@@ -4,6 +4,8 @@
 //! Every call blocks the calling thread (a small runtime is built per call), so the terminal loop stays plain code.
 
 use std::sync::Arc;
+
+use agora_i18n::key;
 use std::time::Duration;
 
 use crate::device::{approval_message, grant_message, new_grant_id, Device};
@@ -601,6 +603,24 @@ impl Session {
         approved: bool,
         agent: Option<&str>,
     ) -> Result<bool, String> {
+        let answer = if approved {
+            Answer::Allow
+        } else {
+            Answer::Deny
+        };
+        self.resolve_answer(snapshot, device, answer, agent)
+    }
+
+    /// [`Session::resolve_approval`] with the answer the key named; ADR-0101: [`Answer::AllowAlways`] only for a request that offers it,
+    /// and a plain Allow never for one that offers only that ([`answer_message`]). Refused here, nothing sent, with
+    /// `approval.scope_unavailable` otherwise.
+    pub fn resolve_answer(
+        &mut self,
+        snapshot: &Snapshot,
+        device: &Device,
+        answer: Answer,
+        agent: Option<&str>,
+    ) -> Result<bool, String> {
         let Some(a) = answered_approval(snapshot, agent) else {
             return Ok(false);
         };
@@ -609,19 +629,19 @@ impl Session {
             .approval_id
             .split_once('/')
             .unwrap_or(("", a.approval_id.as_str()));
-        let message = decision_message(node, local, &a.action, &a.detail, approved);
+        let (message, scope) = answer_message(a, answer).map_err(str::to_string)?;
         let signature = device
             .sign(&message)
             .ok_or_else(|| "client.sign".to_string())?;
         let cmd = command_request::Command::ApprovalResolve(agora_protocol::v1::ApprovalResolve {
             approval_id: local.to_string(),
-            approved,
+            approved: answer != Answer::Deny,
             signer_device_id: device.id.clone(),
             signature,
             helper_grant: 0,
             helpers_may_start: false,
-            // ADR-0101: a single answer, signed over the message above (the "always" key comes with the terminal client's step).
-            scope: agora_protocol::v1::ApprovalScope::Unspecified as i32,
+            // ADR-0101: UNSPECIFIED for a single answer (signed over the v1 bytes, as before), ALWAYS over its own bytes.
+            scope: scope as i32,
         });
         self.command(node, cmd, Duration::from_secs(15))
             .map(|()| true)
@@ -1359,6 +1379,131 @@ fn command_error(code: &str) -> ErrorInfo {
     }
 }
 
+/// ADR-0101: what a waiting request offers beyond a single answer, as the machine announced it (after its policy).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlwaysOffer {
+    /// The agent's own name for its "always" option: untrusted text, shown quoted, may be empty.
+    pub label: String,
+    /// The exact option the answer is bound to (signed, never shown).
+    pub option_id: String,
+    /// The request offers no single answer: only one the agent remembers.
+    pub only: bool,
+}
+
+/// ADR-0101: the "always" offer of `a`, as the web window reads it: ALWAYS in its `scopes` with the option's id, never for a request the
+/// machine itself makes (`agent.start`, `agent.skip_permissions`, any `agent.` action).
+pub fn always_offer(a: &agora_protocol::v1::ApprovalSnapshot) -> Option<AlwaysOffer> {
+    use agora_protocol::v1::ApprovalScope;
+    let has = |s: ApprovalScope| a.scopes.contains(&(s as i32));
+    if a.action.starts_with("agent.")
+        || !has(ApprovalScope::Always)
+        || a.always_option_id.is_empty()
+    {
+        return None;
+    }
+    Some(AlwaysOffer {
+        label: a.always_label.clone(),
+        option_id: a.always_option_id.clone(),
+        only: !has(ApprovalScope::Once) && !has(ApprovalScope::Unspecified),
+    })
+}
+
+/// ADR-0101 and Codex's review of it: "for this session" is said only for a kind known to drop an "always" answer when its session ends. ACP
+/// lets the agent decide what the answer covers and for how long, and no machine reports a kind as checked yet (no manifest or protocol
+/// field says so), so every kind gets the words that say the agent keeps it (`-kept`). The ADR's session words keep their own ids for the
+/// day a kind can be marked as checked (`session_limited`).
+pub fn always_text(id: &'static str, session_limited: bool) -> &'static str {
+    if session_limited {
+        return id;
+    }
+    match id {
+        "tui-request-answer-always" => key!("tui-request-answer-always-kept"),
+        "tui-request-answer-always-only" => key!("tui-request-answer-always-only-kept"),
+        "tui-chat-answer-always" => key!("tui-chat-answer-always-kept"),
+        "tui-chat-answer-always-only" => key!("tui-chat-answer-always-only-kept"),
+        "tui-tab-answer-always" => key!("tui-tab-answer-always-kept"),
+        "tui-tab-answer-always-only" => key!("tui-tab-answer-always-only-kept"),
+        "tui-allowed-always" => key!("tui-allowed-always-kept"),
+        "tui-app-cmd-allow-always" => key!("tui-app-cmd-allow-always-kept"),
+        "tui-allow-once-not-offered" => key!("tui-allow-once-not-offered-kept"),
+        other => other,
+    }
+}
+
+/// ADR-0101: the hint that says the keys answering `a`: `plain` when it offers no "always", else the `always` or `only` one (`only`: no
+/// single answer), in the words [`always_text`] picks.
+pub fn answer_hint(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    plain: &'static str,
+    always: &'static str,
+    only: &'static str,
+) -> &'static str {
+    match always_offer(a) {
+        None => plain,
+        Some(o) if o.only => always_text(only, false),
+        Some(_) => always_text(always, false),
+    }
+}
+
+/// How a request is answered: `y`, ADR-0101's `A` (Alt+A in a tab), `n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Allow,
+    AllowAlways,
+    Deny,
+}
+
+/// The bytes this device signs to answer `a` and the scope the answer carries, or the code it is refused with before anything is sent:
+/// `approval.scope_unavailable` for an "always" answer the request does not offer, or a plain Allow on a request that offers only
+/// "always" (the agent would remember it). A Deny is always a single answer.
+pub fn answer_message(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    answer: Answer,
+) -> Result<(Vec<u8>, agora_protocol::v1::ApprovalScope), &'static str> {
+    use agora_protocol::v1::ApprovalScope;
+    let (node, local) = a
+        .approval_id
+        .split_once('/')
+        .unwrap_or(("", a.approval_id.as_str()));
+    let offer = always_offer(a);
+    match answer {
+        Answer::Deny => Ok((
+            decision_message(node, local, &a.action, &a.detail, false),
+            ApprovalScope::Unspecified,
+        )),
+        Answer::Allow if offer.as_ref().is_some_and(|o| o.only) => {
+            Err("approval.scope_unavailable")
+        }
+        Answer::Allow => Ok((
+            decision_message(node, local, &a.action, &a.detail, true),
+            ApprovalScope::Unspecified,
+        )),
+        Answer::AllowAlways => {
+            // The node's own id of the agent: the part of the hub-wide key after `<node>/`.
+            let agent = a
+                .agent_id
+                .strip_prefix(node)
+                .and_then(|r| r.strip_prefix('/'))
+                .filter(|r| !node.is_empty() && !r.is_empty());
+            match (offer, agent) {
+                (Some(o), Some(agent)) => Ok((
+                    crate::device::always_message(
+                        node,
+                        local,
+                        agent,
+                        &a.action,
+                        &a.detail,
+                        &o.label,
+                        &o.option_id,
+                    ),
+                    ApprovalScope::Always,
+                )),
+                _ => Err("approval.scope_unavailable"),
+            }
+        }
+    }
+}
+
 /// The request `y` / `n` answer: `agent`'s when it has one, else the first waiting.
 pub fn answered_approval<'a>(
     snapshot: &'a Snapshot,
@@ -1650,6 +1795,120 @@ fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
         if let Some(pos) = queue.iter().position(is_pair_frame) {
             queue.remove(pos);
         }
+    }
+}
+
+/// ADR-0101: the bytes and scope of each answer, and what is refused before anything is sent.
+#[cfg(test)]
+mod always_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{always_offer, answer_message, Answer};
+    use crate::device::{always_message, approval_message};
+    use agora_protocol::v1::{ApprovalScope, ApprovalSnapshot};
+
+    fn ask(scopes: &[ApprovalScope]) -> ApprovalSnapshot {
+        ApprovalSnapshot {
+            approval_id: "laptop/ap-1".into(),
+            agent_id: "laptop/agent-1".into(),
+            action: "run_command".into(),
+            detail: "{\"command\":\"git status\"}".into(),
+            scopes: scopes.iter().map(|s| *s as i32).collect(),
+            always_label: if scopes.contains(&ApprovalScope::Always) {
+                "Always allow git status".into()
+            } else {
+                String::new()
+            },
+            always_option_id: if scopes.contains(&ApprovalScope::Always) {
+                "allow-always-1".into()
+            } else {
+                String::new()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_offer_is_read_as_the_window_reads_it() {
+        use ApprovalScope::{Always, Once};
+        assert_eq!(always_offer(&ask(&[])), None);
+        assert_eq!(always_offer(&ask(&[Once])), None);
+        assert!(!always_offer(&ask(&[Once, Always])).unwrap().only);
+        assert!(always_offer(&ask(&[Always])).unwrap().only);
+        let mut start = ask(&[Once, Always]);
+        start.action = "agent.start".into();
+        assert_eq!(always_offer(&start), None);
+        let mut no_id = ask(&[Always]);
+        no_id.always_option_id.clear();
+        assert_eq!(always_offer(&no_id), None);
+    }
+
+    #[test]
+    fn always_signs_the_always_bytes_with_scope_always_and_nothing_else_does() {
+        use ApprovalScope::{Always, Once};
+        let a = ask(&[Once, Always]);
+        let (m, scope) = answer_message(&a, Answer::AllowAlways).unwrap();
+        assert_eq!(scope, ApprovalScope::Always);
+        assert_eq!(
+            m,
+            always_message(
+                "laptop",
+                "ap-1",
+                "agent-1",
+                &a.action,
+                &a.detail,
+                "Always allow git status",
+                "allow-always-1"
+            )
+        );
+        assert_eq!(
+            answer_message(&a, Answer::Allow).unwrap(),
+            (
+                approval_message("laptop", "ap-1", true),
+                ApprovalScope::Unspecified
+            )
+        );
+        assert_eq!(
+            answer_message(&a, Answer::Deny).unwrap(),
+            (
+                approval_message("laptop", "ap-1", false),
+                ApprovalScope::Unspecified
+            )
+        );
+    }
+
+    #[test]
+    fn what_a_request_does_not_offer_is_refused_before_anything_is_sent() {
+        use ApprovalScope::{Always, Once};
+        // No offer: never ALWAYS.
+        assert_eq!(
+            answer_message(&ask(&[Once]), Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
+        assert_eq!(
+            answer_message(&ask(&[]), Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
+        // Only "always": no plain Allow (the agent would remember it); a Deny stays a single answer.
+        let only = ask(&[Always]);
+        assert_eq!(
+            answer_message(&only, Answer::Allow),
+            Err("approval.scope_unavailable")
+        );
+        assert_eq!(
+            answer_message(&only, Answer::Deny).unwrap().1,
+            ApprovalScope::Unspecified
+        );
+        assert_eq!(
+            answer_message(&only, Answer::AllowAlways).unwrap().1,
+            ApprovalScope::Always
+        );
+        // An agent that is not the machine's own: nothing is signed for it.
+        let mut other = ask(&[Once, Always]);
+        other.agent_id = "box/agent-1".into();
+        assert_eq!(
+            answer_message(&other, Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
     }
 }
 

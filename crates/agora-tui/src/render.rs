@@ -44,6 +44,24 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0101: "asks less" while a running agent holds at least one "always" answer (`AgentSnapshot.always_allowed`), never beside "does not
+/// ask" (that one says more: an agent started so, or whose mode skips asking).
+pub fn asks_less(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    (a.running
+        && !a.always_allowed.is_empty()
+        && !crate::board::acts_freely(a, &crate::client::Configs::default()))
+    .then(|| t(key!("tui-badge-asks-less"), &[]))
+}
+
+/// The agent's badge in a line: "does not ask" (ADR-0059), else "asks less" (ADR-0101), else nothing; `sep` goes before it.
+pub fn badge(a: &AgentSnapshot, t: Text<'_>, sep: &str) -> String {
+    if a.skips_permissions {
+        format!("{sep}[{}]", t(key!("tui-badge-no-ask"), &[]))
+    } else {
+        asks_less(a, t).map_or_else(String::new, |l| format!("{sep}[{l}]"))
+    }
+}
+
 /// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
 pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
     t(
@@ -265,12 +283,9 @@ pub fn render(
             } else {
                 by
             };
-            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
-            let no_ask = if a.skips_permissions {
-                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
-            } else {
-                String::new()
-            };
+            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life (ADR-0101: else "asks
+            // less" while it holds an "always" answer).
+            let no_ask = badge(a, t, "  ");
             out.push(format!(
                 "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 local(&a.agent_id),

@@ -55,6 +55,18 @@ approval-failed = The answer did not go through. Try again.
 approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
 approval-no-longer-valid = This request is no longer valid. The agent it was about has ended or restarted.
 approval-ran-out = This request ran out of time. Ask again from the agent's controls.
+# ADR-0101: "Allow always", an answer the agent remembers. The session words are the ADR's, for a kind known to drop the answer when its
+# session ends; no kind is marked so yet, so the window shows the "-kept" words (the agent keeps it, as long as it decides).
+approval-allow-always = Allow always for this session
+approval-allow-always-note = { $name } will not ask again for what it counts as the same request, until it ends. It decides what that covers.
+approval-always-only = This agent offers no single answer for this request: allowing it allows it for the rest of its session.
+approval-allow-always-kept = Allow always
+approval-allow-always-note-kept = { $name } remembers this answer and will not ask again for what it counts as the same request. It decides what that covers and how long it keeps it, which may be longer than this session.
+approval-always-only-kept = This agent offers no single answer for this request: allowing it lets the agent remember the answer, possibly beyond this session.
+approval-allow-always-label = In its own words: “{ $label }”
+approval-scope-forbidden = This machine does not let agents act without asking, so only this one request can be allowed.
+approval-scope-unavailable = The agent does not offer that answer for this request. Nothing was sent; answer it again.
+approval-adapter-outdated = This agent was started by an older Agora, which could make it remember a single Allow. This machine allows single answers only: start the agent again, then answer.
 skip-approval-title = Let { $name } act without asking?
 skip-approval-body = It will run commands and change files without asking you first, until it ends or you switch it back.
 skip-approval-machine = Machine
@@ -500,6 +512,8 @@ notice-adapter-restarting = The agent stopped unexpectedly. Agora is starting it
 notice-adapter-gave_up = The agent stopped unexpectedly again after { $restarts } restarts (last exit code { $exit_code }), so Agora stopped starting it again. Start a new agent to go on.
 notice-adapter-gave_up-no_code = The agent stopped unexpectedly again after { $restarts } restarts, so Agora stopped starting it again. Start a new agent to go on.
 notice-other = The agent reported something this window cannot show ({ $code }).
+notice-approval-always_only_forbidden = The agent asked for “{ $action }” and offered only an answer it would remember. This machine allows single answers only, so it was refused.
+notice-adapter-permission_unanswerable = The agent asked for “{ $action }” without offering a way to allow it, so it was refused.
 session-header = Agent settings
 session-elapsed-hint = How long it has been running
 session-mode = Mode
@@ -776,6 +790,12 @@ agent-does-not-ask-short = Acts freely
 agent-does-not-ask-explain = Started so that it acts without asking you first
 agent-does-not-ask-session-neutral-explain = Acts without asking you first, until it ends or is switched back
 agent-does-not-ask-session-explain = Switched, with your approval, so that it acts without asking you first, until it ends or you switch it back
+agent-always-allowed-short = Asks less
+agent-always-allowed-explain = You allowed { $count } of its requests for this session. It does not ask again for those until it ends.
+agent-always-allowed-explain-kept = { $count ->
+    [one] You let it remember the answer to one of its requests. It does not ask again for that; it decides how long it keeps the answer.
+   *[other] You let it remember the answers to { $count } of its requests. It does not ask again for those; it decides how long it keeps them.
+}
 start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
 start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.
 # Layouts (ADR-0068): panes side by side, tabs, saved layouts.
@@ -1269,6 +1289,8 @@ chat-steps-call-failed = { $count ->
 permission-pending = Asked for permission
 permission-approved = Permission given
 permission-denied = Permission refused
+permission-approved-always = Permission given for this session
+permission-approved-always-kept = Permission given; the agent remembers it
 permission-cancelled = Not answered
 permission-show = Show the request
 chat-queued-mark = Waiting

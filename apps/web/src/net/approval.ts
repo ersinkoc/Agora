@@ -43,6 +43,21 @@ export async function startSignedMessage(
   return Uint8Array.from(out);
 }
 
+/** ADR-0101: the bytes of an "always" answer (`ApprovalResolve.scope` = ALWAYS, approved): `agora-approval-always-v1`, one NUL, then
+ * F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id), where F(x) is
+ * the UTF-8 byte length of x, `:`, then x (crates/agora-node/src/approvals.rs, vectors in schema/fixtures/signing/approval-always-v1.json).
+ * `agentId` is the node's own id of the agent (no `<node>/` prefix); every text is used exactly as the machine announced it. */
+export async function alwaysSignedMessage(
+  nodeId: string, approvalId: string, agentId: string, action: string, detail: string, alwaysLabel: string, alwaysOptionId: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const sha = async (x: string) => toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(x) as BufferSource)));
+  const fields = [nodeId, approvalId, '1', agentId, await sha(action), await sha(detail), alwaysLabel, alwaysOptionId];
+  const body = fields.map((f) => `${enc.encode(f).length}:${f}`).join('');
+  return Uint8Array.from([...enc.encode('agora-approval-always-v1'), 0, ...enc.encode(body)]);
+}
+
 /** ADR-0066: `[id, value]` pairs as signed: the count, then `:<id byte length>:<id>:<value byte length>:<value>` per pair in the order given (UTF-8
  * lengths), so a list can be neither added to, changed nor reordered without changing the bytes. */
 export function signedPairs(items: readonly (readonly [string, string])[]): string {
@@ -100,6 +115,10 @@ export function approvalFailureKey(code: string | undefined): string {
     // ADR-0090 Amendment A: the run the request named is gone (the agent ended or restarted), or the request ran out of time.
     case 'agent.not_found': return 'approval-no-longer-valid';
     case 'approval.expired': return 'approval-ran-out';
+    // ADR-0101: the machine's policy allows single answers only, the agent does not offer that answer, or its bridge is too old.
+    case 'approval.scope_forbidden': return 'approval-scope-forbidden';
+    case 'approval.scope_unavailable': return 'approval-scope-unavailable';
+    case 'approval.adapter_outdated': return 'approval-adapter-outdated';
     default: return 'approval-failed';
   }
 }
@@ -157,6 +176,15 @@ export async function signStart(
   subtle: SubtleCrypto = crypto.subtle,
 ): Promise<Uint8Array> {
   const message = await startSignedMessage(nodeId, approvalId, approved, helperGrant, helpersMayStart, detail, subtle);
+  return new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
+}
+
+/** ADR-0101: the signature of an "always" answer (only ever an Allow). */
+export async function signAlways(
+  device: Device, nodeId: string, approvalId: string, agentId: string, action: string, detail: string, alwaysLabel: string, alwaysOptionId: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const message = await alwaysSignedMessage(nodeId, approvalId, agentId, action, detail, alwaysLabel, alwaysOptionId, subtle);
   return new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
 }
 

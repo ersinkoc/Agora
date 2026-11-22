@@ -11,8 +11,10 @@ use agora_i18n::{key, Arg};
 use agora_protocol::v1::{
     command_request::Command as WireCommand, param_value::Value, ChatEntry, ErrorInfo, Snapshot,
 };
-use agora_tui::app::{Action, App, Area, Ctx, Event as AppEvent, Row, Screen as AppScreen};
-use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
+use agora_tui::app::{
+    Action, App, Area, Ctx, Event as AppEvent, Row, Screen as AppScreen, ALLOW_ALWAYS,
+};
+use agora_tui::client::{sign_in, Answer, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
 use agora_tui::input::Parser;
 use agora_tui::pane::ColorMode;
@@ -436,21 +438,39 @@ fn answer(
     session: &mut Session,
     snapshot: &Snapshot,
     selected: &str,
-    approved: bool,
+    answer: Answer,
 ) -> String {
+    // ADR-0101: an answer the request does not offer is never sent; the line says which one it offers.
+    if let Some(a) = agora_tui::client::answered_approval(snapshot, Some(selected)) {
+        let offer = agora_tui::client::always_offer(a);
+        match answer {
+            Answer::AllowAlways if offer.is_none() => {
+                return say.text(key!("tui-allow-always-not-offered"), &[])
+            }
+            Answer::Allow if offer.is_some_and(|o| o.only) => {
+                return say.text(
+                    agora_tui::client::always_text(key!("tui-allow-once-not-offered"), false),
+                    &[],
+                )
+            }
+            _ => {}
+        }
+    }
     let Some(device) = device() else {
         return say.text(
             key!("tui-answer-failed"),
             &[("code", Arg::Str("device".into()))],
         );
     };
-    match session.resolve_approval(snapshot, &device, approved, Some(selected)) {
+    match session.resolve_answer(snapshot, &device, answer, Some(selected)) {
         Ok(false) => String::new(),
         Ok(true) => say.text(
-            if approved {
-                key!("tui-allowed")
-            } else {
-                key!("tui-denied")
+            match answer {
+                Answer::Allow => key!("tui-allowed"),
+                Answer::AllowAlways => {
+                    agora_tui::client::always_text(key!("tui-allowed-always"), false)
+                }
+                Answer::Deny => key!("tui-denied"),
             },
             &[],
         ),
@@ -1903,7 +1923,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                                 continue;
                             }
-                            notice = answer(say, &mut session, s, &selected, k == b'y');
+                            let reply = if k == b'y' {
+                                Answer::Allow
+                            } else {
+                                Answer::Deny
+                            };
+                            notice = answer(say, &mut session, s, &selected, reply);
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -2648,8 +2673,8 @@ fn console(
                         // box again instead of staying cut in the footer.
                         c.notice.clear();
                         c.note.seen.clear();
-                        // Alt+Y / Alt+N in a chat tab that shows its agent's request: it is in view there.
-                        if matches!(k, 'y' | 'n') {
+                        // Alt+Y / Alt+N (ADR-0101: and Alt+A) in a chat tab that shows its agent's request: it is in view there.
+                        if matches!(k, 'y' | 'n' | ALLOW_ALWAYS) {
                             if let Some(pane) = chat
                                 .as_ref()
                                 .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
@@ -3079,7 +3104,15 @@ fn draw_console(
                             .take(4),
                     );
                     block.extend(agora_tui::render::wrap_row(
-                        &say.text(key!("tui-chat-answer"), &[]),
+                        &say.text(
+                            agora_tui::client::answer_hint(
+                                a,
+                                key!("tui-chat-answer"),
+                                key!("tui-chat-answer-always"),
+                                key!("tui-chat-answer-always-only"),
+                            ),
+                            &[],
+                        ),
                         width,
                         width,
                     ));
@@ -3622,7 +3655,7 @@ fn command(
     };
     let selected = c.selected.clone();
     match k {
-        'y' | 'n' => {
+        'y' | 'n' | ALLOW_ALWAYS => {
             // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
             let inspector = c.app.areas(area).inspector;
             let details = app_details(&s, &selected, inspector.width, inspector.height, &text);
@@ -3646,8 +3679,12 @@ fn command(
                 c.read_whole.insert(id);
             }
             // Any other request is answered only once it was in view: in the inspector, in the chat tab that shows it, or else in a
-            // box that shows it now and takes the answer.
-            let mut allow = k == 'y';
+            // box that shows it now and takes the answer (ADR-0101: `A` there allows it always, when it offers that).
+            let mut reply = match k {
+                'y' => Answer::Allow,
+                ALLOW_ALWAYS => Answer::AllowAlways,
+                _ => Answer::Deny,
+            };
             let waiting = agora_tui::client::answered_approval(&s, Some(&selected)).cloned();
             if let (Some(a), None) = (waiting, details.start.as_ref()) {
                 let in_view = (inspector.width > 0
@@ -3665,13 +3702,22 @@ fn command(
                         .trim(),
                     ));
                     lines.push(String::new());
-                    lines.push(say.text(key!("tui-request-answer"), &[]));
+                    lines.push(say.text(
+                        agora_tui::client::answer_hint(
+                            &a,
+                            key!("tui-request-answer"),
+                            key!("tui-request-answer-always"),
+                            key!("tui-request-answer-always-only"),
+                        ),
+                        &[],
+                    ));
                     let key = over_console(say, c, session, None, rx, |_, ask| {
                         ask.key(&lines, Duration::from_secs(120))
                     });
                     match key {
-                        Some(b'y') => allow = true,
-                        Some(b'n') => allow = false,
+                        Some(b'y') => reply = Answer::Allow,
+                        Some(b'A') => reply = Answer::AllowAlways,
+                        Some(b'n') => reply = Answer::Deny,
                         _ => {
                             c.notice = String::new();
                             return false;
@@ -3680,7 +3726,7 @@ fn command(
                 }
             }
             c.shown_request = None;
-            if allow
+            if reply == Answer::Allow
                 && !over_console(say, c, session, None, rx, |_, ask| {
                     confirm_skipping_start(say, &s, &selected, &text, ask)
                 })
@@ -3688,7 +3734,7 @@ fn command(
                 c.notice = String::new();
                 return false;
             }
-            c.notice = answer(say, session, &s, &selected, allow);
+            c.notice = answer(say, session, &s, &selected, reply);
             true
         }
         // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
@@ -4773,6 +4819,7 @@ mod typing_grant_tests {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         }];
         let text = |id: &str, _: &[(&str, Arg)]| id.to_string();
         let cx = Ctx {

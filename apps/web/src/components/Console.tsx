@@ -18,6 +18,7 @@ import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
+import { AsksLessChip } from './AllowAlways';
 import { LiveSummary } from './LiveSummary';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
@@ -98,7 +99,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // ADR-0060: resume an interrupted agent (or start it again in its folder); undefined when it did, else the error code.
   onResume?: (agent: AgentTileModel, action: ResumeAction) => Promise<string | undefined>;
   start?: ReactNode;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   // ADR-0057: what an agent may still start without asking, and taking that back.
   helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
@@ -304,6 +305,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {a.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="truncate font-mono">{a.branch}</span></>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
           <NoAskBadge agent={a} />
+          <AsksLessChip agent={a} />
         </div>
         <div className="flex flex-none items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff

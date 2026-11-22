@@ -34,6 +34,7 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         },
         Row {
             id: "mac/agent-2".into(),
@@ -44,6 +45,7 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         },
         Row {
             id: "win/agent-7".into(),
@@ -54,6 +56,7 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         },
     ];
     let mut screens: HashMap<String, AlacrittyTerminal> = HashMap::new();

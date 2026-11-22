@@ -7,6 +7,7 @@ import { ago } from '../net/time';
 import { Icon } from './Icon';
 import { StateBadge } from './StateBadge';
 import { NoAskBadge } from './NoAskBadge';
+import { AsksLessChip } from './AllowAlways';
 import { LimitChip } from './Quota';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
@@ -45,6 +46,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
         <NoAskBadge agent={agent} nested />
+        <AsksLessChip agent={agent} nested />
         <span className="muted">
           {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
         </span>
@@ -72,6 +74,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <StateBadge state={agent.state} failed={failed} />
       </span>
       <NoAskBadge agent={agent} nested />
+      <AsksLessChip agent={agent} nested />
       <LimitChip agent={agent} />
       {context.same && <ProjectChip spread={context.same} />}
       {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}${agent.state === 'needs-you' && !agent.closed ? ' tile__activity--ask' : ''}`} dir="auto">{line}</span> : null}

@@ -269,7 +269,7 @@
   .terminal-menu__panel { @apply absolute end-0 top-full z-20 mt-1 grid w-64 gap-3 rounded-m border border-line bg-surface-1 p-3 text-xs text-ink; box-shadow: var(--shadow); }
   .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .approval { @apply flex flex-col gap-2 rounded-m border border-line bg-surface-1 p-4; }
-  .approval__actions { @apply flex gap-3; }
+  .approval__actions { @apply flex flex-wrap gap-3; }
   .machines { @apply m-0 grid list-none gap-3 p-0; }
   .machine { @apply flex flex-wrap items-baseline gap-4 rounded-m border border-line bg-surface-1 px-4 py-3; }
   .start { @apply flex flex-col gap-3 rounded-m border border-line bg-surface-1 p-4; }

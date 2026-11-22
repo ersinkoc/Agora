@@ -281,12 +281,8 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
             } else {
                 String::new()
             };
-            // ADR-0059: an agent that acts without asking says so in the tree too.
-            let no_ask = if a.skips_permissions {
-                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
-            } else {
-                String::new()
-            };
+            // ADR-0059: an agent that acts without asking says so in the tree too (ADR-0101: else "asks less").
+            let no_ask = crate::render::badge(a, t, "  ");
             rows.push(Row {
                 text: format!(
                     "  {lead}{m} {}  {}{note}{no_ask}",
@@ -468,14 +464,14 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         } else {
             format!("{}↳ ", "  ".repeat(depth - 1))
         };
-        let no_ask = if a.skips_permissions {
-            format!(" [{}]", t(key!("tui-badge-no-ask"), &[]))
-        } else {
-            String::new()
-        };
+        let no_ask = crate::render::badge(a, t, " ");
         let unreachable = a.running && machine_offline(s, &a.node_id);
         let state = state_text(s, a, t);
         let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
+        // ADR-0101: the request its keys answer (its first) offers an answer it remembers: Alt+A answers so in its tab.
+        let asks_always = crate::client::answered_approval(s, Some(&a.agent_id))
+            .filter(|x| x.agent_id == a.agent_id)
+            .is_some_and(|x| crate::client::always_offer(x).is_some());
         crate::app::Row {
             id: a.agent_id.clone(),
             label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
@@ -485,6 +481,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             header: false,
             group: false,
             request: asks,
+            request_always: asks_always,
         }
     };
     let mut nodes: Vec<_> = s.nodes.iter().collect();
@@ -509,6 +506,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
                 header: true,
                 group: true,
                 request: false,
+                request_always: false,
             });
         }
         rows.push(crate::app::Row {
@@ -527,6 +525,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             header: true,
             group: false,
             request: false,
+            request_always: false,
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
@@ -557,6 +556,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
                     header: true,
                     group: true,
                     request: false,
+                    request_always: false,
                 });
             }
             for (a, depth) in crate::render::helper_order(&list) {
@@ -701,8 +701,9 @@ fn details(
             if a.interrupted && !a.running {
                 lines.push(crate::render::interrupted_text(a, t));
             }
-            if a.skips_permissions {
-                lines.push(format!("[{}]", t(key!("tui-badge-no-ask"), &[])));
+            let badge = crate::render::badge(a, t, "");
+            if !badge.is_empty() {
+                lines.push(badge);
             }
             if let Some(l) = crate::render::session_line(a, t) {
                 lines.push(l);
@@ -739,7 +740,13 @@ fn details(
         ));
         lines.push(t(
             if in_tab {
-                key!("tui-tab-answer")
+                // ADR-0101: Alt+A, when the request offers an answer the agent remembers.
+                crate::client::answer_hint(
+                    a,
+                    key!("tui-tab-answer"),
+                    key!("tui-tab-answer-always"),
+                    key!("tui-tab-answer-always-only"),
+                )
             } else {
                 key!("tui-split-answer")
             },
@@ -855,11 +862,7 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
             } else {
                 by
             };
-            let no_ask = if a.skips_permissions {
-                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
-            } else {
-                String::new()
-            };
+            let no_ask = crate::render::badge(a, t, "  ");
             format!(
                 " {}  {}  {}  {}{by}{no_ask}",
                 local(&a.agent_id),
@@ -1369,6 +1372,57 @@ mod tests {
             own.lines
         );
         assert_eq!(own.lines.last().map(String::as_str), Some("tui-tab-answer"));
+    }
+
+    /// ADR-0101: the tab's hint grows Alt+A only when the request offers it (and says Alt+Y is not there when it offers only that); the
+    /// row knows it; the agent's line says "asks less" while it holds an always answer, never beside "does not ask".
+    #[test]
+    fn the_always_answer_shows_in_the_hint_the_row_and_the_agent_line() {
+        use agora_protocol::v1::ApprovalScope;
+        let mut s = snapshot();
+        let row = |s: &Snapshot| {
+            app_rows(s, 0, &text)
+                .into_iter()
+                .find(|r| r.id == "mac2/agent-1")
+                .unwrap()
+        };
+        assert!(row(&s).request && !row(&s).request_always);
+        s.approvals[0].approval_id = "mac2/a1".into();
+        s.approvals[0].scopes = vec![ApprovalScope::Once as i32, ApprovalScope::Always as i32];
+        s.approvals[0].always_label = "Always allow edits".into();
+        s.approvals[0].always_option_id = "edits".into();
+        assert!(row(&s).request_always);
+        let own = app_details_in_tab(&s, "mac2/agent-1", 60, 20, &text);
+        assert_eq!(
+            own.lines.last().map(String::as_str),
+            Some("tui-tab-answer-always-kept")
+        );
+        s.approvals[0].scopes = vec![ApprovalScope::Always as i32];
+        let own = app_details_in_tab(&s, "mac2/agent-1", 60, 20, &text);
+        assert_eq!(
+            own.lines.last().map(String::as_str),
+            Some("tui-tab-answer-always-only-kept")
+        );
+        // The list's own hint is unchanged (no always from the list).
+        let list = app_details(&s, "mac2/agent-1", 60, 20, &text);
+        assert_eq!(
+            list.lines.last().map(String::as_str),
+            Some("tui-split-answer")
+        );
+
+        assert!(!row(&s).label.contains("tui-badge-asks-less"));
+        s.agents[1].always_allowed = vec!["files.write".into()];
+        assert!(
+            row(&s).label.contains("[tui-badge-asks-less]"),
+            "{}",
+            row(&s).label
+        );
+        s.agents[1].skips_permissions = true;
+        assert!(row(&s).label.contains("[tui-badge-no-ask]"));
+        assert!(!row(&s).label.contains("tui-badge-asks-less"));
+        s.agents[1].skips_permissions = false;
+        s.agents[1].running = false;
+        assert!(!row(&s).label.contains("tui-badge-asks-less"));
     }
 
     #[test]

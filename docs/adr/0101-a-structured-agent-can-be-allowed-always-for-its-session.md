@@ -343,6 +343,15 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
 5. **Error parameters.** `approval.scope_forbidden`, `approval.scope_unavailable` and `approval.adapter_outdated` carry no parameter (their
    text does not show the random approval id; the window knows which card it answered).
 6. **Event number.** `AgentAlwaysAllowed` is `Event.body` 69 (after 66 to 68, the agent and task events added since ADR-0090).
+7. **Words for an unchecked kind (PR B, Codex's review).** ACP leaves what an always answer covers and how long it lasts to the agent, so
+   "for this session" and "until it ends" are said only for a kind known to drop the answer when its session ends. Nothing marks a kind
+   so yet (no manifest key or protocol field reaches the clients), so the window and the terminal client show the words that say the agent
+   remembers it, possibly beyond its session: the `-kept` ids beside the ids of decision 1 (for example `approval-allow-always-kept` =
+   "Allow always", `tui-allowed-always-kept`), chosen by one function per client (`alwaysText` in `apps/web/src/net/always.ts`,
+   `always_text` in `crates/agora-tui/src/client.rs`). The ids of decision 1 keep the session words for the day a kind can be marked as
+   checked, which needs its own decision (a manifest key and a way to tell the clients). The same applies to the chip and the
+   conversation entry. An always-only request is never answered from a one-line row (the fleet console, the phone's bar, the attention
+   dialog); its full card shows the always button in the place of Allow.
 
 ## Consequences
 

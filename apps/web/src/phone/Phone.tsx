@@ -13,6 +13,7 @@ import { Icon, type IconName } from '../components/Icon';
 import { CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { StateBadge, StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
+import { AlwaysNote, AlwaysOnly, AsksLessChip, allowAlwaysWord, alwaysNoteId } from '../components/AllowAlways';
 import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
 import type { PromptSend } from '../components/chatActions';
@@ -35,7 +36,7 @@ const subscribePhone = (cb: () => void) => { const m = typeof window !== 'undefi
 const isPhone = () => typeof window !== 'undefined' && !!window.matchMedia?.(PHONE_QUERY).matches;
 export const usePhone = () => useSyncExternalStore(subscribePhone, isPhone, () => false);
 
-type Resolve = (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => unknown;
+type Resolve = (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => unknown;
 
 // The visible part of the page: with the touch keyboard open it is shorter than the window (iOS does not resize the page), and the
 // bars must stay on screen above the keyboard.
@@ -79,10 +80,10 @@ function NavButton({ icon, label, onClick, href, primary }: { icon: IconName; la
 // The one place a tap becomes an answer: a second tap waits for the first, and nothing is sent while the link is down.
 function useAnswer(x: ApprovalModel, onResolve: Resolve | undefined, stale: boolean) {
   const [busy, setBusy] = useState(false);
-  const answer = (ok: boolean, choice?: StartChoice) => {
+  const answer = (ok: boolean, choice?: StartChoice, always?: boolean) => {
     if (!onResolve || busy || stale) return;
     setBusy(true);
-    void Promise.resolve(onResolve(x, ok, choice)).finally(() => setBusy(false));
+    void Promise.resolve(always ? onResolve(x, ok, choice, true) : onResolve(x, ok, choice)).finally(() => setBusy(false));
   };
   return { busy, answer };
 }
@@ -106,10 +107,16 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
       {x.detail && <pre className="phone-card__detail">{visible(x.detail)}</pre>}
       {untrusted}
       {onResolve && (docked ? <p className="phone-card__why m-0">{t('phone-answer-below')}</p> : <>
+        <AlwaysOnly approval={x} />
         <div className="phone-card__actions">
-          <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
+          {/* ADR-0101: "Allow always" only when offered; in the place of Allow when the request offers nothing else. */}
+          {x.always?.only
+            ? <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x)} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>
+            : <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>}
           <button type="button" className="button" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
+          {x.always && !x.always.only && <button type="button" className="button phone-card__always" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x)} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>}
         </div>
+        {x.always && <AlwaysNote approval={x} />}
         {stale && <p id={`phone-why-${x.id}`} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
       </>)}
     </article>
@@ -192,6 +199,7 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
           <span className="block truncate text-xs text-muted">{a.project || a.workspace}{a.branch ? ` · ${a.branch}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />
+        <AsksLessChip agent={a} />
         <span className="flex-none text-xs"><StateBadge state={a.state} failed={endedWithError(a)} /></span>
         <Icon name="chevron" className="size-4 text-muted rtl:rotate-180" />
       </button>
@@ -324,6 +332,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           {agent && <span className="flex min-w-0 items-center gap-2 text-xs text-muted"><StateBadge state={agent.state} /><span className="truncate">{agent.machine}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
+        {agent && <AsksLessChip agent={agent} />}
         {agent && <CloseAgentMenu agent={agent} />}
         {next && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => onOpen(next)}>{t('phone-next', { count: elsewhere.length })}</button>}
       </>}>

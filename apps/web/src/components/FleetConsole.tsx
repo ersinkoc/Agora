@@ -68,7 +68,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   machines: readonly MachineModel[];
   now: number;
   onOpen: (agentId: string) => void;
-  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   // Where a request is read in full when this window does not list its agent (so there is no agent to open).
   onReview?: () => void;
   // The link is not live: an answer cannot be signed to a machine through it, so Allow and Deny wait, with the reason shown.
@@ -243,7 +243,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   now: number;
   onOpen: (agentId: string) => void;
   onStart?: (machine?: string) => void;
-  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   onReview?: () => void;
   onRetry?: () => void;
   // ADR-0065: machines asking to join (only for an owner's session), and the switch that lets them.

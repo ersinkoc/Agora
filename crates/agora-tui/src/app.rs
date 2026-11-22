@@ -150,6 +150,10 @@ pub enum Action {
     Quit,
 }
 
+/// ADR-0101: the command that allows the waiting request always (`A` in the request view, Alt+A in a tab or chat, or the commands). The
+/// tree never sends it for a typed `A`.
+pub const ALLOW_ALWAYS: char = 'A';
+
 /// One agent in the tree, in the order the caller wants them shown. Words are already localised.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
@@ -168,6 +172,8 @@ pub struct Row {
     /// The agent has a request waiting for the user's answer (y / n). An agent can need the user without one: a question on its
     /// own screen, answered by typing there.
     pub request: bool,
+    /// ADR-0101: that request offers an answer the agent remembers ("Allow always"): Alt+A answers so in its tab.
+    pub request_always: bool,
 }
 
 /// What an event is handled against: the tree's rows, the window, and the active agent's terminal modes.
@@ -525,6 +531,17 @@ impl App {
                 self.common(Key::Char('m'), cx.area, out);
                 return;
             }
+            // ADR-0101: Alt+A allows the request of the agent in front always, only while that request offers it; otherwise it is the
+            // agent's key, as Alt+Y and Alt+N are without a request.
+            Key::Alt('a' | 'A')
+                if self.focus == Focus::Terminal
+                    && self.active_agent().is_some_and(|id| {
+                        cx.rows.iter().any(|r| r.id == id && r.request_always)
+                    }) =>
+            {
+                out.push(Action::Command(ALLOW_ALWAYS));
+                return;
+            }
             // Alt+Y / Alt+N answer the request of the agent in front (the caller shows it first when it is not in view); without
             // one they are the agent's keys, never an answer to another agent's request.
             Key::Alt(c @ ('y' | 'Y' | 'n' | 'N'))
@@ -593,6 +610,9 @@ impl App {
                 out.push(Action::Command(c.to_ascii_lowercase()))
             }
             Key::Char('q') | Key::Ctrl('c') => out.push(Action::Quit),
+            // ADR-0101: never "always" from the list, where `a` is Ask: a one-letter case difference must not be the gap between a single
+            // and a remembered answer. Enter opens the request (its tab, where Alt+A answers so), or the commands name it.
+            Key::Char(ALLOW_ALWAYS) => {}
             Key::Char(c) if c.is_alphanumeric() => out.push(Action::Command(c)),
             _ => {}
         }
@@ -706,6 +726,16 @@ impl App {
             ('p', key!("tui-app-cmd-pair")),
         ] {
             all.push((Command::Letter(c), t(label, &[])));
+        }
+        // ADR-0101: offered while a request in the tree offers an answer the agent remembers.
+        if cx.rows.iter().any(|r| r.request_always) {
+            all.push((
+                Command::Letter(ALLOW_ALWAYS),
+                t(
+                    crate::client::always_text(key!("tui-app-cmd-allow-always"), false),
+                    &[],
+                ),
+            ));
         }
         all.push((Command::ToggleMouse, t(key!("tui-app-cmd-mouse"), &[])));
         all.push((
@@ -2041,6 +2071,7 @@ mod tests {
                 header: false,
                 group: false,
                 request: false,
+                request_always: false,
             })
             .collect()
     }
@@ -2735,6 +2766,7 @@ mod tests {
                 header: false,
                 group: false,
                 request: false,
+                request_always: false,
             })
             .collect();
         let mut app = App::default();
@@ -2786,6 +2818,7 @@ mod tests {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         }];
         let app = App::default();
         let question = vec![
@@ -3027,6 +3060,7 @@ mod tests {
                 header: true,
                 group: false,
                 request: false,
+                request_always: false,
             },
         );
         let mut app = App::default();
@@ -3160,6 +3194,7 @@ mod tests {
             header: true,
             group: false,
             request: false,
+            request_always: false,
         }];
         rows.extend((1..=40).map(|i| Row {
             id: format!("mac/agent-{i}"),
@@ -3170,6 +3205,7 @@ mod tests {
             header: false,
             group: false,
             request: false,
+            request_always: false,
         }));
         // Near the top nothing is kept; far down the heading is on the first line and the chosen row still in view.
         assert_eq!(tree_window(3, 10, &rows), (0, None));
@@ -3252,6 +3288,99 @@ mod tests {
         );
     }
 
+    /// ADR-0101: Alt+A allows always only in a tab whose request offers it; otherwise it is the agent's key. The list never sends it
+    /// (there `a` is Ask), and the commands offer it only while a request does.
+    #[test]
+    fn alt_a_allows_always_only_in_a_tab_whose_request_offers_it() {
+        let rows = rows();
+        let mut app = App::default();
+        // In the list: a typed A or Alt+A is nothing, and a is still Ask.
+        assert_eq!(key(&mut app, &rows, Key::Char('A')), vec![]);
+        assert_eq!(key(&mut app, &rows, Key::Alt('a')), vec![]);
+        assert_eq!(key(&mut app, &rows, Key::Alt('A')), vec![]);
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('a')),
+            vec![Action::Command('a')]
+        );
+        let mut offering = rows.clone();
+        offering[0].request = true;
+        offering[0].request_always = true;
+        assert_eq!(key(&mut app, &offering, Key::Char('A')), vec![]);
+        // In the tab.
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.focus, Focus::Terminal);
+        // No request: the agent's key.
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('a')),
+            vec![Action::Input(b"\x1ba".to_vec())]
+        );
+        // A request that offers only a single answer: still the agent's key, never an answer.
+        let mut once = rows.clone();
+        once[0].request = true;
+        assert_eq!(
+            key(&mut app, &once, Key::Alt('a')),
+            vec![Action::Input(b"\x1ba".to_vec())]
+        );
+        assert_eq!(
+            key(&mut app, &offering, Key::Alt('a')),
+            vec![Action::Command(ALLOW_ALWAYS)]
+        );
+        assert_eq!(
+            key(&mut app, &offering, Key::Alt('A')),
+            vec![Action::Command(ALLOW_ALWAYS)]
+        );
+        // A plain A is typing.
+        assert_eq!(
+            key(&mut app, &offering, Key::Char('A')),
+            vec![Action::Input(b"A".to_vec())]
+        );
+        // Alt+Y still allows once.
+        assert_eq!(
+            key(&mut app, &offering, Key::Alt('y')),
+            vec![Action::Command('y')]
+        );
+    }
+
+    /// ADR-0101: the always command's letter folds into no other: not Ask (`a`), not any other command.
+    #[test]
+    fn the_always_key_folds_into_no_other_command() {
+        let rows = rows();
+        let app = App::default();
+        let letters: Vec<char> = app
+            .commands(&cx(&rows))
+            .into_iter()
+            .filter_map(|(c, _)| match c {
+                Command::Letter(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        assert!(letters.contains(&'a'));
+        assert!(
+            !letters.contains(&ALLOW_ALWAYS),
+            "offered only while a request offers it"
+        );
+        assert_ne!(ALLOW_ALWAYS, ALLOW_ALWAYS.to_ascii_lowercase());
+        let mut offering = rows.clone();
+        offering[0].request = true;
+        offering[0].request_always = true;
+        let all = app.commands(&cx(&offering));
+        let always: Vec<_> = all
+            .iter()
+            .filter(|(c, _)| *c == Command::Letter(ALLOW_ALWAYS))
+            .collect();
+        assert_eq!(always.len(), 1);
+        assert_eq!(always[0].1, "tui-app-cmd-allow-always-kept");
+        // No other command uses the same letter in either case.
+        let others: Vec<char> = all
+            .iter()
+            .filter_map(|(c, _)| match c {
+                Command::Letter(l) if *l != ALLOW_ALWAYS => Some(*l),
+                _ => None,
+            })
+            .collect();
+        assert!(!others.contains(&ALLOW_ALWAYS));
+    }
+
     #[test]
     fn the_palette_offers_to_clean_up_old_machines_only_when_there_are_some() {
         let mut rows = rows();
@@ -3270,6 +3399,7 @@ mod tests {
             header: true,
             group: true,
             request: false,
+            request_always: false,
         });
         assert_eq!(app.commands(&cx(&rows)).len(), 1);
         assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::CleanUpOld]);
@@ -3286,6 +3416,7 @@ mod tests {
             header,
             group: false,
             request: false,
+            request_always: false,
         };
         let rows = vec![
             row("mac", true),

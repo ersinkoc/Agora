@@ -6,6 +6,7 @@ import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 import { detailLaunchOptions, type StartOption } from './approval';
+import { ALWAYS_LIST_MAX, alwaysOffer, type AlwaysOffer } from './always';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
@@ -34,6 +35,8 @@ export interface AgentV {
   interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
   skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
   hidden?: boolean; // ADR-0073: still running when its machine was forgotten; shown again only if still running when it comes back
+  // ADR-0101: the "always" answers its process holds (`AgentAlwaysAllowed`; the snapshot names actions only), newest last, at most 16.
+  alwaysAllowed?: { id: string; action: string }[];
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -73,7 +76,12 @@ function addUsage(a: AgentV, u: Record<string, any>): void {
   a.session = s;
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
-export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
+// ADR-0101: `scopes`, `alwaysLabel` and `alwaysOptionId` as the machine announced them (after its policy).
+export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number; scopes?: number[]; alwaysLabel?: string; alwaysOptionId?: string }
+
+// ADR-0101: the always fields of a request as they came (nothing trimmed: an always answer is signed over them exactly).
+const alwaysFields = (p: { scopes?: readonly (number | null)[] | null; alwaysLabel?: string | null; alwaysOptionId?: string | null }): Pick<ApprovalV, 'scopes' | 'alwaysLabel' | 'alwaysOptionId'> =>
+  p.scopes?.length ? { scopes: p.scopes.map((x) => Number(x ?? 0)), alwaysLabel: p.alwaysLabel ?? '', alwaysOptionId: p.alwaysOptionId ?? '' } : {};
 
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
@@ -146,6 +154,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       skipsPermissions: !!a.skipsPermissions,
       // #902: how a closed agent ended (`AgentSnapshot.exit_code`), so a reloaded window still shows one that failed as failed.
       ...(!a.running && a.exitCode !== undefined && a.exitCode !== null ? { exitCode: a.exitCode } : {}),
+      ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.slice(-ALWAYS_LIST_MAX).map((action) => ({ id: '', action })) } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -167,7 +176,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
   }
   for (const p of s.approvals ?? []) {
     v.approvals.set(p.approvalId ?? '', {
-      agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs),
+      agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs), ...alwaysFields(p),
     });
   }
   return v;
@@ -198,7 +207,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
       // F1421: an ended agent can be asked nothing; its settings and commands go, as after `agentExited` (a later snapshot has none).
-      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; a.alwaysAllowed = undefined; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
@@ -369,6 +378,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       };
       a.running = false;
       a.state = 4 /* done */;
+      a.alwaysAllowed = undefined; // ADR-0101: the hub clears it too
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
       if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; // F1421: ended, as the hub drops them
@@ -381,9 +391,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) {
         a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
+        // ADR-0101: an always answer lives in the agent's process.
+        a.alwaysAllowed = undefined;
         // ADR-0090: an ended agent can be asked nothing; its settings and commands are gone (the hub drops them too).
         if (a.session) a.session = { ...a.session, config: undefined, commands: undefined };
       }
+      break;
+    }
+    // ADR-0101: an agent that runs holds one more "always" answer (one it holds already, said again after a restart, changes nothing).
+    case 'agentAlwaysAllowed': {
+      const b = e.agentAlwaysAllowed;
+      const a = v.agents.get(q(b.agentId));
+      if (!a?.running) break;
+      const held = a.alwaysAllowed ?? [];
+      const id = b.approvalId ?? '';
+      if (id && held.some((h) => h.id === id)) break;
+      a.alwaysAllowed = [...held, { id, action: b.action ?? '' }].slice(-ALWAYS_LIST_MAX);
       break;
     }
     case 'terminalOpened':
@@ -391,7 +414,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       break;
     case 'approvalRequested': {
       const b = e.approvalRequested;
-      v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs) });
+      v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs), ...alwaysFields(b) });
       break;
     }
     case 'approvalResolved':
@@ -504,6 +527,7 @@ export function tiles(v: View): AgentTileModel[] {
       parentId: a.parentId,
       interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
       skipsPermissions: !!a.skipsPermissions,
+      ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.map((h) => h.action) } : {}),
     } as AgentTileModel;
   });
   const names = new Map(list.map((t) => [t.id, t.name]));
@@ -528,6 +552,7 @@ export interface ApprovalModel {
   start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
   skip?: SkipRequest; // ADR-0090 Amendment A: what an `agent.skip_permissions` request says, read strictly
   skipUnknown?: boolean; // the action is that kind but the card is not the shape this window expects: nothing is signed
+  always?: AlwaysOffer; // ADR-0101: the request offers an answer the agent remembers (and maybe only that)
 }
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
@@ -601,6 +626,7 @@ export function approvalList(v: View): ApprovalModel[] {
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
         start: startRequest(a.action, a.detail),
+        ...(a.scopes ? (() => { const o = alwaysOffer(a.action, a.scopes, a.alwaysLabel ?? '', a.alwaysOptionId ?? ''); return o ? { always: o } : {}; })() : {}),
         ...skipFields(skipOf(a.action, a.detail, at < 0 ? '' : id.slice(0, at), a.agentId)),
       };
     })
