@@ -665,9 +665,8 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
     let tool = tools[0];
     let versions: Vec<&v1::ChatEntry> = chat.seen.iter().filter(|e| e.call_id == "t3").collect();
     // ADR-0090 sends at most one version of an entry per 150 ms, but never holds back the first one or the final status: the
-    // subscriber sees Pending first and Completed last, once. The in-progress version between them is seen only when the node read
-    // it 150 ms or more after Pending; a node that read the updates late and close together holds it, and Completed replaces it
-    // (#1019). The agent sent one in-progress update, so there is at most one version between them.
+    // subscriber sees Pending first and Completed last, once. The in-progress version between them can be held and replaced by
+    // Completed (#1019). The agent sent one in-progress update, so there is at most one version between them.
     assert!(
         matches!(versions.len(), 2 | 3),
         "pending, maybe in progress, completed: {versions:#?}"
