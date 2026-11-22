@@ -12,7 +12,7 @@ Gates, written in the task:
 
 Owner: the merger session (Claude, Linux) builds unless the task says otherwise.
 
-Where things stand: 62 capabilities in `docs/capabilities.md`, 34 built, 18 partly, 10 not built; 42 cite evidence from a real
+Where things stand: 62 capabilities in `docs/capabilities.md`, about 34 built, 18 partly, 10 not built; 42 cite evidence from a real
 machine written down. So the order is: finish what is in flight, prove what exists on real machines, finish what is half built, then the
 new features.
 

@@ -7,8 +7,8 @@ against the go/no-go numbers of decision 6). Stages 1 to 5 stay Proposed: the sp
 or rejects them then. Nothing beyond the spike may be built until then.
 Closed: 2026-11-22. Stages 1 to 5 were rejected by the maintainer after stage 0 (merger chat: "GPUI den vazgeçtik diyelim, tauri ile
 yapılan arayüzde native desktop app gibi kaliteli olmalı her şey"). The desktop stays the Tauri shell around the web window (ADR-0048),
-held to native-app quality; no GPUI code is on main. The spike's Linux part was measured in PR #954 (closed without merging); its report
-and measurements are in that PR, not on main, and the macOS and Windows runs were not done.
+held to native-app quality; no GPUI code is on main. The spike ran on Linux and Windows in PR #954 (closed without merging): its Linux
+report and the Windows figures are in that PR and its comments, not on main; no macOS run is recorded.
 
 Touches ADR-0005 (web-first, Tauri desktop), ADR-0048 (the desktop app is a thin Tauri shell; proposed to be superseded once decision 5's
 retirement step is reached), ADR-0043 and ADR-0063 (the terminal client, whose state model decision 3 extracts), ADR-0012 (VT backend),
