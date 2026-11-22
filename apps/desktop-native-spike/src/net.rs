@@ -33,7 +33,7 @@ const KIND_BEHIND: u8 = 200;
 pub const SCROLLBACK: usize = 10_000;
 
 /// One agent from the snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRow {
     /// `<node>/<local id>`.
     pub agent_id: String,

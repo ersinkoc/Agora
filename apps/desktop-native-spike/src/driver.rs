@@ -2,7 +2,7 @@
 //! the fixture agents, launches the app once per fixture, samples what only the outside can see, and writes one JSON file per run
 //! plus `summary.json` with the ADR-0099 go/no-go numbers. The same command on Linux, macOS and Windows.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -324,6 +324,14 @@ struct AppRun {
     driver: serde_json::Map<String, Value>,
 }
 
+/// A process's CPU time and when it was read: the middle of the call, since a sample can take half a second (PowerShell on
+/// Windows; on Linux a `/proc` read of a few milliseconds, so the numbers stay comparable with earlier Linux runs).
+fn cpu_sample(pid: u32) -> Option<(Instant, f64)> {
+    let a = Instant::now();
+    let c = os::cpu_ms(pid)?;
+    Some((a + a.elapsed() / 2, c))
+}
+
 fn run_app(
     exe: &Path,
     stack: &Stack,
@@ -352,11 +360,19 @@ fn run_app(
             "--stack",
             &stack_file.to_string_lossy(),
         ])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("spawn app: {e}"))?;
     let pid = child.id();
+    // F4 waits for a "sampled" line after each phase the driver samples, so the process is alive for the sample on every system.
+    let mut stdin = child.stdin.take();
+    let mut sampled = || {
+        if let Some(s) = stdin.as_mut() {
+            let _ = writeln!(s, "sampled").and_then(|()| s.flush());
+        }
+    };
     let (tx, rx) = mpsc::channel::<String>();
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
@@ -387,11 +403,12 @@ fn run_app(
                         std::thread::sleep(Duration::from_millis(500));
                         d.insert("rss_bytes".into(), json!(os::rss(pid)));
                         d.insert("tree_rss_bytes".into(), json!(os::tree_rss(pid)));
-                        cpu_begin = os::cpu_ms(pid).map(|c| (Instant::now(), c));
+                        cpu_begin = cpu_sample(pid);
+                        sampled();
                     }
                     "f4-end" => {
-                        if let (Some((t0, c0)), Some(c1)) = (cpu_begin, os::cpu_ms(pid)) {
-                            let wall = t0.elapsed().as_secs_f64() * 1000.0;
+                        if let (Some((t0, c0)), Some((t1, c1))) = (cpu_begin, cpu_sample(pid)) {
+                            let wall = (t1 - t0).as_secs_f64() * 1000.0;
                             d.insert(
                                 "idle_cpu_percent_of_one_core".into(),
                                 json!((c1 - c0) / wall * 100.0),
@@ -399,6 +416,7 @@ fn run_app(
                             d.insert("idle_cpu_window_ms".into(), json!(wall));
                         }
                         d.insert("rss_bytes_end".into(), json!(os::rss(pid)));
+                        sampled();
                     }
                     "hold" => {
                         if let Some(h) = hook.as_mut() {

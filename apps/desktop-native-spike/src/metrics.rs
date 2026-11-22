@@ -23,6 +23,22 @@ pub struct EchoSample {
     pub to_present_ms: f64,
 }
 
+/// Counters of what can make the window draw a frame. GPUI redraws the whole window (every visible pane) when any view is notified
+/// or the pointer changes what it hovers; the spike does not cache pane views.
+#[derive(Default, Clone, Copy)]
+pub struct Wakes {
+    /// Frames the window drew (the root view renders once per drawn frame).
+    pub frames_drawn: u64,
+    /// Agent-list snapshots received from the hub.
+    pub agent_snapshots: u64,
+    /// Of those, the ones that changed the list (only these redraw the window).
+    pub agent_list_changes: u64,
+    /// Terminal output that marked a pane for redraw.
+    pub output_wakes: u64,
+    /// Pointer moves over the window (hover changes redraw it).
+    pub pointer_moves: u64,
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub recording: bool,
@@ -53,6 +69,10 @@ pub struct Metrics {
     pub window_active_samples: Vec<bool>,
     /// Every pane paint since start.
     pub paints_total: u64,
+    /// Every paint since start, per pane.
+    pub paints_by_pane: HashMap<usize, u64>,
+    /// What made the window draw, counted since start (F4 reports the counts over its idle window).
+    pub wakes: Wakes,
     /// One entry per window frame that painted any pane while recording (a frame ends at the next frame callback).
     pub frames: Vec<Instant>,
     frame_open: bool,
@@ -95,6 +115,7 @@ pub fn painted(m: &Rc<RefCell<Metrics>>, p: Painted, window: &mut Window) {
     let now = Instant::now();
     let mut g = m.borrow_mut();
     g.paints_total += 1;
+    *g.paints_by_pane.entry(p.pane).or_default() += 1;
     if p.with_preedit {
         g.preedit_painted = true;
     }

@@ -3,9 +3,10 @@
 //! from process spawn) and collects the files.
 
 use std::cell::RefCell;
-use std::io::Write as _;
+use std::io::{BufRead as _, Write as _};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -469,14 +470,79 @@ async fn fx_f4(this: &This, cx: &mut AsyncWindowContext, s: &Stack) -> Value {
     let ready = wait_screens(this, cx, &ids, 15).await;
     let listed = this.read_with(cx, |r, _| r.agents.len()).unwrap_or(0);
     sleep(cx, 3000).await;
+    // The driver samples memory and CPU time from outside at each phase; on Windows a sample starts PowerShell (about 0.5 s), so
+    // the window waits for the driver's "sampled" line on stdin after each phase instead of moving on (or quitting) under it.
+    let acks = driver_acks();
     phase("f4-begin");
+    let begun = wait_ack(cx, &acks, 20).await;
     let m = metrics(this, cx);
-    let p0 = m.borrow().paints_total;
+    let (p0, by0, w0) = {
+        let g = m.borrow();
+        (g.paints_total, g.paints_by_pane.clone(), g.wakes)
+    };
     let t0 = Instant::now();
-    sleep(cx, 11_000).await;
+    sleep(cx, IDLE_MS).await;
+    let idle = t0.elapsed().as_secs_f64();
+    let (frames, by_pane, w) = {
+        let g = m.borrow();
+        let by: serde_json::Map<String, Value> = ids
+            .iter()
+            .map(|id| {
+                let n = g.paints_by_pane.get(id).copied().unwrap_or(0)
+                    - by0.get(id).copied().unwrap_or(0);
+                (id.to_string(), json!(n))
+            })
+            .collect();
+        (g.paints_total - p0, by, g.wakes)
+    };
     phase("f4-end");
-    let frames = m.borrow().paints_total - p0;
-    json!({"agents_listed": listed, "visible": 4, "background": 2, "terminals_ready": ready, "idle_seconds": t0.elapsed().as_secs_f64(), "pane_paints_while_idle": frames, "window_active": active(cx)})
+    let ended = wait_ack(cx, &acks, 20).await;
+    json!({
+        "agents_listed": listed, "visible": 4, "background": 2, "terminals_ready": ready, "idle_seconds": idle,
+        // Pane paints in the idle window, all panes and per pane (a pane id is its open order; ids 4 and 5 are in the background).
+        // The spike draws no blinking cursor, so an idle window paints nothing unless something below woke it.
+        "pane_paints_while_idle": frames,
+        "pane_paints_while_idle_by_pane": by_pane,
+        // What woke the window in the idle window: drawn frames, and the causes the spike can see.
+        "wakes_while_idle": {
+            "frames_drawn": w.frames_drawn - w0.frames_drawn,
+            "agent_snapshots": w.agent_snapshots - w0.agent_snapshots,
+            "agent_list_changes": w.agent_list_changes - w0.agent_list_changes,
+            "terminal_output": w.output_wakes - w0.output_wakes,
+            "pointer_moves": w.pointer_moves - w0.pointer_moves,
+        },
+        "driver_sampled": {"begin": begun, "end": ended},
+        "window_active": active(cx),
+    })
+}
+
+/// F4's idle window. The driver's CPU window runs from its sample after `f4-begin` to its sample after `f4-end`.
+const IDLE_MS: u64 = 10_500;
+
+/// The driver's "sampled" lines on stdin. A reader thread, so the window never blocks on stdin; without a driver (stdin a terminal
+/// or closed) each wait times out or ends at once.
+fn driver_acks() -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if line.trim() == "sampled" && tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+async fn wait_ack(cx: &mut AsyncWindowContext, acks: &mpsc::Receiver<()>, secs: u64) -> bool {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < end {
+        match acks.try_recv() {
+            Ok(()) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+            Err(mpsc::TryRecvError::Empty) => sleep(cx, 50).await,
+        }
+    }
+    false
 }
 
 async fn fx_hold(this: &This, cx: &mut AsyncWindowContext, s: &Stack, secs: u64) -> Value {

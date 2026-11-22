@@ -48,10 +48,17 @@ impl Root {
     pub fn on_net(&mut self, ev: UiEvent, cx: &mut Context<Self>) {
         match ev {
             UiEvent::Agents(a) => {
-                self.agents = a;
-                cx.notify();
+                // The hub's snapshot is asked for again on any event; an unchanged list must not redraw every visible terminal.
+                let mut m = self.metrics.borrow_mut();
+                m.wakes.agent_snapshots += 1;
+                if a != self.agents {
+                    m.wakes.agent_list_changes += 1;
+                    self.agents = a;
+                    cx.notify();
+                }
             }
             UiEvent::Dirty(t) => {
+                self.metrics.borrow_mut().wakes.output_wakes += 1;
                 if let Some(p) = self.by_ptr.get(&ptr(&t)) {
                     p.update(cx, |_, cx| cx.notify());
                 }
@@ -116,6 +123,7 @@ impl Render for Root {
         let n = self.agents.len();
         let selected = self.selected;
         let has_agents = n > 0;
+        self.metrics.borrow_mut().wakes.frames_drawn += 1;
         let metrics = self.metrics.clone();
         let items = self.agents.iter().enumerate().map(|(i, a)| {
             let label = SharedString::from(format!("{} ({})", a.agent_id, a.kind));
@@ -200,6 +208,9 @@ impl Render for Root {
         };
         div()
             .id("root")
+            .on_mouse_move(cx.listener(|this, _, _, _| {
+                this.metrics.borrow_mut().wakes.pointer_moves += 1;
+            }))
             .flex()
             .flex_row()
             .size_full()
