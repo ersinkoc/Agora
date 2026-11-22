@@ -39,6 +39,31 @@ refused. Protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 are accepted; a
 and to call `workspace_status` when it starts and before it edits files others may touch.
 The caller is the agent the node bound to the connection; no argument can name another sender.
 
+**Lines that are not one valid message** (#981, #984; JSON-RPC 2.0 sections 5.1 and 6). No line is met with silence unless JSON-RPC
+says so (a notification, or a response from the client). These are JSON-RPC's own error codes, with no `data`, not Agora error
+codes:
+- A line that is not JSON: `-32700` with `id: null`.
+- JSON that is not a valid request (not an object, `jsonrpc` not `"2.0"`, `method` not a string, an `id` that is not a string or
+  number): `-32600`, with the line's `id` when it is a string or number and `null` otherwise. A response from the client, well
+  formed or not, gets no answer.
+- A batch (a JSON array) is taken only when `initialize` settled on 2025-03-26, the one version here whose base protocol has batches
+  (2024-11-05 does not define them, 2025-06-18 removed them). Then the answer is one array with the answers to its requests, in
+  their order; notifications in it get none, a batch of only notifications gets no reply, `initialize` inside a batch is `-32600`
+  (2025-03-26 forbids it), and a value in it that is not a valid request is answered inside the array as above. A batch waits for
+  its slowest request (an `ask`, `agent_start` or `agent_wait` in it), while the connection's other calls are answered meanwhile;
+  a request of it the client cancels (`notifications/cancelled`) is left out. Before `initialize`, or under any other version, a
+  batch is refused: `-32600` for each request in it, each on its own line with its id, or one `-32600` with `id: null` when it
+  holds no request.
+- An empty batch, or one of more than 32 values (`agora_mesh::mcp::MAX_BATCH`), is one `-32600` with `id: null`, whatever the
+  version, and nothing in it runs.
+
+Bound: a batch is one line, so the node's 1 MiB line limit (a longer line closes the connection) bounds its size, and at most 32
+messages run for one line. Each message of a batch is routed and checked exactly as if it came alone, in order, one after the
+other: the node's spawn tools, the hub's board for a shared project, then the broker, with the same argument checks, size limits,
+rate counts (`mesh.rate_limited`), open-ask and `agent_wait` limits, and the user's approval for each `agent_start`; batching skips
+none of them and runs nothing in parallel. A batch still waiting holds at least one waiting call, so those limits also bound how many
+batches can wait.
+
 Differences from the table above, all additive: `send_message` takes an optional `reply_to` (a `message_id` from the inbox)
 and a reply to an open `ask` is what answers it; `agents_list` items also carry `project` and the fields under "Awareness"; `task_list` items carry `detail`
 and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
@@ -74,7 +99,7 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
 socket path the same): it answers each request in flight (except one the client cancelled with `notifications/cancelled`, which gets no answer), and each request that arrives while it has no connection, at once with a
-JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets a batch of such errors, one per request in it, and notifications get no answer), keeps its
+JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets one such error per request in it, as a batch when the node's answer to the client's `initialize` settled on 2025-03-26 and one line each otherwise, and notifications get no answer; the requests of a batch in flight when the connection ends are answered one line each; while it has no connection it answers a line that is not JSON or not a valid request with the same `-32700` / `-32600` the node would), keeps its
 stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
 connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
 `notifications/initialized`) and discards the answer, exactly as at start; it carries nothing else over, and a peer that does not

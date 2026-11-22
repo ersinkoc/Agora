@@ -16,7 +16,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
-use agora_mesh::mcp::{HandoffArgs, McpConnection, Outcome, SendMessageArgs, BOARD_TOOLS};
+use agora_mesh::mcp::{
+    read_line, refuse_batch, BatchItem, BatchReply, HandoffArgs, Line, McpConnection, Outcome,
+    SendMessageArgs, BOARD_TOOLS,
+};
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
@@ -1516,6 +1519,173 @@ fn poll_spawn(
     Ok(())
 }
 
+/// What a connection keeps between lines: the MCP conversation and the calls still waiting for their answer.
+struct Session<'a> {
+    conn: McpConnection,
+    /// (request id, ask id, deadline) of asks still waiting for an answer.
+    waiting: Vec<WaitingAsk>,
+    owned: ConnectionAsks<'a>,
+    spawn_waits: Vec<SpawnWait>,
+    starts: ConnectionStarts,
+    /// Batches (2025-03-26) with a request still waiting; each is sent whole once the last of them is answered (#981). Every one
+    /// holds a waiting call, so the limits on those (open asks, `agent_wait`s, starts) bound how many there are.
+    batches: Vec<BatchReply>,
+}
+
+/// What routing one message did.
+enum Step {
+    /// Answer it now.
+    Reply(Message),
+    /// Nothing to send (a notification or a stray response).
+    Silent,
+    /// The request waits: its answer comes from `poll_asks` or `poll_spawn`.
+    Waits,
+    /// The client cancelled the request with this id; its waiting call was dropped.
+    Cancelled(Value),
+}
+
+/// Routes one message (a line, or one value of a batch) exactly as a line holding it alone: the node's own tools first, then the
+/// hub's board for a shared project, then the broker. Limits, rate counts and approvals apply the same however it arrived.
+fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links<'_>) -> Step {
+    let (remote, allowed, shares) = (links.remote, links.allowed, links.shares);
+    // ADR-0057: starting and following helpers is the node's, not the broker's.
+    if let Some(h) = &links.helpers {
+        if let Some(answer) = spawn_call(&s.conn, text, h, &mut s.spawn_waits, &mut s.starts) {
+            return answer.map_or(Step::Waits, Step::Reply);
+        }
+    }
+    if let Some(msg) = status_reply(&s.conn, text, mesh, remote, shares)
+        .or_else(|| list_reply(&s.conn, text, mesh, remote, shares))
+    {
+        return Step::Reply(msg);
+    }
+    // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
+    if let Some(msg) = board_reply(&s.conn, text, mesh, remote, shares) {
+        return Step::Reply(msg);
+    }
+    let outcome = {
+        let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        s.conn.handle(text, &mut m, now_ms())
+    };
+    dispatch_outbound(mesh, remote, allowed);
+    match outcome {
+        Outcome::Reply(msg) => Step::Reply(msg),
+        Outcome::Silent => Step::Silent,
+        Outcome::Waiting {
+            request_id,
+            ask_id,
+            deadline_ms,
+        } => {
+            s.owned.ids.insert(ask_id.clone());
+            s.waiting.push((request_id, ask_id, deadline_ms));
+            Step::Waits
+        }
+        Outcome::Cancelled { request_id } => {
+            cancel_request(
+                &request_id,
+                &mut s.waiting,
+                &mut s.owned,
+                &mut s.spawn_waits,
+                &mut s.starts,
+            );
+            Step::Cancelled(request_id)
+        }
+    }
+}
+
+fn send_line(w: &mut LocalStream, line: &str) -> io::Result<()> {
+    w.write_all(line.as_bytes())?;
+    w.write_all(b"\n")?;
+    w.flush()
+}
+
+/// Sends a later answer, or keeps it for the batch that waits for it and sends that batch once it is complete.
+fn deliver(w: &mut LocalStream, batches: &mut Vec<BatchReply>, msg: &Message) -> io::Result<()> {
+    let id = match msg {
+        Message::Response { id, .. } | Message::ErrorResponse { id, .. } => id,
+        _ => return send(w, msg),
+    };
+    let Some(i) = batches.iter().position(|b| b.waits_for(id)) else {
+        return send(w, msg);
+    };
+    batches[i].take(msg.clone());
+    finish_batch(w, batches, i)
+}
+
+/// Sends batch `i` and forgets it once every request in it has its answer.
+fn finish_batch(w: &mut LocalStream, batches: &mut Vec<BatchReply>, i: usize) -> io::Result<()> {
+    if !batches[i].complete() {
+        return Ok(());
+    }
+    let batch = batches.remove(i);
+    match batch.line() {
+        Some(line) => send_line(w, &line),
+        None => Ok(()),
+    }
+}
+
+/// A cancelled request gets no answer: a batch that waited for it is sent without it once nothing else is waiting.
+fn cancel_in_batches(
+    w: &mut LocalStream,
+    batches: &mut Vec<BatchReply>,
+    id: &Value,
+) -> io::Result<()> {
+    match batches.iter().position(|b| b.waits_for(id)) {
+        Some(i) => {
+            batches[i].cancel(id);
+            finish_batch(w, batches, i)
+        }
+        None => Ok(()),
+    }
+}
+
+/// One line from the client: one message, a batch, or something to refuse (#981, #984). `Err` when the client is gone.
+fn serve_line(
+    text: &str,
+    w: &mut LocalStream,
+    s: &mut Session<'_>,
+    mesh: &Arc<Mutex<Mesh>>,
+    links: &Links<'_>,
+) -> io::Result<()> {
+    let items = match read_line(text) {
+        Line::Batch(items) => items,
+        Line::Refuse(err) => return send(w, &err),
+        Line::One(_) | Line::Ignore => {
+            return match route(text, s, mesh, links) {
+                Step::Reply(msg) => send(w, &msg),
+                Step::Cancelled(id) => cancel_in_batches(w, &mut s.batches, &id),
+                Step::Silent | Step::Waits => Ok(()),
+            };
+        }
+    };
+    if !s.conn.batches() {
+        for err in refuse_batch(&items) {
+            send(w, &err)?;
+        }
+        return Ok(());
+    }
+    let mut batch = BatchReply::default();
+    for item in &items {
+        match s.conn.batch_item(item) {
+            BatchItem::Answer(msg) => batch.answer(msg),
+            BatchItem::Skip => {}
+            BatchItem::Handle(text) => match route(&text, s, mesh, links) {
+                Step::Reply(msg) => batch.answer(msg),
+                Step::Silent => {}
+                Step::Waits => batch.wait(item.get("id").cloned().unwrap_or(Value::Null)),
+                Step::Cancelled(id) => {
+                    if !batch.cancel(&id) {
+                        cancel_in_batches(w, &mut s.batches, &id)?;
+                    }
+                }
+            },
+        }
+    }
+    s.batches.push(batch);
+    let last = s.batches.len() - 1;
+    finish_batch(w, &mut s.batches, last)
+}
+
 /// One connection: newline-delimited JSON-RPC in, replies out. Questions that wait for an answer are polled each
 /// time the read times out, so a pending `ask` never blocks the agent's other calls.
 fn serve(
@@ -1525,7 +1695,6 @@ fn serve(
     links: &Links<'_>,
     stop: &AtomicBool,
 ) {
-    let (remote, allowed, shares) = (links.remote, links.allowed, links.shares);
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
@@ -1536,19 +1705,22 @@ fn serve(
     if links.helpers.is_some() {
         conn.enable_spawn();
     }
-    let mut spawn_waits: Vec<SpawnWait> = Vec::new();
-    let mut starts = ConnectionStarts {
-        helpers: links.helpers.clone(),
-        tickets: HashSet::new(),
-    };
-    let mut owned = ConnectionAsks {
-        mesh,
-        agent,
-        ids: HashSet::new(),
+    let mut s = Session {
+        conn,
+        waiting: Vec::new(),
+        owned: ConnectionAsks {
+            mesh,
+            agent,
+            ids: HashSet::new(),
+        },
+        spawn_waits: Vec::new(),
+        starts: ConnectionStarts {
+            helpers: links.helpers.clone(),
+            tickets: HashSet::new(),
+        },
+        batches: Vec::new(),
     };
     let mut line: Vec<u8> = Vec::new();
-    // (request id, ask id, deadline) of asks still waiting for an answer.
-    let mut waiting: Vec<WaitingAsk> = Vec::new();
     while !stop.load(Ordering::Acquire) {
         // At most one byte past the limit is read into the line: a client that keeps sending without a newline is cut off
         // there, instead of growing the line (and holding this loop) for as long as it sends.
@@ -1562,62 +1734,8 @@ fn serve(
                 if text.is_empty() {
                     continue;
                 }
-                // ADR-0057: starting and following helpers is the node's, not the broker's.
-                if let Some(h) = &links.helpers {
-                    if let Some(answer) = spawn_call(&conn, &text, h, &mut spawn_waits, &mut starts)
-                    {
-                        if let Some(msg) = answer {
-                            if send(&mut writer, &msg).is_err() {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                }
-                if let Some(msg) = status_reply(&conn, &text, mesh, remote, shares)
-                    .or_else(|| list_reply(&conn, &text, mesh, remote, shares))
-                {
-                    if send(&mut writer, &msg).is_err() {
-                        break;
-                    }
-                    continue;
-                }
-                // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
-                if let Some(msg) = board_reply(&conn, &text, mesh, remote, shares) {
-                    if send(&mut writer, &msg).is_err() {
-                        break;
-                    }
-                    continue;
-                }
-                let outcome = {
-                    let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
-                    conn.handle(&text, &mut m, now_ms())
-                };
-                if let Outcome::Waiting { ask_id, .. } = &outcome {
-                    owned.ids.insert(ask_id.clone());
-                }
-                dispatch_outbound(mesh, remote, allowed);
-                match outcome {
-                    Outcome::Reply(msg) => {
-                        if send(&mut writer, &msg).is_err() {
-                            break;
-                        }
-                    }
-                    Outcome::Silent => {}
-                    Outcome::Waiting {
-                        request_id,
-                        ask_id,
-                        deadline_ms,
-                    } => {
-                        waiting.push((request_id, ask_id, deadline_ms));
-                    }
-                    Outcome::Cancelled { request_id } => cancel_request(
-                        &request_id,
-                        &mut waiting,
-                        &mut owned,
-                        &mut spawn_waits,
-                        &mut starts,
-                    ),
+                if serve_line(&text, &mut writer, &mut s, mesh, links).is_err() {
+                    break;
                 }
             }
             // A partial line (the read timed out mid-line): keep what arrived and wait for the rest.
@@ -1633,15 +1751,16 @@ fn serve(
             break;
         }
         // Answer asks whose reply arrived or whose time ran out.
-        if poll_asks(&mut waiting, &mut owned, &conn, |msg| {
-            send(&mut writer, msg)
+        let batches = &mut s.batches;
+        if poll_asks(&mut s.waiting, &mut s.owned, &s.conn, |msg| {
+            deliver(&mut writer, batches, msg)
         })
         .is_err()
         {
             return;
         }
-        if poll_spawn(&mut spawn_waits, &mut starts, agent, |msg| {
-            send(&mut writer, msg)
+        if poll_spawn(&mut s.spawn_waits, &mut s.starts, agent, |msg| {
+            deliver(&mut writer, batches, msg)
         })
         .is_err()
         {
@@ -2483,5 +2602,319 @@ mod tests {
         assert!(server.dispatch_claim("p", &w, t.as_str()).is_ok());
         drop(server);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A test client on an agent's mesh socket: writes lines, reads answers.
+    struct Wire {
+        w: LocalStream,
+        r: BufReader<LocalStream>,
+    }
+
+    impl Wire {
+        fn open(sock: &Path) -> Wire {
+            let w = agora_platform::local_connect(sock).unwrap();
+            let r = w.try_clone().unwrap();
+            r.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            Wire {
+                w,
+                r: BufReader::new(r),
+            }
+        }
+
+        fn send(&mut self, line: &str) {
+            self.w.write_all(format!("{line}\n").as_bytes()).unwrap();
+            self.w.flush().unwrap();
+        }
+
+        /// The next line the node sends, or `None` when nothing comes within `wait`.
+        fn next(&mut self, wait: Duration) -> Option<Value> {
+            self.r.get_ref().set_read_timeout(Some(wait)).unwrap();
+            let mut s = String::new();
+            match self.r.read_line(&mut s) {
+                Ok(n) if n > 0 => Some(serde_json::from_str(&s).unwrap()),
+                _ => None,
+            }
+        }
+
+        fn answer(&mut self) -> Value {
+            self.next(Duration::from_secs(5))
+                .unwrap_or_else(|| panic!("no answer"))
+        }
+
+        fn initialize(&mut self, version: &str) {
+            self.send(
+                &json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":version}})
+                    .to_string(),
+            );
+            let a = self.answer();
+            assert_eq!(a["result"]["protocolVersion"], version, "{a}");
+            self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        }
+    }
+
+    /// A mesh server with agents `a1` and `b1` registered; their sockets.
+    fn two_agents(tag: &str) -> (MeshServer, PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("agora-in-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let mut socks = Vec::new();
+        for id in ["a1", "b1"] {
+            socks.push(
+                server
+                    .register(AgentInfo {
+                        id: AgentId::new(id),
+                        kind: "fixture".into(),
+                        node: "n".into(),
+                        project: "p".into(),
+                        label: id.into(),
+                        worktree: String::new(),
+                        state: "idle".into(),
+                    })
+                    .unwrap(),
+            );
+        }
+        let b = socks.pop().unwrap();
+        let a = socks.pop().unwrap();
+        (server, dir, a, b)
+    }
+
+    fn done(server: MeshServer, dir: PathBuf) {
+        server.unregister(&AgentId::new("a1"));
+        server.unregister(&AgentId::new("b1"));
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn rpc_error_code(v: &Value) -> i64 {
+        v["error"]["code"].as_i64().unwrap_or(0)
+    }
+
+    /// #984: JSON-RPC 2.0 answers a line that is not JSON with -32700 and id null, and a value that is not a valid request with
+    /// -32600 (with its id when one can be read). Nothing is dropped in silence, and the connection keeps working.
+    #[test]
+    fn a_line_that_is_not_json_or_not_a_request_is_answered() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("bad");
+        let mut c = Wire::open(&a);
+        c.initialize("2025-06-18");
+        c.send(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"inbox","arguments":{"#);
+        let e = c.answer();
+        assert_eq!(rpc_error_code(&e), -32700, "{e}");
+        assert_eq!(e["id"], Value::Null, "{e}");
+        assert_eq!(e["jsonrpc"], "2.0", "{e}");
+        for (line, id) in [
+            (r#"{"jsonrpc":"1.0","id":5,"method":"ping"}"#, json!(5)),
+            (r#"{"jsonrpc":"2.0","id":"s","method":7}"#, json!("s")),
+            (
+                r#"{"jsonrpc":"2.0","id":{"x":1},"method":"ping"}"#,
+                Value::Null,
+            ),
+            (r#"{"method":"ping"}"#, Value::Null),
+            ("42", Value::Null),
+            (r#""ping""#, Value::Null),
+        ] {
+            c.send(line);
+            let e = c.answer();
+            assert_eq!(rpc_error_code(&e), -32600, "{line}: {e}");
+            assert_eq!(e["id"], id, "{line}: {e}");
+        }
+        // A response from the client (well formed or not) is not answered: the next line read answers the ping.
+        c.send(r#"{"jsonrpc":"2.0","id":9,"result":{}}"#);
+        c.send(r#"{"jsonrpc":"2.0","id":9,"error":{"code":"x"}}"#);
+        c.send(r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#);
+        let a6 = c.answer();
+        assert_eq!(a6["id"], 6, "{a6}");
+        assert!(a6["result"].is_object(), "{a6}");
+        done(server, dir);
+    }
+
+    /// #981: after a 2025-03-26 handshake a batch is answered with an array of the answers (in order), notifications get none, an
+    /// all-notification batch gets no reply at all, an empty batch is -32600, and `initialize` inside a batch is refused.
+    #[test]
+    fn a_batch_under_2025_03_26_is_answered_with_an_array() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("batch");
+        let mut c = Wire::open(&a);
+        c.initialize("2025-03-26");
+        c.send(
+            r#"[{"jsonrpc":"2.0","id":4,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/progress","params":{}},{"jsonrpc":"2.0","id":5,"method":"tools/list"}]"#,
+        );
+        let b = c.answer();
+        let items = b.as_array().unwrap_or_else(|| panic!("not an array: {b}"));
+        assert_eq!(items.len(), 2, "{b}");
+        assert_eq!(items[0]["id"], 4, "{b}");
+        assert!(items[0]["result"].is_object(), "{b}");
+        assert_eq!(items[1]["id"], 5, "{b}");
+        assert!(items[1]["result"]["tools"].is_array(), "{b}");
+
+        // Only notifications: nothing comes back; the next line read answers the next request.
+        c.send(r#"[{"jsonrpc":"2.0","method":"notifications/progress","params":{}},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#);
+        c.send(r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#);
+        assert_eq!(c.answer()["id"], 6);
+
+        c.send("[]");
+        let e = c.answer();
+        assert_eq!(rpc_error_code(&e), -32600, "{e}");
+        assert_eq!(e["id"], Value::Null, "{e}");
+
+        // Invalid items and `initialize` are answered inside the array.
+        c.send(r#"[{"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":"2025-03-26"}},1,{"jsonrpc":"2.0","id":8,"method":"ping"}]"#);
+        let b = c.answer();
+        let items = b.as_array().unwrap_or_else(|| panic!("not an array: {b}"));
+        assert_eq!(items.len(), 3, "{b}");
+        assert_eq!(
+            (items[0]["id"].clone(), rpc_error_code(&items[0])),
+            (json!(7), -32600),
+            "{b}"
+        );
+        assert_eq!(
+            (items[1]["id"].clone(), rpc_error_code(&items[1])),
+            (Value::Null, -32600),
+            "{b}"
+        );
+        assert_eq!(items[2]["id"], 8, "{b}");
+        done(server, dir);
+    }
+
+    /// #981: 2025-06-18 removed batching (and 2024-11-05 never had it), and before `initialize` nothing is negotiated: a batch is
+    /// refused with -32600 for each request in it, never dropped. A batch over the bound is -32600 with id null in every version.
+    #[test]
+    fn a_batch_without_batching_or_over_the_bound_is_refused() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("nobatch");
+        let batch = r#"[{"jsonrpc":"2.0","id":4,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/progress","params":{}},{"jsonrpc":"2.0","id":5,"method":"tools/list"}]"#;
+        let mut c = Wire::open(&a);
+        c.send(batch);
+        for id in [4, 5] {
+            let e = c.answer();
+            assert_eq!(
+                (e["id"].clone(), rpc_error_code(&e)),
+                (json!(id), -32600),
+                "{e}"
+            );
+        }
+        for version in ["2025-06-18", "2024-11-05"] {
+            let mut c = Wire::open(&a);
+            c.initialize(version);
+            c.send(batch);
+            for id in [4, 5] {
+                let e = c.answer();
+                assert_eq!(
+                    (e["id"].clone(), rpc_error_code(&e)),
+                    (json!(id), -32600),
+                    "{version}: {e}"
+                );
+            }
+            // Notifications only: one -32600 with id null, so the line is not met with silence.
+            c.send(r#"[{"jsonrpc":"2.0","method":"notifications/progress","params":{}}]"#);
+            let e = c.answer();
+            assert_eq!(
+                (e["id"].clone(), rpc_error_code(&e)),
+                (Value::Null, -32600),
+                "{version}: {e}"
+            );
+            c.send(r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#);
+            assert_eq!(c.answer()["id"], 6);
+        }
+        let mut c = Wire::open(&a);
+        c.initialize("2025-03-26");
+        let over: Vec<Value> = (0..=agora_mesh::mcp::MAX_BATCH)
+            .map(|i| json!({"jsonrpc":"2.0","id":i,"method":"ping"}))
+            .collect();
+        c.send(&Value::Array(over).to_string());
+        let e = c.answer();
+        assert_eq!(
+            (e["id"].clone(), rpc_error_code(&e)),
+            (Value::Null, -32600),
+            "{e}"
+        );
+        assert!(
+            c.next(Duration::from_millis(300)).is_none(),
+            "more than one answer"
+        );
+        let at: Vec<Value> = (0..agora_mesh::mcp::MAX_BATCH)
+            .map(|i| json!({"jsonrpc":"2.0","id":i,"method":"ping"}))
+            .collect();
+        c.send(&Value::Array(at).to_string());
+        let b = c.answer();
+        assert_eq!(
+            b.as_array().map(Vec::len),
+            Some(agora_mesh::mcp::MAX_BATCH),
+            "{b}"
+        );
+        done(server, dir);
+    }
+
+    /// #981: a batch whose `ask` waits is answered once, with every answer, when the ask is; a request of it the client cancels
+    /// is left out; the connection's other calls are answered meanwhile.
+    #[test]
+    fn a_batch_with_a_waiting_ask_is_answered_when_the_ask_is() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, b) = two_agents("wait");
+        let mut ca = Wire::open(&a);
+        ca.initialize("2025-03-26");
+        let mut cb = Wire::open(&b);
+        cb.initialize("2025-03-26");
+        ca.send(r#"[{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"ask","arguments":{"to":"b1","question":"q?","timeout_s":20}}},{"jsonrpc":"2.0","id":11,"method":"ping"}]"#);
+        ca.send(r#"[{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"ask","arguments":{"to":"b1","question":"other?","timeout_s":20}}},{"jsonrpc":"2.0","id":21,"method":"ping"}]"#);
+        ca.send(r#"{"jsonrpc":"2.0","id":12,"method":"ping"}"#);
+        assert_eq!(
+            ca.answer()["id"],
+            12,
+            "the batch was answered before its ask"
+        );
+        // The client gives up on 20: its batch is sent with 21 alone.
+        ca.send(
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":20}}"#,
+        );
+        let got = ca.answer();
+        let items = got
+            .as_array()
+            .unwrap_or_else(|| panic!("not an array: {got}"));
+        assert_eq!(items.len(), 1, "{got}");
+        assert_eq!(items[0]["id"], 21, "{got}");
+        // b answers the first ask.
+        cb.send(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inbox","arguments":{}}}"#);
+        let inbox = cb.answer();
+        let text = inbox["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let msgs: Value = serde_json::from_str(&text).unwrap();
+        let ask = msgs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["body"] == "q?")
+            .unwrap_or_else(|| panic!("{msgs}"))["message_id"]
+            .clone();
+        cb.send(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"a1","body":"yes","reply_to":ask}}})
+                .to_string(),
+        );
+        assert!(cb.answer()["result"].is_object());
+        let got = ca.answer();
+        let items = got
+            .as_array()
+            .unwrap_or_else(|| panic!("not an array: {got}"));
+        assert_eq!(items.len(), 2, "{got}");
+        assert_eq!(items[0]["id"], 10, "{got}");
+        assert!(
+            items[0]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("yes"),
+            "{got}"
+        );
+        assert_eq!(items[1]["id"], 11, "{got}");
+        done(server, dir);
     }
 }

@@ -37,6 +37,14 @@ sees and approves each start, and `agent_wait` and `agent_output` follow the hel
 const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_REQUEST: i64 = -32600;
+/// JSON-RPC 2.0: the line is not JSON.
+pub const PARSE_ERROR: i64 = -32700;
+/// The most messages one JSON-RPC batch may hold (#981). A longer batch is refused whole with -32600; the line limit of the
+/// transport bounds its size as for any line, and each message in it is handled, limited and rate counted as if it came alone.
+pub const MAX_BATCH: usize = 32;
+/// The one protocol version this server speaks whose base protocol has JSON-RPC batches: 2024-11-05 did not define them and
+/// 2025-06-18 removed them.
+pub const BATCH_VERSION: &str = "2025-03-26";
 
 /// What the connection wants done after handling one line.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +69,8 @@ pub enum Outcome {
 pub struct McpConnection {
     agent: AgentId,
     initialized: bool,
+    /// The protocol version `initialize` settled on; `None` before it.
+    version: Option<&'static str>,
     /// ADR-0057: the node offers `agent_start`, `agent_wait` and `agent_output` (capability `mesh.spawn`).
     spawn: bool,
 }
@@ -306,6 +316,163 @@ fn rpc_error(id: &Value, code: i64) -> Outcome {
     })
 }
 
+/// What one line from the client holds (#981, #984).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Line {
+    /// One valid JSON-RPC message.
+    One(Message),
+    /// A JSON-RPC batch of 1 to [`MAX_BATCH`] values, each still to be read (`McpConnection::batch_item`, [`refuse_batch`]).
+    Batch(Vec<Value>),
+    /// Answer this and do nothing else: the line is not JSON (-32700, id null), not a valid message (-32600, its id when one can
+    /// be read), or an empty batch or one over [`MAX_BATCH`] (-32600, id null).
+    Refuse(Message),
+    /// A malformed response from the client: JSON-RPC never answers a response.
+    Ignore,
+}
+
+/// A JSON-RPC error with no `data`: the standard codes are protocol level, not Agora error codes.
+fn standard_error(id: Value, code: i64) -> Message {
+    Message::ErrorResponse {
+        id,
+        code,
+        data: None,
+    }
+}
+
+/// Reads one line. Pure; the line is bounded by the transport's line limit.
+pub fn read_line(line: &str) -> Line {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return Line::Refuse(standard_error(Value::Null, PARSE_ERROR));
+    };
+    match v {
+        Value::Array(items) if items.is_empty() || items.len() > MAX_BATCH => {
+            Line::Refuse(standard_error(Value::Null, INVALID_REQUEST))
+        }
+        Value::Array(items) => Line::Batch(items),
+        v => read_value(&v, line),
+    }
+}
+
+/// Reads one value of a batch: never a batch itself (a nested array is an invalid request).
+fn read_item(v: &Value) -> Line {
+    if v.is_array() {
+        return Line::Refuse(standard_error(Value::Null, INVALID_REQUEST));
+    }
+    read_value(v, &v.to_string())
+}
+
+/// `text` is `v` as JSON text.
+fn read_value(v: &Value, text: &str) -> Line {
+    if let Ok(msg) = parse_line(text) {
+        return Line::One(msg);
+    }
+    let obj = v.as_object();
+    let field = |k: &str| obj.and_then(|o| o.get(k));
+    if field("method").is_none() && (field("result").is_some() || field("error").is_some()) {
+        return Line::Ignore;
+    }
+    let id = field("id")
+        .filter(|id| id.is_string() || id.is_number())
+        .cloned()
+        .unwrap_or(Value::Null);
+    Line::Refuse(standard_error(id, INVALID_REQUEST))
+}
+
+/// The answer to a batch on a connection whose protocol version has no batches (or before `initialize`): -32600 for each request
+/// in it, with its id, so a client that sent one is never left waiting; one -32600 with id null when it holds no request.
+pub fn refuse_batch(items: &[Value]) -> Vec<Message> {
+    let mut out: Vec<Message> = items
+        .iter()
+        .filter_map(|item| match read_item(item) {
+            Line::One(Message::Request { id, .. }) => Some(standard_error(id, INVALID_REQUEST)),
+            _ => None,
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(standard_error(Value::Null, INVALID_REQUEST));
+    }
+    out
+}
+
+/// What one value of a batch is, on a connection that takes batches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BatchItem {
+    /// A message to handle as if it came alone, as JSON text.
+    Handle(String),
+    /// Answer this inside the batch's array.
+    Answer(Message),
+    /// Nothing to answer (a response from the client).
+    Skip,
+}
+
+/// The answers to one batch (2025-03-26), collected in the order of its requests until every request has its answer; then sent as
+/// one array.
+#[derive(Debug, Default)]
+pub struct BatchReply {
+    /// One slot per answer, in request order; a slot is empty while its request waits, or for good when it was cancelled.
+    answers: Vec<Option<Message>>,
+    /// Requests whose answer comes later (an `ask`, or the node's `agent_start` or `agent_wait`): their id and slot.
+    waiting: Vec<(Value, usize)>,
+}
+
+impl BatchReply {
+    /// An answer ready now.
+    pub fn answer(&mut self, msg: Message) {
+        self.answers.push(Some(msg));
+    }
+
+    /// The request `id` will be answered later.
+    pub fn wait(&mut self, id: Value) {
+        self.waiting.push((id, self.answers.len()));
+        self.answers.push(None);
+    }
+
+    /// Whether this batch waits for the answer to `id`.
+    pub fn waits_for(&self, id: &Value) -> bool {
+        self.waiting.iter().any(|(w, _)| w == id)
+    }
+
+    /// A later answer to one of its requests: kept for the array. `false` when it is not one this batch waits for.
+    pub fn take(&mut self, msg: Message) -> bool {
+        let id = match &msg {
+            Message::Response { id, .. } | Message::ErrorResponse { id, .. } => id,
+            _ => return false,
+        };
+        let Some(i) = self.waiting.iter().position(|(w, _)| w == id) else {
+            return false;
+        };
+        let (_, slot) = self.waiting.remove(i);
+        self.answers[slot] = Some(msg);
+        true
+    }
+
+    /// The client cancelled the request `id` (`notifications/cancelled`): it gets no answer. `false` when this batch did not wait for it.
+    pub fn cancel(&mut self, id: &Value) -> bool {
+        let Some(i) = self.waiting.iter().position(|(w, _)| w == id) else {
+            return false;
+        };
+        self.waiting.remove(i);
+        true
+    }
+
+    /// Every request has its answer (or was cancelled).
+    pub fn complete(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
+    /// The line to send once complete: the array of answers, or `None` when there is none (only notifications, or every request
+    /// cancelled).
+    pub fn line(&self) -> Option<String> {
+        let items: Vec<Value> = self
+            .answers
+            .iter()
+            .flatten()
+            .filter_map(|m| serde_json::from_str(&agora_protocol::jsonrpc::to_line(m)).ok())
+            .collect();
+        (!items.is_empty()).then(|| Value::Array(items).to_string())
+    }
+}
+
 /// The tools that read or change a project's shared state (ADR-0039): on a shared project they run on the hub's board.
 pub const BOARD_TOOLS: &[&str] = &[
     "task_list",
@@ -332,6 +499,7 @@ pub fn board_tool(
     let conn = McpConnection {
         agent: agent.clone(),
         initialized: true,
+        version: None,
         spawn: false,
     };
     let params = json!({"name": name, "arguments": args});
@@ -357,6 +525,7 @@ impl McpConnection {
         Self {
             agent,
             initialized: false,
+            version: None,
             spawn: false,
         }
     }
@@ -375,10 +544,34 @@ impl McpConnection {
         self.initialized
     }
 
+    /// Whether this connection takes JSON-RPC batches: only after `initialize` settled on [`BATCH_VERSION`] (#981).
+    pub fn batches(&self) -> bool {
+        self.version == Some(BATCH_VERSION)
+    }
+
+    /// One value of a batch on a connection that [`batches`](Self::batches): `initialize` may not be in a batch (2025-03-26), and
+    /// a value that is not a valid message is answered inside the array.
+    pub fn batch_item(&self, item: &Value) -> BatchItem {
+        match read_item(item) {
+            Line::One(Message::Request { id, method, .. }) if method == "initialize" => {
+                BatchItem::Answer(standard_error(id, INVALID_REQUEST))
+            }
+            Line::One(Message::Request { .. } | Message::Notification { .. }) => {
+                BatchItem::Handle(item.to_string())
+            }
+            Line::Refuse(m) => BatchItem::Answer(m),
+            Line::One(_) | Line::Batch(_) | Line::Ignore => BatchItem::Skip,
+        }
+    }
+
+    /// Handles one line holding one message. A batch is the caller's to split ([`read_line`], [`Self::batch_item`]), because the
+    /// node routes some calls itself; a batch given here is refused as one invalid request.
     pub fn handle(&mut self, line: &str, mesh: &mut Mesh, now_ms: u64) -> Outcome {
-        let Ok(msg) = parse_line(line) else {
-            // Not even a JSON-RPC message: there is no id to answer.
-            return Outcome::Silent;
+        let msg = match read_line(line) {
+            Line::One(msg) => msg,
+            Line::Refuse(err) => return Outcome::Reply(err),
+            Line::Batch(_) => return Outcome::Reply(standard_error(Value::Null, INVALID_REQUEST)),
+            Line::Ignore => return Outcome::Silent,
         };
         let Message::Request { id, method, params } = msg else {
             if let Message::Notification { method, params } = &msg {
@@ -406,6 +599,7 @@ impl McpConnection {
                     .find(|v| **v == wanted)
                     .unwrap_or(&SUPPORTED_VERSIONS[0]);
                 self.initialized = true;
+                self.version = Some(*version);
                 reply(
                     &id,
                     json!({
@@ -860,7 +1054,15 @@ mod tests {
             ),
             Outcome::Silent
         );
-        assert_eq!(c.handle("garbage", &mut m, 0), Outcome::Silent);
+        // #984: a line that is not JSON is answered with -32700 and id null.
+        assert_eq!(
+            c.handle("garbage", &mut m, 0),
+            Outcome::Reply(Message::ErrorResponse {
+                id: Value::Null,
+                code: PARSE_ERROR,
+                data: None
+            })
+        );
         assert!(matches!(
             c.handle(r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#, &mut m, 0),
             Outcome::Reply(Message::Response { .. })
@@ -1286,5 +1488,174 @@ mod tests {
         ] {
             assert_eq!(c.handle(line, &mut m, 0), Outcome::Silent, "{line}");
         }
+    }
+
+    fn refused(id: Value, code: i64) -> Line {
+        Line::Refuse(Message::ErrorResponse {
+            id,
+            code,
+            data: None,
+        })
+    }
+
+    /// #984: JSON-RPC 2.0 section 5.1: not JSON is -32700 with id null; JSON that is not a valid request is -32600 with its id
+    /// when one can be read; a response from the client is never answered.
+    #[test]
+    fn a_line_is_read_as_one_message_a_batch_or_an_error_to_answer() {
+        assert_eq!(
+            read_line(r#"{"jsonrpc":"2.0","id":1,"#),
+            refused(Value::Null, PARSE_ERROR)
+        );
+        assert_eq!(read_line(""), refused(Value::Null, PARSE_ERROR));
+        assert!(matches!(
+            read_line(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+            Line::One(Message::Request { .. })
+        ));
+        for (line, id) in [
+            (r#"{"jsonrpc":"1.0","id":5,"method":"ping"}"#, json!(5)),
+            (r#"{"jsonrpc":"2.0","id":"s","method":7}"#, json!("s")),
+            (
+                r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
+                Value::Null,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":true,"method":"ping"}"#,
+                Value::Null,
+            ),
+            (r#"{"method":"ping"}"#, Value::Null),
+            (r#"{"jsonrpc":"2.0","id":3}"#, json!(3)),
+            ("7", Value::Null),
+            ("null", Value::Null),
+        ] {
+            assert_eq!(read_line(line), refused(id, INVALID_REQUEST), "{line}");
+        }
+        assert_eq!(
+            read_line(r#"{"jsonrpc":"2.0","id":3,"error":{"code":"x"}}"#),
+            Line::Ignore
+        );
+        assert_eq!(read_line(r#"{"id":3,"result":1}"#), Line::Ignore);
+        assert_eq!(read_line("[]"), refused(Value::Null, INVALID_REQUEST));
+        let n = |count: usize| {
+            Value::Array(
+                (0..count)
+                    .map(|i| json!({"jsonrpc":"2.0","id":i,"method":"ping"}))
+                    .collect(),
+            )
+            .to_string()
+        };
+        assert!(matches!(read_line(&n(MAX_BATCH)), Line::Batch(items) if items.len() == MAX_BATCH));
+        assert_eq!(
+            read_line(&n(MAX_BATCH + 1)),
+            refused(Value::Null, INVALID_REQUEST)
+        );
+    }
+
+    /// #981: only a 2025-03-26 conversation takes batches; `initialize` may not be in one; anything else is refused per request.
+    #[test]
+    fn batches_follow_the_negotiated_version() {
+        let mut m = Mesh::new(Limits::default());
+        let init = |v: &str| {
+            json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":v}})
+                .to_string()
+        };
+        let mut c = McpConnection::new(AgentId::new("a"));
+        assert!(!c.batches());
+        for (v, yes) in [
+            ("2025-03-26", true),
+            ("2025-06-18", false),
+            ("2024-11-05", false),
+            ("1999-01-01", false),
+        ] {
+            let _ = c.handle(&init(v), &mut m, 0);
+            assert_eq!(c.batches(), yes, "{v}");
+        }
+        let _ = c.handle(&init("2025-03-26"), &mut m, 0);
+        assert_eq!(
+            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{}})),
+            BatchItem::Answer(Message::ErrorResponse {
+                id: json!(4),
+                code: INVALID_REQUEST,
+                data: None
+            })
+        );
+        assert_eq!(
+            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"ping"})),
+            BatchItem::Handle(r#"{"id":4,"jsonrpc":"2.0","method":"ping"}"#.to_string())
+        );
+        assert_eq!(
+            c.batch_item(&json!([{"jsonrpc":"2.0","id":4,"method":"ping"}])),
+            BatchItem::Answer(Message::ErrorResponse {
+                id: Value::Null,
+                code: INVALID_REQUEST,
+                data: None
+            })
+        );
+        assert_eq!(
+            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"result":{}})),
+            BatchItem::Skip
+        );
+        // A batch handed to `handle` (the node splits them itself) is refused, never dropped.
+        assert!(matches!(
+            c.handle(r#"[{"jsonrpc":"2.0","id":4,"method":"ping"}]"#, &mut m, 0),
+            Outcome::Reply(Message::ErrorResponse {
+                code: INVALID_REQUEST,
+                ..
+            })
+        ));
+        let items = vec![
+            json!({"jsonrpc":"2.0","id":4,"method":"ping"}),
+            json!({"jsonrpc":"2.0","method":"notifications/progress"}),
+            json!("x"),
+            json!({"jsonrpc":"2.0","id":"b","method":"tools/list"}),
+        ];
+        let ids: Vec<(Value, i64)> = refuse_batch(&items)
+            .into_iter()
+            .map(|m| match m {
+                Message::ErrorResponse { id, code, .. } => (id, code),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![(json!(4), INVALID_REQUEST), (json!("b"), INVALID_REQUEST)]
+        );
+        assert_eq!(
+            refuse_batch(&[json!({"jsonrpc":"2.0","method":"notifications/progress"})]),
+            vec![Message::ErrorResponse {
+                id: Value::Null,
+                code: INVALID_REQUEST,
+                data: None
+            }]
+        );
+    }
+
+    /// #981: a batch is sent once, in request order, when its last waiting request is answered; a cancelled one is left out, and a
+    /// batch with no answer at all sends nothing.
+    #[test]
+    fn a_batch_reply_waits_for_its_last_answer() {
+        let ok = |id: i64| Message::Response {
+            id: json!(id),
+            result: json!({}),
+        };
+        let mut b = BatchReply::default();
+        b.wait(json!(1));
+        b.answer(ok(2));
+        b.wait(json!(3));
+        assert!(!b.complete() && b.waits_for(&json!(1)) && !b.waits_for(&json!(2)));
+        assert!(!b.take(ok(9)));
+        assert!(b.take(ok(3)));
+        assert!(!b.complete());
+        assert!(b.take(ok(1)));
+        assert!(b.complete());
+        let line: Value = serde_json::from_str(&b.line().unwrap()).unwrap();
+        let ids: Vec<&Value> = line.as_array().unwrap().iter().map(|v| &v["id"]).collect();
+        assert_eq!(ids, [&json!(1), &json!(2), &json!(3)]);
+
+        let mut b = BatchReply::default();
+        b.wait(json!("c"));
+        assert!(b.cancel(&json!("c")) && !b.cancel(&json!("c")));
+        assert!(b.complete());
+        assert_eq!(b.line(), None);
+        assert_eq!(BatchReply::default().line(), None);
     }
 }
