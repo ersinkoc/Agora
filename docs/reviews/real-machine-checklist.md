@@ -568,7 +568,9 @@ not built: nothing to check.
   together). Send `rich`, `plan`, `slow`, two prompts while `slow` runs, then Stop turn. Under the input, Mode > "Turbo (does not
   ask)" (the list is Default, Turbo (does not ask), Plan).
 - **See:** "Thought", the tool call with its path, and the Plan with "N of M done"; the waiting prompts show "Waiting" and "Sent when
-  this turn ends"; Stop turn ends only the turn and they go in order; the mode switch opens a card at once (Setting: Approvals,
+  this turn ends"; Stop turn ends only the turn and they go in order; after Stop turn the "sleep" call reads "Stopped" (no spinner), the
+  composer no longer says "Waiting for this turn to end." once the agent is Idle, and each waiting prompt is shown above its own answer,
+  each answer its own message ("queued one", then "queued two", never "queued onequeued two"; #908); the mode switch opens a card at once (Setting: Approvals,
   Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
   request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued).

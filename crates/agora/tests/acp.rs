@@ -777,6 +777,14 @@ fn prompts_queue_behind_a_turn_and_cancelling_the_turn_leaves_the_agent_alive() 
         .find(|e| e.code == "adapter.queue_dropped")
         .unwrap();
     assert_eq!(notice.params["count"], "8");
+    // #908: it names exactly the entries it drops, so a window marks only those as not sent.
+    let queued_ids: Vec<String> = chat
+        .latest()
+        .iter()
+        .filter(|e| e.role == v1::ChatRole::User as i32 && e.text.starts_with('q'))
+        .map(|e| e.entry_id.to_string())
+        .collect();
+    assert_eq!(notice.params["entries"], queued_ids.join(","));
     let mut fresh = Chat::open(&home, &id);
     fresh.wait("the snapshot", |c| !c.seen.is_empty());
     assert!(
@@ -854,6 +862,26 @@ fn cancelling_a_turn_keeps_the_queue_unless_told_to_drop_it() {
     assert!(all
         .iter()
         .any(|e| e.role == v1::ChatRole::User as i32 && e.text == "k1"));
+    // #908 (RM-44): each sent prompt's entry (same id) carries the time it went, not the time it was queued: no earlier than the
+    // call that ran or the answer before it, and no later than its own answer. A client that places prompts by time (ties by id)
+    // shows prompt, answer, prompt, answer.
+    let at = |role: v1::ChatRole, t: &str| {
+        all.iter()
+            .find(|e| e.role == role as i32 && e.text == t)
+            .unwrap()
+            .at_ms
+    };
+    let call = all.iter().find(|e| e.call_id == "t4").unwrap().at_ms;
+    let (u1, a1, u2, a2) = (
+        at(v1::ChatRole::User, "k1"),
+        at(v1::ChatRole::Agent, "k1"),
+        at(v1::ChatRole::User, "k2"),
+        at(v1::ChatRole::Agent, "k2"),
+    );
+    assert!(
+        call <= u1 && u1 <= a1 && a1 <= u2 && u2 <= a2,
+        "{call} {u1} {a1} {u2} {a2}: {all:#?}"
+    );
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }

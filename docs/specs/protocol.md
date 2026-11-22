@@ -947,8 +947,18 @@ forwards either to a node that did not offer it.
   `AgentPromptResult` (`CommandOk` field 29: `queued`, `queue_len`); a node without it, and every terminal agent, answers `empty`, read as
   sent. The node queues a prompt that arrives while the agent's turn is open (its adapter declared `turns`, a prompt was sent and no `idle`
   followed), at most 8 per agent (`agent.queue_full`, `limit` 8), and sends them one per `idle`, in order. A queued prompt is a user entry
-  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Prompts that will not be sent (the adapter
-  ended, or `AgentCancelTurn` with `drop_queue`) leave the transcript and a notice `adapter.queue_dropped` (`count`) says so: the
+  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Clarification (#908): `at_ms` is the
+  node's wall-clock time of the entry's event, never adjusted; for a queued prompt that event is its send, so the unqueued version
+  carries the time it was sent (the id stays: ids are never reused). A client places the person's entries by `at_ms`, ties and
+  out-of-order times broken by entry id, each just before the first other entry that is not older, and draws a prompt still waiting
+  after everything; a client that saw the entry become unqueued may place it after the newest agent entry it held at that moment
+  (times can tie within a millisecond). Otherwise two turns' answers read as one reply (RM-44). A tool call that is `pending` or
+  `in_progress` when its turn is over will not finish; ACP has no cancelled status and leaves marking such calls to the client, so the
+  window shows them as stopped once a later prompt was sent, or once the agent has been `idle` or finished for a moment (not while
+  `unknown`), and the node sends no invented status. Prompts that will not be sent (the adapter
+  ended, or `AgentCancelTurn` with `drop_queue`, or its send failed) leave the transcript and a notice `adapter.queue_dropped` (`count`,
+  and since #908 `entries`: the ids of exactly those entries joined by commas, so a client marks only them; a notice without it covers
+  every queued entry older than it) says so: the
   schema has no way to delete an entry, so a client that holds one clears its waiting mark when it sees that notice (a tombstone entry would
   need an ADR). The queue is node memory: it is lost when the node restarts (ADR-0089). A prompt that would wait is at most 64 KiB
   (`protocol.invalid_message`, `field` `text`); one sent at once is not bounded here. The turn is an explicit state, `Idle` or
