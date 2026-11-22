@@ -1835,7 +1835,8 @@ impl Drop for ControlServer {
         if let Some(t) = self.thread.take() {
             // Best effort: wake the accept wait with a connection of our own, so stopping usually does not wait out `POLL`. Only while
             // the accept thread runs, so something drains the socket's queue (a Unix connect does not wait on a full one). The
-            // connect can still take its time: on Windows a busy pipe makes it wait up to 2 s (`WaitNamedPipeW`) before it fails.
+            // connect can still take its time: on Windows a busy pipe makes it wait for a free instance up to 5 s (agora-platform's
+            // `CONNECT_BUSY_LIMIT`, #974) before it fails; a busy pipe means a client is already there, which wakes the accept anyway.
             // The stop does not depend on it: the accept loop sees the flag within `POLL` either way.
             if !t.is_finished() {
                 let _ = local_connect(&self.path);
