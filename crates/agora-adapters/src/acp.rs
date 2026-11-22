@@ -78,9 +78,10 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 const STDERR_SETTLE: Duration = Duration::from_millis(100);
 /// How long the bridge waits for a late request after its agent dies before opening a session.
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
-/// ADR-0101 (Codex review of PR #1007): how long a person's answer may wait for the writer to give it to the agent before the node is
-/// told it was not delivered and the agent is ended (as for a full writer queue), so an answer reported undelivered never reaches the
-/// agent later. Shorter than the node's wait for the answer to `approval/resolve`.
+/// ADR-0101 (Codex review of PR #1007): how long a person's answer may wait for the writer's report before the agent is ended (as for
+/// a full writer queue) and the node is told its delivery was not confirmed. Expiry does not prove no byte reached the agent (the
+/// success report may be queued behind another event), so the agent is ended first: whatever it got, it holds no grant afterwards.
+/// Shorter than the node's wait for the answer to `approval/resolve`.
 const DELIVER_WAIT: Duration = Duration::from_secs(5);
 /// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is
 /// dropped (a cut id would name another option).
@@ -1297,9 +1298,10 @@ impl<W: Write> Bridge<W> {
         }
     }
 
-    /// ADR-0101: refuses every node request whose line waited longer than [`DELIVER_WAIT`] for the writer. Returns whether there was
-    /// one: the caller then ends the agent, so a line reported undelivered cannot reach it later.
-    fn delivery_overdue(&mut self, now: Instant) -> io::Result<bool> {
+    /// ADR-0101: takes every node request whose line waited longer than [`DELIVER_WAIT`] for the writer's report, oldest first. The
+    /// caller ends the agent before [`Self::unconfirmed`] tells the node, so an answer whose delivery was not confirmed cannot reach a
+    /// running agent after the node heard it failed.
+    fn take_overdue(&mut self, now: Instant) -> Vec<Value> {
         let mut late: Vec<u64> = self
             .delivering
             .iter()
@@ -1307,12 +1309,18 @@ impl<W: Write> Bridge<W> {
             .map(|(t, _)| *t)
             .collect();
         late.sort_unstable();
-        for t in &late {
-            if let Some(d) = self.delivering.remove(t) {
-                self.undelivered(&d.node_id)?;
-            }
+        late.iter()
+            .filter_map(|t| self.delivering.remove(t).map(|d| d.node_id))
+            .collect()
+    }
+
+    /// ADR-0101: the node requests [`Self::take_overdue`] took get `adapter.approval_undelivered` (delivery not confirmed; the agent was
+    /// ended first).
+    fn unconfirmed(&mut self, ids: &[Value]) -> io::Result<()> {
+        for id in ids {
+            self.undelivered(id)?;
         }
-        Ok(!late.is_empty())
+        Ok(())
     }
 
     fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
@@ -2629,7 +2637,11 @@ where
             if b.agent_writer_full {
                 break Some(io::ErrorKind::WouldBlock);
             }
-            if b.delivery_overdue(Instant::now())? {
+            let late = b.take_overdue(Instant::now());
+            if !late.is_empty() {
+                // End the agent before the node hears the answer failed: expiry does not prove nothing reached it.
+                let _ = child.kill();
+                b.unconfirmed(&late)?;
                 break Some(io::ErrorKind::TimedOut);
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
@@ -3817,9 +3829,13 @@ mod tests {
         let mut b = ready(Box::new(stuck))?;
         always(&mut b, 33)?;
         let now = std::time::Instant::now();
-        assert!(!b.delivery_overdue(now)?);
+        assert!(b.take_overdue(now).is_empty());
         assert!(reply_to(&b.out, 33).is_none());
-        assert!(b.delivery_overdue(now + super::DELIVER_WAIT)?);
+        let late = b.take_overdue(now + super::DELIVER_WAIT);
+        assert_eq!(late.len(), 1);
+        // Taking it tells the node nothing yet: the bridge ends the agent first, then reports.
+        assert!(reply_to(&b.out, 33).is_none());
+        b.unconfirmed(&late)?;
         let reply = reply_to(&b.out, 33).ok_or("no reply")?;
         assert_eq!(
             reply["error"]["message"], "adapter.approval_undelivered",
