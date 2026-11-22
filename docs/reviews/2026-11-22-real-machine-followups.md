@@ -30,8 +30,10 @@ Release build of `main` at `c32c19d0` (contains #976), macOS 27.2.1, a scratch i
 
 - **A kept agent reads new messages after the node restarts (#965):** before the restart, `inbox` of the kept `mac/agent-1`
   returned 3 items. `agora down` ("2 agents keep running"), then `agora`: `agents_list` identical before and after; `inbox` then
-  returned the 4 messages posted after the restart, and `inbox` with `since` set to the old cursor returned the same 4. This is
-  evidence for the mesh bridge reconnecting (ADR-0075 step 1); the later steps of ADR-0075 are not built.
+  returned four items posted after the restart (two messages and two presence items), and `inbox` with `since` set to the old
+  cursor returned the same four. Every call used a fresh `agora mesh stdio`, so this shows the kept agent's mesh works again and its
+  inbox cursor advances after a restart (#965, ADR-0093 reattachment); it does not exercise an already running bridge reconnecting in
+  the same process (ADR-0075 step 1, RM-30), which stays unverified on a real machine.
 - **A message to a stopped machine (RM-27, #915):** `kill -STOP` of `rm-two`'s node; after 30 s the hub showed it offline. A
   `send_message` from `mac/agent-3` to `rm-two/agent-1` returned a `message_id`; about 60 s later the sender's `inbox` held one
   `delivery_failed` from `rm-two/agent-1` with body `node.offline` and `reply_to` that `message_id`. After `kill -CONT` the recipient's

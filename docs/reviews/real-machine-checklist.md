@@ -468,7 +468,7 @@ not built: nothing to check.
 - **Do:** start a Shell; open its bridge with S5 and call `workspace_status`; `agora down` (the agent stays with its holder), then
   `agora`; within 15 minutes call `workspace_status` again on the same bridge (unverified: a bridge run by hand, not by an agent).
 - **See:** the second call answers without restarting the bridge (during the gap a call may fail with `mesh.unavailable`).
-- **Evidence so far:** [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a kept agent read the messages posted after `agora down` and `agora` (#965). The 2026-11-21 failure (#906) is in [macOS 2026-11-21](2026-11-21-real-machine-macos.md).
+- **Evidence so far:** [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a kept agent read the messages posted after `agora down` and `agora` (#965), each call over a fresh `agora mesh stdio`; the same running bridge reconnecting (this entry) is still unverified. The 2026-11-21 failure (#906) is in [macOS 2026-11-21](2026-11-21-real-machine-macos.md).
 
 ### RM-31 A read-only metrics token
 - **OS:** Linux, macOS, Windows.
