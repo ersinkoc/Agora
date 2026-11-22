@@ -383,6 +383,38 @@ pub struct Tools<'a> {
 pub enum Fault {
     /// Right after the launcher moved, before `current` is written.
     BeforeCurrent,
+    /// After `exe` is written, as if `current` could not be, and putting the records back fails too.
+    RecordsUnrestorable,
+}
+
+/// What a record file (`exe`, `current`) held before the switch, so a failed switch can put it back exactly.
+enum Was {
+    Held(Vec<u8>),
+    Absent,
+    /// It could not be read (a folder in its place, say): it is left as it is.
+    Unknown,
+}
+
+impl Was {
+    fn of(path: &Path) -> Self {
+        match std::fs::read(path) {
+            Ok(b) => Was::Held(b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Was::Absent,
+            Err(_) => Was::Unknown,
+        }
+    }
+
+    /// Puts the file back as it was; `false` when that failed.
+    fn put_back(&self, path: &Path) -> bool {
+        match self {
+            Was::Held(b) => agora_platform::write_private(path, b).is_ok(),
+            Was::Absent => match std::fs::remove_file(path) {
+                Ok(()) => true,
+                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            },
+            Was::Unknown => true,
+        }
+    }
 }
 
 impl<'a> Tools<'a> {
@@ -1288,6 +1320,14 @@ pub fn install(
     }
 
     let old_target = std::fs::read_link(&launcher).ok();
+    // The records as they were, put back exactly if the switch fails (Codex review of #1027: the `exe` record too, so a renamed
+    // program's new name is not left owned by a version that was rolled back).
+    let (exe_was, current_was) = (
+        Was::of(&name_path.join("exe")),
+        Was::of(&name_path.join("current")),
+    );
+    let same_exe =
+        matches!(&exe_was, Was::Held(b) if String::from_utf8_lossy(b).trim() == plan.exe);
     // Switch, then record. Any failure puts the launcher back before the new folder goes.
     let switched = (|| -> Result<(), InstallError> {
         root.subdir(OsStr::new("bin"), true)
@@ -1299,6 +1339,9 @@ pub fn install(
         }
         agora_platform::write_private(&name_path.join("exe"), plan.exe.as_bytes())
             .map_err(|e| io_err(&e))?;
+        if tools.fault == Some(Fault::RecordsUnrestorable) {
+            return err(Code::IoFailed, "injected");
+        }
         agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
             .map_err(|e| io_err(&e))
     })();
@@ -1308,24 +1351,25 @@ pub fn install(
             (Some(t), _) => {
                 let _ = agora_platform::install_launcher(&bin.join(t), t, &launcher);
             }
-            (None, Some(old)) => {
+            // The previous version had this launcher name (its launcher went missing): it points there again.
+            (None, Some(old)) if same_exe => {
                 let _ = link(plan, old, &name_path.join(old), &launcher);
             }
-            (None, None) => {
+            // A new launcher name (a first install, or an update that renamed the program): it goes; the old one was not touched.
+            (None, _) => {
                 if launcher_uses(&launcher, &plan.name, &plan.version) {
                     let _ = std::fs::remove_file(&launcher);
                 }
             }
         }
-        match installed.as_deref() {
-            Some(old) => {
-                let _ = agora_platform::write_private(&name_path.join("current"), old.as_bytes());
-            }
-            None => {
-                let _ = std::fs::remove_file(name_path.join("current"));
-            }
-        }
+        let restored = exe_was.put_back(&name_path.join("exe"))
+            & current_was.put_back(&name_path.join("current"))
+            & (tools.fault != Some(Fault::RecordsUnrestorable));
         remove_version(&launcher, &plan.name, &plan.version, &version_path);
+        if !restored {
+            // Not a clean rollback: said as such, not as the write failure that started it.
+            return err(Code::IoFailed, "rollback_incomplete");
+        }
         return Err(e);
     }
     prune(

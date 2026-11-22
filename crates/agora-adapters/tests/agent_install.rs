@@ -61,6 +61,8 @@ struct Opts {
     signature: bool,
     revoked: bool,
     platform: &'static str,
+    /// The one program the entry provides (the launcher's name).
+    provides: &'static str,
 }
 impl Opts {
     fn new(version: &'static str, body: &str) -> Self {
@@ -71,6 +73,7 @@ impl Opts {
             signature: false,
             revoked: false,
             platform: PLATFORM,
+            provides: "fake-agent",
         }
     }
 }
@@ -100,7 +103,7 @@ fn signed_list(o: &Opts, version: u64) -> (String, String) {
             "name": "fake-agent", "display": "Fake Agent",
             "changelog": "https://agents.example.com/changes", "homepage": "https://agents.example.com",
             "publisher": "fake-official", "version_policy": "track", "version": o.version,
-            "provides": ["fake-agent"],
+            "provides": [o.provides],
             "verify": {"args": ["--version"], "regex": "fake-agent [0-9]+"},
             "installer": {"kind": "binary-download", "platforms": {o.platform: dl}},
         }],
@@ -1451,6 +1454,60 @@ fn a_failed_write_of_current_is_rolled_back_for_real() {
         .join("fake-agent")
         .is_file());
     assert!(!home.agents().join("fake-agent").join("2.0.0").exists());
+}
+
+/// Codex review of #1027: an update that renames the program and then fails puts the `exe` record (which agent owns which launcher
+/// name) back with `current`, so the old launcher keeps its owner and the new name is not claimed by a version that was rolled back.
+#[test]
+fn a_failed_update_that_renames_the_program_puts_the_exe_record_back() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    let before = std::fs::read_link(launcher(&home)).unwrap();
+    let exe_file = home.agents().join("fake-agent").join("exe");
+    let old_exe = std::fs::read_to_string(&exe_file).unwrap();
+    let mut o = Opts::new("2.0.0", GOOD);
+    o.provides = "fake-agent-two";
+    let l = list(&o);
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    assert_ne!(p.exe, old_exe.trim());
+    // A folder where `current` must go makes the real write fail, after `exe` was written.
+    let current = home.agents().join("fake-agent").join("current");
+    std::fs::remove_file(&current).unwrap();
+    std::fs::create_dir(&current).unwrap();
+    let net = Net::serving(GOOD);
+    let e = install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(e.code, Code::IoFailed);
+    assert_eq!(std::fs::read_link(launcher(&home)).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(&exe_file).unwrap(), old_exe);
+    assert!(
+        !home.agents().join("bin").join(&p.exe).exists(),
+        "the new launcher name is not left behind"
+    );
+    assert!(!home.agents().join("fake-agent").join("2.0.0").exists());
+}
+
+/// A rollback that cannot put the records back says so: the error is not the plain write failure, so nobody reads it as a clean
+/// rollback (Codex review of #1027).
+#[test]
+fn a_rollback_that_cannot_restore_the_records_says_so() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    let l = list(&Opts::new("2.0.0", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    let mut t = tools(&net, &Sig(true));
+    t.fault = Some(Fault::RecordsUnrestorable);
+    let e = install(&p, &approval(&p), &home.0, &t).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IoFailed, "rollback_incomplete")
+    );
 }
 
 #[test]
