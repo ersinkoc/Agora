@@ -999,7 +999,7 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
     pty.write_input(b"open sesame 42\r").unwrap();
     wait_for(&mut pty, "Type it again");
     pty.write_input(b"open sesame 42\r").unwrap();
-    wait_for(&mut pty, "open sessions were signed out");
+    wait_for(&mut pty, "signed out.");
     assert!(pty.wait().unwrap().success(), "{seen}");
     // Ctrl-C while typing stops with 130 and changes nothing (the terminal is restored before it exits).
     let mut stop = agora_platform::spawn(&agora_platform::PtyConfig {
