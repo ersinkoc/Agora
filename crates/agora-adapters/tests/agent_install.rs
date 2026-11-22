@@ -1121,10 +1121,19 @@ fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_fre
     let c = kids.0.iter_mut().find(|c| c.id() == holder).unwrap();
     c.kill().unwrap();
     c.wait().unwrap();
-    // Windows may take a moment to drop the lock of a process that was ended.
-    wait_until("the lock is free once its holder was killed", || {
-        remember_list_version(&home.0, 7).is_ok()
-    });
+    // Windows may take a moment to drop the lock of a process that was ended. The ended holder's handle stays open in `kids`, which
+    // keeps it queryable there: it must still read as gone (Codex's review of #934).
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match remember_list_version(&home.0, 7) {
+            Ok(()) => break,
+            Err(e) => assert!(
+                std::time::Instant::now() < end,
+                "timed out: the lock is not free once its holder was killed; last: {e:?}"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(last_seen_version(&home.0), 7);
     assert!(released(&home));
 }

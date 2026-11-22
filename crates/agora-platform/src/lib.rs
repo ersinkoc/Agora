@@ -374,8 +374,9 @@ pub fn safe_search_path() -> String {
     }
 }
 
-/// Whether a process with this id exists (a lock file's owner). Only "no such process" says no; any other answer (access denied,
-/// a system that cannot tell) says yes, so a lock is never broken on a guess.
+/// Whether a process with this id exists (a lock file's owner). Only "no such process" (on Windows also: a process that has ended,
+/// even while some handle keeps it queryable) says no; any other answer (access denied, a system that cannot tell) says yes, so a lock
+/// is never broken on a guess.
 pub fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -393,15 +394,15 @@ pub fn process_exists(pid: u32) -> bool {
         // Unix, unlike the name lookups, whose error for a dead pid differs (macOS leaves a stale errno).
         io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        winproc::exists(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         match process_name(pid) {
             Ok(_) => true,
-            // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
-            Err(e) => {
-                !(e.kind() == io::ErrorKind::NotFound
-                    || (cfg!(windows) && e.raw_os_error() == Some(87)))
-            }
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
         }
     }
 }
