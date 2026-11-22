@@ -87,6 +87,13 @@ pub fn render(values: &[(String, String)]) -> String {
 /// `--no-includes` (an `include` or `includeIf` is not followed), `-z` (the value comes back exactly, to its last byte), no prompt, no
 /// pager. `None` when the key is not set or git cannot answer.
 pub fn read_key(key: &str) -> Option<String> {
+    let out = key_command(key)?.output().ok()?;
+    key_value(out.status, out.stdout)
+}
+
+/// The hardened `git config` command [`read_key`] runs for `key` (`None` for a key not on the allow-list), for a caller that runs it
+/// under its own limits (`agora doctor`, audit F68).
+pub(crate) fn key_command(key: &str) -> Option<Command> {
     if !is_allowed(key) {
         return None;
     }
@@ -108,11 +115,15 @@ pub fn read_key(key: &str) -> Option<String> {
         // Not inside any repository, whatever the node's own folder is.
         c.current_dir(dir);
     }
-    let out = c.output().ok()?;
-    if out.status.code() != Some(0) {
+    Some(c)
+}
+
+/// The value in what [`key_command`] printed, `None` when it did not end successfully (the key is not set, or git cannot answer).
+pub(crate) fn key_value(status: std::process::ExitStatus, stdout: Vec<u8>) -> Option<String> {
+    if status.code() != Some(0) {
         return None;
     }
-    let text = String::from_utf8(out.stdout).ok()?;
+    let text = String::from_utf8(stdout).ok()?;
     Some(text.strip_suffix('\0').unwrap_or(&text).to_string())
 }
 
@@ -126,12 +137,20 @@ pub fn read_allowed() -> Vec<(String, String)> {
 
 /// Whether the agents have no git identity: no `user.name` or no `user.email` that [`read_key`] finds, which is exactly what is copied
 /// (so an identity only in an `include` or the system file is reported missing, because a confined agent would not get it either).
-/// `agora doctor` names it on a machine that confines agents (decision 5).
+/// `agora doctor` names it on a machine that confines agents (decision 5), asking through [`key_command`] with a time limit.
 pub fn identity_missing() -> bool {
-    ["user.name", "user.email"]
-        .iter()
-        .any(|k| read_key(k).is_none_or(|v| v.trim().is_empty()))
+    identity_missing_with(read_key)
 }
+
+/// [`identity_missing`] with each key read by `read` (the doctor's reads are time-limited, audit F68).
+pub(crate) fn identity_missing_with(mut read: impl FnMut(&str) -> Option<String>) -> bool {
+    IDENTITY
+        .iter()
+        .any(|k| read(k).is_none_or(|v| v.trim().is_empty()))
+}
+
+/// The keys that make up the git identity a confined agent commits with.
+const IDENTITY: [&str; 2] = ["user.name", "user.email"];
 
 /// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
 pub(crate) fn place_hash(path: &Path) -> u32 {

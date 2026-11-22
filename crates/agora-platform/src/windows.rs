@@ -103,8 +103,8 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
-        SYNCHRONIZE, WRITE_DAC,
+        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
     let held = hold_dir(dir)?;
@@ -119,8 +119,17 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     } else {
         windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
     };
+    // A lock file is not shared for delete: while it is open it can be neither renamed nor removed, so a process that judges the
+    // lock by the file alone (an older install lock that takes over a lock it cannot read) cannot move it from under its holder
+    // (review of audit F100). Every opener of a lock file shares read and write, so they still open it side by side.
+    let share = if append {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    };
     let file = std::fs::OpenOptions::new()
         .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(share)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let (links, reparse) = link_facts(&file)?;

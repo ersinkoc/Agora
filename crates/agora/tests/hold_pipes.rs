@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
     read_frame, socket_path, write_frame, AgentState, Client, LinkError, PipeData, Refusal, Reply,
-    Request, StartPipeRequest, LINK_VERSION, LINK_VERSION_PIPES, MAX_FRAME,
+    Request, StartPipeRequest, LINK_VERSION, LINK_VERSION_PIPES, MAX_AGENT_ID, MAX_FRAME,
 };
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
@@ -618,4 +618,42 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
         [LINK_VERSION_PIPES, LINK_VERSION]
     );
     let _ = std::fs::remove_dir_all(home);
+}
+
+/// #929: a pipe agent's id is bounded as a terminal agent's: a longer one is refused on `StartPipe` and nothing starts; one at the
+/// bound starts, is listed, and is handed over by `AttachPipes`.
+#[test]
+fn a_pipe_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_handed_over() {
+    let rig = Rig::new("idlen");
+    let mut c = rig.connect();
+    assert!(c.attach().expect("attach").is_empty());
+    for long in ["p".repeat(MAX_AGENT_ID + 1), "p".repeat(3 << 20)] {
+        match c.start_pipe(&pipe(&long, "echo up; sleep 600")) {
+            Err(LinkError::Refused(Refusal::BadRequest, _)) => {}
+            Err(e) => panic!("refused for another reason: {e}"),
+            Ok(pid) => {
+                let _ = c.stop(&long, true);
+                panic!("an id of {} bytes was started (pid {pid})", long.len());
+            }
+        }
+    }
+    assert!(c.list().expect("list").is_empty(), "nothing started");
+
+    let at = "q".repeat(MAX_AGENT_ID);
+    let pid = c
+        .start_pipe(&pipe(&at, "echo up; sleep 600"))
+        .expect("start");
+    read_until(&mut c, &at, "up");
+    let listed = c.list().expect("list");
+    assert_eq!(
+        (listed[0].agent.as_str(), listed[0].pid),
+        (at.as_str(), pid)
+    );
+    drop(c);
+    let mut c = rig.connect();
+    assert!(c.attach().expect("attach").is_empty());
+    let held = c.attach_pipes().expect("attach pipes");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].info.agent, at);
+    c.stop(&at, true).expect("stop");
 }
