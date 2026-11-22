@@ -715,11 +715,11 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
     );
     // The node's clock measured it, from when the node read Pending to when it read Completed. The fake agent waited 400 ms between
     // them, but a loaded node reads them late and close together (CI measured 101 ms, #1019), so the wait sets no lower bound and
-    // the duration is only positive. When the in-progress version was seen, the hold rule in `crates/agora-node/src/chat.rs` does
+    // the end is never before the start (both are read in milliseconds, so they can be equal). When the in-progress version was seen, the hold rule in `crates/agora-node/src/chat.rs` does
     // set one: `add` records `sent_ms` = `started_ms` for the first version, and `Transcript::modify` and `ChatBoard::flush_due`
     // send a later version only once `now_ms - sent_ms >= COALESCE_MS` (150 ms), so Completed was read at least 150 ms after Pending.
     assert!(
-        tool.started_ms > 0 && tool.ended_ms > tool.started_ms,
+        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms,
         "{tool:?}"
     );
     if versions.len() == 3 {
