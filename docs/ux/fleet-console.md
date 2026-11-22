@@ -34,8 +34,11 @@ rendered page for it.
      card ([approvals.md](approvals.md)). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
      measures the longest one at 340, 420 and 820 px and in Large text). While the link is down the buttons are disabled and say why.
    * **Allow and Deny do nothing for a short dwell** (600 ms, as the attention dialog and the phone bar, threat model T44) after anything
-     on the list changed (a card came, went, moved or says something else: a card that moves could put a ready Allow under a click meant
-     for another), after the person came back to the window and after the link came back. They look off meanwhile, and a press sends nothing.
+     on the list changed (a card came, went, moved or shows anything else: the agent, its machine or project, the ask, which buttons it
+     has, how long ago it asked; a card that moves could put a ready Allow under a click meant for another), after the person came back to
+     the window (focus, or the tab shown again: at once, even before the window redraws) and after the link came back. They look off
+     meanwhile, and a press sends nothing. **A request is answered once**: the first accepted press turns both buttons off until the list
+     changes, so a double click or a press on the other button sends nothing more.
    * **A machine that asks to join (ADR-0065) is a row of its own with one button, Review, and never an inline Approve**: the owner must compare the number on its screen with the
      card first, so the row shows the name and says what to do, never the number. It counts in the first count and sorts by when it runs out. See `docs/specs/pairing.md` section 14.
    * **Six or more agents asking for exactly the same thing are one row with a count and "Review each"** (same kind of request, same action

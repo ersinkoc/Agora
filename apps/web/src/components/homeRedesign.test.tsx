@@ -199,6 +199,68 @@ describe('request cards keep the safety rules', () => {
   });
 });
 
+describe('request cards: the dwell after Codex review of #1028 (T44)', () => {
+  const button = (name: string) => [...host.querySelectorAll('button')].find((b) => b.textContent === name) as HTMLButtonElement;
+  const render = (fleet: AgentTileModel[], approvals: ApprovalModel[], onResolve: (a: ApprovalModel, ok: boolean) => void) =>
+    act(() => root.render(<AttentionQueue items={attentionList(approvals, fleet)} machines={[]} now={NOW} onOpen={() => {}} onResolve={onResolve} />));
+
+  it('starts again when the machine or project the card shows changes, even when the request itself does not', () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    const onResolve = (x: ApprovalModel) => { sent.push(x.id); };
+    const x = ask('r1', 'a');
+    render([agent('a', { state: 'needs-you', machine: 'laptop', project: 'web' })], [x], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    render([agent('a', { state: 'needs-you', machine: 'server', project: 'web' })], [x], onResolve);
+    expect(host.textContent).toContain('server · web');
+    act(() => button('Allow').click());
+    render([agent('a', { state: 'needs-you', machine: 'server', project: 'api' })], [x], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS - 1); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual([]);
+    act(() => { vi.advanceTimersByTime(1); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1']);
+  });
+  it('answers a request once: a second press, on either button, sends nothing while the card stays', () => {
+    vi.useFakeTimers();
+    const sent: [string, boolean][] = [];
+    render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x, ok) => { sent.push([x.id, ok]); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    act(() => button('Allow').click());
+    act(() => button('Deny').click());
+    expect(sent).toEqual([['r1', true]]);
+    expect(button('Allow').getAttribute('aria-disabled')).toBe('true');
+    expect(button('Deny').getAttribute('aria-disabled')).toBe('true');
+    // Two presses in one batch (before any re-render) are still one answer.
+    render([agent('b', { state: 'needs-you' })], [ask('r2', 'b')], (x, ok) => { sent.push([x.id, ok]); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => { button('Deny').click(); button('Allow').click(); });
+    expect(sent).toEqual([['r1', true], ['r2', false]]);
+  });
+  it('is not ready the moment the person comes back: focus or the tab shown again and a press in the same batch send nothing', () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => { window.dispatchEvent(new Event('focus')); button('Allow').click(); });
+    expect(sent).toEqual([]);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); button('Allow').click(); });
+    expect(sent).toEqual([]);
+    // A timer started before the return does not make the card ready early.
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS - 100); });
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    act(() => { vi.advanceTimersByTime(100); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual([]);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1']);
+  });
+});
+
 describe('Group by is the shared segmented control', () => {
   it('is a radio group named Group by, chosen with a click or the arrow keys', () => {
     const seen: string[] = [];

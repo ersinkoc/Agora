@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -69,8 +69,18 @@ function iconOf(it: AttentionItem): IconName {
   return it.approval.start ? 'plus' : 'bell';
 }
 
-// What a card shows, as one string: when it changes, the card is another card (the dwell starts again).
-const shownOf = (it: AttentionItem): string => [it.key, askOf(it), it.kind === 'pair' ? peerText(it.card.name) : it.agent?.name ?? '', it.kind === 'approval' ? it.approval.machineName ?? '' : ''].join('\u0000');
+// What one agent's card shows, worked out once: the card is drawn from it and the dwell's identity is made of it, so nothing on the card
+// can change without the dwell starting again (Codex review of #1028).
+interface RowModel {
+  name: string;
+  machine?: string;
+  project?: string;
+  ask: string;
+  inline: boolean; // Allow and Deny are on the card
+  when?: string; // "Asked 3 minutes ago", when the queue shows it
+  action: 'answer' | 'agent' | 'panel' | 'none';
+  agentId?: string;
+}
 
 // The queue: everything that needs the user, most urgent first, one request card each (the kit's Callout, amber, never a bar on one side).
 // A plain yes or no has Allow and Deny in its card (the same answer, signed the same way, as the banner above the terminal); anything with
@@ -107,23 +117,59 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   // on the list changed (a card came, went, moved, or says something else: a card that moves can put a ready Allow under a click meant for
   // another), after the person came back to the window, and after the link came back. One timer for the whole queue, derived from what is
   // shown, so no frame has a new list ready.
-  const layout = [all, [...each].join(), [...read].join(), stale, ...shown.map((r) => (r.kind === 'one' ? shownOf(r.item) : `${r.key}\u0000${r.items.length}`))].join('\u0001');
+  // The model of every agent card on screen, opened "Review each" lists included; the cards are drawn from these same models.
+  const model = (it: Exclude<AttentionItem, { kind: 'pair' }>, inlineOk: boolean): RowModel => {
+    const agent = it.agent;
+    const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
+    const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
+    return {
+      name,
+      machine: agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined),
+      project: agent ? agent.project || agent.workspace : undefined,
+      ask: askOf(it),
+      inline,
+      when: knownWait && it.sinceMs ? t('fleet-asked', { when: ago(it.sinceMs, now) }) : undefined,
+      action: inline ? 'answer' : agent ? 'agent' : onReview ? 'panel' : 'none',
+      agentId: agent?.id,
+    };
+  };
+  const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
+    ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
+    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail] : '', model(it, inlineOk)]));
+  const layout = JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
+    : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
+
+  // Readiness is a ref, checked and used up in the click handler itself, so it is right even before React has drawn the change: `ready` holds
+  // the layout it was earned for, and each timer only sets it for the generation it was started in. A new layout (seen in render), the
+  // person coming back to the window (focus, or the tab shown again) and the link changing all clear it at once and start a new generation.
+  // An answer uses it up: one answer per card, and both its buttons stay off until the list changes. (The state below only redraws.)
+  const ready = useRef<string | undefined>(undefined);
+  const generation = useRef(0);
+  const seenLayout = useRef(layout);
+  const [, redraw] = useState(0);
+  const [answered, setAnswered] = useState<string | undefined>();
+  if (seenLayout.current !== layout) { seenLayout.current = layout; ready.current = undefined; generation.current += 1; }
   const [epoch, setEpoch] = useState(0);
-  const [readyFor, setReadyFor] = useState<string | undefined>();
   useEffect(() => {
-    const again = () => setEpoch((n) => n + 1);
+    const again = () => { ready.current = undefined; generation.current += 1; setEpoch((n) => n + 1); };
     const seen = () => { if (document.visibilityState === 'visible') again(); };
     window.addEventListener('focus', again);
     document.addEventListener('visibilitychange', seen);
     return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
   }, []);
   useEffect(() => {
-    const h = setTimeout(() => setReadyFor(layout), ATTENTION_DWELL_MS);
-    return () => { clearTimeout(h); setReadyFor(undefined); };
+    const mine = generation.current;
+    const h = setTimeout(() => { if (generation.current === mine) { ready.current = layout; redraw((n) => n + 1); } }, ATTENTION_DWELL_MS);
+    return () => clearTimeout(h);
   }, [layout, epoch]);
-  const ready = readyFor === layout && !stale;
-  // The guard is here, not only on the button: a press during the dwell sends nothing.
-  const answer = (a: ApprovalModel, ok: boolean) => { if (ready) onResolve?.(a, ok); };
+  const live = ready.current === layout && answered !== layout && !stale;
+  // The guard is here, not only on the button: a press during the dwell, a second press and a press from an older drawing send nothing.
+  const answer = (a: ApprovalModel, ok: boolean) => {
+    if (stale || ready.current !== layout) return;
+    ready.current = undefined;
+    setAnswered(layout);
+    onResolve?.(a, ok);
+  };
 
   // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.
   const reviewPair = (key: string, id: string) => {
@@ -151,30 +197,26 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const rowOf = (it: AttentionItem, inlineOk: boolean) => {
     if (it.kind === 'pair') return pairRow(it);
     const agent = it.agent;
-    const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
-    const machine = agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined);
-    const project = agent ? agent.project || agent.workspace : undefined;
-    const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
-    const ask = askOf(it);
+    const { name, machine, project, ask, inline, when, action, agentId } = model(it, inlineOk);
     const why = `fleet-stale-why-${it.key}`;
-    const off = { 'aria-disabled': !ready || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
+    const off = { 'aria-disabled': !live || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
     return card(it.key, 'fleet-ask', iconOf(it),
       <>
         <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />
         <bdi className="fleet-ask__name">{name}</bdi>
         <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
-        {knownWait && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{t('fleet-asked', { when: ago(it.sinceMs, now) })}</time> : null}
+        {when && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{when}</time> : null}
       </>,
       <>
         {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
         <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{inline ? <span className="fleet-ask__cmd" dir="auto">{ask}</span> : ask}</p>
         {inline && stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
       </>,
-      inline && it.kind === 'approval' ? <>
+      action === 'answer' && it.kind === 'approval' ? <>
         <Button size="sm" {...off} aria-label={t('fleet-deny-for', { name })} onClick={() => answer(it.approval, false)}>{t('approval-deny')}</Button>
         <Button size="sm" variant="primary" {...off} aria-label={t('fleet-allow-for', { name })} onClick={() => answer(it.approval, true)}>{t('approval-allow')}</Button>
-      </> : agent ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agent.id)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
-        : onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null);
+      </> : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
+        : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null);
   };
 
   return (
