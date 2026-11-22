@@ -505,6 +505,20 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
     Ok((d.ca_pem.to_string(), fingerprint))
 }
 
+/// The name half of section 5 step 6b, checked as soon as the handshake ends and before any pairing message (#901): is `host`, the
+/// name or address that was dialled, one of the names of the leaf the handshake showed? It is the same name check [`check_delivery`]
+/// makes (rustls' own, as its server verifier uses), without the chain, which needs the CA the hub delivers only at the end. A leaf
+/// that fails here would fail there after the owner approved, so the machine stops before it asks: no number, no card, nothing issued.
+/// Passing here proves nothing about the hub; the whole check still runs after the approval.
+pub fn leaf_names(leaf_der: &[u8], host: &str) -> bool {
+    let Ok(name) = ServerName::try_from(host.to_string()) else {
+        return false;
+    };
+    let der = CertificateDer::from(leaf_der);
+    rustls::server::ParsedCertificate::try_from(&der)
+        .is_ok_and(|leaf| rustls::client::verify_server_name(&leaf, &name).is_ok())
+}
+
 // ---- the connection ----
 
 /// A verifier that accepts a leaf this machine cannot chain to anything yet, and remembers it (section 5). It is the only way the
@@ -733,6 +747,10 @@ async fn run(
             .ok_or_else(|| PairError::TlsFailed("no certificate".into()))?;
         (exporter, seen)
     };
+    // Before anything is sent (#901): a leaf that does not name the dialled host could never be kept, so the owner is not asked.
+    if !leaf_names(&leaf_der, &host) {
+        return Err(PairError::NameUnverified { name: host });
+    }
     let leaf_hash = sha256(&[&leaf_der]);
     let mut conn = ws::connect(tls, &format!("wss://{addr}/"))
         .await
@@ -1164,6 +1182,28 @@ mod tests {
 
     fn invalid(what: &'static str) -> PairError {
         PairError::CertificateInvalid(what)
+    }
+
+    #[test]
+    fn the_leaf_must_name_the_dialled_host_before_anything_is_sent() {
+        let ca = good_authority();
+        assert!(leaf_names(&ca.leaf(HOST), HOST));
+        assert!(
+            leaf_names(&ca.leaf(HOST), "HUB.test"),
+            "names compare without case"
+        );
+        assert!(!leaf_names(&ca.leaf(HOST), "other.test"));
+        assert!(
+            !leaf_names(&ca.leaf("localhost"), "127.0.0.1"),
+            "an IP needs an IP name"
+        );
+        assert!(leaf_names(&ca.leaf("127.0.0.1"), "127.0.0.1"));
+        assert!(!leaf_names(b"not a certificate", HOST));
+        assert!(!leaf_names(&ca.leaf(HOST), "not a name"));
+        // The early check agrees with the final one: a leaf it passes is one the delivery check passes for that name.
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        assert!(check(&ca.pem, &cert, &ca.leaf(HOST), &csr, now()).is_ok());
     }
 
     #[test]
