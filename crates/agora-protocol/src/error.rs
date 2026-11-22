@@ -108,6 +108,9 @@ pub enum ErrorCode {
     AgentApprovalNeeded,
     EnrollRenewRefused,
     TaskDispatchLimited,
+    /// RM-19 (#903): the kind's program could not be started because this machine cannot find it (not in the node's `PATH`, not
+    /// installed by `agora agent install`, or a path that does not exist).
+    AgentProgramMissing,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -210,6 +213,7 @@ impl ErrorCode {
         ErrorCode::AgentApprovalNeeded,
         ErrorCode::EnrollRenewRefused,
         ErrorCode::TaskDispatchLimited,
+        ErrorCode::AgentProgramMissing,
         ErrorCode::Internal,
     ];
 
@@ -309,6 +313,7 @@ impl ErrorCode {
             ErrorCode::AgentApprovalNeeded => "agent.approval_needed",
             ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
             ErrorCode::TaskDispatchLimited => "task.dispatch_limited",
+            ErrorCode::AgentProgramMissing => "agent.program_missing",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -420,6 +425,7 @@ impl ErrorCode {
             ErrorCode::AgentApprovalNeeded => &["approval_id"],
             ErrorCode::EnrollRenewRefused => &["reason"],
             ErrorCode::TaskDispatchLimited => &["limit"],
+            ErrorCode::AgentProgramMissing => &["kind", "program"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

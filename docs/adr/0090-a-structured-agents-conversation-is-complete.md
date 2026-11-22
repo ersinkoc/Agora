@@ -207,6 +207,16 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   permissions is shown disabled and never sent), the `/` menu. The window cannot read a node's capabilities (`NodeSnapshot` has no field for
   them; adding one is a schema change and needs an ADR), so it goes by what the node sent (rich entries, settings or commands, or an
   `AgentPromptResult`); a node's capabilities in the snapshot would make this exact. Step 7 (TUI): not started.
+- Fix #908 (RM-44, found on Linux and Windows): after Stop turn with prompts waiting, the call that ran kept spinning, the composer kept
+  "Waiting for this turn to end." while the agent was idle, and the waiting prompts' answers read as one glued reply (a waiting prompt's
+  entry is numbered before the answers of the turn it waits behind, so its answers followed each other). A clarification, no new rule:
+  `at_ms` is the wall-clock time of an entry's event, and a queued prompt's event is its send, so its unqueued version carries that time;
+  the window places the person's entries by it (ties by id; after the agent entry it followed when it saw the send) and a waiting prompt
+  after everything. A call still `pending` or `in_progress` when its turn is over (a later prompt, or the agent idle for a moment; not
+  while `unknown`) is shown stopped (ACP leaves that mark to the client; no `ToolStatus` value is added, which would need a schema
+  change); the composer's note ends when nothing waits; `adapter.queue_dropped` names its entries (`entries`), so one failed send among
+  several waiting prompts marks only that one. No message changed shape. The terminal client keeps the first version of each entry (step 7 not started) and shows each answer on
+  its own line, as before.
 
 
 ## Amendment A (Accepted, 2026-11-20): switching a running agent to a mode that skips permission questions needs the owner's signed approval, and then it works

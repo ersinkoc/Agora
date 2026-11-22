@@ -46,6 +46,8 @@ pub struct SandboxPolicy {
     /// The node's own folders and sockets, closed to every confined agent whatever else is open (set by the node, not the policy
     /// file): its data (trusted devices, policy, ledger), identity, logs, hub folder, control socket and the agents' mesh sockets.
     pub protect: Vec<PathBuf>,
+    /// ADR-0098: the node's configured data directory owns generated Git files.
+    pub data_dir: Option<PathBuf>,
     /// ADR-0082: the control token file, set by the node where it requires the token (Linux, confinement on). A profile whose read or
     /// write grants contain it is refused at the start (`control_token_reachable`).
     pub control_token: Option<PathBuf>,
@@ -318,22 +320,20 @@ impl SandboxPolicy {
             .is_some_and(|g| self.read.contains(&g))
     }
 
-    /// Writes the global git configuration of the confined agent that works in `worktree` (ADR-0078) and returns its path, to be
-    /// granted for reading and named in `GIT_CONFIG_GLOBAL`. `None` when agents are not confined, the owner grants `~/.gitconfig`
-    /// themselves, the file would lie under a folder the agent may write (`write`: then it could rewrite it, so nothing is written and
-    /// git behaves as it did before), or the file could not be written.
-    pub fn git_config(&self, worktree: &Path, write: &[PathBuf]) -> Option<PathBuf> {
+    /// Prepares the generated Git file when its directory can be kept private except for the file's own read grant.
+    pub fn git_config(&self, profile: &agora_platform::Sandbox) -> Option<PathBuf> {
         if self.level == Level::Off || self.grants_gitconfig() {
             return None;
         }
-        // The folder first: the check below resolves it, which a folder that does not exist yet (a fresh machine) cannot be, and an
-        // unresolvable one counts as under a grant. A folder that cannot be made private is not used.
-        crate::gitconfig::prepare_folder().ok()?;
-        let file = crate::gitconfig::path_for(worktree);
-        if under_a_grant(&file, write) {
+        let data_dir = std::fs::canonicalize(self.data_dir.as_ref()?).ok()?;
+        data_dir.to_str()?;
+        let directory = crate::gitconfig::directory(&data_dir);
+        // An existing directory can have a different spelling on a case-insensitive volume.
+        let resolved = std::fs::canonicalize(&directory).unwrap_or(directory);
+        if under_a_grant(&resolved, &profile.read) || under_a_grant(&resolved, &profile.write) {
             return None;
         }
-        crate::gitconfig::write_for(worktree)
+        crate::gitconfig::write_for(&data_dir)
     }
 
     /// The paths for one agent, or `None` when agents are not confined.
@@ -672,6 +672,7 @@ mod tests {
             write: vec!["/home/x/.cache/agent".into()],
             trusted_kinds: vec![],
             protect: vec!["/node/home".into()],
+            data_dir: None,
             control_token: None,
             pass_env: vec![],
             sockets: vec!["/run/user/1/keep.sock".into(), "/node/home/m/x".into()],

@@ -172,8 +172,12 @@ const Counts = ({ added, removed }: { added: number; removed: number }) => (
 
 // Where a call is in its life, as a mark: a spinner while it runs (a still ring when motion is reduced), a hollow ring while it waits, a tick
 // when it is done and a cross when it failed. Said in words for a screen reader. Only drawn when the node sends a status (ADR-0090).
-const MARKS: Record<CallStatus, string> = { pending: 'tool-status-pending', in_progress: 'tool-status-running', completed: 'tool-status-done', failed: 'tool-status-failed' };
-export function CallMark({ status }: { status: CallStatus }) {
+// #908: a call whose turn is over but that never said it finished (Stop turn, or the agent moved on) is `stopped`: a still square.
+type ShownStatus = CallStatus | 'stopped';
+const MARKS: Record<ShownStatus, string> = { pending: 'tool-status-pending', in_progress: 'tool-status-running', completed: 'tool-status-done', failed: 'tool-status-failed', stopped: 'tool-status-stopped' };
+/** What a call's mark says: its own status, or `stopped` when its turn is over and it still says it runs or waits. */
+export const shownStatus = (status: CallStatus, turnOver: boolean): ShownStatus => (turnOver && (status === 'in_progress' || status === 'pending') ? 'stopped' : status);
+export function CallMark({ status }: { status: ShownStatus }) {
   const label = t(MARKS[status]);
   const box = 'grid size-4 flex-none place-items-center';
   switch (status) {
@@ -181,6 +185,7 @@ export function CallMark({ status }: { status: CallStatus }) {
     case 'pending': return <span role="img" aria-label={label} title={label} className={box}><span className="size-3 rounded-full border-2 border-dashed border-muted" /></span>;
     case 'completed': return <span role="img" aria-label={label} title={label} className={`${box} text-finished`}><Icon name="check" className="size-3.5" /></span>;
     case 'failed': return <span role="img" aria-label={label} title={label} className={`${box} text-removed`}><Icon name="close" className="size-3.5" /></span>;
+    case 'stopped': return <span role="img" aria-label={label} title={label} className={`${box} text-muted`}><svg aria-hidden viewBox="0 0 16 16" className="size-3 fill-current"><rect x="3" y="3" width="10" height="10" rx="1.5" /></svg></span>;
   }
 }
 
@@ -212,14 +217,15 @@ function PlaceChips({ places, skip }: { places: readonly { path: string; line: n
 // One thing the agent did: an icon tile, a sentence, the file or command it was about as a chip, and the full input folded underneath.
 // An edit that has its diff shows the change inside the row. With the node's data (ADR-0090) the row also has the call's status mark,
 // how long it took, the files it touched and, folded, what it printed.
-const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?: ChatLine }) {
+const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: ChatLine; diff?: ChatLine; ended?: boolean }) {
   const v = useMemo(() => toolView(line.text), [line.text]);
   const d = useMemo(() => (diff ? parseHunks(diff.text) : undefined), [diff]);
   const action = actionOf(line, v.action);
   const took = callMs(line);
   const showsSubject = v.subject && !titleSays(v.title, v.subject);
   // A command that is running shows its output from the start (read once; afterwards the fold is the reader's).
-  const [runOpen] = useState(() => line.status === 'in_progress' && !!line.output);
+  const [runOpen] = useState(() => line.status === 'in_progress' && !ended && !!line.output);
+  const status = line.status && shownStatus(line.status, ended);
   const heading = v.raw
     ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
     : <>
@@ -231,11 +237,11 @@ const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?:
   const icon = <span aria-hidden className={`grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 ${TONE[stepTone(action)]}`}><Icon name={ICONS[action]} className="size-3.5" /></span>;
   const tail = <>
     {took !== undefined && <span className="flex-none text-xs text-muted tabular-nums" data-took>{preciseDuration(took)}</span>}
-    {line.status && <CallMark status={line.status} />}
+    {status && <CallMark status={status} />}
   </>;
-  if (v.details.length === 0 && !v.raw && !d && !line.output) return <div className={row} title={fullStamp(line.atMs)} data-status={line.status}>{icon}{heading}<span className="flex-1" />{tail}</div>;
+  if (v.details.length === 0 && !v.raw && !d && !line.output) return <div className={row} title={fullStamp(line.atMs)} data-status={status}>{icon}{heading}<span className="flex-1" />{tail}</div>;
   return (
-    <details className="group" open={(d && d.lines.length <= 24) || runOpen ? true : undefined} data-diff-path={diff?.path} data-status={line.status}>
+    <details className="group" open={(d && d.lines.length <= 24) || runOpen ? true : undefined} data-diff-path={diff?.path} data-status={status}>
       <summary className={`${row} cursor-pointer list-none hover:bg-surface-2 [&::-webkit-details-marker]:hidden`} title={fullStamp(line.atMs)}>
         {icon}{heading}
         <span className="flex-1" />
@@ -266,11 +272,12 @@ const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?:
 // group arriving never folds one under them. The data has no status per call, so a flag is the agent's own state (it waits on you, or
 // ended with an error) on its newest group: a group that was flagged opens and stays open, and is never hidden in a fold meanwhile.
 const SHOWN_KINDS = 3;
-export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag, open = false, diffs }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine> }) {
+// `ended` (#908): the turn of this group is over, so a call in it that still says it runs is drawn stopped and nothing spins.
+export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended = false, flag, open = false, diffs }: { lines: ChatLine[]; running?: boolean; ended?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine> }) {
   const sum = useMemo(() => stepsSummary(lines), [lines]);
   // With the node's per-call status (ADR-0090) the spinner follows the calls themselves; without it, the agent's own state.
   const rich = lines.some((l) => l.status !== undefined);
-  const spinning = rich ? lines.some((l) => l.status === 'in_progress') : running;
+  const spinning = rich ? !ended && lines.some((l) => l.status === 'in_progress') : running;
   const failed = lines.filter((l) => l.status === 'failed').length;
   const kinds = sum.actions.slice(0, SHOWN_KINDS).map((a) => t(`chat-act-${a.action}`, { count: a.count }));
   const more = sum.actions.length - SHOWN_KINDS;
@@ -291,12 +298,12 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag,
         <Icon name="chevron" className={CHEVRON} />
       </summary>
       <div className="grid grid-cols-1 divide-y divide-line border-t border-line">
-        {lines.map((l) => <ToolStep key={l.id} line={l} diff={diffs?.get(l.id)} />)}
+        {lines.map((l) => <ToolStep key={l.id} line={l} diff={diffs?.get(l.id)} ended={ended} />)}
       </div>
     </details>
   );
   // An entry that changed in place is a new object under the same id (ADR-0090): compare the lines themselves, not only how many.
-}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]) && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
+}, (a, b) => a.running === b.running && a.ended === b.ended && a.flag === b.flag && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]) && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
 
 // A file the agent changed that no step claimed: a card with its name and how much changed, the lines numbered and coloured; a long
 // change starts folded.
@@ -416,14 +423,14 @@ function DateRule({ atMs }: { atMs: number }) {
   return <div role="separator" aria-label={label} className="flex items-center gap-3 py-1 text-xs text-muted"><span className="h-px flex-1 bg-line" /><span>{label}</span><span className="h-px flex-1 bg-line" /></div>;
 }
 
-export function Item({ item, running, flag, open, diffs, notice, queued, onShowRequest }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine>; notice: (l: ChatLine) => ReactNode; queued?: 'waiting' | 'not-sent'; onShowRequest?: () => void }) {
+export function Item({ item, running, ended, flag, open, diffs, notice, queued, onShowRequest }: { item: TranscriptItem; running?: boolean; ended?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine>; notice: (l: ChatLine) => ReactNode; queued?: 'waiting' | 'not-sent'; onShowRequest?: () => void }) {
   switch (item.kind) {
     case 'date': return <DateRule atMs={item.atMs} />;
     case 'user': return <UserText line={item.line} state={queued} />;
     case 'reply': return <Reply text={item.text} atMs={item.atMs} />;
     case 'thought': return <Thought text={item.text} seconds={Math.round((item.endMs - item.atMs) / 1000)} live={running} />;
     case 'permission': return <PermissionRecord line={item.line} onShow={onShowRequest} />;
-    case 'steps': return <ToolSteps lines={item.lines} running={running} flag={flag} open={open} diffs={diffs} />;
+    case 'steps': return <ToolSteps lines={item.lines} running={running} ended={ended} flag={flag} open={open} diffs={diffs} />;
     case 'plan': return <PlanEntry line={item.line} latest={item.latest} />;
     case 'diff': return <DiffEntry line={item.line} />;
     case 'notice': return <>{notice(item.line)}</>;

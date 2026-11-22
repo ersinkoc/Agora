@@ -291,6 +291,18 @@ pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
 /// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
 pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
 
+/// The device name to pass to programs that take an output path when the output should be discarded.
+pub const NULL_DEVICE: &str = {
+    #[cfg(unix)]
+    {
+        unix::NULL_DEVICE
+    }
+    #[cfg(windows)]
+    {
+        windows::NULL_DEVICE
+    }
+};
+
 /// The platform key of the signed agent list (`<os>-<arch>[-musl]`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`,
 /// `linux-aarch64-musl`), or `None` for a system the list has no keys for.
 pub fn platform_key() -> Option<String> {
@@ -1260,7 +1272,8 @@ pub struct Sandbox {
     pub confine_sockets: bool,
     /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
     /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
-    /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
+    /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
+    /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
     /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
     /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
@@ -1270,6 +1283,9 @@ pub struct Sandbox {
     /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
     /// macOS only, as `deny`.
     pub reopen: Vec<PathBuf>,
+    /// The node-generated Git configuration (ADR-0098). This grant reads an exact file, including
+    /// under a protected directory. Unlike a worktree exception, it grants no writes or listing.
+    pub git_config: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -1281,6 +1297,48 @@ impl Sandbox {
             ..Self::default()
         }
     }
+
+    /// The file that can be named in the sandbox and in the launch environment.
+    pub fn git_config_file(&self) -> Option<PathBuf> {
+        let path = self.git_config.as_deref()?;
+        path.to_str()?;
+        if !path.is_absolute() || !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+        {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::git_config_path(path)
+        }
+        #[cfg(windows)]
+        {
+            // Git for Windows ignores verbatim paths in GIT_CONFIG_GLOBAL. If the same
+            // file has no ordinary spelling, the generated configuration is optional.
+            let plain = canonicalize_plain(path).ok()?;
+            if matches!(plain.components().next(), Some(std::path::Component::Prefix(p)) if p.kind().is_verbatim())
+            {
+                return None;
+            }
+            Some(plain)
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            Some(path.to_path_buf())
+        }
+    }
+}
+
+/// The settings copied by the node take precedence over ambient Git environment overrides.
+pub fn git_config_env(file: &std::path::Path) -> [(String, String); 4] {
+    [
+        ("GIT_CONFIG_COUNT".into(), "0".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), String::new()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            file.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]
 }
 
 /// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel
@@ -1450,8 +1508,12 @@ pub fn recover_sandbox_leftovers() {
 }
 
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
-/// cannot be enforced, so the caller never runs the command unconfined by accident.
-pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
+/// cannot be enforced, so the caller never runs the command unconfined by accident. Returns the
+/// generated Git file if the confinement grants read access to it.
+pub fn confine_command(
+    cmd: &mut std::process::Command,
+    sandbox: &Sandbox,
+) -> io::Result<Option<PathBuf>> {
     if !enforceable(sandbox) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1461,16 +1523,17 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let ruleset = linux::ruleset(sandbox, None, None)?;
+        let mut ruleset = linux::ruleset(sandbox, None, None)?;
+        let git_config = ruleset.git_config.take();
         // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(target_os = "macos")]
     {
         // The command becomes `sandbox-exec -p <profile> -- <program> <args>`. Environment and folder carry over; standard streams do
         // not (std cannot read them back), so callers confine first and set the streams after.
-        let (program, args) = {
+        let (program, args, git_config) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
             macos::wrap(sandbox, cmd.get_program(), &a)?
         };
@@ -1486,7 +1549,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
             };
         }
         *cmd = wrapped;
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

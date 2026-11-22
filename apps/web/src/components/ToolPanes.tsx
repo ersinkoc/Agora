@@ -157,7 +157,7 @@ export function TerminalPane({ agent, source }: { agent: AgentTileModel; source:
         <TerminalSettings />
       </div>
       <div className="pane min-h-0 flex-1 p-1.5">
-        <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+        <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
           <TerminalView source={source} label={`${t('focus-terminal')} · ${agent.name}`} />
         </Suspense>
       </div>

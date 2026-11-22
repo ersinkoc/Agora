@@ -320,6 +320,16 @@ fn stopping_an_adapter_agent_ends_its_session() {
     until(&mut s, state_is(AgentState::Idle));
     let ev = s.stop(&id).unwrap();
     assert!(ev.contains(&SupervisorEvent::Stopped { agent: id.clone() }));
+    // #902: a person's stop is a stop, never a give-up with an exit (in the stop's answer or the ticks after it).
+    std::thread::sleep(Duration::from_millis(200));
+    let after = s.tick(Instant::now());
+    assert!(
+        !ev.iter().chain(after.iter()).any(|e| matches!(
+            e,
+            SupervisorEvent::Exited { .. } | SupervisorEvent::GaveUp { .. }
+        )),
+        "{ev:#?} {after:#?}"
+    );
     assert!(!s.list().into_iter().find(|v| v.id == id).unwrap().running);
 }
 
@@ -384,8 +394,37 @@ fn a_crashed_adapter_is_restarted_with_backoff_and_then_given_up_on() {
     until(&mut s, |e| matches!(e, SupervisorEvent::Started { .. }));
     settle(&mut s, &id, AgentState::Idle);
     let _ = s.adapter_prompt(&id, "crash", false);
-    until(&mut s, |e| matches!(e, SupervisorEvent::GaveUp { .. }));
+    let ev = until(&mut s, |e| matches!(e, SupervisorEvent::GaveUp { .. }));
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
+    // #902 (RM-13): giving up ends the agent with the exit code its adapter crashed with (the fake adapter's `crash` exits 3), right
+    // before `GaveUp`, so a window shows it ended with an error instead of keeping it unknown.
+    let n = ev.len();
+    assert!(n >= 2, "{ev:#?}");
+    assert_eq!(
+        ev[n - 2],
+        SupervisorEvent::Exited {
+            agent: id.clone(),
+            status: agora_platform::ExitStatus {
+                code: Some(3),
+                signal: None
+            },
+        },
+        "{ev:#?}"
+    );
+    assert_eq!(
+        ev[n - 1],
+        SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: Some(3),
+        }
+    );
+    // Only the end is reported as exited: the earlier crashes were restarts.
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, SupervisorEvent::Exited { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -400,12 +439,17 @@ fn a_stop_cancels_a_pending_adapter_restart() {
     until(&mut s, state_is(AgentState::Idle));
     let _ = s.adapter_prompt(&id, "crash", false);
     until(&mut s, |e| matches!(e, SupervisorEvent::Restarting { .. }));
-    s.stop(&id).unwrap();
+    let stopped = s.stop(&id).unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let ev = s.tick(std::time::Instant::now());
     assert!(!ev
         .iter()
         .any(|e| matches!(e, SupervisorEvent::Started { .. })));
+    // #902: stopped while a restart waited: no give-up and no exit is reported for it.
+    assert!(!ev.iter().chain(stopped.iter()).any(|e| matches!(
+        e,
+        SupervisorEvent::Exited { .. } | SupervisorEvent::GaveUp { .. }
+    )));
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
 }
 
@@ -553,4 +597,96 @@ fn a_confined_adapter_that_could_read_the_control_token_or_the_secrets_is_refuse
         "secrets_reachable"
     ));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A supervisor whose fake adapter kind has a launch option that makes it act without asking (its argument is one the fake ignores).
+fn supervisor_with_skip_option(restart: RestartPolicy) -> Supervisor {
+    let mut s = Supervisor::new(SupervisorConfig {
+        node: NodeId::new("node-1"),
+        restart,
+        terminal: TerminalOptions::default(),
+        limits: NodeLimits::default(),
+    });
+    s.register(
+        Manifest::parse(&format!(
+            "kind = \"fake-adapter\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 2\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n\
+             [[launch.option]]\nid = \"skip\"\nlabel = \"option-skip\"\nargs = [\"--yes\"]\nskips_permissions = true\n",
+            fake_agent()
+        ))
+        .unwrap(),
+    );
+    s
+}
+
+fn launch_of(s: &Supervisor, id: &AgentId) -> (Vec<String>, bool) {
+    let v = s.list().into_iter().find(|v| &v.id == id).expect("listed");
+    (v.launch_options, v.skips_permissions)
+}
+
+/// Independent review of #928, point 3: only an agent taken up from the holder (`set_kept_launch`, whose options' arguments are not
+/// known again) loses its launch options at a crash restart, since its next process runs without them. An agent this node started with
+/// a skipping option keeps the option and the badge across a crash restart (its arguments are applied again). A manifest option always
+/// has arguments, so the old test of "no arguments" could not tell the two apart by itself; the explicit kept set does.
+#[test]
+fn only_an_adapter_taken_up_from_the_holder_loses_its_launch_options_at_a_crash_restart() {
+    let e = env("keptlaunch");
+    let policy = RestartPolicy {
+        max_restarts: 3,
+        base_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(100),
+    };
+    let mut s = supervisor_with_skip_option(policy);
+    let skip = agora_node::launch_options::Requested {
+        ids: vec!["skip".into()],
+        confirmed: vec!["skip".into()],
+        settings: Vec::new(),
+    };
+    let req = |name: &str| StartRequest {
+        kind: "fake-adapter".into(),
+        checkout: e.repo.clone(),
+        worktree_root: e.dir.join("worktrees"),
+        name: name.into(),
+        base: None,
+    };
+
+    // Started here with the option: it survives a crash restart.
+    let own = s
+        .start_with_options(&req("own"), &skip, Instant::now())
+        .expect("start");
+    settle(&mut s, &own, AgentState::Idle);
+    assert_eq!(launch_of(&s, &own), (vec!["skip".to_string()], true));
+    let _ = s.adapter_prompt(&own, "crash", false);
+    until(
+        &mut s,
+        |e| matches!(e, SupervisorEvent::Started { agent } if *agent == own),
+    );
+    settle(&mut s, &own, AgentState::Idle);
+    assert_eq!(
+        launch_of(&s, &own),
+        (vec!["skip".to_string()], true),
+        "an agent started here lost its launch options at a crash restart"
+    );
+    assert!(s.skips_permissions_now(&own));
+
+    // Its options put back from the ledger as at a take-up: the restarted process runs without their arguments, so it is shown without.
+    let kept = start(&mut s, &e, "kept");
+    settle(&mut s, &kept, AgentState::Idle);
+    s.set_kept_launch(&kept, &["skip".to_string()], true);
+    assert_eq!(launch_of(&s, &kept), (vec!["skip".to_string()], true));
+    assert!(s.skips_permissions_now(&kept));
+    let _ = s.adapter_prompt(&kept, "crash", false);
+    until(
+        &mut s,
+        |e| matches!(e, SupervisorEvent::Started { agent } if *agent == kept),
+    );
+    settle(&mut s, &kept, AgentState::Idle);
+    assert_eq!(
+        launch_of(&s, &kept),
+        (Vec::new(), false),
+        "a kept agent's next process was shown with options it does not run with"
+    );
+    assert!(!s.skips_permissions_now(&kept));
+    // The agent started here is untouched by the other's restart.
+    assert_eq!(launch_of(&s, &own), (vec!["skip".to_string()], true));
+    let _ = std::fs::remove_dir_all(&e.dir);
 }
