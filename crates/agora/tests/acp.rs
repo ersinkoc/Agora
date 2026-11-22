@@ -664,15 +664,44 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
     assert_eq!(tools.len(), 1, "{tools:#?}");
     let tool = tools[0];
     let versions: Vec<&v1::ChatEntry> = chat.seen.iter().filter(|e| e.call_id == "t3").collect();
+    // ADR-0090 sends at most one version of an entry per 150 ms, but never holds back the first one or the final status: the
+    // subscriber sees Pending first and Completed last, once. The in-progress version between them is seen only when the node read
+    // it 150 ms or more after Pending; a node that read the updates late and close together holds it, and Completed replaces it
+    // (#1019). The agent sent one in-progress update, so there is at most one version between them.
     assert!(
-        versions.len() >= 3,
-        "pending, in progress, completed: {versions:#?}"
+        matches!(versions.len(), 2 | 3),
+        "pending, maybe in progress, completed: {versions:#?}"
     );
     assert!(versions.iter().all(|e| e.entry_id == tool.entry_id));
+    assert!(
+        versions.iter().all(|e| e.started_ms == tool.started_ms),
+        "the start is kept from the first sight: {versions:#?}"
+    );
     assert_eq!(
         versions.first().unwrap().status,
         v1::ToolStatus::Pending as i32
     );
+    assert_eq!(
+        versions.last().unwrap().status,
+        v1::ToolStatus::Completed as i32,
+        "nothing follows the final status: {versions:#?}"
+    );
+    assert_eq!(
+        versions
+            .iter()
+            .filter(|e| e.status == v1::ToolStatus::Completed as i32)
+            .count(),
+        1,
+        "{versions:#?}"
+    );
+    for middle in &versions[1..versions.len() - 1] {
+        assert_eq!(
+            middle.status,
+            v1::ToolStatus::InProgress as i32,
+            "{middle:?}"
+        );
+        assert_eq!(middle.ended_ms, 0, "a running call has no end: {middle:?}");
+    }
     assert_eq!(tool.status, v1::ToolStatus::Completed as i32);
     assert_eq!(tool.tool_kind, v1::ToolKind::Read as i32);
     assert_eq!(tool.output, "file text");
