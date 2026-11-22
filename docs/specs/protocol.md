@@ -276,7 +276,7 @@ Initial event families:
 | --- | --- |
 | node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
-| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentQuotaObserved` (ADR-0091), `AgentExited` |
+| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentQuotaObserved` (ADR-0091), `AgentAlwaysAllowed` (ADR-0101), `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
 | approval | `ApprovalRequested`, `ApprovalResolved`, `AgentStartRefused` (ADR-0057) |
 | mesh | `MessagePosted`, `TaskChanged`, `LeaseGranted`, `LeaseReleased`, `HandoffCreated` |
@@ -1185,3 +1185,54 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   passed the access check, also one the node then refuses (`task.dispatch_limited`, `limit`); one dispatch per task at a time follows from
   the claim. A command sent on a node's own control socket is not counted (it never reaches the hub).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.TaskDispatch*.*`, `agora.v1.TaskDispatched.*` and `schema/fixtures/task-dispatch/`.
+
+### Allowing a structured agent always for its session (ADR-0101)
+Schema step approved with ADR-0101 by the maintainer on 2026-11-22. Handled by every node of this build, which advertises `approval.always`;
+the hub passes it (`hubcli.rs`). The window does not branch on it: the evidence it uses is ALWAYS in a request's `scopes`, which only such a
+node sets. The window's button and the terminal client's key come with the next step; until then every client sends single answers.
+
+- **Enum** `ApprovalScope` (`common.proto`): `APPROVAL_SCOPE_UNSPECIFIED` (0, read as ONCE: what every decision meant before), `ONCE` (1),
+  `ALWAYS` (2: the agent remembers the answer, as the agent defines it, ACP `allow_always`). A value this build does not know is refused
+  (`protocol.invalid_message`, `field: scope`), never read as either.
+- **The offer.** `ApprovalRequested` / `ApprovalSnapshot` gain `scopes` (6), `always_label` (7) and `always_option_id` (8): the answers the
+  person may give after the node's policy (empty: ONCE only, as every node before said it), the agent's own name for its always option
+  (untrusted text, control and format characters removed, at most 120 characters) and that one option's exact id (never altered: an id
+  that is empty, longer than 128 bytes or holds such a character is never offered). The node takes them from the adapter's
+  `approval/request` (`docs/specs/adapter-protocol.md`), only from an adapter that declared `approval_scopes`.
+- **The decision.** `ApprovalResolve.scope` (7). UNSPECIFIED and ONCE are signed over `agora-approval-v1` exactly as before. ALWAYS, only
+  with `approved` and never on an `agent.` request, is signed over the domain `agora-approval-always-v1`, one NUL byte, then
+  `F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id)`, where `F(x)` is
+  the decimal byte length of `x`, `:`, then `x` (canonical decimal, raw bytes); `verdict` is `1`; `agent_id` is the node's own id of the
+  agent (`ApprovalRequested.agent_id` as the node sent it; in an `ApprovalSnapshot` the part after `<node_id>/`); the hashes are of
+  `action` and `detail` exactly as announced, lowercase hex; the label and option id are as announced. Vectors:
+  `schema/fixtures/signing/approval-always-v1.json` (checked in `crates/agora-protocol/tests/approval_always_signing.rs` and by the node).
+- **The node checks, in order:** the shape (an unknown scope; ALWAYS with a denial, a grant or on an `agent.` request is
+  `approval.signature_invalid`); the signature against `trusted-devices`, over the bytes the decision's scope names, so a hub that turns
+  ONCE into ALWAYS or ALWAYS into ONCE fails here (`approval.signature_invalid`); the offer it stored (an Allow on a request that offers
+  only ALWAYS, or ALWAYS on one that does not offer it: `approval.scope_unavailable`; a Deny needs no offer); the policy, read again
+  (`approval.scope_forbidden`); for an agent behind an ACP bridge that did not declare `approval_scopes` (one from before ADR-0101, kept
+  across a node update) a single Allow while the policy refuses ALWAYS (`approval.adapter_outdated`: that bridge may answer it with the
+  agent's remembered option); then expiry and single use. A refusal before expiry spends nothing: the card keeps waiting.
+- **Policy.** The existing `skip_permissions` line (ADR-0059): `forbid` refuses every ALWAYS, `confined_only` refuses it while agents are not
+  confined, `allow` permits it; a kind whose manifest says `[structured] allow_always = false` is never offered it. Under a refusing policy
+  the node leaves ALWAYS out of `scopes`. A request that offers only ALWAYS under such a policy gets no card: the node announces it and at
+  once `ApprovalResolved { approved: false }` with no signer, answers the adapter denied (the agent gets `reject_once` or `cancelled`) and
+  adds the conversation notice `approval.always_only_forbidden` (params `action`).
+- **The record.** `ApprovalResolved.scope` (6): ALWAYS for an always decision the adapter took, ONCE for any other person's decision,
+  UNSPECIFIED for one nobody decided. `ChatEntry.permission_always` (21) marks the permission entry of an approved ALWAYS. The new event
+  `AgentAlwaysAllowed` (`Event.body` 69, producer `node`: `agent_id`, `approval_id`, `action` cleaned and cut at 120 characters,
+  `signer_device_id`, `at_ms`) is written only after the adapter took the always answer (a refused or undelivered one records the
+  request cancelled, as before). The node keeps an agent's always answers beside its kept session (`kept-<id>.pb`, at most 16) and says
+  them again after the `AgentStarted` it restates (a resync, or a node that takes a kept agent up); a new process of the agent, its end
+  and its interruption drop them, and a resumed agent's are not replayed.
+- **The hub** relays `scopes`, `always_label` and `always_option_id` into `ApprovalSnapshot`, and derives `AgentSnapshot.always_allowed` (45):
+  the actions of the agent's `AgentAlwaysAllowed`, newest last, at most 16, a repeated `approval_id` once; cleared by its `AgentExited`,
+  `AgentInterrupted` and every `AgentStarted` (the restated answers that follow a restated start bring them back). A window sees
+  `AgentAlwaysAllowed` when it may see the agent.
+- **Compatibility.** An old window sends no scope: single answers work as before, except an Allow on a request that offers only ALWAYS
+  (`approval.scope_unavailable`, the card stays; Deny works). A new window facing an old node sees no `scopes` and offers no always answer.
+  An old hub drops the new fields, so its windows offer single answers only; an ALWAYS that crossed it would arrive as ONCE and fail the
+  signature. An ACP bridge kept across a node update (ADR-0075, ADR-0093) until its agent restarts may still answer a single Allow with the
+  agent's remembered option when the agent offers no single one; under `allow` that residual is kept (named in ADR-0101), under `forbid`
+  or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
+- Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.

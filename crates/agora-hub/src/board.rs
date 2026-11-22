@@ -897,6 +897,7 @@ mod tests {
                     interrupted: None,
                     launch_options: Vec::new(),
                     skips_permissions: false,
+                    always_allowed: Vec::new(),
                 },
             );
         }

@@ -50,13 +50,13 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 | --- | --- | --- |
 | node → adapter | `session/prompt` | Send user or mesh input |
 | node → adapter | `session/cancel` | Interrupt current turn |
-| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision) |
+| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing |
 | node → adapter | `mesh/deliver` | Deliver a mesh message |
 | node → adapter | `session/set_config` | ADR-0090, capability `config`: `{sessionId, configId, value}`, one of the ids and values the adapter reported in `session/config` (`value` is a choice id for a select, `"true"` or `"false"` for a boolean). Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | node → adapter | `session/set_option` | ADR-0058: `{kind: SESSION_OPTION_KIND_MODE \| SESSION_OPTION_KIND_MODEL, id}`, one of the ids the adapter reported in `session/options`. Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | adapter → node | `state/update` | `working`, `blocked`, `idle`, with optional message |
 | adapter → node | `chat/append` | Structured transcript items (text, tool call, plan, diff, and since ADR-0058 a notice: `{code, params}`, never text). ADR-0090: `{thought: {text}}`; a tool call `{toolCall: {callId, tool?, argumentsJson?, kind?, status?, locations?: [{path, line}], output?}}` where a later item with the same `callId` updates the call (a field it leaves out keeps its value, one it sends replaces it, as ACP's `tool_call_update` does); a plan `{plan: {steps, entries?: [{text, status, priority}]}}` that replaces the earlier plan |
-| adapter → node | `approval/request` | Ask permission; node routes to the approvals queue |
+| adapter → node | `approval/request` | Ask permission; node routes to the approvals queue. ADR-0101: `scopes` (the answers the agent offers: `APPROVAL_SCOPE_ONCE`, `APPROVAL_SCOPE_ALWAYS` for one it remembers; empty means ONCE only), `alwaysLabel` (the agent's own name for its always option) and `alwaysOptionId` (that one option's exact id). The node reads them only from an adapter that declared `approval_scopes`; from any other the request offers ONCE only |
 | adapter → node | `usage/report` | Model id, tokens, reported cost if known, quota status if known; since ADR-0058 `contextTokens` and `contextWindow`, the context's level and size now (0 when unknown) |
 | adapter → node | `session/options` | ADR-0058: `{modes[], models[], currentMode, currentModel}`, each option `{id, name, description, skipsPermissions}`. Sent at the start and whenever something in it changes; each replaces the last |
 | adapter → node | `session/config` | ADR-0090: `{options[]}`, each `{id, name, description, category, type: "select" \| "boolean", current, choices[] {id, name, description, skipsPermissions}, skipsPermissions}`; each report replaces the last |
@@ -200,8 +200,17 @@ agent offered (anything else is refused by the bridge without asking the agent),
 `session/set_config` (`chat.rich` only) → ACP `session/set_config_option { sessionId, configId, value }` for an option and a value the bridge
 reported (a boolean as `{type: "boolean", value}`; anything else is refused by the bridge with `adapter.option_refused`), answered once the agent
 answered and followed by `session/config` from the agent's full reply;
-`approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
-`reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
+`approval/resolve` → exactly one option the bridge captured when the agent asked (ADR-0101): an approval with scope ONCE (or none,
+from a node before ADR-0101) → the first `allow_once`, **never** `allow_always`; with scope ALWAYS → the one `allow_always`, never
+anything narrower or wider; a denial → `reject_once`, else `cancelled` (never `reject_always`: a remembered refusal is reserved). A
+decision whose answer the request did not offer is refused (`-32602`, `data` `{code: "approval.scope_unavailable"}`), a scope the bridge
+does not know or ALWAYS with a denial too (`data` `{code: "protocol.invalid_message", params: {field: "scope"}}`); the agent is sent
+nothing and the request stays held (answered again, or `cancelled` when the turn ends). An option of a kind ACP does not define is
+never selected. `session/request_permission` becomes an `approval/request` whose `scopes` hold ONCE when the agent offers `allow_once`
+and ALWAYS when it offers exactly one `allow_always` (two or more are ambiguous: ALWAYS is not offered), with that option's `name` as
+`alwaysLabel` and its `optionId` as `alwaysOptionId`. A request that offers neither raises no approval: the bridge answers it
+`reject_once` (else `cancelled`) and reports `adapter.permission_unanswerable` (params `action`) as a `log` line and a conversation
+notice. The bridge declares the capability `approval_scopes`. A decision for an approval the bridge no longer holds (it
 answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
 agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
 and unsigned (as when a turn is cancelled), so the hub clears it. The bridge acknowledges the decision once it is queued for the
@@ -210,7 +219,7 @@ cancelled permission when its decision is refused, and clears it: telling it the
 → node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
 endpoint like for any agent (the server the bridge passed in `session/new`). If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
-for L3); before that the bridge reports why (below). The bridge declares `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
+for L3); before that the bridge reports why (below). The bridge declares `approval_scopes` (ADR-0101), `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
 manifests and fixtures from real accounts (P2-09).
 
 ### Turn and exit reasons

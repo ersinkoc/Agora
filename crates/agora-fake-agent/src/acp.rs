@@ -2,6 +2,8 @@
 //!
 //! Prompts (the text of `session/prompt`):
 //! - `ask`: sends `session/request_permission`, waits for the client's answer, says `allowed` or `denied`, and finishes the turn.
+//! - `ask-kinds K1,K2,...` (ADR-0101): asks with one option per kind (id = the kind as written, so `allow_always2` is a second
+//!   `allow_always`; name `Name of K`), says `selected:<optionId>` or `cancelled`, and finishes.
 //! - `plan`: sends a plan, a tool call carrying a diff, and a message in two chunks, then finishes.
 //! - `crash`: exits at once.
 //! - `crash-loud`: writes a fatal error (with a fake token in it) to stderr and exits with code 4, mid-turn.
@@ -582,6 +584,43 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             out,
                             &session,
                             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "world"}}),
+                        )?;
+                    }
+                    // ADR-0101: `ask-kinds K1,K2,...` offers one option per kind (its id is the kind itself, its name `Name of K`),
+                    // waits for the answer and says `selected:<optionId>` or `cancelled`.
+                    other if other.starts_with("ask-kinds ") => {
+                        let kinds = other.trim_start_matches("ask-kinds ");
+                        let options: Vec<Value> = kinds
+                            .split(',')
+                            .filter(|k| !k.is_empty())
+                            .map(|k| json!({"optionId": k, "name": format!("Name of {k}"), "kind": k.trim_end_matches(|c: char| c.is_ascii_digit())}))
+                            .collect();
+                        send(
+                            out,
+                            &json!({"jsonrpc": "2.0", "id": 901, "method": "session/request_permission", "params": {
+                            "sessionId": session,
+                            "toolCall": {"toolCallId": "t1", "title": "run_command", "kind": "execute", "rawInput": {"command": "git status"}},
+                            "options": options}}),
+                        )?;
+                        let mut said = "cancelled".to_string();
+                        for l in lines.by_ref() {
+                            let Ok(m) = serde_json::from_str::<Value>(&l?) else {
+                                continue;
+                            };
+                            if m.get("id") == Some(&json!(901)) {
+                                if let Some(o) = m
+                                    .pointer("/result/outcome/optionId")
+                                    .and_then(Value::as_str)
+                                {
+                                    said = format!("selected:{o}");
+                                }
+                                break;
+                            }
+                        }
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": said}}),
                         )?;
                     }
                     other => update(

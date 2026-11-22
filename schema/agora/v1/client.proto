@@ -86,6 +86,9 @@ message AgentSnapshot {
   // ADR-0059: `AgentStarted.launch_options` and `skips_permissions` (fields 30-39 are kept for ADR-0059).
   repeated string launch_options = 30;
   bool skips_permissions = 31;
+  // ADR-0101: the actions of the "always" answers the agent holds (`AgentAlwaysAllowed`), newest last, at most 16; cleared when it
+  // ends or starts again.
+  repeated string always_allowed = 45;
 }
 
 message TerminalSnapshot {
@@ -101,6 +104,11 @@ message ApprovalSnapshot {
   string action = 3;
   string detail = 4;
   uint64 expires_at_ms = 5;
+  // ADR-0101: `ApprovalRequested.scopes`, `always_label` and `always_option_id` (the signed `agent_id` is the node's own id: the part
+  // of `agent_id` after `<node_id>/`).
+  repeated ApprovalScope scopes = 6;
+  string always_label = 7;
+  string always_option_id = 8;
 }
 
 message TaskSnapshot {

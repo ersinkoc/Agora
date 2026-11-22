@@ -1,0 +1,12 @@
+{
+  "producerId": "n1",
+  "seq": "62",
+  "atMs": "1700000009000",
+  "agentAlwaysAllowed": {
+    "agentId": "agent-1",
+    "approvalId": "ap-0123456789abcdef0123456789abcdef",
+    "action": "run_command",
+    "signerDeviceId": "dev-1",
+    "atMs": "1700000009000"
+  }
+}

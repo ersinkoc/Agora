@@ -1215,16 +1215,32 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            let resolution = approvals.resolve_request(r, now).map_err(|e| match e {
-                ApprovalError::Unknown => invalid("approval_id"),
-                ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
-                    .with("approval_id", r.approval_id.as_str()),
-                ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
-                    .with("approval_id", r.approval_id.as_str()),
-                ApprovalError::Forbidden => {
-                    Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
-                }
-            })?;
+            // ADR-0101: the policy is read now (it may have changed since the card was raised), for the agent the request is routed
+            // to, before the queue is locked (the supervisor's lock is never taken under it).
+            let decide = approvals
+                .agent_of(&r.approval_id)
+                .map(|agent| ctx.sup().approval_decide(&agent))
+                .unwrap_or_default();
+            let resolution = approvals
+                .resolve_decided(r, now, decide)
+                .map_err(|e| match e {
+                    ApprovalError::Unknown => invalid("approval_id"),
+                    ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
+                        .with("approval_id", r.approval_id.as_str()),
+                    ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
+                        .with("approval_id", r.approval_id.as_str()),
+                    ApprovalError::Forbidden => {
+                        Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
+                    }
+                    ApprovalError::InvalidScope => invalid("scope"),
+                    ApprovalError::ScopeUnavailable => {
+                        Error::new(ErrorCode::ApprovalScopeUnavailable)
+                    }
+                    ApprovalError::ScopeForbidden => Error::new(ErrorCode::ApprovalScopeForbidden),
+                    ApprovalError::AdapterOutdated => {
+                        Error::new(ErrorCode::ApprovalAdapterOutdated)
+                    }
+                })?;
             // ADR-0057: a start request is the node's own, not an adapter's; its decision (verified above) goes to the spawner,
             // which announces it with the grant that was signed.
             if resolution.request.action == crate::approvals::START_ACTION {
@@ -1244,9 +1260,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 resolution.verdict,
             );
             let approved = verdict == crate::approvals::Verdict::Approved;
-            let call = ctx
-                .sup()
-                .prepare_resolve_approval(&agent, &adapter_id, approved);
+            let always = resolution.always && approved;
+            let call =
+                ctx.sup()
+                    .prepare_resolve_approval_scoped(&agent, &adapter_id, approved, always);
             if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
                 // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
                 // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
@@ -1265,7 +1282,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 return Err(sup_err(e));
             }
             // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
-            ctx.chat.set_permission(
+            ctx.chat.set_permission_as(
                 &agent,
                 &r.approval_id,
                 if approved {
@@ -1273,10 +1290,21 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 } else {
                     v1::PermissionOutcome::Denied
                 },
+                always,
                 crate::daemon::now_ms(),
             );
             if let Some(ev) = &ctx.events {
-                ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+                if always {
+                    // ADR-0101: only an always answer the adapter took is recorded as one the agent holds.
+                    ev.approval_resolved_always(
+                        &agent,
+                        &r.approval_id,
+                        &resolution.request.action,
+                        &r.signer_device_id,
+                    );
+                } else {
+                    ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+                }
             }
             Ok(ok_empty())
         }

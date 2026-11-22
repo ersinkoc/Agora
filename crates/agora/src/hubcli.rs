@@ -42,6 +42,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.commands",
     // ADR-0090 Amendment A: the hub relays the `agent.skip_permissions` approval and its decision like any other (it cannot sign one).
     "approval.skip_permissions",
+    // ADR-0101: the hub relays the answers an agent offers (`ApprovalSnapshot.scopes`) and derives `AgentSnapshot.always_allowed`; it
+    // cannot sign an "always" answer.
+    "approval.always",
     // ADR-0091: `AgentQuotaObserved` (the plan windows of a subscription tool) is relayed to windows; the hub keeps nothing of it yet.
     "usage.quota",
     // ADR-0095: the hub stamps `TaskDispatch.by_user`, counts each person's dispatches and relays `TaskDispatched` (a node offers it).

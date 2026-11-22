@@ -9,8 +9,9 @@
 //! Mapping (ACP → adapter protocol):
 //! - `session/update` `agent_message_chunk` → `chat/append` text (chunks are joined for up to 150 ms); `tool_call` → a tool call
 //!   item; `plan` → a plan item; a `diff` in a tool call's content → a diff item; `agent_thought_chunk` is dropped.
-//! - `session/request_permission` → `approval/request` and state `blocked`; `approval/resolve` picks the agent's own allow or reject
-//!   option (`allow_once` before `allow_always`, `reject_once` before `reject_always`, otherwise the first option or `cancelled`).
+//! - `session/request_permission` → `approval/request` and state `blocked`, with the answers the agent offers (ADR-0101: `scopes`, the
+//!   always option's name and id); `approval/resolve` picks exactly one option: ONCE → `allow_once`, never anything else; ALWAYS →
+//!   the one `allow_always`; a denial → `reject_once`, else `cancelled`. A request with no way to allow it raises no card.
 //! - A prompt turn: `session/prompt` → state `working`, and the agent's answer (its stop reason) → state `idle`. A turn that failed,
 //!   was stopped by the agent (`refusal`, `max_tokens`, ...) or ended with nothing said carries a stable reason code in the state's
 //!   `message` and in a `log` line (docs/specs/adapter-protocol.md "Turn and exit reasons"); never text.
@@ -126,7 +127,30 @@ enum Waiting {
 struct Permission {
     /// The id of the agent's `session/request_permission` request.
     request: Value,
-    options: Vec<(String, String)>, // (option id, kind)
+    /// ADR-0101: the options captured when the agent asked, used until the request is answered. `once`: the first `allow_once`;
+    /// `always`: the one `allow_always` (none when the agent offered two or more: ambiguous, Codex review of ADR-0101); `reject`:
+    /// the first `reject_once`. Nothing else is ever selected (`reject_always` is a remembered refusal, an unknown kind may do
+    /// anything).
+    once: Option<String>,
+    always: Option<String>,
+    reject: Option<String>,
+}
+
+/// ADR-0101: how far a decision from the node reaches. `None`: a value this build does not know (refused, never guessed).
+fn decision_scope(params: &Value) -> Option<bool> {
+    match params.get("scope") {
+        None | Some(Value::Null) => Some(false),
+        Some(Value::String(s)) => match s.as_str() {
+            "APPROVAL_SCOPE_UNSPECIFIED" | "APPROVAL_SCOPE_ONCE" => Some(false),
+            "APPROVAL_SCOPE_ALWAYS" => Some(true),
+            _ => None,
+        },
+        Some(v) => match v.as_u64() {
+            Some(0 | 1) => Some(false),
+            Some(2) => Some(true),
+            _ => None,
+        },
+    }
 }
 
 fn lines<R: Read + Send + 'static>(r: R, wrap: fn(Input) -> Ev, tx: SyncSender<Ev>) {
@@ -1526,6 +1550,8 @@ impl<W: Write> Bridge<W> {
         let mut c = vec![
             "chat",
             "approvals",
+            // ADR-0101: `approval/request` carries `scopes`, and a plain Allow is never answered with a remembered option.
+            "approval_scopes",
             "plan",
             "diff",
             "cancel",
@@ -1678,7 +1704,16 @@ impl<W: Write> Bridge<W> {
                     .get("approved")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let Some(p) = self.perms.remove(approval) else {
+                // ADR-0101: the scope is read first; a value this build does not know is refused and nothing is sent.
+                let Some(always) = decision_scope(&params) else {
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32602, "message": "protocol.invalid_message",
+                                      "data": {"code": "protocol.invalid_message", "params": {"field": "scope"}}}}))?;
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                };
+                let Some(p) = self.perms.get(approval) else {
                     // A permission the bridge already answered `cancelled` (a prompt's reply, a cancel, a change of session), or
                     // never knew: the decision cannot reach the agent, so it is refused and the node cancels its entry.
                     if let Some(id) = &id {
@@ -1687,18 +1722,38 @@ impl<W: Write> Bridge<W> {
                     }
                     return Ok(ControlFlow::Continue(()));
                 };
-                let want: &[&str] = if approved {
-                    &["allow_once", "allow_always"]
-                } else {
-                    &["reject_once", "reject_always"]
+                // ADR-0101: exactly the option the person's answer names, captured when the agent asked. An answer the agent did not
+                // offer is refused before anything is sent, and the request stays held (answered again, or `cancelled` at turn end).
+                let chosen = match (approved, always) {
+                    (true, false) => Ok(p.once.clone()),
+                    (true, true) => Ok(p.always.clone()),
+                    (false, false) => Err(p.reject.clone()),
+                    (false, true) => {
+                        // A remembered refusal is reserved: never sent.
+                        if let Some(id) = &id {
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32602, "message": "protocol.invalid_message",
+                                          "data": {"code": "protocol.invalid_message", "params": {"field": "scope"}}}}))?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
+                    }
                 };
-                let chosen = want
-                    .iter()
-                    .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
-                    .or_else(|| if approved { p.options.first() } else { None });
                 let outcome = match chosen {
-                    Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
-                    None => json!({"outcome": "cancelled"}),
+                    Ok(Some(option)) | Err(Some(option)) => {
+                        json!({"outcome": "selected", "optionId": option})
+                    }
+                    Err(None) => json!({"outcome": "cancelled"}),
+                    Ok(None) => {
+                        if let Some(id) = &id {
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32602, "message": "approval.scope_unavailable",
+                                          "data": {"code": "approval.scope_unavailable"}}}))?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
+                    }
+                };
+                let Some(p) = self.perms.remove(approval) else {
+                    return Ok(ControlFlow::Continue(()));
                 };
                 if !self.send_agent(
                     &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
@@ -2053,31 +2108,82 @@ impl<W: Write> Bridge<W> {
                     .unwrap_or("permission")
                     .to_string();
                 let detail = call.get("rawInput").map(short).unwrap_or_default();
-                let options = p
+                // (option id, name, kind) of every option with an id.
+                let options: Vec<(String, String, String)> = p
                     .get("options")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
                             .filter_map(|o| {
+                                let text = |k: &str| {
+                                    o.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+                                };
                                 Some((
                                     o.get("optionId")?.as_str()?.to_string(),
-                                    o.get("kind")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    text("name"),
+                                    text("kind"),
                                 ))
                             })
                             .collect()
                     })
                     .unwrap_or_default();
+                let first = |kind: &str| {
+                    options
+                        .iter()
+                        .find(|(_, _, k)| k == kind)
+                        .map(|(id, _, _)| id.clone())
+                };
+                let mut always_options = options.iter().filter(|(_, _, k)| k == "allow_always");
+                // ADR-0101 (Codex review): exactly one always option, or none is offered; two would leave the signed answer ambiguous.
+                let always = match (always_options.next(), always_options.next()) {
+                    (Some(one), None) => Some(one.clone()),
+                    _ => None,
+                };
+                let once = first("allow_once");
+                let reject = first("reject_once");
+                if once.is_none() && always.is_none() {
+                    // ADR-0101: nothing to allow, so nobody is asked: refused at once, and the person is told why.
+                    match &reject {
+                        Some(option) => self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
+                            "result": {"outcome": {"outcome": "selected", "optionId": option}}})),
+                        None => self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
+                            "result": {"outcome": {"outcome": "cancelled"}}})),
+                    };
+                    let reason = json!({"action": action});
+                    self.log_reason("WARN", "adapter.permission_unanswerable", &reason)?;
+                    self.notice("adapter.permission_unanswerable", &reason)?;
+                    return Ok(());
+                }
+                let mut scopes = Vec::new();
+                if once.is_some() {
+                    scopes.push("APPROVAL_SCOPE_ONCE");
+                }
+                let (always_label, always_option_id) = match &always {
+                    Some((id, name, _)) => {
+                        scopes.push("APPROVAL_SCOPE_ALWAYS");
+                        (name.clone(), id.clone())
+                    }
+                    None => (String::new(), String::new()),
+                };
                 self.next += 1;
                 let approval = format!("acp-{}", self.next);
-                self.perms
-                    .insert(approval.clone(), Permission { request, options });
+                self.perms.insert(
+                    approval.clone(),
+                    Permission {
+                        request,
+                        once,
+                        always: always.map(|(id, _, _)| id),
+                        reject,
+                    },
+                );
                 let sid = self.session.clone().unwrap_or_default();
                 self.said = true;
                 self.state("BLOCKED")?;
-                self.note("approval/request", json!({"sessionId": sid, "approvalId": approval, "action": action, "detail": detail}))?;
+                self.note(
+                    "approval/request",
+                    json!({"sessionId": sid, "approvalId": approval, "action": action, "detail": detail,
+                           "scopes": scopes, "alwaysLabel": always_label, "alwaysOptionId": always_option_id}),
+                )?;
             }
             // Files and terminals are the agent's own business in its worktree; the bridge offers neither.
             (Some(_), Some(id)) => {
@@ -3491,6 +3597,304 @@ mod tests {
         b.out.clear();
         b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
         assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        Ok(())
+    }
+
+    // ---- ADR-0101: the offer travels with the request, and the decision's scope picks exactly one option ----
+
+    fn ask_with(
+        b: &mut super::Bridge<Vec<u8>>,
+        id: &str,
+        options: serde_json::Value,
+    ) -> std::io::Result<()> {
+        b.handle_agent(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission",
+            "params":{"sessionId":"s","toolCall":{"title":"run_command","rawInput":{"command":"git status"}},"options":options}}))
+    }
+
+    /// The node's notes of one method.
+    fn notes_of(out: &[u8], method: &str) -> Vec<serde_json::Value> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .filter(|v| v["method"] == method)
+            .map(|v| v["params"].clone())
+            .collect()
+    }
+
+    /// The option the agent was sent for its permission request `id`, if one was selected.
+    fn option_sent(sent: &[serde_json::Value], id: &str) -> Option<String> {
+        sent.iter()
+            .find(|v| v["id"] == id && v.get("method").is_none())
+            .and_then(|v| {
+                v["result"]["outcome"]["optionId"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    }
+
+    fn reply_to(out: &[u8], id: u64) -> Option<serde_json::Value> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .find(|v| v["id"] == id && v.get("method").is_none())
+    }
+
+    fn all_four() -> serde_json::Value {
+        serde_json::json!([
+            {"optionId":"ra","name":"Never","kind":"reject_always"},
+            {"optionId":"aa","name":"Always allow git","kind":"allow_always"},
+            {"optionId":"ro","name":"No","kind":"reject_once"},
+            {"optionId":"ao","name":"Yes","kind":"allow_once"}
+        ])
+    }
+
+    #[test]
+    fn the_bridge_declares_strict_scopes() -> Result<(), Box<dyn std::error::Error>> {
+        let b = bridge_in_session()?;
+        assert!(b.capabilities().contains(&"approval_scopes"));
+        Ok(())
+    }
+
+    /// The request names which answers the agent offers, the always option's own name and its exact id.
+    #[test]
+    fn the_offer_travels_with_the_request() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        for (options, scopes, label, option) in [
+            (
+                all_four(),
+                json!(["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"]),
+                "Always allow git",
+                "aa",
+            ),
+            (
+                json!([{"optionId":"ao","name":"Yes","kind":"allow_once"}]),
+                json!(["APPROVAL_SCOPE_ONCE"]),
+                "",
+                "",
+            ),
+            (
+                json!([{"optionId":"aa","name":"Always","kind":"allow_always"},{"optionId":"ro","name":"No","kind":"reject_once"}]),
+                json!(["APPROVAL_SCOPE_ALWAYS"]),
+                "Always",
+                "aa",
+            ),
+            // Two always options are ambiguous (Codex review of ADR-0101): ALWAYS is withheld, the single answer stays.
+            (
+                json!([{"optionId":"a1","name":"A","kind":"allow_always"},{"optionId":"a2","name":"A","kind":"allow_always"},
+                    {"optionId":"ao","name":"Yes","kind":"allow_once"}]),
+                json!(["APPROVAL_SCOPE_ONCE"]),
+                "",
+                "",
+            ),
+        ] {
+            let (mut b, _) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            b.out.clear();
+            ask_with(&mut b, "p", options.clone())?;
+            let req = notes_of(&b.out, "approval/request");
+            assert_eq!(req.len(), 1, "{options}");
+            assert_eq!(req[0]["scopes"], scopes, "{options}");
+            assert_eq!(req[0]["alwaysLabel"], json!(label), "{options}");
+            assert_eq!(req[0]["alwaysOptionId"], json!(option), "{options}");
+        }
+        Ok(())
+    }
+
+    /// A plain Allow (ONCE, or a node that sends no scope) is never answered with a remembered option, and ALWAYS selects only the
+    /// one always option the request offered. An option of an unknown kind is never selected.
+    #[test]
+    fn once_never_selects_allow_always_and_always_selects_only_it(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let cases: Vec<(serde_json::Value, serde_json::Value, bool, Option<&str>)> = vec![
+            (all_four(), json!(null), true, Some("ao")),
+            (
+                all_four(),
+                json!("APPROVAL_SCOPE_UNSPECIFIED"),
+                true,
+                Some("ao"),
+            ),
+            (all_four(), json!("APPROVAL_SCOPE_ONCE"), true, Some("ao")),
+            (all_four(), json!("APPROVAL_SCOPE_ALWAYS"), true, Some("aa")),
+            // Denying never widens: `reject_once`, else `cancelled`, never `reject_always`.
+            (all_four(), json!("APPROVAL_SCOPE_ONCE"), false, Some("ro")),
+            (
+                json!([{"optionId":"ra","kind":"reject_always"},{"optionId":"ao","kind":"allow_once"}]),
+                json!(null),
+                false,
+                None,
+            ),
+        ];
+        for (options, scope, approved, want) in cases {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "p", options.clone())?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            let _ = sent.take();
+            b.out.clear();
+            let mut params = json!({"approvalId": approval, "approved": approved});
+            if !scope.is_null() {
+                params["scope"] = scope.clone();
+            }
+            let _ = b.handle_node(
+                &json!({"jsonrpc":"2.0","id":30,"method":"approval/resolve","params":params}),
+            )?;
+            let reply = reply_to(&b.out, 30).ok_or("no reply")?;
+            assert_eq!(reply["result"], json!({}), "{options} {scope}: {reply}");
+            let sent = sent.take();
+            assert_eq!(
+                option_sent(&sent, "p").as_deref(),
+                want,
+                "{options} {scope} {approved}"
+            );
+            if want.is_none() {
+                assert_eq!(answer_to(&sent, "p").as_deref(), Some("cancelled"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The decision names an answer the request did not offer (ONCE on an always-only request, ALWAYS on a once-only one), or a scope
+    /// this build does not know: refused with `approval.scope_unavailable` / an invalid scope, the agent is sent nothing, and the
+    /// request is still held (it can be answered again, or is answered `cancelled` when the turn ends).
+    #[test]
+    fn an_answer_the_agent_did_not_offer_is_refused_and_keeps_the_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let always_only = json!([{"optionId":"aa","name":"Always","kind":"allow_always"},{"optionId":"ro","kind":"reject_once"}]);
+        let once_only =
+            json!([{"optionId":"ao","kind":"allow_once"},{"optionId":"x","kind":"something_new"}]);
+        for (options, scope, approved, code) in [
+            (
+                always_only.clone(),
+                json!("APPROVAL_SCOPE_ONCE"),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                always_only.clone(),
+                json!(null),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                once_only.clone(),
+                json!("APPROVAL_SCOPE_ALWAYS"),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                once_only.clone(),
+                json!("APPROVAL_SCOPE_BOGUS"),
+                true,
+                "protocol.invalid_message",
+            ),
+            (
+                once_only.clone(),
+                json!(7),
+                true,
+                "protocol.invalid_message",
+            ),
+            // A remembered refusal is reserved (ADR-0101): never sent.
+            (
+                all_four(),
+                json!("APPROVAL_SCOPE_ALWAYS"),
+                false,
+                "protocol.invalid_message",
+            ),
+        ] {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "p", options.clone())?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            let _ = sent.take();
+            b.out.clear();
+            let mut params = json!({"approvalId": approval, "approved": approved});
+            if !scope.is_null() {
+                params["scope"] = scope.clone();
+            }
+            let _ = b.handle_node(
+                &json!({"jsonrpc":"2.0","id":31,"method":"approval/resolve","params":params}),
+            )?;
+            let reply = reply_to(&b.out, 31).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32602, "{options} {scope}: {reply}");
+            assert_eq!(
+                reply["error"]["data"]["code"],
+                json!(code),
+                "{options} {scope}: {reply}"
+            );
+            assert!(
+                sent.take().is_empty(),
+                "{options} {scope}: the agent is sent nothing"
+            );
+            assert!(
+                b.perms.contains_key(&approval),
+                "{options} {scope}: the request is still held"
+            );
+            assert!(states(&b.out).is_empty());
+        }
+        // A deny still works on an always-only request (a signed ONCE deny stays valid there).
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask_with(&mut b, "p", always_only)?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        let _ = sent.take();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":32,"method":"approval/resolve",
+            "params":{"approvalId": approval, "approved": false, "scope": "APPROVAL_SCOPE_ONCE"}}))?;
+        assert_eq!(option_sent(&sent.take(), "p").as_deref(), Some("ro"));
+        Ok(())
+    }
+
+    /// A request that offers no way to allow it (no `allow_once`, and no single `allow_always`) raises no card: the agent is answered
+    /// `reject_once` (else `cancelled`), and the node gets a log line and a notice with the action.
+    #[test]
+    fn a_request_that_cannot_be_allowed_raises_no_card() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        for (options, want) in [
+            (
+                json!([{"optionId":"ro","kind":"reject_once"},{"optionId":"ra","kind":"reject_always"}]),
+                Some("ro"),
+            ),
+            (
+                json!([{"optionId":"ra","kind":"reject_always"},{"optionId":"x","kind":"something_new"}]),
+                None,
+            ),
+            (
+                json!([{"optionId":"a1","kind":"allow_always"},{"optionId":"a2","kind":"allow_always"}]),
+                None,
+            ),
+            (json!([]), None),
+        ] {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            let _ = sent.take();
+            b.out.clear();
+            ask_with(&mut b, "p", options.clone())?;
+            assert!(notes_of(&b.out, "approval/request").is_empty(), "{options}");
+            assert!(states(&b.out).is_empty(), "{options}: not blocked");
+            assert!(b.perms.is_empty(), "{options}");
+            let sent = sent.take();
+            assert_eq!(option_sent(&sent, "p").as_deref(), want, "{options}");
+            if want.is_none() {
+                assert_eq!(
+                    answer_to(&sent, "p").as_deref(),
+                    Some("cancelled"),
+                    "{options}"
+                );
+            }
+            let notices = notes_of(&b.out, "chat/append");
+            assert_eq!(notices.len(), 1, "{options}");
+            assert_eq!(
+                notices[0]["notice"]["code"],
+                "adapter.permission_unanswerable"
+            );
+            assert_eq!(notices[0]["notice"]["params"]["action"], "run_command");
+            let logs = notes_of(&b.out, "log");
+            assert!(
+                logs.iter().any(|l| l["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("adapter.permission_unanswerable"))),
+                "{options}: {logs:?}"
+            );
+        }
         Ok(())
     }
 }

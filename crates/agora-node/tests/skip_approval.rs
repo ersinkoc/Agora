@@ -287,6 +287,7 @@ fn decision(
         ),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }
 }
 

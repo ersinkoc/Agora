@@ -1,0 +1,12 @@
+{
+  "requestId": "r1",
+  "idempotencyKey": "k1",
+  "targetNode": "n1",
+  "approvalResolve": {
+    "approvalId": "ap-0123456789abcdef0123456789abcdef",
+    "approved": true,
+    "signerDeviceId": "dev-1",
+    "signature": "AQID",
+    "scope": "APPROVAL_SCOPE_ALWAYS"
+  }
+}

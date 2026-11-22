@@ -1,0 +1,15 @@
+{
+  "producerId": "n1",
+  "seq": "60",
+  "atMs": "1700000008000",
+  "approvalRequested": {
+    "approvalId": "ap-0123456789abcdef0123456789abcdef",
+    "agentId": "agent-1",
+    "action": "run_command",
+    "detail": "{\"command\":\"git status\"}",
+    "expiresAtMs": "1700000608000",
+    "scopes": ["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"],
+    "alwaysLabel": "Always allow git status",
+    "alwaysOptionId": "allow-always-1"
+  }
+}

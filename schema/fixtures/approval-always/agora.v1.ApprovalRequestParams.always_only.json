@@ -1,0 +1,9 @@
+{
+  "sessionId": "s1",
+  "approvalId": "acp-2",
+  "action": "write_file",
+  "detail": "src/main.rs",
+  "scopes": ["APPROVAL_SCOPE_ALWAYS"],
+  "alwaysLabel": "Allow edits this session",
+  "alwaysOptionId": "edits"
+}

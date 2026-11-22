@@ -48,6 +48,10 @@ or a local response timeout has a localized retry message.
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
+| `approval.scope_forbidden` | | ADR-0101: an "always" answer (`ApprovalResolve.scope` ALWAYS) refused by the node's `skip_permissions` policy (`forbid`, or `confined_only` while agents are not confined). Nothing was sent or spent: the card can still be allowed once or denied |
+| `approval.scope_unavailable` | | ADR-0101: the request did not offer that answer (an Allow on an always-only request, or ALWAYS on one that does not offer it), or the agent's bridge no longer holds the option. Nothing was sent; the card stays waiting |
+| `approval.always_only_forbidden` | `action` | ADR-0101, a conversation notice: the agent offered only an answer it would remember, and this machine's policy allows single answers only, so the request was answered denied at once (no card) |
+| `approval.adapter_outdated` | | ADR-0101 (Codex review): the agent runs behind an ACP bridge from before ADR-0101 (it did not declare `approval_scopes`), which may answer a plain Allow with the agent's remembered option; under a policy that refuses "always" the node refuses the Allow. Deny works; starting the agent again fixes it |
 | `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
 | `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
 | `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
@@ -82,6 +86,7 @@ or a local response timeout has a localized retry message.
 | `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |
 | `adapter.agent_refused` | `stage` | ADR-0058: the agent behind an adapter answered `initialize` or the new session (`stage`) with an error |
 | `adapter.option_refused` | `id` | ADR-0058: the agent did not switch to that mode or model |
+| `adapter.permission_unanswerable` | `action` | ADR-0101, a conversation notice: the agent asked for permission without offering an option of kind `allow_once` or exactly one of kind `allow_always`, so the bridge raised no card and refused it |
 | `pair.closed` | — | ADR-0065: the hub is not open for pairing (the switch is closed, or closed while this session was open) |
 | `pair.limit` | `seconds` | ADR-0065: a pairing limit: pending sessions, admissions per address or for the hub, a poll over its rate, or the address is locked out. `seconds` is how long to wait before trying again |
 | `pair.expired` | — | ADR-0065: the pairing was not decided or revealed in time |

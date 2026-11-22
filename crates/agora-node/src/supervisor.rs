@@ -268,11 +268,25 @@ pub enum Prepared {
 }
 
 enum CallOp {
-    Prompt { text: String, from_mesh: bool },
+    Prompt {
+        text: String,
+        from_mesh: bool,
+    },
     Cancel,
-    SetConfig { id: String, value: String },
-    SetOption { kind: OptionKind, value: String },
-    Resolve { approval: String, approved: bool },
+    SetConfig {
+        id: String,
+        value: String,
+    },
+    SetOption {
+        kind: OptionKind,
+        value: String,
+    },
+    /// ADR-0101: `scope` only for an adapter that declared `approval_scopes` (`None`: left out, as before).
+    Resolve {
+        approval: String,
+        approved: bool,
+        scope: Option<agora_protocol::v1::ApprovalScope>,
+    },
 }
 
 impl AdapterCall {
@@ -299,9 +313,13 @@ impl AdapterCall {
                 .caller
                 .set_option(session, *kind, value, WAIT)
                 .map_err(adapter_error),
-            CallOp::Resolve { approval, approved } => self
+            CallOp::Resolve {
+                approval,
+                approved,
+                scope,
+            } => self
                 .caller
-                .resolve_approval(session, approval, *approved, WAIT)
+                .resolve_approval_scoped(session, approval, *approved, *scope, WAIT)
                 .map_err(|e| SupervisorError::Spawn(e.to_string())),
         }
     }
@@ -808,6 +826,14 @@ impl AdapterRich {
         self.generation += 1;
         self.epoch += 1;
         self.queue.drain(..).map(|q| q.tag).collect()
+    }
+}
+
+impl AdapterEntry {
+    /// ADR-0101: the adapter declared `approval_scopes`: its requests' `scopes` are read, and it never answers a single Allow with a
+    /// remembered option.
+    fn strict_scopes(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "approval_scopes")
     }
 }
 
@@ -2798,12 +2824,68 @@ impl Supervisor {
         approval_id: &str,
         approved: bool,
     ) -> Result<AdapterCall, SupervisorError> {
+        self.prepare_resolve_approval_scoped(id, approval_id, approved, false)
+    }
+
+    /// ADR-0101: [`prepare_resolve_approval`](Self::prepare_resolve_approval) with the scope the person signed (`always`). An adapter
+    /// that declared `approval_scopes` is told ONCE or ALWAYS; any other is told nothing new and is never sent ALWAYS (refused here,
+    /// although the node never offers it one).
+    pub fn prepare_resolve_approval_scoped(
+        &self,
+        id: &AgentId,
+        approval_id: &str,
+        approved: bool,
+        always: bool,
+    ) -> Result<AdapterCall, SupervisorError> {
+        use agora_protocol::v1::ApprovalScope;
+        let strict = self.adapter_of(id)?.strict_scopes();
+        let scope = match (strict, always) {
+            (true, true) => Some(ApprovalScope::Always),
+            (true, false) => Some(ApprovalScope::Once),
+            (false, false) => None,
+            (false, true) => return Err(SupervisorError::NotFound(id.clone())),
+        };
         self.call_of(
             id,
             CallOp::Resolve {
                 approval: approval_id.to_string(),
                 approved,
+                scope,
             },
+        )
+    }
+
+    /// ADR-0101: whether "always" may be offered for (and given to) this agent now: the node's `skip_permissions` policy (`forbid`
+    /// never, `confined_only` only while agents are confined) and the kind's manifest (`[structured] allow_always = false`).
+    fn always_permitted(&self, e: &AdapterEntry) -> bool {
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        self.skip_permissions.refusal(confined).is_none()
+            && self
+                .kinds
+                .get(&e.agent.kind)
+                .and_then(|k| k.manifest.structured.as_ref())
+                .is_none_or(agora_adapters::manifest::Structured::offers_always)
+    }
+
+    /// ADR-0101: how the node raises a card for this adapter agent's request: whether its adapter declared `approval_scopes`, and
+    /// whether "always" may be offered (see [`always_permitted`](Self::always_permitted)). `None` for an agent without an adapter.
+    pub fn approval_raise_terms(&self, id: &AgentId) -> Option<(bool, bool)> {
+        let e = self.adapters.get(id)?;
+        Some((e.strict_scopes(), self.always_permitted(e)))
+    }
+
+    /// ADR-0101: the policy a decision on this agent's request is checked under, read when the decision arrives. A single Allow is
+    /// refused (Codex review of ADR-0101) only for an agent behind an ACP bridge that did not declare `approval_scopes` (one from
+    /// before ADR-0101, kept across a node update, which may answer it with a remembered option) while "always" is not permitted.
+    pub fn approval_decide(&self, id: &AgentId) -> crate::approvals::Decide {
+        let Some(e) = self.adapters.get(id) else {
+            return crate::approvals::Decide::default();
+        };
+        crate::approvals::Decide::for_adapter(
+            self.always_permitted(e),
+            e.strict_scopes(),
+            e.agent.level == agora_core::IntegrationLevel::L2Acp,
         )
     }
 

@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashSet};
 use serde::Deserialize;
 
 /// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084). 5: `[quota]` (ADR-0091).
-pub const ENGINE_VERSION: u32 = 5;
+/// 6: `[structured] allow_always` (ADR-0101).
+pub const ENGINE_VERSION: u32 = 6;
 
 /// ADR-0066: most `[[launch.setting]]`s one manifest may declare, most allowed values one may list, and most arguments one may add.
 pub const MAX_LAUNCH_SETTINGS: usize = 8;
@@ -235,6 +236,16 @@ pub struct Launch {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Structured {
     pub acp: Option<AcpSpec>,
+    /// ADR-0101: `false` for a kind found to keep an "always" answer beyond its session: the node then never offers the person the
+    /// always answer for it. Needs `min_engine = 6`, so an older engine (which would ignore the key and offer it) refuses the manifest.
+    pub allow_always: Option<bool>,
+}
+
+impl Structured {
+    /// ADR-0101: whether the node may offer "always" for this kind (the default: yes).
+    pub fn offers_always(&self) -> bool {
+        self.allow_always != Some(false)
+    }
 }
 
 /// How the node hands an agent its own mesh MCP server (docs/specs/agent-manifest.md `[mcp]`).
@@ -636,6 +647,14 @@ impl Manifest {
                 return Err(invalid("usage.file"));
             }
         }
+        if self
+            .structured
+            .as_ref()
+            .is_some_and(|s| s.allow_always.is_some())
+            && self.min_engine < 6
+        {
+            return Err(invalid("structured.allow_always"));
+        }
         if let Some(q) = &self.quota {
             let path_ok = |p: &String| {
                 !p.is_empty()
@@ -930,13 +949,35 @@ mod launch_tests {
 
     #[test]
     fn a_manifest_newer_than_this_engine_is_refused() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 6");
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 7");
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 6,
-                supported: 5
+                required: 7,
+                supported: 6
             })
+        ));
+    }
+
+    /// ADR-0101: `[structured] allow_always = false` switches the always answer off for a kind, and needs engine 6.
+    #[test]
+    fn allow_always_switches_the_offer_off_and_needs_engine_six() {
+        let acp = |engine: u32, extra: &str| {
+            format!("kind = \"k-acp\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = {engine}\n[structured]\nacp = {{ argv = [\"k\", \"acp\"] }}\n{extra}")
+        };
+        let on = Manifest::parse(&acp(1, "")).expect("plain acp kind");
+        assert!(on
+            .structured
+            .as_ref()
+            .is_some_and(Structured::offers_always));
+        let off = Manifest::parse(&acp(6, "allow_always = false\n")).expect("switched off");
+        assert!(!off
+            .structured
+            .as_ref()
+            .is_some_and(Structured::offers_always));
+        assert!(matches!(
+            Manifest::parse(&acp(5, "allow_always = false\n")),
+            Err(ManifestError::Invalid { .. })
         ));
     }
 

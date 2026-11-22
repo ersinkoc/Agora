@@ -154,7 +154,13 @@ pub struct KeptSession {
     pub options: Option<v1::AgentSessionOptions>,
     pub config: Option<v1::AgentSessionConfig>,
     pub commands: Option<v1::AgentCommands>,
+    /// ADR-0101: the "always" answers the agent's process holds (`AgentAlwaysAllowed`, at most [`MAX_KEPT_ALWAYS`], newest last), so a
+    /// node that takes a kept agent up says them again. Never the agent's own rule: the action, approval id, signer and time.
+    pub always: Vec<v1::AgentAlwaysAllowed>,
 }
+
+/// ADR-0101: how many "always" answers are kept per agent (the hub shows as many).
+pub const MAX_KEPT_ALWAYS: usize = 16;
 
 impl KeptSession {
     /// The events, in the order the node records them.
@@ -169,6 +175,7 @@ impl KeptSession {
         if let Some(c) = &self.commands {
             out.push(Body::AgentCommands(c.clone()));
         }
+        out.extend(self.always.iter().cloned().map(Body::AgentAlwaysAllowed));
         out
     }
 
@@ -197,6 +204,11 @@ impl KeptSession {
                 Some(Body::AgentSessionOptions(o)) if o.agent_id == agent => kept.options = Some(o),
                 Some(Body::AgentSessionConfig(c)) if c.agent_id == agent => kept.config = Some(c),
                 Some(Body::AgentCommands(c)) if c.agent_id == agent => kept.commands = Some(c),
+                Some(Body::AgentAlwaysAllowed(a))
+                    if a.agent_id == agent && kept.always.len() < MAX_KEPT_ALWAYS =>
+                {
+                    kept.always.push(a);
+                }
                 _ => {}
             }
         }
@@ -208,8 +220,8 @@ impl KeptSession {
 /// put back is never more than a window could have been shown, and a write stays small. A larger report is not kept, and the one before
 /// it is dropped, as it was replaced (as on the hub).
 const MAX_KEPT_REPORT: usize = 64 * 1024;
-/// A kept session file larger than this (three reports) is not read.
-const MAX_KEPT_BYTES: u64 = 3 * MAX_KEPT_REPORT as u64 + 64;
+/// A kept session file larger than this (three reports and the always answers, ADR-0101) is not read.
+const MAX_KEPT_BYTES: u64 = 3 * MAX_KEPT_REPORT as u64 + 64 + MAX_KEPT_ALWAYS as u64 * 1024;
 
 /// The file a kept session of `agent` is written to, in the ledger's folder; `None` for an id that is not a plain node-made id.
 fn kept_file(dir: &Path, agent: &str) -> Option<PathBuf> {
@@ -304,6 +316,19 @@ fn keep(st: &mut State, body: &Body, dir: Option<&Path>) -> Option<String> {
                 k.config = next;
                 c.agent_id.clone()
             })
+        }
+        // ADR-0101: an always answer the agent's process now holds (an announcement's repeat of one is not learned here). Bounded,
+        // newest kept, never twice.
+        Body::AgentAlwaysAllowed(a) if room(st, &a.agent_id) && a.encoded_len() <= 1024 => {
+            let k = st.kept.entry(a.agent_id.clone()).or_default();
+            if k.always.iter().any(|x| x.approval_id == a.approval_id) {
+                return None;
+            }
+            if k.always.len() == MAX_KEPT_ALWAYS {
+                k.always.remove(0);
+            }
+            k.always.push(a.clone());
+            Some(a.agent_id.clone())
         }
         Body::AgentCommands(c) if room(st, &c.agent_id) => {
             let k = st.kept.entry(c.agent_id.clone()).or_default();
@@ -1244,6 +1269,52 @@ mod tests {
     /// #932: what an adapter agent last reported of its session is written beside the ledger (also when it came before the agent's
     /// start), read back by a later node, replaced by a newer report, and removed when the agent ends or is not taken up.
     #[test]
+    /// ADR-0101: a kept agent's always answers are written beside its session, read back by a later node (which says them again after
+    /// it takes the agent up), bounded and never twice; a new process, an end or an interruption drops them.
+    fn a_kept_agents_always_answers_survive_a_node_restart_and_end_with_its_process() {
+        let dir = temp("kept-always");
+        let l = Ledger::open(&dir, 1).unwrap();
+        let always = |id: &str| {
+            Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
+                agent_id: "agent-1".into(),
+                approval_id: id.into(),
+                action: "run_command".into(),
+                signer_device_id: "phone".into(),
+                at_ms: 2,
+            })
+        };
+        l.observe(&started("agent-1", "/wt/a", ""), 2);
+        l.observe(&always("ap-1"), 3);
+        l.observe(&always("ap-1"), 4);
+        for i in 0..20 {
+            l.observe(&always(&format!("x-{i}")), 5);
+        }
+        l.flush_all().unwrap();
+        let again = Ledger::open(&dir, 6).unwrap();
+        let kept = again.kept_session("agent-1");
+        assert_eq!(kept.always.len(), MAX_KEPT_ALWAYS);
+        assert_eq!(kept.always.last().unwrap().approval_id, "x-19");
+        assert!(kept
+            .bodies()
+            .iter()
+            .any(|b| matches!(b, Body::AgentAlwaysAllowed(a) if a.approval_id == "x-19")));
+        // A new process of the running agent (a restart after a crash, on the node that ran it) holds none of them.
+        l.observe(&started("agent-1", "/wt/a", ""), 7);
+        assert!(l.kept_session("agent-1").always.is_empty());
+        l.observe(&always("ap-2"), 8);
+        assert_eq!(l.kept_session("agent-1").always.len(), 1);
+        l.observe(
+            &Body::AgentInterrupted(v1::AgentInterrupted {
+                agent_id: "agent-1".into(),
+                ..Default::default()
+            }),
+            9,
+        );
+        assert!(l.kept_session("agent-1").always.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_kept_session_is_written_read_back_and_removed() {
         let dir = temp("kept");
         let l = Ledger::open(&dir, 1).unwrap();
@@ -1861,6 +1932,7 @@ mod tests {
                 action: "run_command".into(),
                 detail: "echo TOKEN".into(),
                 expires_at_ms: 9,
+                ..Default::default()
             }),
             3,
         );

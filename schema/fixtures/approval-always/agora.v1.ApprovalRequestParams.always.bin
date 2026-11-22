@@ -1,0 +1,2 @@
+
+s1acp-1run_command"{"command":"git status"}*2Always allow git status:allow-always-1

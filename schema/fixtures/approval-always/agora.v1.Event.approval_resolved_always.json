@@ -1,0 +1,11 @@
+{
+  "producerId": "n1",
+  "seq": "61",
+  "atMs": "1700000009000",
+  "approvalResolved": {
+    "approvalId": "ap-0123456789abcdef0123456789abcdef",
+    "approved": true,
+    "signerDeviceId": "dev-1",
+    "scope": "APPROVAL_SCOPE_ALWAYS"
+  }
+}

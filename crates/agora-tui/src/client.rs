@@ -620,6 +620,8 @@ impl Session {
             signature,
             helper_grant: 0,
             helpers_may_start: false,
+            // ADR-0101: a single answer, signed over the message above (the "always" key comes with the terminal client's step).
+            scope: agora_protocol::v1::ApprovalScope::Unspecified as i32,
         });
         self.command(node, cmd, Duration::from_secs(15))
             .map(|()| true)

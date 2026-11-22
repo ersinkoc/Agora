@@ -902,6 +902,7 @@ mod tests {
                 action: "shell".into(),
                 detail: "rm -r build".into(),
                 expires_at_ms: 0,
+                ..Default::default()
             }],
             ..Default::default()
         }

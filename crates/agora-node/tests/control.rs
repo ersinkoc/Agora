@@ -1077,6 +1077,7 @@ fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
             signature: signed_message(node, id, approved),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         }))
     };
     let state_of = |n: &Node, id: &str| {
@@ -1209,6 +1210,7 @@ fn with_no_trusted_device_every_decision_is_refused() {
         signature: signed_message("node-test", &id, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert_eq!(err_code(r), "approval.signature_invalid");
 }
@@ -1987,6 +1989,7 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
             signature: signed_message("node-test", id, approved),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         })));
     };
     let outcome_is = |id: &str, want: v1::PermissionOutcome| {
@@ -2018,6 +2021,7 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
         signature: signed_message("node-test", &first, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert_eq!(err_code(bad), "approval.signature_invalid");
     outcome_is(&first, v1::PermissionOutcome::Pending);
@@ -2132,6 +2136,7 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
         signature: signed_message("node-test", &id, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert!(
         r_is_err(r),

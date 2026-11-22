@@ -158,10 +158,11 @@ signed grants (ADR-0057, ADR-0090 Amendment A), and an ALWAYS there is refused t
 - approved + ONCE → `allow_once`. **Never `allow_always`.** With none, the bridge refuses the decision (JSON-RPC `-32602`, `data`
   `{code: "approval.scope_unavailable"}`) and sends the agent nothing.
 - approved + ALWAYS → `allow_always`, never anything narrower or wider. With none, refused the same way.
-- denied → `reject_once`, else `reject_always`, else `cancelled` (unchanged: denying never widens anything).
+- denied → `reject_once`, else `cancelled`. Never `reject_always`: a remembered refusal is reserved (below), and the automatic refusals
+  (an always-only request under a refusing policy, a request with nothing to allow) follow the same rule (refined in the Codex review).
 
 A refused decision is handled as a refused one today (the node marks the entry cancelled and resolves the approval unsigned); in practice it
-cannot happen, because the node checks the offer first (decision 3). An L3 adapter may set `scopes` too and then receives `scope`; one that does
+cannot happen, because the node checks the offer first (decision 3). An L3 adapter may set `scopes` too (declaring `approval_scopes`, section 7) and then receives `scope`; one that does
 not is never sent ALWAYS.
 
 This closes the silent widening of Context item 2: an agent that offers only `allow_always` announces `scopes = [ALWAYS]`, so the window
@@ -319,6 +320,29 @@ The agent holds the answer; Agora only records it. The record follows the agent'
 
 The native desktop client (ADR-0099), when it signs approvals, uses the same domain; no other signer exists today (`apps/web/src/net/approval.ts`,
 `crates/agora-tui/src/client.rs`).
+
+### 7. Refinements from the implementation and Codex's review (PR A, 2026-11-22)
+
+Codex reviewed this ADR at 4c81e007; the implementation applies its findings, which refine the text above without changing its decisions:
+
+1. **The offer describes allow options only.** `scopes` is checked for an Allow; a signed single Deny stays valid on an always-only card.
+   Every denial, including the node's automatic one, reaches the agent as `reject_once` or `cancelled`, never `reject_always`.
+2. **An outdated bridge cannot widen an Allow unseen under a strict policy.** The bridge declares the adapter capability `approval_scopes`;
+   the node reads `scopes` only from an adapter that declares it, and sends `scope` only to such an adapter. For an ACP agent whose bridge
+   does not declare it (one kept across a node update), the node refuses a single Allow with the new code `approval.adapter_outdated`
+   while the policy refuses ALWAYS (`forbid`, or `confined_only` unconfined): that bridge may answer it with the agent's remembered
+   option. Under `allow` the residual named in the compatibility list stays.
+3. **Unknown scopes are refused.** Only UNSPECIFIED and ONCE use `agora-approval-v1`, ALWAYS the always domain; any other value is
+   `protocol.invalid_message` (`field: scope`) on the node and in the bridge. `AgentAlwaysAllowed` and `ApprovalResolved.scope = ALWAYS`
+   are written only after the adapter took the answer; a refused or undelivered one is recorded cancelled, as before.
+4. **The decision is bound to one option.** ACP options have unique `optionId`s but may share a name and kind. The request carries the
+   exact id of the always option (`always_option_id`, appended to `ApprovalRequestParams`, `ApprovalRequested` and `ApprovalSnapshot`),
+   the always domain ends with `F(always_option_id)`, and an offer with more than one `allow_always` is ambiguous: ALWAYS is not offered
+   for it. The bridge answers with the option it captured for that request. An option id that cannot be signed as it is (empty, over
+   128 bytes, a control or format character) is never offered.
+5. **Error parameters.** `approval.scope_forbidden`, `approval.scope_unavailable` and `approval.adapter_outdated` carry no parameter (their
+   text does not show the random approval id; the window knows which card it answered).
+6. **Event number.** `AgentAlwaysAllowed` is `Event.body` 69 (after 66 to 68, the agent and task events added since ADR-0090).
 
 ## Consequences
 

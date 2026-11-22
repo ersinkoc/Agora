@@ -27,7 +27,7 @@ exists. A found file without the owner's execute bit is "broken" (`agent-broken`
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 2                  # 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
+min_engine = 2                  # 6 with `[structured] allow_always` (ADR-0101), 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
@@ -60,6 +60,9 @@ credential_env = ["EXAMPLE_API_TOKEN"]
 
 [structured]
 acp = { argv = ["example-agent", "--acp"] }   # present = L2 available (run through `agora acp-bridge`, see adapter-protocol.md)
+# allow_always = false                        # ADR-0101 (min_engine 6): never offer the person "Allow always" for this kind. Set
+#                                             # only for a kind a check on a real version found to keep such an answer beyond its
+#                                             # session; absent = offered when the agent offers `allow_always` and the policy allows
 # adapter = "example-agent-adapter"           # present = L3 package from the registry
 
 [mcp]
