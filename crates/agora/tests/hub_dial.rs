@@ -2994,6 +2994,8 @@ fn a_message_between_agents_on_one_machine_reaches_the_hub_and_a_window_on_its_o
             })
             .await
             .unwrap();
+        // Subscribed once its snapshot is here: a message the hub took before it would be in no snapshot and never come live.
+        while next_frame(&mut window).await.kind != kinds::SNAPSHOT {}
     });
     let mut conn = agora_platform::local_connect(&a_sock).unwrap();
     mcp(
