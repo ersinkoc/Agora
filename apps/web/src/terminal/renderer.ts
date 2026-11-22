@@ -18,8 +18,9 @@ import { TouchScroll, Wheel, type WheelAction } from './wheel';
 export interface TerminalRenderer {
   mount(el: HTMLElement): void;
   write(bytes: Uint8Array): void;
-  /** Repaints from an ANSI snapshot, in one paint (after a reconnect or when the client fell behind). */
-  reset(snapshot: Uint8Array): void;
+  /** Repaints from an ANSI snapshot, in one paint (after a reconnect or when the client fell behind), after the history the node sent
+   * before it (kind 4, ADR-0100), when there is one. */
+  reset(snapshot: Uint8Array, history?: Uint8Array): void;
   /** Shows the terminal at the size the node reports (which may be smaller than the element: it is shared, see sizing.ts). */
   resize(cols: number, rows: number): void;
   /** Size that fits the mounted element, to report to the node. Measures only: the terminal keeps its size. */
@@ -289,15 +290,20 @@ export class XtermRenderer implements TerminalRenderer {
     this.term.write(bytes);
   }
 
-  reset(snapshot: Uint8Array): void {
+  reset(snapshot: Uint8Array, history?: Uint8Array): void {
     // The snapshot clears the screen and draws every row itself, so nothing is reset first: a reset (a clear, then the repaint a moment
     // later) is painted as an empty screen between the two, on every reconnect. Synchronized output (mode 2026) makes the whole repaint
-    // one paint. The history and the modes the program switched on (mouse, keyboard protocols) are what this window learned from the
-    // same stream, so they stay.
+    // one paint. History (kind 4, ADR-0100), when the window asked for it, goes into the same write, just before the snapshot: it fills
+    // the scrollback and leaves the screen clear for the snapshot, so a reload paints once, at the size both were made for (the window
+    // took it before calling this, frames.ts). Without it (a reconnect, falling behind) the history this window gathered stays. A
+    // current node's repaint sets every mode it tracks (ADR-0100 decision 3); an older node's sets none, and then the modes learned from
+    // the stream stay.
     const head = new TextEncoder().encode('\x1b[?2026h');
     const tail = new TextEncoder().encode('\x1b[?2026l');
-    const all = new Uint8Array(head.length + snapshot.length + tail.length);
-    all.set(head, 0); all.set(snapshot, head.length); all.set(tail, head.length + snapshot.length);
+    const past = history ?? new Uint8Array();
+    const all = new Uint8Array(head.length + past.length + snapshot.length + tail.length);
+    let at = 0;
+    for (const part of [head, past, snapshot, tail]) { all.set(part, at); at += part.length; }
     this.term.write(all);
   }
 

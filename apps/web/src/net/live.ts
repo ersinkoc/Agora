@@ -5,7 +5,7 @@
 import { agora } from '../gen/agora.js';
 import { chatLine, type ChatLine, type ChatSource } from './chat';
 const CHAT_KIND = { SNAPSHOT: 10, ENTRY: 11 } as const;
-import { decodeTerminalFrame, type TerminalEvent } from '../terminal/frames';
+import { decodeTerminalFrame, historyPairing, type TerminalEvent } from '../terminal/frames';
 import type { TerminalSource } from '../terminal/source';
 import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_CONTROL, STREAM_EVENTS } from './frame';
 import { decodePairFrame, type PairNote } from './pairing';
@@ -70,6 +70,12 @@ function paramsOf(p: { [k: string]: agora.v1.IParamValue } | null | undefined): 
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(p ?? {})) out[k] = v.str ?? (v.int !== undefined && v.int !== null ? String(v.int) : '');
   return out;
+}
+
+// The history a terminal subscription asks for (ADR-0100 decision 2): the window's own setting while its terminal has no screen yet
+// (a first open, a reload, a remount: a new stream), 0 once it has one (a reconnect, or after falling behind), where it keeps its own.
+export function historyToAsk(t: { history: number; painted: boolean }): number {
+  return t.painted ? 0 : Math.max(0, Math.floor(t.history));
 }
 
 const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as Socket;
@@ -140,7 +146,11 @@ export function connectLive(o: LiveOptions): Live {
   // `size`: what fits the window's view of the terminal, said again after every (re)subscription: the hub counts a window's size
   // only while it watches the terminal, and forgets it with the connection (docs/specs/protocol.md "Shared terminal size").
   // `due`: the connection (generation) on which a resubscription is already scheduled for the stream, when it fires, and its timer.
-  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number } } & Due>();
+  // `history`: the lines of history the window asked for (ADR-0100); `painted`: a screen (kind 1) arrived on the stream, so the window
+  // has a terminal with history of its own and every later subscription (a reconnect, the hub ending a relay that fell behind) asks
+  // for none (`historyToAsk`). `pairing`: the history frames of the current subscription, held for its snapshot; reset whenever a
+  // subscription starts or ends, so history never reaches another subscription's snapshot.
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number }; history: number; painted: boolean; pairing: ReturnType<typeof historyPairing> } & Due>();
 
   const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void } & Due>();
 
@@ -182,7 +192,8 @@ export function connectLive(o: LiveOptions): Live {
   const subscribeTerminal = (stream: number) => {
     const t = terminals.get(stream);
     if (!t) return;
-    request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '' } }).catch(() => {
+    t.pairing.reset();
+    request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '', historyLines: historyToAsk(t) } }).catch(() => {
       // The node may be away or the agent gone; try again a little later while someone is watching.
       resubscribe(terminals, stream, 2000, () => subscribeTerminal(stream));
     });
@@ -220,6 +231,8 @@ export function connectLive(o: LiveOptions): Live {
     isOpen = false;
     refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
     for (const p of pending.values()) p.reject(new CommandError('node.offline'));
+    // History whose snapshot never came belongs to a subscription that is over.
+    for (const t of terminals.values()) t.pairing.reset();
     pending.clear();
     if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
     if (closed) return;
@@ -308,12 +321,16 @@ export function connectLive(o: LiveOptions): Live {
         const t = terminals.get(f.streamId);
         if (!t) return;
         if (f.kind === STREAM_CLOSE) {
-          // The hub ended the relay (slow client, node left, exit): ask again for a fresh snapshot.
+          // The hub ended the relay (slow client, node left, exit): ask again for a fresh snapshot. History of this relay whose
+          // snapshot never came is dropped.
+          t.pairing.reset();
           const id = f.streamId;
           resubscribe(terminals, id, 500, () => subscribeTerminal(id));
           return;
         }
-        const e = decodeTerminalFrame(f.kind, f.payload);
+        const d = decodeTerminalFrame(f.kind, f.payload);
+        const e = d && t.pairing.frame(d);
+        if (e?.type === 'snapshot') t.painted = true;
         if (e) t.onEvent(e);
         return;
       }
@@ -366,9 +383,9 @@ export function connectLive(o: LiveOptions): Live {
   return {
     command: (node, body) => request(STREAM_COMMANDS, node, body),
     terminal: (node, terminalId) => ({
-      connect(onEvent) {
+      connect(onEvent, options) {
         const stream = nextStream++;
-        terminals.set(stream, { node, terminalId, onEvent });
+        terminals.set(stream, { node, terminalId, onEvent, history: options?.historyLines ?? 0, painted: false, pairing: historyPairing() });
         if (isOpen) subscribeTerminal(stream);
         return {
           // A closed session is inert: a late keystroke or resize (a frame callback after the pane went) is not sent.

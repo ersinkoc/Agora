@@ -57,6 +57,29 @@ fn a_full_stream_waits_the_whole_time_given_and_not_less() {
 }
 
 #[test]
+fn a_wait_with_no_time_limit_does_not_panic_and_ends_when_writable() {
+    // Audit F78: `Duration::MAX` panicked on `Instant::now() + timeout` (unixhold.rs) before polling at all.
+    let (mut w, mut r, dir, _l) = pair("max");
+    let began = Instant::now();
+    assert!(w.wait_writable(Duration::MAX).unwrap());
+    assert!(began.elapsed() < Duration::from_secs(1));
+    // Full, then the peer drains: the unlimited wait ends once there is room, writable.
+    w.set_write_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let chunk = vec![0u8; 64 << 10];
+    while w.write(&chunk).is_ok() {}
+    let drain = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = vec![0u8; 64 << 10];
+        while matches!(r.read(&mut buf), Ok(n) if n > 0) {}
+    });
+    assert!(w.wait_writable(Duration::MAX).unwrap());
+    drop(w);
+    drain.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_stream_whose_peer_closed_is_ready_so_the_send_reports_it() {
     let (w, r, dir, _l) = pair("closed");
     drop(r);

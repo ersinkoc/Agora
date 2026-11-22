@@ -181,6 +181,7 @@ dependencies = [
  "agora-core",
  "agora-i18n",
  "agora-node",
+ "agora-platform",
  "agora-protocol",
  "agora-vt",
  "crossterm",
