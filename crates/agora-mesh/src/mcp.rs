@@ -36,7 +36,8 @@ sees and approves each start, and `agent_wait` and `agent_output` follow the hel
 
 const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_REQUEST: i64 = -32600;
+/// JSON-RPC 2.0: the value is not a valid request.
+pub const INVALID_REQUEST: i64 = -32600;
 /// JSON-RPC 2.0: the line is not JSON.
 pub const PARSE_ERROR: i64 = -32700;
 /// The most messages one JSON-RPC batch may hold (#981). A longer batch is refused whole with -32600; the line limit of the
@@ -394,15 +395,43 @@ pub fn refuse_batch(items: &[Value]) -> Vec<Message> {
     out
 }
 
-/// What one value of a batch is, on a connection that takes batches.
+/// What one value of a batch is ([`batch_item`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum BatchItem {
-    /// A message to handle as if it came alone, as JSON text.
-    Handle(String),
+    /// A request or notification to handle as if it came alone; `text` is it as JSON text.
+    Handle { msg: Message, text: String },
     /// Answer this inside the batch's array.
     Answer(Message),
     /// Nothing to answer (a response from the client).
     Skip,
+}
+
+/// One value of a batch, read the same way by the node and by the bridge: `initialize` may not be in a batch (2025-03-26) and is
+/// -32600, a value that is not a valid message is answered inside the array (-32600), and a response from the client is skipped.
+pub fn batch_item(item: &Value) -> BatchItem {
+    match read_item(item) {
+        Line::One(Message::Request { id, method, .. }) if method == "initialize" => {
+            BatchItem::Answer(standard_error(id, INVALID_REQUEST))
+        }
+        Line::One(msg @ (Message::Request { .. } | Message::Notification { .. })) => {
+            BatchItem::Handle {
+                msg,
+                text: item.to_string(),
+            }
+        }
+        Line::Refuse(m) => BatchItem::Answer(m),
+        Line::One(_) | Line::Batch(_) | Line::Ignore => BatchItem::Skip,
+    }
+}
+
+/// The request a `notifications/cancelled` gives up on (MCP): its `requestId` when that is a string or number.
+pub fn cancelled_id(msg: &Message) -> Option<&Value> {
+    match msg {
+        Message::Notification { method, params } if method == "notifications/cancelled" => params
+            .get("requestId")
+            .filter(|id| id.is_string() || id.is_number()),
+        _ => None,
+    }
 }
 
 /// The answers to one batch (2025-03-26), collected in the order of its requests until every request has its answer; then sent as
@@ -549,22 +578,7 @@ impl McpConnection {
         self.version == Some(BATCH_VERSION)
     }
 
-    /// One value of a batch on a connection that [`batches`](Self::batches): `initialize` may not be in a batch (2025-03-26), and
-    /// a value that is not a valid message is answered inside the array.
-    pub fn batch_item(&self, item: &Value) -> BatchItem {
-        match read_item(item) {
-            Line::One(Message::Request { id, method, .. }) if method == "initialize" => {
-                BatchItem::Answer(standard_error(id, INVALID_REQUEST))
-            }
-            Line::One(Message::Request { .. } | Message::Notification { .. }) => {
-                BatchItem::Handle(item.to_string())
-            }
-            Line::Refuse(m) => BatchItem::Answer(m),
-            Line::One(_) | Line::Batch(_) | Line::Ignore => BatchItem::Skip,
-        }
-    }
-
-    /// Handles one line holding one message. A batch is the caller's to split ([`read_line`], [`Self::batch_item`]), because the
+    /// Handles one line holding one message. A batch is the caller's to split ([`read_line`], [`batch_item`]), because the
     /// node routes some calls itself; a batch given here is refused as one invalid request.
     pub fn handle(&mut self, line: &str, mesh: &mut Mesh, now_ms: u64) -> Outcome {
         let msg = match read_line(line) {
@@ -574,16 +588,10 @@ impl McpConnection {
             Line::Ignore => return Outcome::Silent,
         };
         let Message::Request { id, method, params } = msg else {
-            if let Message::Notification { method, params } = &msg {
-                if let Some(id) = (method == "notifications/cancelled")
-                    .then(|| params.get("requestId"))
-                    .flatten()
-                    .filter(|id| id.is_string() || id.is_number())
-                {
-                    return Outcome::Cancelled {
-                        request_id: id.clone(),
-                    };
-                }
+            if let Some(id) = cancelled_id(&msg) {
+                return Outcome::Cancelled {
+                    request_id: id.clone(),
+                };
             }
             // Other notifications (`notifications/initialized`) and stray responses.
             return Outcome::Silent;
@@ -1571,7 +1579,7 @@ mod tests {
         }
         let _ = c.handle(&init("2025-03-26"), &mut m, 0);
         assert_eq!(
-            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{}})),
+            batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{}})),
             BatchItem::Answer(Message::ErrorResponse {
                 id: json!(4),
                 code: INVALID_REQUEST,
@@ -1579,11 +1587,18 @@ mod tests {
             })
         );
         assert_eq!(
-            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"ping"})),
-            BatchItem::Handle(r#"{"id":4,"jsonrpc":"2.0","method":"ping"}"#.to_string())
+            batch_item(&json!({"jsonrpc":"2.0","id":4,"method":"ping"})),
+            BatchItem::Handle {
+                msg: Message::Request {
+                    id: json!(4),
+                    method: "ping".into(),
+                    params: Value::Null
+                },
+                text: r#"{"id":4,"jsonrpc":"2.0","method":"ping"}"#.to_string()
+            }
         );
         assert_eq!(
-            c.batch_item(&json!([{"jsonrpc":"2.0","id":4,"method":"ping"}])),
+            batch_item(&json!([{"jsonrpc":"2.0","id":4,"method":"ping"}])),
             BatchItem::Answer(Message::ErrorResponse {
                 id: Value::Null,
                 code: INVALID_REQUEST,
@@ -1591,7 +1606,7 @@ mod tests {
             })
         );
         assert_eq!(
-            c.batch_item(&json!({"jsonrpc":"2.0","id":4,"result":{}})),
+            batch_item(&json!({"jsonrpc":"2.0","id":4,"result":{}})),
             BatchItem::Skip
         );
         // A batch handed to `handle` (the node splits them itself) is refused, never dropped.

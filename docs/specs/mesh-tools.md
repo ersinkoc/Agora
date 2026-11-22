@@ -42,7 +42,8 @@ The caller is the agent the node bound to the connection; no argument can name a
 **Lines that are not one valid message** (#981, #984; JSON-RPC 2.0 sections 5.1 and 6). No line is met with silence unless JSON-RPC
 says so (a notification, or a response from the client). These are JSON-RPC's own error codes, with no `data`, not Agora error
 codes:
-- A line that is not JSON: `-32700` with `id: null`.
+- A line that is not JSON, or not UTF-8 (MCP's stdio transport is UTF-8; such a line is never read with replacement
+  characters): `-32700` with `id: null`.
 - JSON that is not a valid request (not an object, `jsonrpc` not `"2.0"`, `method` not a string, an `id` that is not a string or
   number): `-32600`, with the line's `id` when it is a string or number and `null` otherwise. A response from the client, well
   formed or not, gets no answer.
@@ -99,7 +100,7 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
 socket path the same): it answers each request in flight (except one the client cancelled with `notifications/cancelled`, which gets no answer), and each request that arrives while it has no connection, at once with a
-JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets one such error per request in it, as a batch when the node's answer to the client's `initialize` settled on 2025-03-26 and one line each otherwise, and notifications get no answer; the requests of a batch in flight when the connection ends are answered one line each; while it has no connection it answers a line that is not JSON or not a valid request with the same `-32700` / `-32600` the node would), keeps its
+JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets one such error per request in it, as a batch when the node's answer to the client's `initialize` settled on 2025-03-26 and one line each otherwise, and notifications get no answer; the requests of a batch in flight when the connection ends are answered one line each; while it has no connection it answers a line that is not JSON or not a valid request with the same `-32700` / `-32600` the node would, and reads a batch's values as the node does: in a 2025-03-26 conversation a value that is not a valid request gets its `-32600` inside the array and a `notifications/cancelled` in the batch drops the answer to the request it names, and without batches a batch holding no request is one `-32600` with `id: null`; a batch's requests sent on a live connection are in flight, and in a 2025-03-26 conversation a cancellation inside the same batch takes its request out, as one on its own line does), keeps its
 stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
 connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
 `notifications/initialized`) and discards the answer, exactly as at start; it carries nothing else over, and a peer that does not

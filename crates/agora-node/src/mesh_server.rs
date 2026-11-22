@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
 use agora_mesh::mcp::{
-    read_line, refuse_batch, BatchItem, BatchReply, HandoffArgs, Line, McpConnection, Outcome,
-    SendMessageArgs, BOARD_TOOLS,
+    batch_item, read_line, refuse_batch, BatchItem, BatchReply, HandoffArgs, Line, McpConnection,
+    Outcome, SendMessageArgs, BOARD_TOOLS,
 };
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
@@ -1666,13 +1666,17 @@ fn serve_line(
     }
     let mut batch = BatchReply::default();
     for item in &items {
-        match s.conn.batch_item(item) {
+        match batch_item(item) {
             BatchItem::Answer(msg) => batch.answer(msg),
             BatchItem::Skip => {}
-            BatchItem::Handle(text) => match route(&text, s, mesh, links) {
+            BatchItem::Handle { msg, text } => match route(&text, s, mesh, links) {
                 Step::Reply(msg) => batch.answer(msg),
                 Step::Silent => {}
-                Step::Waits => batch.wait(item.get("id").cloned().unwrap_or(Value::Null)),
+                Step::Waits => {
+                    if let Message::Request { id, .. } = msg {
+                        batch.wait(id);
+                    }
+                }
                 Step::Cancelled(id) => {
                     if !batch.cancel(&id) {
                         cancel_in_batches(w, &mut s.batches, &id)?;
@@ -1729,7 +1733,19 @@ fn serve(
             Ok(0) => break,
             Ok(_) if line.len() > MAX_LINE => break,
             Ok(_) if line.ends_with(b"\n") => {
-                let text = String::from_utf8_lossy(&line).trim().to_string();
+                // MCP's stdio transport is UTF-8: a line that is not is a parse error, never read with replacement characters.
+                let Ok(text) = std::str::from_utf8(&line).map(|t| t.trim().to_string()) else {
+                    line.clear();
+                    let err = Message::ErrorResponse {
+                        id: Value::Null,
+                        code: agora_mesh::mcp::PARSE_ERROR,
+                        data: None,
+                    };
+                    if send(&mut writer, &err).is_err() {
+                        break;
+                    }
+                    continue;
+                };
                 line.clear();
                 if text.is_empty() {
                     continue;
@@ -2727,6 +2743,28 @@ mod tests {
         let a6 = c.answer();
         assert_eq!(a6["id"], 6, "{a6}");
         assert!(a6["result"].is_object(), "{a6}");
+        done(server, dir);
+    }
+
+    /// Codex review of #992: MCP's stdio transport is UTF-8, and a line that is not is a parse error (-32700, id null) as the bridge
+    /// says while disconnected, not read with replacement characters into a request that is then answered.
+    #[test]
+    fn a_line_that_is_not_utf8_is_a_parse_error() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("utf8");
+        let mut c = Wire::open(&a);
+        c.initialize("2025-06-18");
+        c.w.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\",\"params\":{\"x\":\"\xff\"}}\n",
+        )
+        .unwrap();
+        let e = c.answer();
+        assert_eq!(rpc_error_code(&e), -32700, "{e}");
+        assert_eq!(e["id"], Value::Null, "{e}");
+        c.send(r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#);
+        assert_eq!(c.answer()["id"], 6);
         done(server, dir);
     }
 
