@@ -1261,6 +1261,7 @@ quota-window-seven-day = Yedi gün
 quota-window-minutes = { $minutes } dakika
 quota-percent = %{ $percent }
 quota-chip = Limit %{ $percent }
+quota-chip-short = %{ $percent }
 quota-chip-title = { $kind }, { $what }: plan limitinin %{ $percent } kadarı kullanıldı.
 quota-resets = { $time } içinde sıfırlanır ({ $when })
 quota-reset-unknown = Sıfırlanma zamanı bildirilmedi

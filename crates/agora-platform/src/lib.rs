@@ -288,6 +288,11 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
 /// a fake agent and skip themselves elsewhere).
 pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
 
+/// True where a file lock (`File::lock`, `File::try_lock`) keeps every other handle from reading or writing the locked file and a file
+/// open through [`open_lock_private`] can be neither renamed nor removed (Windows: `LockFileEx` is mandatory and the file is not
+/// shared for delete). Elsewhere a lock is advisory: the file can be read, renamed and removed while it is held.
+pub const LOCK_FILES_MANDATORY: bool = cfg!(windows);
+
 /// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
 pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
 
@@ -369,8 +374,9 @@ pub fn safe_search_path() -> String {
     }
 }
 
-/// Whether a process with this id exists (a lock file's owner). Only "no such process" says no; any other answer (access denied,
-/// a system that cannot tell) says yes, so a lock is never broken on a guess.
+/// Whether a process with this id exists (a lock file's owner). Only "no such process" (on Windows also: a process that has ended,
+/// even while some handle keeps it queryable) says no; any other answer (access denied, a system that cannot tell) says yes, so a lock
+/// is never broken on a guess.
 pub fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -388,15 +394,15 @@ pub fn process_exists(pid: u32) -> bool {
         // Unix, unlike the name lookups, whose error for a dead pid differs (macOS leaves a stale errno).
         io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        winproc::exists(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         match process_name(pid) {
             Ok(_) => true,
-            // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
-            Err(e) => {
-                !(e.kind() == io::ErrorKind::NotFound
-                    || (cfg!(windows) && e.raw_os_error() == Some(87)))
-            }
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
         }
     }
 }
@@ -832,6 +838,30 @@ impl LocalListener {
         #[cfg(windows)]
         {
             self.inner.accept().map(|inner| LocalStream { inner })
+        }
+    }
+
+    /// Wait up to `timeout` for the next client, and return it as soon as it connects (a readiness wait, not a sleep between tries);
+    /// `None` when none came in that time. For an accept loop that must also notice a stop: the client is served at once and the
+    /// stop is seen within `timeout`. Make the listener non-blocking first ([`set_nonblocking`](Self::set_nonblocking)) so a client
+    /// that leaves between the wait and the accept cannot leave this waiting past `timeout` on Unix.
+    pub fn accept_timeout(&self, timeout: std::time::Duration) -> io::Result<Option<LocalStream>> {
+        #[cfg(unix)]
+        {
+            if !unix::wait_readable(&self.inner, timeout)? {
+                return Ok(None);
+            }
+            match self.accept() {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.inner
+                .accept_timeout(timeout)
+                .map(|s| s.map(|inner| LocalStream { inner }))
         }
     }
 
@@ -2129,7 +2159,8 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
 /// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
 /// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
 /// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
-/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file. On Windows the file is not shared for
+/// delete: while any process has it open it can be neither renamed nor removed ([`LOCK_FILES_MANDATORY`]).
 pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
     let dir = path
         .parent()
@@ -3337,5 +3368,77 @@ mod read_timeout_tests {
             let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
             assert_eq!(e.kind(), kind);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod accept_timeout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn listener(name: &str) -> (LocalListener, PathBuf) {
+        // Short: Unix socket paths are limited to about 100 bytes.
+        let path = std::env::temp_dir().join(format!("agora-at-{}-{name}", std::process::id()));
+        let l = local_listen(&path).expect("listen");
+        l.set_nonblocking(true).expect("nonblocking");
+        (l, path)
+    }
+
+    #[test]
+    fn without_a_client_it_waits_the_timeout_and_says_none() {
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, _path) = listener("none");
+        let start = Instant::now();
+        assert!(l
+            .accept_timeout(Duration::from_millis(60))
+            .unwrap()
+            .is_none());
+        let waited = start.elapsed();
+        // It waited (no spin), and not much longer than asked; generous for a loaded runner.
+        assert!(
+            waited >= Duration::from_millis(50),
+            "returned after {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(5), "returned after {waited:?}");
+    }
+
+    #[test]
+    fn a_client_is_returned_as_soon_as_it_connects_not_when_the_timeout_ends() {
+        // #958: the control socket's accept loop slept 100 ms between tries, so each new connection waited up to that long.
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, path) = listener("soon");
+        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+        let server = std::thread::spawn(move || {
+            for _ in 0..20 {
+                let s = loop {
+                    if let Some(s) = l.accept_timeout(Duration::from_secs(30)).unwrap() {
+                        break s;
+                    }
+                };
+                tx.send(Instant::now()).unwrap();
+                drop(s);
+            }
+        });
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            // Let the server reach its wait first, so the client arrives in the middle of it.
+            std::thread::sleep(Duration::from_millis(5));
+            let sent = Instant::now();
+            let c = local_connect(&path).expect("connect");
+            let got = rx.recv_timeout(Duration::from_secs(20)).expect("accepted");
+            slowest = slowest.max(got.saturating_duration_since(sent));
+            drop(c);
+        }
+        server.join().unwrap();
+        // A 30 s wait that returns within a second of every connect returned because of it.
+        assert!(
+            slowest < Duration::from_secs(1),
+            "slowest accept {slowest:?}"
+        );
     }
 }

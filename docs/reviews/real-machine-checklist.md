@@ -221,12 +221,14 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   answer that one in the window (A new machine wants to join > Approve > "Do the two numbers match exactly?" > Yes, the numbers match).
   Wait a second or two before each answer: a key
   typed right after a question is refused ("That key came too soon after the question to be an answer. …"). Join by a name the
-  hub's certificate holds (the hub's own suggestion, `agora join <hub name>:PORT`); an IP address that the certificate does not
-  name fails after the approval (#901).
+  hub's certificate holds (the hub's own suggestion, `agora join <hub name>:PORT`); then join once by an address the certificate does
+  not name (on the hub's own computer, `127.0.0.1:PORT` when the hub listens on all addresses).
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
   the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
-  saved"; the hub closes itself after one approval.
+  saved"; the hub closes itself after one approval. The join by an address the certificate does not name says at once "The hub at … could
+  not be verified, so nothing was saved." with no number, the owner gets no card, and a later join with that name is not offered
+  "Replace the existing machine".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): terminal answer passed; after a window approval the hub stays open (#942); the join hint on a loopback hub (#943).
 
 ### RM-08 Machines reachable only over SSH

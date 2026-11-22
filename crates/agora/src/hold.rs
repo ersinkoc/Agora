@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use agora_i18n::key;
 use agora_node::holder_link::{
-    read_frame, socket_path, write_frame, AgentInfo, AgentState, PipeData, Refusal, Reply, Request,
-    StartPipeRequest, StartRequest, TerminalInfo, LINK_VERSION, LINK_VERSION_PIPES, MAX_FRAME,
-    WRITE_SLICE,
+    agent_id_fits, read_frame, socket_path, write_frame, AgentInfo, AgentState, PipeData, Refusal,
+    Reply, Request, StartPipeRequest, StartRequest, TerminalInfo, LINK_VERSION, LINK_VERSION_PIPES,
+    MAX_FRAME, WRITE_SLICE,
 };
 use agora_platform::{
     ExitStatus, HeldBuffer, HeldProcess, HeldSignal, HeldTerminal, LineWriter, LocalListener,
@@ -614,7 +614,8 @@ impl Holder {
     }
 
     fn start(&mut self, s: &StartRequest) {
-        if s.agent.is_empty() || s.argv.is_empty() {
+        // An id longer than `MAX_AGENT_ID` would make every later reply that names it (`Attach`, `List`) larger than a frame (#929).
+        if !agent_id_fits(&s.agent) || s.argv.is_empty() {
             return self.refuse(Refusal::BadRequest);
         }
         if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {
@@ -710,7 +711,7 @@ impl Holder {
 
     /// ADR-0093: starts a program on pipes. Its output is read from now on, by a thread of its own, into a bounded buffer.
     fn start_pipe(&mut self, s: &StartPipeRequest) {
-        if s.agent.is_empty() || s.argv.is_empty() {
+        if !agent_id_fits(&s.agent) || s.argv.is_empty() {
             return self.refuse(Refusal::BadRequest);
         }
         if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {

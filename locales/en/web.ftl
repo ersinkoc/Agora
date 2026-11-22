@@ -1323,6 +1323,7 @@ quota-window-minutes = { $minutes ->
 }
 quota-percent = { $percent } %
 quota-chip = Limit { $percent } %
+quota-chip-short = { $percent } %
 quota-chip-title = { $kind }, { $what }: { $percent } % of the plan limit used.
 quota-resets = Resets in { $time } ({ $when })
 quota-reset-unknown = Reset time not reported

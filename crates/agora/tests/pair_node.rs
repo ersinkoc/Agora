@@ -483,33 +483,74 @@ async fn a_hub_nobody_listens_at_is_unreachable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_address_that_is_in_no_name_of_the_hubs_leaf_fails_closed_after_the_owner_approved() {
-    // The leaf names `localhost` only; the machine dials the IP address.
+async fn an_address_that_is_in_no_name_of_the_hubs_leaf_fails_before_the_owner_is_asked_and_leaves_no_name(
+) {
+    // #901 (RM-07): the leaf names `localhost` only and the machine dials the IP address. The machine sees that at once, before it
+    // sends a request, so no number is shown, no card reaches the owner (before the fix the owner approved, the machine threw the
+    // certificate away and the hub kept the name), and the hub holds no name: the same name then joins by the right address with no
+    // "replace".
     let rig = rig().await;
     let mut owner = Window::open(&rig).await;
     owner.open_switch().await;
-    let m = machine(&format!("127.0.0.1:{}", rig.addr.port()), "byip", fast());
-    m.shown().await;
-    let card = owner.card().await;
-    owner.approve(&card.pair_id).await;
-    let (r, _, _) = m.finish().await;
+    let (r, shown, asked) = refused_early(
+        &mut owner,
+        machine(&format!("127.0.0.1:{}", rig.addr.port()), "byip", fast()),
+    )
+    .await;
     assert_eq!(
         r.unwrap_err(),
         PairError::NameUnverified {
             name: "127.0.0.1".into()
         }
     );
+    assert!(!shown, "no number was shown");
+    assert!(!asked, "the owner was never asked");
+    assert_nothing_held(&rig, &mut owner, "byip").await;
+    let (r, _) = pair_by(&mut owner, &dial(&rig), "byip").await;
+    r.expect("the name was free: no replace was needed");
 
     // A leaf for another name than the one dialled.
     let rig = rig_with(&["elsewhere.example"], false).await;
     let mut owner = Window::open_via(&rig).await;
     owner.open_switch().await;
-    let m = machine(&dial(&rig), "wrongleaf", fast());
-    m.shown().await;
-    let card = owner.card().await;
-    owner.approve(&card.pair_id).await;
-    let (r, _, _) = m.finish().await;
+    let (r, shown, asked) =
+        refused_early(&mut owner, machine(&dial(&rig), "wrongleaf", fast())).await;
     assert!(matches!(r.unwrap_err(), PairError::NameUnverified { .. }));
+    assert!(!shown && !asked, "refused before any number or card");
+    assert_nothing_held(&rig, &mut owner, "wrongleaf").await;
+}
+
+/// Runs `m` to its end, which must come without the owner's answer. Returns the machine's result, whether it showed a number, and
+/// whether a card reached the owner (the window has read every frame up to the answer of a status command sent after the end).
+async fn refused_early(
+    owner: &mut Window,
+    m: Machine,
+) -> (Result<Verified, PairError>, bool, bool) {
+    let Machine { number, done } = m;
+    let r = tokio::task::spawn_blocking(move || done.join().unwrap())
+        .await
+        .unwrap()
+        .0;
+    owner
+        .command(command_request::Command::PairStatus(v1::PairStatus {}))
+        .await
+        .unwrap();
+    (r, number.try_recv().is_ok(), !owner.cards.is_empty())
+}
+
+/// The hub has no pairing waiting and no certificate under `name`: nothing would make a later join of that name ask for "replace".
+async fn assert_nothing_held(rig: &Rig, owner: &mut Window, name: &str) {
+    let status = owner
+        .command(command_request::Command::PairStatus(v1::PairStatus {}))
+        .await
+        .unwrap();
+    assert!(matches!(status, command_ok::Result::PairStatus(s) if s.pending == 0));
+    assert!(
+        !Enrollment::new(rig.state.hub.store())
+            .node_in_use(name)
+            .unwrap(),
+        "the hub keeps no name for a join that never happened"
+    );
 }
 
 impl Window {
@@ -939,10 +980,13 @@ async fn an_address_that_is_in_no_name_of_a_provisioned_leaf_fails_closed_and_st
     assert_eq!(leaf.names(), ["localhost", "pairbox", "192.0.2.7"]);
     let mut owner = Window::open(&rig).await;
     owner.open_switch().await;
-    let (r, _) = pair_by(
+    let (r, shown, asked) = refused_early(
         &mut owner,
-        &format!("127.0.0.1:{}", rig.addr.port()),
-        "nameless",
+        machine(
+            &format!("127.0.0.1:{}", rig.addr.port()),
+            "nameless",
+            fast(),
+        ),
     )
     .await;
     assert_eq!(
@@ -951,8 +995,10 @@ async fn an_address_that_is_in_no_name_of_a_provisioned_leaf_fails_closed_and_st
             name: "127.0.0.1".into()
         }
     );
-    // The hub issued nothing that a machine could keep: the card was approved but the machine refused what it got, and nothing else
-    // came out of it (the machine's own check is what stores nothing; `agora join` stores only a successful result).
+    // Refused before any request (#901): no number, no card, and the hub holds nothing under the name (the machine's own check is what
+    // stores nothing; `agora join` stores only a successful result).
+    assert!(!shown && !asked, "refused before any number or card");
+    assert_nothing_held(&rig, &mut owner, "nameless").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -987,8 +1033,13 @@ async fn a_new_address_is_named_at_the_next_open_without_a_restart_and_open_conn
     assert_eq!(leaf.hash(), before, "nothing changed, so the leaf is kept");
     let port = rig.addr.port();
     if dialable {
-        let (r, _) = pair_by(&mut owner, &format!("{fresh}:{port}"), "early").await;
+        let (r, shown, asked) = refused_early(
+            &mut owner,
+            machine(&format!("{fresh}:{port}"), "early", fast()),
+        )
+        .await;
         assert!(matches!(r.unwrap_err(), PairError::NameUnverified { .. }));
+        assert!(!shown && !asked, "refused before any number or card");
     }
 
     // The address appears (a DHCP lease, a second card). Nothing is restarted: the next `PairOpen` re-issues the leaf from the same CA.

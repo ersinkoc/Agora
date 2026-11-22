@@ -7,8 +7,16 @@ export interface TerminalSession {
   close(): void;
 }
 
+// `historyLines`: how many lines of history the window wants before the first screen (ADR-0100 decision 2), its own history
+// setting; the node sends at most what it keeps. The window that asks has no history of its own yet (a first open, a reload, a
+// remount). A source asks for it only until that window has a screen: after a reconnect or falling behind it asks for none, because
+// the window keeps its own (often longer) history and a replay would repeat it.
+export interface ConnectOptions {
+  historyLines?: number;
+}
+
 export interface TerminalSource {
-  connect(onEvent: (e: TerminalEvent) => void): TerminalSession;
+  connect(onEvent: (e: TerminalEvent) => void, options?: ConnectOptions): TerminalSession;
 }
 
 // A local stand-in: paints a prompt and echoes what is typed, so the Focus view is usable without a node.

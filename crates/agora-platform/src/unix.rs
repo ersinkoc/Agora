@@ -177,6 +177,32 @@ fn lock_beside(path: &std::path::Path) -> io::Result<File> {
     Ok(lock)
 }
 
+/// Waits up to `timeout` until `fd` is readable (for a listening socket: a client is waiting to be accepted). False when the time
+/// ran out or a signal interrupted the wait: the caller looks again, so an interruption costs one more pass, never a lost client.
+pub(crate) fn wait_readable(fd: &impl AsRawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Rounded up, so a wait shorter than a millisecond still waits instead of spinning; capped at what poll takes.
+    let ms = timeout
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(libc::c_int::MAX as u128) as libc::c_int;
+    // SAFETY: one valid pollfd that lives through the call.
+    let r = unsafe { libc::poll(&mut p, 1, ms) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        return if e.kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(e)
+        };
+    }
+    Ok(r > 0)
+}
+
 pub(crate) fn local_connect(path: &std::path::Path) -> io::Result<crate::LocalStream> {
     Ok(crate::LocalStream {
         inner: std::os::unix::net::UnixStream::connect(path)?,

@@ -34,7 +34,8 @@ pub fn parent(path: &str) -> String {
 }
 
 /// A file's bytes as shown: its text by line (control characters removed, tabs expanded, at most `MAX_LINES`), or that it is binary
-/// (a NUL in its first 8 KiB, as git decides) and how big.
+/// (a NUL in its first 8 KiB, as git decides) and how big. UTF-16 with a byte-order mark (Windows PowerShell's `>`) is shown as its
+/// decoded text (#940, [`agora_core::text::utf16_text`]).
 pub enum Content {
     Text(Vec<String>),
     Binary(usize),
@@ -43,12 +44,13 @@ pub enum Content {
 const MAX_LINES: usize = 20_000;
 
 pub fn content(data: &[u8]) -> Content {
-    if data.iter().take(8192).any(|b| *b == 0) {
-        return Content::Binary(data.len());
-    }
+    let text = match agora_core::text::utf16_text(data) {
+        Some(t) => t,
+        None if data.iter().take(8192).any(|b| *b == 0) => return Content::Binary(data.len()),
+        None => String::from_utf8_lossy(data).into_owned(),
+    };
     Content::Text(
-        String::from_utf8_lossy(data)
-            .lines()
+        text.lines()
             .take(MAX_LINES)
             .map(|l| plain(&l.replace('\t', "    ")))
             .collect(),
@@ -309,6 +311,24 @@ mod tests {
             Content::Binary(_) => panic!("text"),
         }
         assert!(matches!(content(b"PNG\0\x01\x02"), Content::Binary(6)));
+    }
+
+    #[test]
+    fn a_utf16_file_with_a_byte_order_mark_is_text() {
+        // #940: what Windows PowerShell 5.1's `>` writes: UTF-16 LE with a BOM.
+        let mut data = vec![0xff, 0xfe];
+        for u in "hello\r\nworld\r\n".encode_utf16() {
+            data.extend(u.to_le_bytes());
+        }
+        match content(&data) {
+            Content::Text(l) => assert_eq!(l, vec!["hello", "world"]),
+            Content::Binary(_) => panic!("text"),
+        }
+        // An odd length is not UTF-16: binary, as before.
+        assert!(matches!(
+            content(&[0xff, 0xfe, b'h', 0, b'i']),
+            Content::Binary(5)
+        ));
     }
 
     #[test]

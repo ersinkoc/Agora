@@ -176,8 +176,14 @@ cli-password-needs-terminal = Ekran parolasını ayarlamak etkileşimli bir term
 cli-password-too-short = Bu çok kısa: en az { $min } karakter kullanın.
 cli-password-too-long = Bu çok uzun.
 cli-password-mismatch = İkisi aynı değil; hiçbir şey değişmedi.
-cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. Açık { $count } oturum kapatıldı.
-cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. Açık { $count } oturum kapatıldı.
+cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. { $count ->
+    [one] Açık bir oturum kapatıldı.
+   *[other] Açık { $count } oturum kapatıldı.
+  }
+cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. { $count ->
+    [one] Açık bir oturum kapatıldı.
+   *[other] Açık { $count } oturum kapatıldı.
+  }
 cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu parolayı ister.
 cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.

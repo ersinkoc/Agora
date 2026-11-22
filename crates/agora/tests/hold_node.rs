@@ -772,3 +772,135 @@ fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts()
         "the hub has no terminal for the kept agent"
     );
 }
+
+impl Bridge {
+    fn tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.request(
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": arguments}),
+        )
+    }
+
+    /// The JSON a tool answered with (its one text item), or the error it answered with.
+    fn tool_json(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let a = self.tool(name, arguments);
+        let text = a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: {a}"))
+            .to_string();
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("{name}: {a}"))
+    }
+}
+
+fn inbox_bodies(inbox: &serde_json::Value) -> Vec<String> {
+    inbox
+        .as_array()
+        .unwrap_or_else(|| panic!("{inbox}"))
+        .iter()
+        .map(|m| m["body"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The `inbox` call an agent's client keeps making across the node's restart: messages after the last one it read.
+fn read_after(bridge: &mut Bridge, cursor: &str) -> serde_json::Value {
+    bridge.tool_json("inbox", serde_json::json!({"since": cursor}))
+}
+
+/// #965 (RM-30): an agent the holder kept across a node restart hears the mesh again, also through the cursor its client carried
+/// over. Before the restart it read its inbox up to some `message_id`; the restarted node's broker is new, and its ids must not
+/// start over below that cursor, or every message for the kept agent (from an agent on its machine, a presence notice, one from
+/// another machine) is hidden from `inbox(since)` while the senders are told it was accepted.
+#[test]
+fn a_kept_agent_hears_the_mesh_after_its_node_restarts_through_the_cursor_it_carried() {
+    let _serial = serial();
+    let rig = Rig::new("inbox", &sh("echo up; sleep 600"));
+    let socket = |id: &str| rig.root.join("m").join(format!("{id}.sock"));
+    let node = rig.node();
+    let kept = rig.launch(&node);
+    let peer = rig.launch(&node);
+    for id in [&kept, &peer] {
+        assert!(held(&node, id), "the test agents must start in the holder");
+        wait_for("the agent", || screen(&node, id).contains("up"));
+        wait_for("the holder in the ledger", || {
+            node.ledger.get(id).is_some_and(|e| e.holder_pid != 0)
+        });
+    }
+    let mut bridge = Bridge::start(&socket(&kept));
+    bridge.initialize();
+    let mut pb = Bridge::start(&socket(&peer));
+    pb.initialize();
+    // Enough traffic before the restart that the kept agent's cursor is past the ids a new broker would hand out first.
+    for n in 0..8 {
+        let a = pb.tool_json(
+            "send_message",
+            serde_json::json!({"to": kept, "body": format!("before {n}")}),
+        );
+        assert!(a["message_id"].is_string(), "{a}");
+    }
+    let before = bridge.tool_json("inbox", serde_json::json!({}));
+    assert_eq!(inbox_bodies(&before).len(), 9, "{before}");
+    let cursor = before[8]["message_id"].as_str().expect("id").to_string();
+    assert!(read_after(&mut bridge, &cursor)
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The node stops (its endpoints close, as its process ending would) and the next one takes both agents up.
+    node.mesh.unregister(&AgentId::new(kept.clone()));
+    node.mesh.unregister(&AgentId::new(peer.clone()));
+    drop(node);
+    let node = rig.node();
+    assert!(node.mesh.is_registered(&AgentId::new(kept.clone())));
+    let end = Instant::now() + Duration::from_secs(15);
+    while mesh_unavailable(&bridge.workspace_status()) {
+        assert!(Instant::now() < end, "the bridge never reconnected");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // (b) A fresh agent joins: the kept agent gets its presence notice.
+    let fresh = rig.launch(&node);
+    wait_for("the fresh agent", || screen(&node, &fresh).contains("up"));
+    // (a) A message from an agent on the same machine.
+    let mut fb = Bridge::start(&socket(&fresh));
+    fb.initialize();
+    let sent = fb.tool_json(
+        "send_message",
+        serde_json::json!({"to": kept, "body": "from the fresh agent"}),
+    );
+    assert!(sent["message_id"].is_string(), "{sent}");
+    // (c) A message from an agent on another machine, as the hub hands it to this node (`MeshPost`).
+    node.mesh
+        .deliver_remote(
+            "other-node",
+            "agent-9",
+            &AgentId::new(kept.clone()),
+            "from another machine",
+            &[],
+        )
+        .expect("the remote message is accepted");
+
+    let after = read_after(&mut bridge, &cursor);
+    let bodies = inbox_bodies(&after);
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains(&fresh) && b.contains("joined")),
+        "no presence notice for the fresh agent after the cursor: {after}"
+    );
+    assert!(
+        bodies.iter().any(|b| b == "from the fresh agent"),
+        "the local message is hidden behind the carried cursor: {after}"
+    );
+    assert!(
+        bodies.iter().any(|b| b == "from another machine"),
+        "the cross-node message is hidden behind the carried cursor: {after}"
+    );
+    // Nothing from before the restart comes back as new.
+    assert!(!bodies.iter().any(|b| b.starts_with("before ")), "{after}");
+    // The fresh agent's own cursor works the same way: its next read after what it saw is empty.
+    let seen = fb.tool_json("inbox", serde_json::json!({}));
+    if let Some(last) = seen.as_array().and_then(|a| a.last()) {
+        let id = last["message_id"].as_str().expect("id").to_string();
+        assert!(read_after(&mut fb, &id).as_array().unwrap().is_empty());
+    }
+}

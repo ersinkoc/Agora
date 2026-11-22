@@ -103,8 +103,8 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
-        SYNCHRONIZE, WRITE_DAC,
+        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
     let held = hold_dir(dir)?;
@@ -119,8 +119,17 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     } else {
         windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
     };
+    // A lock file is not shared for delete: while it is open it can be neither renamed nor removed, so a process that judges the
+    // lock by the file alone (an older install lock that takes over a lock it cannot read) cannot move it from under its holder
+    // (review of audit F100). Every opener of a lock file shares read and write, so they still open it side by side.
+    let share = if append {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    };
     let file = std::fs::OpenOptions::new()
         .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(share)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let (links, reparse) = link_facts(&file)?;
@@ -570,16 +579,37 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        let wait = if self.nonblocking.load(Ordering::Acquire) {
+            0
+        } else {
+            INFINITE
+        };
         // Clients that left before they were accepted are skipped, however many there were.
         loop {
-            if let Some(s) = self.accept_once()? {
+            if let Some(s) = self.accept_once(wait)? {
                 return Ok(s);
             }
         }
     }
 
-    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
-    fn accept_once(&self) -> io::Result<Option<Stream>> {
+    /// Waits up to `timeout` for the next client and returns it as soon as it connects; `None` when none came (or the one that came
+    /// had already left). The connect started here stays pending between calls, so a client arriving between two of them is
+    /// picked up by the next one. Ignores [`Self::set_nonblocking`].
+    pub fn accept_timeout(&self, timeout: Duration) -> io::Result<Option<Stream>> {
+        // Rounded up, so a wait shorter than a millisecond still waits instead of spinning; below INFINITE, which never ends.
+        let ms = timeout
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(u128::from(INFINITE - 1)) as u32;
+        match self.accept_once(ms) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            r => r,
+        }
+    }
+
+    /// One accept, waiting up to `wait_ms` for a client (`WouldBlock` when none came); `None` when the instance's client had
+    /// already left (the instance is reset for the next one).
+    fn accept_once(&self, wait_ms: u32) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -615,13 +645,8 @@ impl Listener {
             let Some(p) = st.pending.as_ref() else {
                 return Err(io::Error::other("no pending connection"));
             };
-            let ms = if self.nonblocking.load(Ordering::Acquire) {
-                0
-            } else {
-                INFINITE
-            };
             // SAFETY: a live event handle.
-            let w = unsafe { WaitForSingleObject(p.event.0 .0, ms) };
+            let w = unsafe { WaitForSingleObject(p.event.0 .0, wait_ms) };
             if w == WAIT_TIMEOUT {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }

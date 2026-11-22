@@ -240,8 +240,11 @@ fn history(args: &[String]) -> ExitCode {
         report.switch_plain_p95_ms
     );
     println!(
-        "  on a new connection per subscription (as the uplink routes one): full history p95 {:.2} ms, without history p95 {:.2} ms",
-        report.switch_history_new_connection_p95_ms, report.switch_plain_new_connection_p95_ms
+        "  on a new connection per subscription (as the uplink routes one): full history p50 {:.2} ms p95 {:.2} ms, without history p50 {:.2} ms p95 {:.2} ms",
+        report.switch_history_new_connection_p50_ms,
+        report.switch_history_new_connection_p95_ms,
+        report.switch_plain_new_connection_p50_ms,
+        report.switch_plain_new_connection_p95_ms
     );
     if let Some(path) = out {
         match serde_json::to_string_pretty(&report) {

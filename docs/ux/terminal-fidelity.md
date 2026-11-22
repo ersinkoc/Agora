@@ -207,7 +207,7 @@ pane, polling for a stop request, switching 1003 on and off) has no automated te
 
 ## Phase 3: what the web client cannot fix
 
-In priority order; each needs work outside `apps/web`. Item 1's first step (the modes in the repaint) is built; nothing else here is.
+In priority order; each needs work outside `apps/web`. Item 1 (the modes and the history in the repaint, ADR-0100) is built; nothing else here is.
 Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an ADR first.
 
 1. **The repaint a window receives loses the program's modes and the history.** `subscribed_snapshot`
@@ -245,9 +245,24 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    `min(history_lines, kept)` lines (at most 512 KiB, in kind 4 frames of at most 16 KiB, at most 32) before the repaint. They are
    re-encoded from the scrollback's cells with their colours, and a line the node holds as wrapped is written without a break, so the
    window rewraps it. A program on the alternate screen gets none (the backend cannot read the main screen under it), and a resync
-   never carries history. Measured with `agora-bench history`; the figures are in `docs/design/performance.md`. The clients' part
-   (step 3: the web window and the terminal client asking for history, and holding it with the snapshot) is not built: they still ask
-   for none.
+   never carries history. Measured with `agora-bench history`; the figures are in `docs/design/performance.md`.
+   **Step 3 is done** (the clients, ADR-0100 decisions 2 and 4). The web window asks for its own history setting (1000 to 20 000
+   lines) when its terminal has none of its own (a first open, a reload, a remount), and for none on a reconnect or after falling
+   behind, where it keeps its own (`apps/web/src/net/live.ts`, `historyToAsk`). It holds the kind 4 frames with the snapshot, which
+   already waits for its size frame (`frames.ts`, `snapshotAfterSize`), and writes history and repaint in one synchronized write (mode
+   2026, `renderer.ts`, `reset`), so a reload is one paint at the node's width. It never waits for history: an older node sends none and
+   the snapshot is painted as before. History is paired with the snapshot of its own subscription only (`frames.ts`,
+   `historyPairing`): when the connection is lost or the relay ends before the snapshot, it is dropped, so it never reaches a later
+   subscription's snapshot, and at most one replay (512 KiB) is ever held (Codex review of #964; the terminal client does the same,
+   `client.rs`, `HeldHistory`). The terminal client asks for its scrollback (2000 lines) on a fresh pane and for none when it
+   watches again; it holds the history with the screen until the size that follows, feeds both to its emulator once (the wheel reads
+   that scrollback), and keeps only the screen as the one it feeds again when the screen's own size follows it (a later size only
+   resizes the emulator, #977), clearing its screen first without moving it into the history (`crates/agora-tui/src/preview.rs`, `PaneFeed`). This is the agent's terminal panel; the full-screen terminal opened
+   from it (`crates/agora/src/tuicmd.rs`) still asks for none. Tested by D4 in `scripts/e2e-terminal-repaint.mjs` (after a reload the
+   first line of a 300-line output is in the window's history; Chromium), `crates/agora-tui/tests/history_replay.rs` (a probe on a
+   real pseudo-terminal: the pane's scrollback is the node's, stays the node's through a taller and a shorter terminal, and a repaint
+   fed again at its own size never copies the screen into it) and web unit tests. Still not replayed: the main screen's history while
+   a program is on the alternate screen (the backend cannot read it). Screens: `docs/ux/screens/adr100-history-after-reload-light.png` and `-dark.png`.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
    when **no window is attached** gets no answer, and with **two windows** it gets two, each with its own theme's colours. Proposed
@@ -271,17 +286,20 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
      alternate screen, and the client's `termio::ModeScanner` and emulator read them from it like live output
      (`crates/agora-tui/tests/repaint_modes.rs`). Mouse 9 and the urxvt encoding 1015 are still learned only from live output;
    - **focus of the user's own terminal window** (not the pane) is not forwarded: the client does not switch on its own terminal's
-     focus reports.
+     focus reports;
+   - ~~**the history before the client started watching** is not there~~: done by item 1's step 3. A fresh pane asks for its 2000
+     lines of scrollback and the wheel scrolls through them (`crates/agora-tui/tests/history_replay.rs`).
    Passthrough of the raw stream would fix all of it but gives up the cell model ADR-0063 chose; that is a decision for the maintainer,
    not an implementation detail.
 5. **Hub resize policy** (`crates/agora-hub/src/router.rs:101`, `smallest`, ADR-0072). The window side is as the ADR says and looks clean, but
    one small viewer (a phone with its keyboard open) shrinks every other window's terminal for as long as it watches, and a window
    cannot say it is only looking. Proposed fix, as the ADR's open question says: let a window mark itself as "only looking" so its
    size does not count, and let a window whose tab is hidden stop counting; both are a field on the subscription, so an ADR.
-6. **Scrollback is a node setting nobody can change.** The window's history is configurable now (1000 to 20 000 lines), but what a
-   fresh window can see is bounded by what the node keeps (2000, `alacritty.rs:16`) and by item 1. Proposed fix: a node setting for
-   the cap (the performance budget in `docs/design/performance.md` says "default scrollback" for the 10 MB per terminal) and the replay
-   in item 1.
+6. **Scrollback is a node setting nobody can change.** The window's history is configurable now (1000 to 20 000 lines), and a fresh
+   window now gets the node's history replayed (item 1, ADR-0100 step 3), but what it can see is bounded by what the node keeps (2000,
+   `alacritty.rs:20`) and by the replay's 512 KiB cap: a window set to more than 2000 lines gets 2000 after a reload, and keeps more
+   only from what it watches live. Proposed fix: a node setting for the cap (the performance budget in `docs/design/performance.md`
+   says "default scrollback" for the 10 MB per terminal).
 
 ## Left for later (web client)
 

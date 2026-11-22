@@ -75,7 +75,9 @@ The verifier relaxes **one** check, trust in the issuer, and nothing else:
    and sends `PairResult { approved, cert_pem, ca_pem }` on the same connection, then closes it.
 6. **The machine checks before it keeps anything.** (a) the certificate it got is for its own key and node id; (b) the leaf it saw in step 1
    chains to `ca_pem` (verified with the certificate library, with `ca_pem` as the only root, after the handshake signature was verified during the connection) and the address or name it dialled is one of that leaf's names (section 5b says how the hub's leaf gets that name; the
-   check is never skipped, and a failure is the machine-local `pair.name_unverified`, the machine says so and stores nothing); (c) only then does
+   check is never skipped, and a failure is the machine-local `pair.name_unverified`, the machine says so and stores nothing; the name half
+   needs no CA, so it is also checked as soon as the handshake ends, before step 1, and a leaf that does not name the dialled address ends
+   the pairing there: no request, no number, no card for the owner, nothing issued, so the hub keeps no name for it (#901)); (c) only then does
    it store the CA and its certificate in its link folder, as `agora node enroll` does today. A mismatch is thrown away and nothing is stored.
 7. **Device trust in the same step** (ADR-0065 decision 5, ADR-0061): the machine then asks, on the machine, once, "Trust the owner's devices on
    this machine? [y/N]" with each device's fingerprint, reusing `agora node trust --from-hub`. It is the node's own question; the hub cannot
@@ -290,6 +292,18 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   not a CA, its common name is the node id, and its public key is the one in this machine's own CSR. Each check has a test against a certificate wrong in just that way
   (`pairing_client.rs`, `check_delivery`), and each test was seen to fail with its check removed. The CA's fingerprint is printed in the same format as
   `agora hub fingerprint`. The module stores nothing; `agora join` stores only what `pair()` returned.
+- **The name is checked twice: first before anything is sent** (#901, real-machine run RM-07). Right after the handshake, before `PairRequest`, the machine
+  checks that the dialled host is one of the leaf's names (`pairing_client::leaf_names`: rustls' own name check, the one the final check runs, without the chain,
+  which needs the CA delivered at the end). A leaf that fails it is `pair.name_unverified` at once and the connection is closed: no number is shown, the owner gets
+  no card, the hub opens no session and issues no certificate, so it keeps no name a later join would have to replace. Before this the owner could approve, the
+  hub issued and recorded the certificate, and the machine then threw it away, leaving a name the hub refused without "replace" although no machine had joined.
+  Passing the early check proves nothing about the hub: the whole of step 6 still runs after the approval. Tested over real TLS in `pair_node.rs`
+  (`an_address_that_is_in_no_name_of_the_hubs_leaf_fails_before_the_owner_is_asked_and_leaves_no_name`) and in `pairing_client.rs`. What is not solved: a join
+  thrown away **after** the approval for another reason (the leaf does not chain to the delivered CA, a delivered certificate that fails its checks, a
+  confirmed CA fingerprint that differs, the machine stopped or could not store) still leaves the certificate the hub recorded, and the owner's next join of that
+  name must choose Replace. The hub cannot tell that the machine threw it away: `PairResult` is the last message and nothing answers it. Releasing such a name
+  needs either a new message from the machine (a schema change) or a rule for certificates that never connected (a decision on section 12's taken-name rule),
+  so it is left to an ADR.
 - **A leaf that does not chain to the delivered CA is reported as `pair.name_unverified`** too (step 6b lists both under that code), with the address as the
   parameter. The sentence tells the person to ask the owner to start the hub with `--name ADDRESS`.
 - **The address.** `host`, `host:port`, `[v6]:port` or `wss://host:port`; the default port is 7443 (the front door's). The host is both what is dialled and the name
