@@ -302,6 +302,18 @@ of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows
 repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
+UTF-16 text (#940). A file that is UTF-16 with a byte-order mark (`FF FE` or `FE FF`; Windows PowerShell 5.1's `>` writes the
+former), of even length, valid UTF-16 and with no control character other than a tab, a line break, a carriage return or a form
+feed, is text. `files.read` still answers its bytes as they are (a download is the file itself); clients decode it for showing.
+Where git prints `Binary files ... differ` for such a file (it holds NUL bytes, and the node runs git with `--no-textconv`), or
+prints its raw bytes as text (a file with no zero byte: one line of characters above U+00FF), the `git.diff` section is written
+by the node as git writes a text diff (three lines of context), from the decoded text of both sides (HEAD's and the workspace's,
+each at most 64 KiB, at most 50 such files); a new file that git does not track is shown decoded the same way. The `diff --git`,
+mode and `index` lines are git's, so the blob ids are those of the bytes. A section stays git's when a side is not text, cannot be
+read, or the two texts are the same (only the encoding changed). A secret file is still cut to its name, and the workspace's file
+is read with the secret check of `files.read` (on where the opened file really is) unless `files.show_secret` is on. Nothing is
+ever written back in another encoding.
+
 Secret files (ADR-0080). The node decides by file name (case-insensitive, any folder): `.env` and `.env.*` (not `.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` (not their `.pub`), `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, anything inside a folder named `.ssh`, `.aws` or `.gnupg`, and `.docker/config.json`. Added to the schema (old clients ignore them, so no capability): `FileEntry.secret` (4), which `files.list` sets on such entries (it still lists them); the error `files.secret` (`path`), which `files.read` answers for the requested path or for where a link leads; `GitDiffResult.secret_files` (2, `SecretFileChange { path, added, removed }`) and, in `diff`, a changed secret file as its `diff --git` line plus mode and rename lines, with no hunk, blob id or content. The change counts of `git.status` are unchanged. The owner's policy line `files.show_secret = true` (any other value is off; the hub cannot change it) turns all of this off for the machine; `agora doctor` says when it is on.
 
 ### Selected directories (ADR-0052)

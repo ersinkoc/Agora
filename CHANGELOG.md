@@ -16,6 +16,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A mesh message to another machine whose answer never comes back now fails with a `delivery_failed` notice `node.timeout` after 40 s on the sending machine, so the sender always learns that it was not delivered (#915).
 - In the terminal client, the agent list of `s` and `f` now offers every agent installed on the machine, nine to a page: `n` shows the next page, and the question says which page you are on (#910). Before, only the first nine were offered and nothing said more existed.
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
+- A text file written as UTF-16 with a byte-order mark (what Windows PowerShell's `>` writes, as in `"hello" > a.txt` in the Shell) is shown as text in Files and the terminal client's file view, and its changes as a text diff in Changes and `r`, instead of "This file is not text". The file itself is never rewritten; a download is still its own bytes (#940).
 
 ## 0.3.33
 
