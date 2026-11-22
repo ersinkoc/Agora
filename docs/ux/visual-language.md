@@ -58,6 +58,10 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   for a deletion. A changed line says so by shape as well as colour: a `-` or `+` glyph and a 2 px bar on its left edge. The red
   reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. This documents a
   content-colour exception to "colour is reserved for state"; it does not change the state-colour rule.
+  The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`), for the sign of an agent that acts without asking
+  (ADR-0059, ADR-0090 Amendment A), a lightning bolt with no words whose meaning is its tooltip and accessible name. It is never amber, so
+  it cannot be read as "needs you" or as the quota chip (an amber warning sign that always shows its percentage); shape (bolt against
+  triangle) and the words in the tooltip carry the difference too, never the colour alone.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
 
 ### Agent state language

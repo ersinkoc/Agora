@@ -54,9 +54,9 @@ const machineName = (a: AgentTileModel, machines: readonly { id: string; name: s
   return sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name;
 };
 
-/** "Acts freely" for an agent that acts without asking now: started so, or switched to a mode or setting that skips approvals. */
+/** The acts-without-asking sign for an agent that acts without asking now: started so, or switched to a mode or setting that skips approvals. */
 function FreeBadge({ agent }: { agent: AgentTileModel }) {
-  return <NoAskBadge agent={{ skipsPermissions: actsFreelyNow(agent) }} session={!agent.skipsPermissions} compact nested />;
+  return <NoAskBadge agent={{ skipsPermissions: actsFreelyNow(agent) }} session={!agent.skipsPermissions} nested />;
 }
 
 /** One agent in the picker: name, kind, machine, its state, and whether it acts without asking. One button, at least 44 px high. */

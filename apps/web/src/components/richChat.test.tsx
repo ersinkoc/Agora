@@ -414,24 +414,24 @@ describe('the agent\'s own settings', () => {
     expect(setConfig).toHaveBeenCalledWith('n/a', 'mode', 'yolo');
     expect(host.querySelector('button[aria-label="Mode: Waiting for your approval"]')).not.toBeNull();
     expect(host.textContent).toContain('Nothing has changed yet.');
-    expect(host.textContent).not.toContain('Acts freely');
+    expect(host.querySelector('[data-no-ask]')).toBeNull();
     expect(host.querySelector('[role=alertdialog]')).toBeNull();
   });
-  it('when the machine reports the value the wait ends and "Acts freely" shows; switching back drops the badge and asks nothing', async () => {
+  it('when the machine reports the value the wait ends and the acts-without-asking sign shows; switching back drops it and asks nothing', async () => {
     const setConfig = vi.fn(async (_a: string, _c: string, v: string) => (v === 'yolo' ? { approvalNeeded: 'n/ap-1' } : true));
     const draw = (cur: string, ids: string[]) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: cur }] }} setConfig={setConfig} approvals={new Set(ids)} />));
     draw('plan', ['n/ap-1']);
     await pickYolo();
     draw('yolo', []); // approved: the machine reports the new mode and the card is gone
     expect(host.querySelector('button[aria-label^="Mode: Bypass"]')).not.toBeNull();
-    expect(host.textContent).toContain('Acts freely');
+    expect(host.querySelector('[data-no-ask]')).not.toBeNull();
     expect(host.textContent).not.toContain('Waiting for your approval');
     open(/Mode/);
     const plan = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Plan')) as HTMLButtonElement;
     await act(async () => { plan.click(); });
     expect(setConfig).toHaveBeenLastCalledWith('n/a', 'mode', 'plan');
     draw('plan', []);
-    expect(host.textContent).not.toContain('Acts freely');
+    expect(host.querySelector('[data-no-ask]')).toBeNull();
     expect(host.textContent).not.toContain('Waiting');
   });
   it('a card that goes without the value being reported (denied, ran out of time, withdrawn) puts the control back and says so', async () => {

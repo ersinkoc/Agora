@@ -17,6 +17,8 @@
   --color-idle: var(--state-idle);
   --color-unknown: var(--state-unknown);
   --color-removed: var(--diff-removed);
+  /* An agent that acts without asking (NoAskBadge): the same fixed red, never amber, which means "needs you" and marks the quota chip. */
+  --color-risk: var(--diff-removed);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-mono);
   --radius-xs: var(--radius-xs);
@@ -89,6 +91,8 @@
   .tip[tabindex]::after { content: attr(data-tip); @apply pointer-events-none invisible absolute start-0 top-full z-30 mt-1 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
   .tip[tabindex]:focus-visible::after, .tip[tabindex]:focus::after { @apply visible opacity-100; }
   @media (hover: hover) { .tip[tabindex]:hover::after { @apply visible opacity-100; } }
+  /* The same tooltip drawn over the page by a component (NoAskBadge), so a clipping row or the window's edge never cuts it. */
+  .tip-bubble { @apply pointer-events-none fixed z-50 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink; box-shadow: var(--shadow); }
   .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }

@@ -88,9 +88,9 @@ describe('Give to an agent on the board', () => {
     expect(rows[0]!.textContent).toContain('claude · a-1');
     expect(rows[0]!.textContent).toContain('claude on laptop');
     expect(rows[0]!.textContent).toContain('Working');
-    expect(rows[0]!.textContent).toContain('Acts freely');
+    expect(rows[0]!.querySelector('[data-no-ask="started"]')?.getAttribute('aria-label')).toMatch(/^Runs without asking: /);
     expect(rows[1]!.textContent).toContain('Helper · claude on server');
-    expect(rows[1]!.textContent).not.toContain('Acts freely');
+    expect(rows[1]!.querySelector('[data-no-ask]')).toBeNull();
     expect(dialog().textContent).not.toContain('elsewhere');
     for (const b of rows.map((r) => r.querySelector('button')!)) expect(b.className).toContain('min-h-11');
   });
@@ -316,7 +316,7 @@ describe('cross-review fixes', () => {
   it('shows "acts freely" for a mode that skips approvals, and follows a change while the confirmation is open', () => {
     const at = (mode: string) => api([agent('n1/a-1', { session: freeSession(mode) })]);
     render(<GiveDialog task={theTask} give={at('yolo')} onClose={() => {}} />);
-    expect(dialog().querySelector('[data-agent-id]')!.textContent).toContain('Acts freely');
+    expect(dialog().querySelector('[data-agent-id] [data-no-ask="session"]')).not.toBeNull();
     click(dialog().querySelector('[data-agent-id] button'));
     expect(dialog().querySelector('[role=note]')?.textContent).toContain('acts without asking');
     // The agent is switched back to a mode that asks: the warning goes. Switched to skipping again: it comes back.
