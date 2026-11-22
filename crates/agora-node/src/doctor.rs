@@ -266,8 +266,9 @@ fn version_of(program: &str, timeout: std::time::Duration) -> Option<String> {
 
 /// Runs `cmd` (no input, no error output) and returns how it ended and the first `max` bytes of its output, when it ends within
 /// `timeout`; output past `max` is read and dropped, so a program that writes a lot is neither stalled nor stored. F68: a program
-/// that does not end in time (or a process it started that keeps its output open) is killed with its process group and `None` is
-/// returned, so the doctor always returns.
+/// that does not end in time (or a process it started that keeps its output open) is killed and `None` is returned, so the doctor
+/// always returns: on Unix with its process group, on Windows the direct child is killed and reaped (`kill_process_tree`); the
+/// caller's time limit holds either way.
 fn output_within(
     mut cmd: Command,
     timeout: std::time::Duration,
