@@ -12,6 +12,8 @@
 //! - `later-flood`: answers the prompt, waits 1.5 s, then says 3000 chat items of 1000 bytes each and `flood-end` (output that fills
 //!   what a holder keeps while no node reads, ADR-0093), then writes `later.txt` in its folder.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
+//! - `mode:ID` (with `--modes`): switches itself to mode ID, as an agent may on its own (ACP `current_mode_update`), and reports its
+//!   options again with ID as the current mode.
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
@@ -48,6 +50,17 @@ fn state<W: Write>(out: &mut W, sid: &str, s: &str) -> io::Result<()> {
         "state/update",
         json!({"sessionId": sid, "state": format!("AGENT_STATE_{s}")}),
     )
+}
+
+/// The four modes `--modes` reports.
+fn all_modes() -> Value {
+    let mode = |id: &str, name: &str, skips: bool| json!({"id": id, "name": name, "description": "", "skipsPermissions": skips});
+    json!([
+        mode("default", "Ask first", false),
+        mode("plan", "Plan", false),
+        mode("turbo", "Turbo", false),
+        mode("bypassPermissions", "Bypass Permissions", true),
+    ])
 }
 
 /// Runs until `shutdown` or end of input.
@@ -108,13 +121,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 )?;
                 state(out, &session, "IDLE")?;
                 if modes {
-                    let mode = |id: &str, name: &str, skips: bool| json!({"id": id, "name": name, "description": "", "skipsPermissions": skips});
-                    let all_modes = json!([
-                        mode("default", "Ask first", false),
-                        mode("plan", "Plan", false),
-                        mode("turbo", "Turbo", false),
-                        mode("bypassPermissions", "Bypass Permissions", true),
-                    ]);
+                    let all_modes = all_modes();
                     note(
                         out,
                         "session/options",
@@ -282,6 +289,12 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             }
                         }
                     }
+                    switch if modes && switch.starts_with("mode:") => note(
+                        out,
+                        "session/options",
+                        json!({"sessionId": session, "modes": all_modes(), "models": [],
+                               "currentMode": &switch["mode:".len()..], "currentModel": ""}),
+                    )?,
                     other => {
                         state(out, &session, "WORKING")?;
                         note(

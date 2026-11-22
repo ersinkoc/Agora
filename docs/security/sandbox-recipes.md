@@ -7,20 +7,29 @@ write the full path). A path that does not exist is skipped; `agora doctor` name
 What is never a default, and why: `~/.gitconfig` and `~/.config/git` can hold credentials (`url.*.insteadOf` with a token, credential
 helper settings), so reading them is the owner's choice, not the node's.
 
-## Git inside a confined agent (ADR-0078)
+## Git inside a confined agent
 
-You do not need to list `~/.gitconfig` for `git status`, `commit`, `branch` and `diff` to work. At every start the node writes a small
-global git file for the agent (on Linux in a private `git-config` folder under `~/.agora` in your home folder (always there, whatever data folder the node was given; no agent profile grants it), so another confined agent that can write a folder around this one's worktree cannot rewrite it; on macOS and Windows in a private `agora-git-config` folder of the system temp folder on macOS and Windows (mode 0700; on Windows an ACL that gives only you and SYSTEM access and does not inherit the temp folder's, which on a machine with other sandboxes can let them rewrite it)), sets
-`GIT_CONFIG_GLOBAL` to it and `GIT_CONFIG_NOSYSTEM=1`, and gives the sandbox a read grant for that one file and no write grant. It holds
-only these keys, each copied if you have set it in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
-`core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote`, `color.ui`. Nothing else is
-copied: no `credential.*`, `include`/`includeIf`, `url.*`, `alias.*`, `core.sshCommand`, `core.hooksPath`, `core.fsmonitor`, `core.pager`,
-`core.editor`, `http.*`, `gpg.*` or `commit.gpgsign`. The node reads the keys with `git config --global --no-includes`, so an identity that
-lives only in a file you `include` is not found; set it in the global file itself. A value that is empty, long, holds a control character
-(a newline too), or, for a key other than the two identity ones, anything but letters, digits, `_`, `-` and `.`, is dropped. The file is not written at all if its folder is one the agent may write, and it stays on disk after the agent ends (one small file per worktree, named with a hash of its path; those of removed worktrees accumulate) until the next start rewrites it. A confined agent also does not read the system git configuration, nor a `safe.directory` you set globally: git run in a repository owned by another user stops on "dubious ownership" there (a worktree the node made is owned by the user it runs as, so this is rare; the fix is to own the folder, or to list `~/.gitconfig` yourself). Other `GIT_*` variables the node inherited (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_PAGER`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`) are not scrubbed by this change.
+At each confined launch the node writes a small Git configuration to `<data>/git-config/` (normally
+`<AGORA_HOME>/data/git-config/`). Git uses that file for its global settings, with `GIT_CONFIG_GLOBAL` pointing to it
+and `GIT_CONFIG_NOSYSTEM=1`. The node grants read access to the one file for that launch. The grant allows opening the
+file while keeping directory listing, sibling reads and writes denied. If the agent's ordinary grants reach that folder,
+or the node cannot prepare the private file, the node skips the generated settings. See [ADR-0078][git-config] and
+[ADR-0098][git-config-location].
 
-If you list `~/.gitconfig` in `sandbox.read` yourself, the node does not set `GIT_CONFIG_GLOBAL` and your choice stands as before; that is also
-the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email` that the node can copy (one found only through an `include` or the system file counts as missing, because the agent would not get it).
+The node copies these keys when set in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
+`core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote` and `color.ui`.
+It reads them with `git config --global --no-includes`, so settings defined through `include` are left out. It skips
+empty or long values and values with control characters. Keys other than the two identity keys also require values made
+up of letters, digits, `_`, `-` and `.`. The node clears `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS` overrides
+when it supplies the file. Other inherited variables such as `GIT_SSH_COMMAND` and `GIT_EXEC_PATH` are outside this setting.
+
+If you list `~/.gitconfig` in `sandbox.read`, the agent uses your configuration as before, including settings such as
+`safe.directory` for a checkout owned by another user. The node leaves generated files on disk after each launch and
+retains copies in legacy locations for agents still using them. `agora doctor` warns when it cannot find a
+`user.name` or `user.email` to copy on a machine that confines agents.
+
+[git-config]: ../adr/0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md
+[git-config-location]: ../adr/0098-generated-git-configuration-belongs-to-the-node.md
 
 ## Unix sockets, the ssh-agent and `git push` over ssh (ADR-0083)
 

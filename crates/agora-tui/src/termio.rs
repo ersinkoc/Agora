@@ -2,10 +2,11 @@
 //! mouse reports, the wheel on a full-screen program, focus events, pastes, links and the title.
 //!
 //! All pure: bytes in, bytes or text out, no I/O. The emulator (`agora-vt`) keeps the screen, the cursor, bracketed paste, the
-//! alternate screen and the title, but not the mouse modes, and the node's repaint (`subscribed_snapshot`) does not carry them
-//! either. So this module reads the mode-setting sequences from the byte stream the client already feeds the emulator
-//! ([`ModeScanner`]): a program that switched the mouse on **before** this client started watching it is not known to have done so
-//! until it switches the mode on again (`docs/ux/terminal-fidelity.md`). Everything a program sends is untrusted text: nothing here
+//! alternate screen and the title. The mouse and focus modes are read here from the byte stream the client already feeds the
+//! emulator ([`ModeScanner`]). The node's repaint sets or resets every mode its emulator tracks (ADR-0100), mouse tracking 1000/1002/1003,
+//! encodings 1005/1006 and focus 1004 among them, so a program that switched the mouse on before this client started watching is
+//! known from the first repaint; mouse 9 and the urxvt encoding 1015, which the node does not track, are known once the program
+//! switches them while this client watches (`docs/ux/terminal-fidelity.md`). Everything a program sends is untrusted text: nothing here
 //! executes or opens anything; the caller decides, after showing the user what it would do.
 
 use agora_vt::Modes;

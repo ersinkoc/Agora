@@ -558,6 +558,19 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
             ],
         ),
         "adapter.output_dropped" => t(key!("tui-notice-output_dropped"), &[("bytes", p("bytes"))]),
+        // #902: the node's own notices about an adapter that ended on its own.
+        "adapter.restarting" => t(key!("tui-notice-restarting"), &[("attempt", p("attempt"))]),
+        // The exit code only when the node knows it (#902): an unknown one is left out, never said as `?` or as 1.
+        "adapter.gave_up" => match e.params.get("exit_code") {
+            Some(_) => t(
+                key!("tui-notice-gave_up"),
+                &[("restarts", p("restarts")), ("exit_code", p("exit_code"))],
+            ),
+            None => t(
+                key!("tui-notice-gave_up-no_code"),
+                &[("restarts", p("restarts"))],
+            ),
+        },
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
@@ -1086,6 +1099,33 @@ mod tests {
         );
         assert!(
             said.contains("tui-notice-other[code=future.thing]"),
+            "{said}"
+        );
+        // #902: the node's own notices about an adapter that ended on its own, with their numbers.
+        let mut restarting = entry(ChatRole::Agent, ChatKind::Notice, "");
+        restarting.code = "adapter.restarting".into();
+        restarting.params.insert("attempt".into(), "2".into());
+        let mut gave_up = entry(ChatRole::Agent, ChatKind::Notice, "");
+        gave_up.code = "adapter.gave_up".into();
+        gave_up.params.insert("restarts".into(), "5".into());
+        let unknown = gave_up.clone();
+        gave_up.params.insert("exit_code".into(), "3".into());
+        let said = render_chat(
+            &[restarting, gave_up, unknown],
+            "a",
+            "",
+            (160, 24),
+            false,
+            &t,
+        )
+        .join("\n");
+        assert!(said.contains("tui-notice-restarting[attempt=2]"), "{said}");
+        assert!(
+            said.contains("tui-notice-gave_up[restarts=5,exit_code=3]"),
+            "{said}"
+        );
+        assert!(
+            said.contains("tui-notice-gave_up-no_code[restarts=5]"),
             "{said}"
         );
         let a = AgentSnapshot {

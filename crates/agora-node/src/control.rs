@@ -45,6 +45,9 @@ pub const KIND_TERM_SNAPSHOT: u8 = 1;
 pub const KIND_TERM_RESIZE: u8 = 2;
 /// Payload: exit code i32 LE (negative signal number when killed by a signal, `i32::MIN` if unknown).
 pub const KIND_TERM_EXIT: u8 = 3;
+/// ADR-0100: history the window asked for (`TerminalSubscribe.history_lines`), ANSI that puts the newest lines into its scrollback;
+/// sent only right after the subscription's response, before its first snapshot, never with a resync.
+pub const KIND_TERM_HISTORY: u8 = 4;
 /// Chat transcript stream (ADR-0038). Payload: an encoded `ChatSnapshot`, sent first.
 pub const KIND_CHAT_SNAPSHOT: u8 = 10;
 /// Payload: an encoded `ChatEntry`, one for every line added after the snapshot.
@@ -1955,7 +1958,13 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok((agent, snap, sub)) = outcome {
+        if let Ok(Subscribed {
+            agent,
+            history,
+            snap,
+            sub,
+        }) = outcome
+        {
             let (ctx, writer, alive, stop) = (
                 Arc::clone(ctx),
                 Arc::clone(writer),
@@ -1965,7 +1974,11 @@ fn handle_request(
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-term".into())
-                .spawn(move || pump(&ctx, &writer, stream_id, &agent, &snap, &sub, &alive, &stop));
+                .spawn(move || {
+                    pump(
+                        &ctx, &writer, stream_id, &agent, history, &snap, &sub, &alive, &stop,
+                    )
+                });
         }
         return true;
     }
@@ -2002,11 +2015,20 @@ fn handle_request(
     true
 }
 
+/// An accepted terminal subscription: whose terminal, the history frames the window asked for (ADR-0100), the snapshot they end at,
+/// and the live output after it.
+struct Subscribed {
+    agent: AgentId,
+    history: Vec<Vec<u8>>,
+    snap: Snapshot,
+    sub: OutputSubscription,
+}
+
 fn subscribe(
     ctx: &ControlContext,
     sub: &v1::TerminalSubscribe,
     stream_id: u32,
-) -> Result<(AgentId, Snapshot, OutputSubscription), Error> {
+) -> Result<Subscribed, Error> {
     if stream_id < agora_protocol::frame::FIRST_DYNAMIC_STREAM {
         return Err(invalid("stream_id"));
     }
@@ -2020,9 +2042,18 @@ fn subscribe(
     let handle = guard.terminal(&id).ok_or_else(|| {
         Error::new(ErrorCode::AgentNotFound).with("agent_id", sub.terminal_id.as_str())
     })?;
-    let (snap, subscription) = handle.subscribe();
+    // ADR-0100: the window's count, capped by what the terminal keeps (and by the replay's byte cap).
+    // Subscribed after the supervisor's lock is let go: copying and formatting a history must not hold up other commands.
+    let lines = usize::try_from(sub.history_lines).unwrap_or(usize::MAX);
+    let watch = handle.watch();
     drop(guard);
-    Ok((id, snap, subscription))
+    let (history, snap, subscription) = watch.subscribe_with_history(lines);
+    Ok(Subscribed {
+        agent: id,
+        history,
+        snap,
+        sub: subscription,
+    })
 }
 
 fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
@@ -2051,11 +2082,18 @@ fn pump(
     writer: &SharedWriter,
     stream: u32,
     agent: &AgentId,
+    history: Vec<Vec<u8>>,
     snap: &Snapshot,
     sub: &OutputSubscription,
     alive: &AtomicBool,
     stop: &AtomicBool,
 ) {
+    // ADR-0100: the history the window asked for comes first, then the snapshot it ends at; each frame is let go once sent.
+    for frame in history {
+        if send(writer, stream, KIND_TERM_HISTORY, frame).is_err() {
+            return;
+        }
+    }
     // Each repaint is followed by the size it was made at, so a client that paints the screen itself (rather than resizing the
     // agent to fit) knows how wide the program thinks its lines are.
     let repaint = |snap: &Snapshot| {

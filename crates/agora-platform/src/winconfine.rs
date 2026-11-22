@@ -966,6 +966,7 @@ pub(crate) struct Confinement {
     logon_text: String,
     ledger: PathBuf,
     token: Token,
+    git_config: Option<PathBuf>,
 }
 
 impl Confinement {
@@ -993,6 +994,7 @@ impl Confinement {
         // overwrite a ledger an earlier spawn kept after a failed removal nor have its own deleted when that spawn ends.
         let spawn = random_numbers()?;
         let ledger = dir.join(format!("{sid_text}-{:08x}{:08x}.acl", spawn[0], spawn[1]));
+        let git_config = sandbox.git_config_file();
         // Folders that exist, read ones first; a folder that is also writable keeps the stronger entry.
         let mut wanted: Vec<(PathBuf, u32)> = Vec::new();
         for p in &sandbox.read {
@@ -1007,7 +1009,10 @@ impl Confinement {
         }
         // Recorded before anything is changed: a crash between the two leaves a ledger that recovery can undo.
         let all: Vec<PathBuf> = wanted.iter().map(|(p, _)| p.clone()).collect();
-        let above = ancestors_of(&all);
+        let mut destinations = all.clone();
+        destinations.extend(git_config.iter().cloned());
+        let mut above = ancestors_of(&destinations);
+        above.extend(git_config.iter().cloned());
         // A folder the user labelled on purpose is left as it is (and not undone later). One that a live agent labelled (a shared
         // `objects`, `refs`) is recorded here too, so the label stays until the last agent using it has ended.
         let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", ledger_path(p));
@@ -1051,6 +1056,7 @@ impl Confinement {
             logon_text,
             ledger,
             token: Token(null_mut()),
+            git_config: None,
         };
         // Every path is recorded in `confinement` *before* it is changed: on failure `confinement` is dropped, which undoes whatever was
         // added so far, including a change that went half through.
@@ -1074,6 +1080,14 @@ impl Confinement {
             }
         }
         for path in above {
+            if git_config.as_ref() == Some(&path) {
+                // Only this file is readable. Its ancestors get traversal rights.
+                confinement.granted_here.push(path.clone());
+                if change_acl_here(&path, confinement.sid.0, FILE_GENERIC_READ, true).is_ok() {
+                    confinement.git_config = Some(path);
+                }
+                continue;
+            }
             // A folder whose permissions the user may not change (`C:\Users`) is left alone: `Users` in the restricting list covers it.
             match change_acl_here(&path, confinement.sid.0, ANCESTOR_MASK, true) {
                 Ok(()) => confinement.granted_here.push(path),
@@ -1114,6 +1128,10 @@ impl Confinement {
     /// The primary token to start the agent's process with.
     pub(crate) fn token(&self) -> HANDLE {
         self.token.0
+    }
+
+    pub(crate) fn git_config(&self) -> Option<&Path> {
+        self.git_config.as_deref()
     }
 }
 
