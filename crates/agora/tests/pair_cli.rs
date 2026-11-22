@@ -561,6 +561,48 @@ fn a_denied_machine_stores_nothing_and_the_hubs_own_address_is_named_in_its_cert
     assert!(byip.join("link").join("node-id").exists(), "{text}");
 }
 
+/// #943 (RM-07): a hub that listens on loopback only cannot be reached from another machine, so `agora pair open` says so and how to
+/// make it listen on the network, and offers only an address the hub listens on and its certificate names (a second Agora on this
+/// same computer). It used to say `agora join <this computer's name>:PORT`, which another machine cannot reach. The offered address
+/// is then dialled and the join completes.
+#[test]
+fn a_loopback_only_hub_says_other_machines_cannot_reach_it_and_offers_only_this_computer() {
+    let root = tmp("loopback");
+    let hub = hub(&root);
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut owner = hub.open(&owner_home);
+    let screen = owner.seen.clone();
+    assert!(screen.contains("listens on this computer only"), "{screen}");
+    assert!(
+        screen.contains(&format!("agora --listen 0.0.0.0:{}", hub.port)),
+        "{screen}"
+    );
+    let local = format!("agora join 127.0.0.1:{}", hub.port);
+    assert!(screen.contains(&local), "{screen}");
+    // Every `agora join` it suggests is that one: no host name another machine would be told to dial.
+    assert_eq!(
+        screen.matches("agora join ").count(),
+        screen.matches(&local).count(),
+        "{screen}"
+    );
+    if let Some(host) = agora_platform::hostname().filter(|h| !h.trim().is_empty()) {
+        assert!(
+            !screen.contains(&format!("agora join {}:", host.trim())),
+            "{screen}"
+        );
+    }
+
+    // The address it offered works on this computer.
+    let second = root.join("second");
+    let mut m = join(&second, &format!("127.0.0.1:{}", hub.port), &[]);
+    m.wait_for("Number ");
+    owner.wait_for("wants to join");
+    owner.answer("y\r");
+    let (ok, text) = m.finish();
+    assert!(ok, "{text}");
+}
+
 /// F821: the owner's screen ends, with a failure and a sentence, when the hub it answers for goes away; it used to wait for ever
 /// and spin on the closed connection.
 #[test]
