@@ -257,6 +257,8 @@ pub struct AdapterCall {
     session: String,
     op: CallOp,
     generation: u64,
+    /// ADR-0101 (Codex review of PR #1007): the run of the adapter process this call was made to (`AdapterRich::epoch`).
+    epoch: u64,
 }
 
 /// What preparing a switch of a running agent's mode or config option came to (ADR-0090 Amendment A).
@@ -293,6 +295,13 @@ impl AdapterCall {
     /// The turn (or restart) this call was made in: what the caller reports back about it names this, so a late report is ignored.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The run of the adapter process this call was made to (a restart, a resume, an exit and a stop each begin another): a result
+    /// recorded about the agent's process names this, so one that comes back after the process was replaced is not applied to the
+    /// replacement ([`Supervisor::runs`]).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Makes the request and waits for the answer.
@@ -829,11 +838,46 @@ impl AdapterRich {
     }
 }
 
+/// ADR-0101 (Codex review of PR #1007): how the adapter process that runs now was launched, recorded on every launch path. A decision
+/// that depends on confinement (`skip_permissions = confined_only`) reads this, never the node's current sandbox setting: an adapter
+/// the holder runs is unconfined by design (`launch_held_adapter` takes none with a sandbox), also after a node that confines agents
+/// took it up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confinement {
+    /// Started by the node under a sandbox the platform enforces in full.
+    Confined,
+    /// Started without a sandbox (or with one the platform cannot enforce in full), or run by the holder.
+    Unconfined,
+    /// Nothing recorded (no process launched yet): read as not confined.
+    #[default]
+    Unknown,
+}
+
+impl Confinement {
+    /// Only a launch recorded as confined counts as confined (an unknown one fails closed).
+    pub fn confined(self) -> bool {
+        self == Self::Confined
+    }
+}
+
+/// ADR-0101: whether the `skip_permissions` policy lets an agent launched with `confinement` be allowed always (`forbid`: never,
+/// `confined_only`: only a launch recorded as confined, `allow`: always).
+pub fn always_by_policy(policy: SkipPermissions, confinement: Confinement) -> bool {
+    policy.refusal(confinement.confined()).is_none()
+}
+
 impl AdapterEntry {
     /// ADR-0101: the adapter declared `approval_scopes`: its requests' `scopes` are read, and it never answers a single Allow with a
     /// remembered option.
     fn strict_scopes(&self) -> bool {
         self.capabilities.iter().any(|c| c == "approval_scopes")
+    }
+
+    /// ADR-0101: the process runs the node's ACP bridge (`<agora> acp-bridge -- <agent>`, [`Manifest::driver`]). Read from the command
+    /// it was started with, since every adapter agent's `agent.level` is `L3Adapter`.
+    fn behind_acp_bridge(&self) -> bool {
+        self.spec.command.get(1).map(String::as_str) == Some("acp-bridge")
+            && self.spec.command.get(2).map(String::as_str) == Some("--")
     }
 }
 
@@ -867,6 +911,8 @@ struct AdapterEntry {
     /// #933: the generated Git configuration of the adapter process that runs now (ADR-0098), removed when it ends, is stopped or is
     /// replaced by a restart (which writes its own). `None` when it is not confined or nothing runs.
     git_config: Option<crate::gitconfig::LaunchFile>,
+    /// ADR-0101: how the adapter process that runs now (or ran last) was launched; set by every launch path.
+    confinement: Confinement,
 }
 
 struct Entry {
@@ -1025,6 +1071,9 @@ impl Supervisor {
             return Err(SupervisorError::NotFound(id));
         };
         e.adapter = Some(adapter);
+        // ADR-0101 (Codex review of PR #1007): the holder runs only adapters without a sandbox (`launch_held_adapter`), whatever this
+        // node's confinement policy says now.
+        e.confinement = Confinement::Unconfined;
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
         // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
@@ -1839,10 +1888,11 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                         file,
+                        self.sandbox.enforceable(),
                     )
                 })
                 .map_err(|e| self.program_missing(&req.kind, e));
-            let (adapter, session_id, capabilities, git_config) = match launched {
+            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -1880,6 +1930,7 @@ impl Supervisor {
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
                     git_config,
+                    confinement,
                 },
             );
         } else {
@@ -2092,10 +2143,11 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                     file,
+                    self.sandbox.enforceable(),
                 )
             })
             .map_err(|e| self.program_missing(&req.kind, e));
-        let (adapter, session_id, capabilities, git_config) = match result {
+        let (adapter, session_id, capabilities, git_config, confinement) = match result {
             Ok(started) => started,
             Err(error) => {
                 self.abandon(&id, created);
@@ -2131,6 +2183,7 @@ impl Supervisor {
                 launch,
                 folder: None,
                 git_config,
+                confinement,
             },
         );
         Ok(id)
@@ -2334,6 +2387,7 @@ impl Supervisor {
             .unwrap_or_default();
         let holder = self.holder.clone();
         let kept_launch = self.kept_launch.contains(id);
+        let enforceable = self.sandbox.enforceable();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2357,11 +2411,13 @@ impl Supervisor {
                 creds,
                 held.as_ref(),
                 file,
+                enforceable,
             )
         });
         match launched {
-            Ok((adapter, session_id, capabilities, git_config)) => {
+            Ok((adapter, session_id, capabilities, git_config, confinement)) => {
                 e.adapter = Some(adapter);
+                e.confinement = confinement;
                 e.git_config = git_config;
                 e.session_id = session_id;
                 e.capabilities = capabilities;
@@ -2401,6 +2457,7 @@ impl Supervisor {
             session: e.session_id.clone(),
             op,
             generation: e.rich.generation,
+            epoch: e.rich.epoch,
         })
     }
 
@@ -2856,11 +2913,12 @@ impl Supervisor {
     }
 
     /// ADR-0101: whether "always" may be offered for (and given to) this agent now: the node's `skip_permissions` policy (`forbid`
-    /// never, `confined_only` only while agents are confined) and the kind's manifest (`[structured] allow_always = false`).
+    /// never, `confined_only` only for an agent whose process was launched confined, [`always_by_policy`]) and the kind's manifest
+    /// (`[structured] allow_always = false`). Codex review of PR #1007: the agent's own launch is read ([`Confinement`]), never the
+    /// node's sandbox setting, so a process the holder runs (unconfined) never counts as confined after a node that confines took it
+    /// up, and a launch with nothing recorded fails closed.
     fn always_permitted(&self, e: &AdapterEntry) -> bool {
-        let confined =
-            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
-        self.skip_permissions.refusal(confined).is_none()
+        always_by_policy(self.skip_permissions, e.confinement)
             && self
                 .kinds
                 .get(&e.agent.kind)
@@ -2875,7 +2933,10 @@ impl Supervisor {
         Some((e.strict_scopes(), self.always_permitted(e)))
     }
 
-    /// ADR-0101: the policy a decision on this agent's request is checked under, read when the decision arrives. A single Allow is
+    /// ADR-0101: the policy a decision on this agent's request is checked under, when the decision arrives: the `skip_permissions`
+    /// line the node read from its policy file at start (a change to the file applies from the next node start, as for every policy
+    /// line) and the agent's recorded launch ([`Confinement`]). The caller binds the call it then makes to the same run
+    /// ([`adapter_epoch`](Self::adapter_epoch)). A single Allow is
     /// refused (Codex review of ADR-0101) only for an agent behind an ACP bridge that did not declare `approval_scopes` (one from
     /// before ADR-0101, kept across a node update, which may answer it with a remembered option) while "always" is not permitted.
     pub fn approval_decide(&self, id: &AgentId) -> crate::approvals::Decide {
@@ -2885,8 +2946,29 @@ impl Supervisor {
         crate::approvals::Decide::for_adapter(
             self.always_permitted(e),
             e.strict_scopes(),
-            e.agent.level == agora_core::IntegrationLevel::L2Acp,
+            e.behind_acp_bridge(),
         )
+    }
+
+    /// ADR-0101 (Codex review of PR #1007): the run of this adapter agent's process now (`None` for an agent without an adapter). A
+    /// decision checked against the agent's launch is made only to the same run ([`AdapterCall::epoch`]).
+    pub fn adapter_epoch(&self, id: &AgentId) -> Option<u64> {
+        self.adapters.get(id).map(|e| e.rich.epoch)
+    }
+
+    /// ADR-0101 (Codex review of PR #1007): whether the adapter process the call of `epoch` was made to still runs as this agent. A
+    /// result about the agent's process (an always answer it now holds) is recorded only while this holds, under the supervisor's
+    /// lock, so it is ordered before any replacement: a restart, resume, exit or stop begins another run, and the late result of a
+    /// former process never marks its replacement.
+    pub fn runs(&self, id: &AgentId, epoch: u64) -> bool {
+        self.adapters
+            .get(id)
+            .is_some_and(|e| e.running && e.rich.epoch == epoch)
+    }
+
+    /// The launch recorded for this adapter agent's process (ADR-0101), `None` for an agent without an adapter.
+    pub fn confinement(&self, id: &AgentId) -> Option<Confinement> {
+        self.adapters.get(id).map(|e| e.confinement)
     }
 
     /// [`prepare_resolve_approval`](Self::prepare_resolve_approval) and run, under the caller's lock (tests).
@@ -3515,6 +3597,8 @@ impl Supervisor {
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),
                     git_config: None,
+                    // ADR-0101: no process yet; the launch (or the take-up) that follows records how it runs.
+                    confinement: Confinement::Unknown,
                 },
             );
             return Ok(());
@@ -3667,9 +3751,10 @@ impl Supervisor {
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
                 git_config,
+                self.sandbox.enforceable(),
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
-            let (adapter, session_id, capabilities, git_config) = match launched {
+            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -3683,6 +3768,7 @@ impl Supervisor {
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
             entry.adapter = Some(adapter);
+            entry.confinement = confinement;
             entry.git_config = git_config;
             entry.session_id = session_id;
             entry.capabilities = capabilities;
@@ -4212,6 +4298,7 @@ fn begin_send(
             from_mesh: false,
         },
         generation,
+        epoch: e.rich.epoch,
     };
     let (results, agent, tag) = (Arc::clone(sent), id.clone(), next.tag);
     let spawned = std::thread::Builder::new()
@@ -4408,12 +4495,25 @@ fn held_again(
     })
 }
 
+/// What [`launch_adapter`] started: the adapter, its session id, the capabilities it declared, its launch's Git file and how it was
+/// launched (ADR-0101).
+type Launched = (
+    Adapter,
+    String,
+    Vec<String>,
+    Option<crate::gitconfig::LaunchFile>,
+    Confinement,
+);
+
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
 /// it declared. An adapter's stable reason for failing (ADR-0058) becomes [`SupervisorError::Adapter`].
 ///
 /// `folder`: the selected folder the start holds (F1012, F1023). An adapter is started, and given its folder, by path, so the path
 /// must lead to the held folder right before the adapter is started and again once its session is open; otherwise nothing is started,
 /// or the adapter is ended ([`discard_adapter`]), and the start is refused ([`SupervisorError::FolderMoved`]).
+///
+/// ADR-0101: also returns how the process was launched: [`Confinement::Confined`] only for one the node started itself under `sandbox`
+/// while the node's policy is `enforceable` (as every other confinement check reads it); one the holder runs never is.
 #[allow(clippy::too_many_arguments)] // each is one part of the start the caller made
 fn launch_adapter(
     agent: &AgentId,
@@ -4427,15 +4527,8 @@ fn launch_adapter(
     credentials: Vec<(String, String)>,
     folder: Option<&agora_platform::HeldFolder>,
     git_config: Option<crate::gitconfig::LaunchFile>,
-) -> Result<
-    (
-        Adapter,
-        String,
-        Vec<String>,
-        Option<crate::gitconfig::LaunchFile>,
-    ),
-    SupervisorError,
-> {
+    enforceable: bool,
+) -> Result<Launched, SupervisorError> {
     let (program, args) = spec
         .command
         .split_first()
@@ -4473,16 +4566,29 @@ fn launch_adapter(
     };
     // ADR-0093: an adapter the node does not confine is run by the holder when this node has one (so it outlives the node), and by the
     // node itself when it cannot be: exactly as before.
-    let adapter = match launch_held_adapter(agent, &config, holder) {
-        Some(started) => started?,
-        None => Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?,
+    let (adapter, confinement) = match launch_held_adapter(agent, &config, holder) {
+        // The holder takes only an adapter without a sandbox.
+        Some(started) => (started?, Confinement::Unconfined),
+        None => {
+            let confined = config.sandbox.is_some() && enforceable;
+            let adapter =
+                Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+            let confinement = if confined {
+                Confinement::Confined
+            } else {
+                Confinement::Unconfined
+            };
+            (adapter, confinement)
+        }
     };
     match open_session(&adapter, checkout_root, worktree, resume, mesh) {
         Ok(_) if moved() => {
             discard_adapter(adapter, git_config);
             Err(SupervisorError::FolderMoved)
         }
-        Ok((session_id, capabilities)) => Ok((adapter, session_id, capabilities, git_config)),
+        Ok((session_id, capabilities)) => {
+            Ok((adapter, session_id, capabilities, git_config, confinement))
+        }
         Err(e) => {
             discard_adapter(adapter, git_config);
             Err(e)
@@ -5025,6 +5131,198 @@ mod adapter_option_tests {
         for p in ["claude", "codex", "wstack", "opencode"] {
             assert!(!runs_anything(p), "{p}");
         }
+    }
+
+    /// ADR-0101, Codex review of PR #1007: "always" (and, behind an ACP bridge that did not declare `approval_scopes`, a single Allow)
+    /// under `skip_permissions = confined_only` follows how the agent's own process was launched, never the node's sandbox setting
+    /// now: an adapter the holder runs is unconfined (also once a node that confines took it up), and a launch with nothing recorded
+    /// fails closed.
+    #[test]
+    fn always_follows_the_agents_own_launch_never_the_nodes_sandbox_setting() {
+        use crate::launch_options::SkipPermissions as S;
+        use Confinement as C;
+        for (policy, confinement, want) in [
+            (S::Allow, C::Confined, true),
+            (S::Allow, C::Unconfined, true),
+            (S::Allow, C::Unknown, true),
+            (S::ConfinedOnly, C::Confined, true),
+            (S::ConfinedOnly, C::Unconfined, false),
+            (S::ConfinedOnly, C::Unknown, false),
+            (S::Forbid, C::Confined, false),
+            (S::Forbid, C::Unconfined, false),
+            (S::Forbid, C::Unknown, false),
+        ] {
+            assert_eq!(
+                always_by_policy(policy, confinement),
+                want,
+                "{policy:?} {confinement:?}"
+            );
+        }
+
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            Manifest::parse(
+                "kind = \"acp\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"opencode\", \"acp\"] }\n",
+            )
+            .unwrap(),
+        );
+        // The node confines agents now (the old check read only this), and its policy allows "always" only for a confined agent.
+        sup.set_sandbox(crate::sandbox::SandboxPolicy {
+            level: crate::sandbox::Level::Worktree,
+            ..Default::default()
+        });
+        sup.set_skip_permissions(S::ConfinedOnly);
+        let id = AgentId::new("agent-1");
+        sup.restore(Restore {
+            id: id.clone(),
+            kind: "acp".into(),
+            project: agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            folder: std::env::temp_dir(),
+            directory: true,
+            branch: String::new(),
+            session: None,
+            carry_on: false,
+            private_config: None,
+        })
+        .unwrap();
+        assert!(sup.adapters[&id].behind_acp_bridge());
+        let terms = |sup: &Supervisor| {
+            let decide = sup.approval_decide(&id);
+            (sup.approval_raise_terms(&id), decide.always, decide.once)
+        };
+        // Restored, nothing launched yet: unknown, refused.
+        assert_eq!(sup.confinement(&id), Some(C::Unknown));
+        assert_eq!(terms(&sup), (Some((false, false)), false, false));
+        // Taken up from the holder (unconfined by design) by this confining node: neither "always" nor, behind a bridge from before
+        // ADR-0101, a single Allow.
+        sup.adapters.get_mut(&id).unwrap().confinement = C::Unconfined;
+        assert_eq!(terms(&sup), (Some((false, false)), false, false));
+        sup.adapters.get_mut(&id).unwrap().capabilities = vec!["approval_scopes".into()];
+        assert_eq!(terms(&sup), (Some((true, false)), false, true));
+        // Launched confined by this node: allowed.
+        sup.adapters.get_mut(&id).unwrap().confinement = C::Confined;
+        assert_eq!(terms(&sup), (Some((true, true)), true, true));
+        sup.adapters.get_mut(&id).unwrap().capabilities.clear();
+        assert_eq!(terms(&sup), (Some((false, true)), false, true));
+    }
+
+    /// ADR-0101, Codex review of PR #1007: a result about the agent's process is applied only to the run the call was made to: a
+    /// restart, a resume, an exit or a stop begins another, and the former run's late result does not count for it.
+    #[test]
+    fn a_late_result_names_the_run_it_was_made_to() {
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            Manifest::parse(
+                "kind = \"acp\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"opencode\", \"acp\"] }\n",
+            )
+            .unwrap(),
+        );
+        let id = AgentId::new("agent-1");
+        sup.restore(Restore {
+            id: id.clone(),
+            kind: "acp".into(),
+            project: agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            folder: std::env::temp_dir(),
+            directory: true,
+            branch: String::new(),
+            session: None,
+            carry_on: false,
+            private_config: None,
+        })
+        .unwrap();
+        let run = sup.adapter_epoch(&id).unwrap();
+        // No process runs (restored only): nothing is applied.
+        assert!(!sup.runs(&id, run));
+        assert!(!sup.runs(&AgentId::new("agent-9"), run));
+        // Its process runs: the result applies, also after a turn began meanwhile (a turn changes the call's `generation`, not its run).
+        sup.adapters.get_mut(&id).unwrap().running = true;
+        assert!(sup.runs(&id, run));
+        let before = sup.adapters[&id].rich.generation;
+        sup.adapters
+            .get_mut(&id)
+            .unwrap()
+            .rich
+            .busy(Instant::now(), false);
+        assert_ne!(sup.adapters[&id].rich.generation, before);
+        assert!(sup.runs(&id, run));
+        // A restart (or an exit, a stop) forgets the former process: its run is over.
+        let _ = sup.adapters.get_mut(&id).unwrap().rich.forget();
+        assert_ne!(sup.adapter_epoch(&id), Some(run));
+        assert!(!sup.runs(&id, run));
+        // A resume, likewise.
+        let now = sup.adapter_epoch(&id).unwrap();
+        assert!(sup.runs(&id, now));
+        sup.adapters.get_mut(&id).unwrap().rich.epoch += 1;
+        assert!(!sup.runs(&id, now));
+        // An exit leaves it not running.
+        sup.adapters.get_mut(&id).unwrap().running = false;
+        assert!(!sup.runs(&id, now + 1));
+
+        // How the node records an always answer delivered to a run: the agent's mark only while that run is its process. A restart
+        // while the answer was on its way: the answer is audited as given, its replacement is not marked.
+        let dir = std::env::temp_dir().join(format!("agora-always-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = crate::daemon::EventSink::open(&dir, "n1").unwrap();
+        let marked = |sink: &crate::daemon::EventSink, approval: &str| {
+            let bodies: Vec<_> = sink
+                .events_after(0)
+                .into_iter()
+                .filter_map(|e| e.body)
+                .collect();
+            let audited = bodies.iter().any(|b| matches!(b, agora_protocol::v1::event::Body::ApprovalResolved(r)
+                if r.approval_id == approval && r.scope == agora_protocol::v1::ApprovalScope::Always as i32));
+            let mark = bodies.iter().any(|b| {
+                matches!(b, agora_protocol::v1::event::Body::AgentAlwaysAllowed(a)
+                if a.approval_id == approval && a.agent_id == "agent-1")
+            });
+            (audited, mark)
+        };
+        sup.adapters.get_mut(&id).unwrap().running = true;
+        let run = sup.adapter_epoch(&id);
+        assert!(crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            run,
+            "ap-1",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-1"), (true, true));
+        let former = sup.adapter_epoch(&id);
+        let _ = sup.adapters.get_mut(&id).unwrap().rich.forget();
+        assert!(!crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            former,
+            "ap-2",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-2"), (true, false));
+        // A call that never reached a run marks nothing either.
+        assert!(!crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            None,
+            "ap-3",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-3"), (true, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn opt(id: &str, skips: bool) -> SessionOption {

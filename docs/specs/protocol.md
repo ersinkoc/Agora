@@ -1209,20 +1209,23 @@ node sets. The window's button and the terminal client's key come with the next 
 - **The node checks, in order:** the shape (an unknown scope; ALWAYS with a denial, a grant or on an `agent.` request is
   `approval.signature_invalid`); the signature against `trusted-devices`, over the bytes the decision's scope names, so a hub that turns
   ONCE into ALWAYS or ALWAYS into ONCE fails here (`approval.signature_invalid`); the offer it stored (an Allow on a request that offers
-  only ALWAYS, or ALWAYS on one that does not offer it: `approval.scope_unavailable`; a Deny needs no offer); the policy, read again
-  (`approval.scope_forbidden`); for an agent behind an ACP bridge that did not declare `approval_scopes` (one from before ADR-0101, kept
+  only ALWAYS, or ALWAYS on one that does not offer it: `approval.scope_unavailable`; a Deny needs no offer); the policy as the node
+  read it at start, for the agent's own launch (`approval.scope_forbidden`); for an agent behind an ACP bridge that did not declare `approval_scopes` (one from before ADR-0101, kept
   across a node update) a single Allow while the policy refuses ALWAYS (`approval.adapter_outdated`: that bridge may answer it with the
   agent's remembered option); then expiry and single use. A refusal before expiry spends nothing: the card keeps waiting.
-- **Policy.** The existing `skip_permissions` line (ADR-0059): `forbid` refuses every ALWAYS, `confined_only` refuses it while agents are not
-  confined, `allow` permits it; a kind whose manifest says `[structured] allow_always = false` is never offered it. Under a refusing policy
+- **Policy.** The existing `skip_permissions` line (ADR-0059), read from the node's policy file at node start: `forbid` refuses every
+  ALWAYS, `confined_only` refuses it for an agent whose process was not launched confined (one the holder runs never is; an unknown launch
+  is refused), `allow` permits it; a kind whose manifest says `[structured] allow_always = false` is never offered it. Under a refusing policy
   the node leaves ALWAYS out of `scopes`. A request that offers only ALWAYS under such a policy gets no card: the node announces it and at
   once `ApprovalResolved { approved: false }` with no signer, answers the adapter denied (the agent gets `reject_once` or `cancelled`) and
   adds the conversation notice `approval.always_only_forbidden` (params `action`).
-- **The record.** `ApprovalResolved.scope` (6): ALWAYS for an always decision the adapter took, ONCE for any other person's decision,
+- **The record.** `ApprovalResolved.scope` (6): ALWAYS for an always decision the adapter delivered, ONCE for any other person's decision,
   UNSPECIFIED for one nobody decided. `ChatEntry.permission_always` (21) marks the permission entry of an approved ALWAYS. The new event
   `AgentAlwaysAllowed` (`Event.body` 69, producer `node`: `agent_id`, `approval_id`, `action` cleaned and cut at 120 characters,
-  `signer_device_id`, `at_ms`) is written only after the adapter took the always answer (a refused or undelivered one records the
-  request cancelled, as before). The node keeps an agent's always answers beside its kept session (`kept-<id>.pb`, at most 16) and says
+  `signer_device_id`, `at_ms`) is written only after the adapter delivered the always answer to the agent (its `approval/resolve`
+  result says so: the ACP bridge answers once its writer wrote the answer to the agent's stdin; a refused or undelivered one records the
+  request cancelled, as before), and only while the run of the agent's process it was delivered to is still the agent's (a former
+  process's late result is audited in `ApprovalResolved` but marks no replacement). The node keeps an agent's always answers beside its kept session (`kept-<id>.pb`, at most 16) and says
   them again after the `AgentStarted` it restates (a resync, or a node that takes a kept agent up); a new process of the agent, its end
   and its interruption drop them, and a resumed agent's are not replayed.
 - **The hub** relays `scopes`, `always_label` and `always_option_id` into `ApprovalSnapshot`, and derives `AgentSnapshot.always_allowed` (45):

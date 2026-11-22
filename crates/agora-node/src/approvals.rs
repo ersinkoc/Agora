@@ -367,7 +367,8 @@ pub fn raise_for(
     }
 }
 
-/// ADR-0101: what the node's policy says when a decision arrives (read again then: it may have changed since the card was raised).
+/// ADR-0101: what the node's policy says when a decision arrives: the `skip_permissions` line the node read at start, for the agent's
+/// launch as it is then (a card raised by an earlier node, or for a process replaced since, is checked against the current ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decide {
     /// The policy and the kind's manifest let this agent be allowed always now.
@@ -1997,8 +1998,8 @@ mod tests {
         );
     }
 
-    /// The policy read at decision time refuses "always" (it may have changed since the card was raised); the card still waits and
-    /// can be allowed once. Without the policy (`resolve`), "always" is never given.
+    /// The policy checked at decision time refuses "always" (it may differ from the one the card was raised under: an earlier node's,
+    /// or another launch of the agent); the card still waits and can be allowed once. Without the policy (`resolve`), "always" is never given.
     #[test]
     fn a_policy_that_refuses_always_refuses_it_at_decision_time() {
         let mut a = approvals();
