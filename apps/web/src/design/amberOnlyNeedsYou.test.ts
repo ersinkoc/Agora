@@ -8,13 +8,13 @@ import { describe, expect, it } from 'vitest';
 // only in the files below, each with how many uses it holds and why. A new amber use anywhere fails here: if it really is "needs you" (or
 // the quota sign), add it to the list with its reason; otherwise pick the role that says what it means.
 const AMBER =
-  /\b(?:text|bg|border|ring|fill|stroke|outline|from|to|via|shadow|divide|decoration|caret|accent)-needs-you\b|--state-needs-you\b|\b(?:tint|line)-needs\b|\bkit-tone-needs\b|\bphone-card--needs\b|\btone(?:=\{?|:\s*)['"]needs['"]/g;
+  /\b(?:text|bg|border|ring|fill|stroke|outline|from|to|via|shadow|divide|decoration|caret|accent)-needs-you\b|--(?:state|color)-needs-you\b|\b(?:tint|line)-needs\b|\bkit-tone-needs\b|\bphone-card--needs\b|\btone(?:=["']|=\{[^}\n]*['"]|:\s*['"])needs['"]/g;
 
 const ALLOWED: Record<string, { uses: number; why: string }> = {
   'design/tokens.css': { uses: 3, why: 'the token itself, Dark and Light' },
-  'design/app.css': { uses: 22, why: 'the utility, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the terminal bell, and the muted syntax colours mixed from the theme (content, like the diff)' },
+  'design/app.css': { uses: 23, why: 'the utility and its Tailwind colour, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the terminal bell, and the muted syntax colours mixed from the theme (content, like the diff)' },
   'components/kit/KitGallery.tsx': { uses: 4, why: 'the gallery shows the Needs you stat tile and request callout' },
-  'components/FleetConsole.tsx': { uses: 2, why: "Home's request cards and the Needs you count" },
+  'components/FleetConsole.tsx': { uses: 3, why: "Home's request cards, the Needs you stat tile and the Needs you count" },
   'components/AttentionLayer.tsx': { uses: 2, why: 'the attention toast and dialog title' },
   'components/ApprovalBanner.tsx': { uses: 3, why: 'an approval request waiting on the person' },
   'components/SkipApproval.tsx': { uses: 2, why: 'a request to stop asking, waiting on the person' },
@@ -28,7 +28,7 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'phone/Phone.tsx': { uses: 8, why: 'the phone lists of what needs you, pairing requests and the next agent that needs you' },
   'phone/phone.css': { uses: 3, why: 'the phone request card (its class and colour) and the bar of what needs you' },
   'components/Quota.tsx': { uses: 11, why: 'the quota warning sign (triangle and percentage)' },
-  'components/UsagePanel.tsx': { uses: 1, why: 'a usage meter at 80 % or more, the quota warning sign family' },
+  'components/UsagePanel.tsx': { uses: 1, why: 'a usage meter at 80 % or more: the quota warning sign family (the audit lists it under quota)' },
   'components/sessionChoice.ts': { uses: 2, why: 'the context meter at 80 % or more, the quota warning sign family' },
   'terminal/renderer.ts': { uses: 1, why: 'terminal search matches: highlighted content, not chrome (the current match is the accent)' },
 };
@@ -56,6 +56,8 @@ describe('amber means only "needs you" (ADR-0102)', () => {
     expect(hits('bg-tint-needs kit-tone-needs phone-card--needs')).toBe(3);
     expect(hits('<Pill tone="needs">')).toBe(1);
     expect(hits("tone: 'needs'")).toBe(1);
+    expect(hits("tone={f === 'needs-you' ? 'needs' : undefined} tone={'needs'}")).toBe(2);
+    expect(hits('color: var(--color-needs-you); text-(--color-needs-you)')).toBe(2);
     // Not amber: the state's locale key, the rail tab id and the danger role.
     expect(hits("t('state-needs-you') { id: 'needs' } text-danger state--needs")).toBe(0);
   });
