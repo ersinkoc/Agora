@@ -938,7 +938,11 @@ phone-no-agents = Bu makinede ajan yok.
 phone-needs = Sizi bekleyenler · { $count }
 phone-answer-below = Yanıtı ekranın altındaki düğmelerle verin.
 phone-next = Sıradaki · { $count }
-phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+phone-untrusted-title = Bu cihaz henüz güvenilir değil
+phone-untrusted-machines = { $count ->
+    [one] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+   *[other] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtları reddederler.
+}
 key-bar = Terminal tuşları
 key-esc = Esc
 key-tab = Tab
