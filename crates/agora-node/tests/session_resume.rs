@@ -112,8 +112,8 @@ impl Drop for Watchdog {
 }
 
 /// Ends the fake agents this test process started (`only`: just these pids), without asking any node: a node whose thread is stuck may
-/// hold the lock that knows them. A process is ended only while it is still the one that was found (a pid can be given again). Says
-/// which pids it ended.
+/// hold the lock that knows them. A process is ended only while it is still the one that was found (a pid can be given again); one
+/// that cannot be identified is left alone and said so (on Windows its node's job ends it with the node). Says which pids it ended.
 fn end_scratch_agents(only: Option<&[u32]>) -> Vec<u32> {
     let mut ended = Vec::new();
     for pid in agora_platform::process_children(std::process::id()).unwrap_or_default() {
@@ -122,16 +122,86 @@ fn end_scratch_agents(only: Option<&[u32]>) -> Vec<u32> {
         {
             continue;
         }
-        let done = match agora_platform::process_identity(pid) {
-            Ok(id) => agora_platform::kill_process_if_same(&id).unwrap_or(false),
-            // Where a process cannot be told apart from a later one (Windows), its node's job ends it with the node anyway.
-            Err(_) => agora_platform::terminate_process(pid).is_ok(),
-        };
-        if done {
-            ended.push(pid);
+        match end_if_identified(
+            pid,
+            agora_platform::process_identity,
+            agora_platform::kill_process_if_same,
+        ) {
+            Ending::Ended => ended.push(pid),
+            Ending::Gone => {}
+            // Straight to the standard error: this may run on the watchdog's thread just before the process exits.
+            Ending::Skipped(why) => {
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!("left fake agent {pid} alone: it cannot be identified ({why})\n")
+                        .as_bytes(),
+                );
+            }
         }
     }
     ended
+}
+
+/// What [`end_if_identified`] did with one pid.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    Ended,
+    /// It was no longer the process that was identified (or had ended): nothing was signalled.
+    Gone,
+    /// It could not be identified, so nothing was signalled.
+    Skipped(String),
+}
+
+/// Ends `pid` only through its identity (`identify`, then `kill_if_same`, which signals only the same process); a pid that cannot be
+/// identified is never signalled by its bare number, which may by now name another process (Codex review of #1030).
+fn end_if_identified(
+    pid: u32,
+    identify: impl Fn(u32) -> std::io::Result<agora_platform::ProcessIdentity>,
+    kill_if_same: impl Fn(&agora_platform::ProcessIdentity) -> std::io::Result<bool>,
+) -> Ending {
+    match identify(pid) {
+        Ok(id) => match kill_if_same(&id) {
+            Ok(true) => Ending::Ended,
+            Ok(false) => Ending::Gone,
+            Err(e) => Ending::Skipped(e.to_string()),
+        },
+        Err(e) => Ending::Skipped(e.to_string()),
+    }
+}
+
+#[test]
+fn the_watchdog_never_signals_a_pid_it_cannot_identify() {
+    let signalled = std::cell::Cell::new(false);
+    let kill = |_: &agora_platform::ProcessIdentity| {
+        signalled.set(true);
+        Ok(true)
+    };
+    // Unsupported (Windows) or a passing error (Unix): nothing is signalled, and the reason is kept to be said.
+    for err in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let ending = end_if_identified(4242, |_| Err(std::io::Error::from(err)), kill);
+        assert!(matches!(ending, Ending::Skipped(_)), "{err:?}: {ending:?}");
+        assert!(
+            !signalled.get(),
+            "{err:?}: a pid that could not be identified was signalled"
+        );
+    }
+    // An identified one goes through the identity-checked kill only.
+    let id = agora_platform::ProcessIdentity {
+        pid: 4242,
+        group: 4242,
+        started: 1,
+        boot: String::new(),
+        name: "agora-fake-agent".into(),
+    };
+    assert_eq!(
+        end_if_identified(4242, |_| Ok(id.clone()), kill),
+        Ending::Ended
+    );
+    assert!(signalled.get());
 }
 
 /// What the folder of an environment says, read without the node: the ledger file, the files, and each probe report's arguments.
@@ -716,6 +786,8 @@ fn start_again_gives_a_kind_that_chooses_its_ids_a_new_one_it_can_resume_later()
     }
     let mut e = Env::new("again");
     let probe = e.launch("probe");
+    // The ledger may learn the chosen session on a later tick (#696).
+    e.wait("the first session", |e| !e.session(&probe).is_empty());
     let first = e.session(&probe);
     // #1011: started for real before the node stops. On Windows a node that stopped at once ended the probe before it wrote its
     // report, and a wait for two reports then waited for one that never came.
@@ -938,6 +1010,8 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
     }
     let mut e = Env::new("options");
     let probe = e.launch_with("probe", &["skip"]);
+    // The ledger may learn the chosen session on a later tick (#696).
+    e.wait("the first session", |e| !e.session(&probe).is_empty());
     let first = e.session(&probe);
     e.wait("the probe's start", |e| {
         e.start_with_session(&first).is_some()
