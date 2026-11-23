@@ -144,7 +144,7 @@ describe('a request to join in the fleet console', () => {
     expect(items[0]).toMatchObject({ kind: 'pair', key: 'pair:aa' });
     expect(fleetCounts([], [], [], 1).needs).toBe(1);
     const html = renderToStaticMarkup(<AttentionQueue items={items} machines={[]} now={NOW} onOpen={noop} onResolve={noop} pairing={ui()} />);
-    expect(html).toContain('<bdi>laptop</bdi>');
+    expect(html).toContain('<bdi class="fleet-ask__name">laptop</bdi>');
     expect(html).toContain('Review the request from \u2068laptop\u2069');
     expect(html).toContain('Compare its number with the one on its screen before you approve.');
     expect(html).not.toContain('Approve');
@@ -167,7 +167,7 @@ describe('a request to join in the fleet console', () => {
     const items = attentionList([], [], [card({ id: 'late', expiresMs: NOW + 200_000 }), card({ id: 'soon', expiresMs: NOW + 50_000 })]);
     expect(items.map((i) => i.key)).toEqual(['pair:soon', 'pair:late']);
     const html = console_(ui({ cards: [card()] }), { machines: [{ id: 'n1', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: NOW }], fleet: [{ id: 'n1/a', name: 'claude · a', accent: '#fff', machine: 'laptop', machineId: 'n1', workspace: 'w', project: 'w', state: 'working', preview: '' }] });
-    expect(html).toContain('fleet-count__n">1</span><span class="fleet-count__word"');
+    expect(html).toMatch(/kit-stat--tinted kit-tone-needs"[^>]*><span class="kit-stat__n">1<\/span>/);
     expect(html).toContain('Review and decide');
   });
 

@@ -175,4 +175,17 @@ describe('usePairing sends what the card says', () => {
     await wait(0);
     expect(ui).toBeUndefined();
   });
+
+  it('says a session is not the owner\'s once, and stops asking (each refusal is a row in the owner\'s Activity, #904)', async () => {
+    let asked = 0;
+    const api = { command: async () => { asked += 1; throw Object.assign(new Error('x'), { code: 'auth.forbidden', params: {} }); } } as unknown as Live;
+    let owner: string | undefined;
+    const Probe = () => { owner = usePairing(api, 'live').owner; return null; };
+    act(() => root.render(<Probe />));
+    expect(owner).toBe('unknown');
+    await wait(0);
+    expect(owner).toBe('no');
+    await wait(5 * 60_000);
+    expect(asked).toBe(1);
+  });
 });

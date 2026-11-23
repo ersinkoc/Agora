@@ -66,6 +66,9 @@ export const demoStartSettingsApproval = { ...demoStartApproval, id: 'demo/3', l
 // ADR-0059 decision 5: the same request asking for a helper that acts without asking (the card asks for the confirmation before it allows).
 const demoNoAsk = [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }];
 export const demoStartNoAskApproval = { ...demoStartApproval, id: 'demo/4', localId: '4', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), grant_allowed: false, launch_options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skips_permissions: true }] }), start: { ...demoStartApproval.start, grantAllowed: false, options: demoNoAsk } };
+// Redesign PR 5: a helper's start with a long first prompt (audit screenshot 26), summarised on its card and read whole in Review.
+const demoLongPrompt = 'Write unit tests for src/auth.rs.\n\nCover these cases:\n1. A token exactly at its expiry is still valid.\n2. A token one second past its expiry is refused.\n3. A token whose signature was made with another key is refused, and the error says which check failed.\n4. A token issued with a clock 40 seconds ahead is accepted within the skew window.\n\nDo not change anything under src/ except tests; if a case cannot be tested without changing the code, write it down in the task board instead of changing the code. Run the tests with cargo test -p login auth:: and report the output.';
+export const demoStartLongApproval = { ...demoStartApproval, id: 'demo/5', localId: '5', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), prompt: demoLongPrompt }), start: { ...demoStartApproval.start, prompt: demoLongPrompt } };
 
 // ADR-0091: plan-limit observations for the demo window (clearly fake). The Laptop's Codex is getting full, the Build server's almost
 // used up (and one older reading), the Windows PC's window just reset; Claude reports nothing, so it shows as unknown.
@@ -108,3 +111,30 @@ export const galleryPairing: PairingUi = {
   onAnswer: async () => 'ok',
   onOpen: async () => true,
 };
+
+// The Settings page with nothing live behind it (#/gallery/settings, also served by a production build): three machines of three
+// systems (one offline, one that does not trust this browser yet), two other devices of the person's, and what each machine can start.
+// Times are fixed against `demoSettingsNow`, so the screenshots of this page do not change from one run to the next.
+export const demoSettingsNow = Date.UTC(2026, 10, 22, 21, 40);
+export const demoSettingsMachines = [
+  { id: 'blackview', name: 'blackview', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: demoSettingsNow - 4000, build: '0.3.35' },
+  { id: 'mac', name: 'mac', os: 'macos', online: true, agentsRunning: 1, lastSeenMs: demoSettingsNow - 9000, build: '0.3.35' },
+  { id: 'win', name: 'win', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: demoSettingsNow - 2 * 3_600_000, build: '0.3.34' },
+];
+export const demoSettingsTrustedOn = ['blackview', 'win'];
+export const demoSettingsDevices = [
+  { id: 'web-7188eda9c2b62f50', name: 'Chrome · Linux', fingerprint: '7188-eda9-c2b6-2f50-9a5a-2a1c', lastUsedMs: demoSettingsNow - 8 * 60_000, trustedOn: [], waiting: true, removed: false },
+  { id: 'web-2a9011fe0c3d77b1', name: 'Safari · iOS', fingerprint: '2a90-11fe-0c3d-77b1-e420-9d05', lastUsedMs: demoSettingsNow - 26 * 3_600_000, trustedOn: ['blackview', 'mac'], waiting: false, removed: false },
+  { id: 'web-5c31a0e2d9f4b871', name: 'Firefox · Windows', fingerprint: '5c31-a0e2-d9f4-b871-03c6-e15a', lastUsedMs: demoSettingsNow - 40 * 86_400_000, trustedOn: [], waiting: false, removed: true },
+];
+const skip = { id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true };
+const model = { id: 'model', label: 'setting-model', values: [], defaultValue: '' };
+const effort = (d = '') => ({ id: 'effort', label: 'setting-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'], defaultValue: d });
+export const demoSettingsKinds = [
+  { kind: 'claude-code', name: 'Claude Code', installed: true, level: 2, program: 'claude', settings: [model, effort()], options: [skip] },
+  { kind: 'codex', name: 'Codex', installed: true, level: 2, program: 'codex', settings: [model, effort('medium')], options: [skip] },
+  { kind: 'antigravity-acp', name: 'Antigravity', installed: true, level: 3, program: 'antigravity', settings: [], options: [] },
+  { kind: 'wrongstack', name: 'WrongStack', installed: true, level: 2, program: 'wrongstack', settings: [], options: [skip] },
+  { kind: 'fake-adapter', name: 'Fake chat agent', installed: true, level: 4, program: 'agora-fake-agent', settings: [], options: [] },
+  { kind: 'opencode-acp', name: 'opencode', installed: false, level: 3, program: 'opencode', settings: [], options: [] },
+];

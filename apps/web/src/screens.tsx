@@ -5,12 +5,13 @@ import { DeviceRequest } from './components/DeviceRequest';
 import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
 import type { SignInApprovalModel } from './components/pairChoice';
-import { ApprovalBanner } from './components/ApprovalBanner';
+import { ApprovalBanner, ApprovalBanners } from './components/ApprovalBanner';
+import { requestShown, useAnswerGuard, type AnswerResult } from './components/useAnswerGuard';
 import { SkipApproval } from './components/SkipApproval';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
-import { themeStore } from './themes/store';
+import { type Mode, themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { PromptSend } from './components/chatActions';
@@ -24,20 +25,26 @@ import { ApprovalCard } from './components/ApprovalCard';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
 import { HeaderLinks } from './components/HeaderLinks';
-import { Icon } from './components/Icon';
+import { Icon, type IconName } from './components/Icon';
 import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
-import { ago } from './net/time';
+import { ago, when } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import type { PairingUi } from './components/Pairing';
-import { StateBadge } from './components/StateBadge';
+import { Mark, StateBadge } from './components/StateBadge';
 import { KitGallery } from './components/kit/KitGallery';
+import { Button, ConfirmDialog, Pill, SegmentedControl, SettingRow, Tag } from './components/kit';
+import { SettingsBlock, SettingsCard, SystemTile } from './components/SettingsCard';
+import { isolated, peerText, systemName } from './components/pairChoice';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
-import { GALLERY_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { demoSettingsDevices, demoSettingsKinds, demoSettingsMachines, demoSettingsNow, demoSettingsTrustedOn } from './fixtures';
+import { ScreenPasswordSettings } from './components/Locks';
+import type { IdleMinutes } from './net/idle';
+import { GALLERY_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -150,14 +157,29 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
         <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
       </div>
+      {/* Redesign PR 4: the one request component as a card, and in a pane narrower than 360 px (the row density, the buttons under the text). */}
+      <div data-approval-sizes className="gallery__row items-start">
+        <div className="w-full max-w-[22rem]"><ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} /></div>
+        <div data-approval-narrow className="w-[12.5rem]"><ApprovalBanner approval={{ ...demoAlwaysApproval, machineName: 'laptop' }} agent={demoAsksLess} onResolve={() => {}} pinned /></div>
+      </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
-      <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
-      <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartNoAskApproval} start={demoStartNoAskApproval.start} onResolve={() => {}} />
-      <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
+      {/* Redesign PR 5: a start and a switch to act without asking as short cards with Review (a long prompt, settings, a start that
+          would not ask, a switch, a pane narrower than 360 px), and the whole request as Review shows it. */}
+      <div data-start-cards className="grid max-w-3xl gap-3">
+        <div className="approvals">
+          <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartSettingsApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoSkipApproval as ApprovalModel} agent={demoRichAgent} onResolve={() => {}} onOpen={() => {}} />
+        </div>
+        <ApprovalBanner approval={demoStartApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned />
+        <div data-start-narrow className="w-[12.5rem]"><ApprovalBanner approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned /></div>
+        <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
+        <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
+      </div>
+      <HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
       {/* ADR-0065: a machine's request to join as the owner sees it, in each state. The clock is fixed so the gallery does not change by itself. */}
@@ -205,12 +227,27 @@ export function Gallery() {
   );
 }
 
+// The Settings page on demo data (#/gallery/settings[/section]): every section filled, nothing sent anywhere. The review surface for the
+// Settings redesign and its visual-regression baseline; a production build serves it like the gallery.
+const demoSettingsDevice = { id: 'web-10a3e055eea9e45f', publicKeyHex: `04${'5be1c09a7d3f42e8'.repeat(8)}`, keys: undefined as unknown as CryptoKeyPair };
+export function SettingsDemo({ section, onBack }: { section?: string; onBack: () => void }) {
+  const [idle, setIdle] = useState<IdleMinutes>(0);
+  return (
+    <DevicePage base="#/gallery/settings" section={section} onBack={onBack} now={demoSettingsNow} device={demoSettingsDevice} fingerprint="91c2-9a46-6de1-76e1-6bcf-2d47"
+      machines={demoSettingsMachines} trustedOn={demoSettingsTrustedOn} others={demoSettingsDevices} onAsk={async () => true} onRemove={async () => true}
+      onAddPasskey={async () => ({ ok: true })} loadKinds={async (node) => (node === 'mac' ? demoSettingsKinds.slice(0, 3) : demoSettingsKinds)}
+      security={<ScreenPasswordSettings passwordSet={false} idle={idle} onIdle={setIdle} onSet={async () => ({ ok: true })} />} />
+  );
+}
+
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, approvals = [], onResolve, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, stale = false, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
-  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // The link is not live: its requests cannot be answered (T44: the dwell starts again when it is back).
+  stale?: boolean;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
@@ -220,6 +257,9 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   const preview = agent?.preview ?? '';
   const demo = useMemo(() => demoSource(preview), [preview]);
   const source = live ?? demo;
+  // T44 (`useAnswerGuard`, as Home's queue): one dwell for this agent's cards, above its terminal or its composer.
+  const mine = agent ? approvals.filter((x) => x.agentId === agent.id) : [];
+  const guard = useAnswerGuard(mine.map((x) => x.id), (status) => JSON.stringify([agent?.terminal !== false, mine.map((x) => [requestShown(x, agent), status(x.id)])]), stale);
   if (!agent) {
     return (
       <main className="page">
@@ -229,7 +269,6 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
-  const asks = approvals.filter((x) => x.agentId === agent.id);
   // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
@@ -248,10 +287,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
         <CloseConfirm agent={agent} where="pane" />
-        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+        {agent.terminal === false ? null : <ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} />}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
+          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={mine.length ? <div className="grid gap-2"><ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} pinned /></div> : undefined} /> : (
             <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>
@@ -264,12 +303,14 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
 }
 
 // Pages other than the window itself (machines, this device, audit): the same title bar, content in a readable column.
-function PageFrame({ title, onBack, children, wide }: { title: string; onBack: () => void; children: ReactNode; wide?: boolean }) {
+// `plainTitle`: the page draws its own heading (Settings), so the bar's title is not a second one.
+function PageFrame({ title, onBack, children, wide, plainTitle }: { title: string; onBack: () => void; children: ReactNode; wide?: boolean; plainTitle?: boolean }) {
   return (
     <div className="min-h-screen bg-surface-0">
       <header className="ide-bar sticky top-0 z-10 h-10 border-b">
         <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>
+        {plainTitle ? <span className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</span>
+          : <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <HeaderLinks />
@@ -286,7 +327,9 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
 // password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
 // password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds }: {
+// Every section is a settings card (an icon, a title, one line and its state, then setting rows); a side index on a wide screen, a row
+// of links above the content on a narrow one. Removing another device asks first, in a dialog whose safe answer comes first.
+export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds, now: fixedNow, base = '#/device' }: {
   device: Device | undefined;
   onBack: () => void;
   // Opens the theme editor in the window (ADR-0068).
@@ -307,151 +350,206 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   onRemove?: (id: string) => Promise<boolean>;
   // What a machine can start (Settings → Agents); without it (no live hub) the section is not offered.
   loadKinds?: (node: string) => Promise<KindChoice[]>;
+  // The moment dates are written against (the demo page fixes it, so its screenshots do not move); now by default.
+  now?: number;
+  // Where the section links point: #/device, or the demo page's own address.
+  base?: string;
 }) {
-  useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
+  const theme = useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
   const [passkeyNotice, setPasskeyNotice] = useState<string | undefined>();
   const [password, setPassword] = useState('');
   const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
   const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
+  const [confirming, setConfirming] = useState<MyDevice | undefined>();
   const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
   const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
   const canVouch = (trustedOn?.length ?? 0) > 0;
-  const sections: { group: string; items: { id: string; label: string; show: boolean }[] }[] = [
+  const sections: { group: string; items: { id: string; label: string; icon: IconName; show: boolean; count?: number }[] }[] = [
     { group: 'settings-group-device', items: [
-      { id: 'device', label: 'settings-device', show: !!device },
-      { id: 'appearance', label: 'device-appearance', show: true },
-      { id: 'notifications', label: 'attention-settings-title', show: true },
-      { id: 'passkeys', label: 'settings-passkeys', show: !!onAddPasskey },
-      { id: 'lock', label: 'password-title', show: !!security },
-      { id: 'devices', label: 'device-others', show: !!others && others.length > 0 },
+      { id: 'device', label: 'settings-device', icon: 'monitor', show: !!device },
+      { id: 'appearance', label: 'device-appearance', icon: 'palette', show: true },
+      { id: 'notifications', label: 'attention-settings-title', icon: 'bell', show: true },
+      { id: 'passkeys', label: 'settings-passkeys', icon: 'key', show: !!onAddPasskey },
+      { id: 'lock', label: 'password-title', icon: 'lock', show: !!security },
+      { id: 'devices', label: 'device-others', icon: 'globe', show: !!others && others.length > 0, count: others?.filter((d) => !d.removed).length },
     ] },
-    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }, { id: 'agents', label: 'settings-agents', show: !!loadKinds }] },
+    { group: 'settings-group-machines', items: [
+      { id: 'machines', label: 'settings-machines', icon: 'stack', show: true },
+      { id: 'agents', label: 'settings-agents', icon: 'terminal', show: !!loadKinds },
+    ] },
   ];
   // A deep link (#/device/passkeys) brings its section to the top; the page's own links change the hash, which lands here.
   useEffect(() => { if (section) document.getElementById(`settings-${section}`)?.scrollIntoView?.({ block: 'start' }); }, [section]);
-  const now = Date.now();
-  const anchor = (id: string) => ({ id: `settings-${id}`, className: 'stack scroll-mt-24' });
+  const now = fixedNow ?? Date.now();
+  const anchor = (id: string) => ({ id: `settings-${id}`, className: 'set-anchor' });
+  const addPasskey = () => {
+    if (!onAddPasskey) return;
+    void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((result) => {
+      if (!result.ok && result.reason === 'busy') { setPasskeyNotice('password-busy'); return; }
+      setPasskeyNotice(result.ok ? 'device-passkey-added' : 'device-passkey-failed');
+      setPassword('');
+    });
+  };
+  const addButton = <Button disabled={passkeyNeedsPassword && !password} onClick={addPasskey}><Icon name="plus" className="size-3.5" />{t('device-passkey-add')}</Button>;
+  const trusted = trustedOn?.length ?? 0;
+  const trustPill = !machines?.length ? undefined : trusted > 0
+    ? <Pill tone="finished" icon={<Icon name="check" className="size-3" />}>{t('device-trust-on', { count: trusted })}</Pill>
+    : <Pill tone="plain">{t('device-trust-none')}</Pill>;
+  const online = machines?.filter((m) => m.online).length ?? 0;
+  const remove = () => {
+    const d = confirming;
+    setConfirming(undefined);
+    if (!d || !onRemove) return;
+    setRemoving({ id: d.id });
+    void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true }));
+  };
   return (
-    <PageFrame wide title={t('settings-title')} onBack={onBack}>
-      <div className="grid items-start gap-6 md:grid-cols-[12rem_minmax(0,1fr)]">
-        <nav aria-label={t('settings-sections')} className="sticky top-10 z-[5] -mx-4 flex gap-x-4 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-1 md:overflow-visible md:border-b-0 md:p-0">
+    <PageFrame wide title={t('settings-title')} onBack={onBack} plainTitle>
+      <div className="set-page" data-settings="">
+        <nav aria-label={t('settings-sections')} className="set-nav">
           {sections.map((g) => (
-            <div key={g.group} className="flex flex-none items-center gap-1 md:grid md:items-stretch">
-              <span className="hidden px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-muted md:block">{t(g.group)}</span>
+            <div key={g.group} className="set-nav__group">
+              <span className="set-nav__overline">{t(g.group)}</span>
               {g.items.filter((i) => i.show).map((i) => (
-                <a key={i.id} href={`#/device/${i.id}`} aria-current={section === i.id ? 'true' : undefined} className="ide-row w-auto flex-none whitespace-nowrap text-[0.8125rem] text-muted hover:text-ink">{t(i.label)}</a>
+                <a key={i.id} href={`${base}/${i.id}`} aria-current={section === i.id ? 'true' : undefined} className="kit-row set-nav__row">
+                  <Icon name={i.icon} className="set-nav__icon size-4" />
+                  <span className="kit-row__label">{t(i.label)}</span>
+                  {i.count ? <span className="set-nav__count">{i.count}</span> : null}
+                </a>
               ))}
             </div>
           ))}
         </nav>
-        <div className="grid min-w-0 max-w-3xl gap-8">
-          <div className="grid gap-6">
-            <h2 className="m-0 hidden text-base md:block">{t('settings-group-device')}</h2>
+        <div className="set-content">
+          <div className="set-head">
+            <h1 className="set-head__title">{t('settings-title')}</h1>
+            <p className="set-head__line">{t('settings-subtitle')}</p>
+          </div>
+          <div className="set-group">
+            <h2 className="set-group__title">{t('settings-group-device')}</h2>
             {device && (
-              <section {...anchor('device')}>
-                <h2 className="m-0">{t('settings-device')}</h2>
-                <p className="m-0">{t('device-intro')}</p>
-                <p className="m-0"><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
-                {fingerprint && <p className="m-0"><span className="muted">{t('device-fingerprint')}</span> <span className="mono text-base tracking-wide">{fingerprint}</span></p>}
+              <SettingsCard id="device" icon="monitor" title={t('settings-device')} description={t('device-desc')} end={trustPill}>
+                <SettingRow label={t('device-name')}>{() => <span className="set-value mono">{device.id}</span>}</SettingRow>
+                {fingerprint && <SettingRow label={t('device-fingerprint')} hint={t('device-fingerprint-hint')}>{() => <span className="set-print mono">{fingerprint}</span>}</SettingRow>}
                 {onAsk && missing.length > 0 && (
-                  <div className="stack">
-                    <h3 className="m-0">{t('device-add-title')}</h3>
-                    <p className="muted m-0">{t('device-add-intro', { fingerprint: fingerprint ?? '' })}</p>
-                    <p className="m-0"><button type="button" className="button button--primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</button></p>
-                    {(ask === 'asked' || (asked && ask === undefined)) && <p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p>}
-                    {ask === 'failed' && <p role="alert" className="m-0">{t('device-ask-failed')}</p>}
-                  </div>
+                  <SettingRow label={t('device-add-title')} hint={t('device-add-intro', { fingerprint: fingerprint ?? '' })}>
+                    {() => <Button variant="primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</Button>}
+                  </SettingRow>
                 )}
-                {(missing.length > 0 || !machines?.length) && <>
-                  <p className="m-0 muted">{t('device-command-intro')}</p>
-                  <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
-                </>}
-              </section>
+                {onAsk && missing.length > 0 && (ask === 'asked' || (asked && ask === undefined)) && <SettingsBlock><p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p></SettingsBlock>}
+                {onAsk && missing.length > 0 && ask === 'failed' && <SettingsBlock><p role="alert" className="m-0 text-danger">{t('device-ask-failed')}</p></SettingsBlock>}
+                {(missing.length > 0 || !machines?.length) && (
+                  <SettingsBlock>
+                    <p className="muted m-0">{t('device-command-intro')}</p>
+                    <p className="mono codebox m-0">agora node trust {device.id} {device.publicKeyHex}</p>
+                  </SettingsBlock>
+                )}
+              </SettingsCard>
             )}
-            <section {...anchor('appearance')}>
-              <h2 className="m-0">{t('device-appearance')}</h2>
-              {onTheme && <p className="muted m-0">{t('device-appearance-intro', { name: themeName(themeStore.active()) })}</p>}
-              <div className="flex flex-wrap items-center gap-3">
-                <ThemePicker />
-                <LanguagePicker />
-                {onTheme && <button type="button" className="button" onClick={onTheme}>{t('theme-edit')}</button>}
-              </div>
-            </section>
+            <SettingsCard id="appearance" icon="palette" title={t('device-appearance')} description={t('device-appearance-intro', { name: themeName(themeStore.active()) })}>
+              <SettingRow label={t('theme-label')}>
+                {(labelId) => <>
+                  <SegmentedControl labelledBy={labelId} value={theme.mode} onChange={(m) => themeStore.setMode(m)}
+                    items={THEME_MODES.map((c) => ({ value: c.id, label: t(c.label), title: t(c.title), icon: <Icon name={c.icon} className="size-3.5" /> }))} />
+                  {onTheme && <Button variant="ghost" size="sm" onClick={onTheme}>{t('theme-edit')}</Button>}
+                </>}
+              </SettingRow>
+              <SettingRow label={t('language-label')}>{() => <LanguagePicker compact />}</SettingRow>
+            </SettingsCard>
             <div {...anchor('notifications')}><AttentionSettings /></div>
             {onAddPasskey && (
-              <section {...anchor('passkeys')}>
-                <h2 className="m-0">{t('settings-passkeys')}</h2>
-                <p className="m-0">{t('device-passkey-intro')}</p>
+              <SettingsCard id="passkeys" icon="key" title={t('settings-passkeys')} description={t('device-passkey-intro')} end={passkeyNeedsPassword ? undefined : addButton}>
                 {passkeyNeedsPassword && (
-                  <label>
-                    <span className="muted">{t('signin-password')}</span>{' '}
-                    <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-                  </label>
+                  <form className="set-form" onSubmit={(e) => { e.preventDefault(); if (password) addPasskey(); }}>
+                    <div className="set-form__row">
+                      <label htmlFor="passkey-password" className="set-form__label">{t('signin-password')}</label>
+                      <input id="passkey-password" type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                    </div>
+                    <div className="set-form__row"><span aria-hidden className="set-form__label" /><div className="set-form__actions">{addButton}</div></div>
+                  </form>
                 )}
-                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => {
-                  void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((result) => {
-                    if (!result.ok && result.reason === 'busy') { setPasskeyNotice('password-busy'); return; }
-                    setPasskeyNotice(result.ok ? 'device-passkey-added' : 'device-passkey-failed');
-                    setPassword('');
-                  });
-                }}>{t('device-passkey-add')}</button>
-                {passkeyNotice && <p role="status" className="m-0">{t(passkeyNotice)}</p>}
-              </section>
+                {passkeyNotice && <SettingsBlock><p role="status" className="m-0">{t(passkeyNotice)}</p></SettingsBlock>}
+              </SettingsCard>
             )}
             {security && <div {...anchor('lock')}>{security}</div>}
             {others && others.length > 0 && (
-              <section {...anchor('devices')}>
-                <h2 className="m-0">{t('device-others')}</h2>
-                <ul className="machines">
-                  {others.map((d) => (
-                    <li key={d.id} className="machine">
-                      <strong>{deviceLabel(d.name, d.id)}</strong>
-                      <span className="mono">{d.fingerprint}</span>
-                      <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
-                      {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
-                      {onRemove && canVouch && !d.removed && (
-                        <button type="button" className="button px-2 py-1 text-xs" disabled={removing?.id === d.id && !removing.failed}
-                          onClick={() => { setRemoving({ id: d.id }); void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true })); }}>{t('device-remove')}</button>
-                      )}
-                      {removing?.id === d.id && removing.failed && <span role="alert">{t('device-remove-failed')}</span>}
-                    </li>
-                  ))}
+              <SettingsCard id="devices" icon="globe" title={t('device-others')} description={t('device-others-desc')}>
+                <ul className="set-list">
+                  {others.map((d) => {
+                    const label = deviceLabel(d.name, d.id);
+                    return (
+                      <li key={d.id} className="set-item">
+                        <SystemTile system={d.name} />
+                        <span className="set-item__main">
+                          <span className="set-item__name"><bdi>{label}</bdi></span>
+                          <span className="set-item__meta"><span className="set-fp">{d.fingerprint}</span>{d.lastUsedMs > 0 && <span>{t('device-last-used', { when: when(d.lastUsedMs, now) })}</span>}</span>
+                        </span>
+                        <span className="set-item__end">
+                          {d.removed ? <Pill>{t('device-removed')}</Pill>
+                            : d.waiting ? <Pill tone="needs" icon={<Mark state="needs-you" />}>{t('device-waiting')}</Pill>
+                            : d.trustedOn.length ? <Pill tone="finished" icon={<Icon name="check" className="size-3" />}>{t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') })}</Pill>
+                            : <Pill>{t('device-trusted-nowhere')}</Pill>}
+                          {onRemove && canVouch && !d.removed && (
+                            <Button variant="danger-ghost" size="sm" aria-label={t('device-remove-named', { name: label })} disabled={removing?.id === d.id && !removing.failed} onClick={() => setConfirming(d)}>
+                              <Icon name="trash" className="size-3.5" />{t('device-remove')}
+                            </Button>
+                          )}
+                        </span>
+                        {removing?.id === d.id && removing.failed && <p role="alert" className="set-item__alert">{t('device-remove-failed')}</p>}
+                      </li>
+                    );
+                  })}
                 </ul>
-              </section>
+              </SettingsCard>
             )}
           </div>
-          <div className="grid gap-6">
-            <h2 className="m-0 hidden text-base md:block">{t('settings-group-machines')}</h2>
-            <section {...anchor('machines')}>
-              <h2 className="m-0">{t('settings-machines')}</h2>
-              <p className="muted m-0">{t('settings-machines-intro')}</p>
+          <div className="set-group">
+            <div className="set-group__head">
+              <h2 className="set-group__title">{t('settings-group-machines')}</h2>
+              <a className="kit-btn kit-btn--ghost kit-btn--sm" href="#/machines">{t('settings-machines-manage')}<Icon name="move" className="size-3.5 rtl:-scale-x-100" /></a>
+            </div>
+            <SettingsCard id="machines" icon="stack" title={t('settings-machines')} description={t('settings-machines-desc')}
+              end={machines?.length ? <Pill>{t('settings-machines-online', { online, total: machines.length })}</Pill> : undefined}>
               {machines && machines.length > 0 ? (
-                <ul className="machines">
+                <ul className="set-list">
                   {machines.map((m) => (
-                    <li key={m.id} className="machine">
-                      <a className="font-semibold hover:underline" href={`#/machines/${encodeURIComponent(m.id)}`}>{m.name}</a>
-                      <span className={m.online ? 'text-finished' : 'muted'}>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
-                      <span className="muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
-                      {m.build && <span className="muted font-mono" title={t('network-build')}>{m.build}</span>}
-                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
+                    <li key={m.id}>
+                      <a className="set-item set-item--link" href={`#/machines/${encodeURIComponent(m.id)}`}>
+                        <SystemTile system={m.os} />
+                        <span className="set-item__main">
+                          <span className="set-item__name"><bdi>{m.name}</bdi></span>
+                          <span className="set-item__meta">
+                            {systemName(m.os) && <span>{peerText(systemName(m.os))}</span>}
+                            <span>{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
+                            {trustedOn && <span className={trustedOn.includes(m.id) ? undefined : 'set-item__flag'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
+                          </span>
+                        </span>
+                        <span className="set-item__end">
+                          {m.build && <span title={t('network-build')}><Tag mono>{m.build}</Tag></span>}
+                          <Pill tone={m.online ? 'finished' : 'idle'} icon={<span aria-hidden className="set-dot" />}>{t(m.online ? 'machine-online' : 'machine-offline')}</Pill>
+                        </span>
+                      </a>
                     </li>
                   ))}
                 </ul>
-              ) : <p className="muted m-0">{t('machines-empty')}</p>}
-              <p className="m-0"><a className="button" href="#/machines">{t('settings-machines-manage')}</a></p>
-            </section>
-            {loadKinds && (
-              <section {...anchor('agents')}>
-                <h2 className="m-0">{t('settings-agents')}</h2>
-                <AgentsSettings machines={machines ?? []} loadKinds={loadKinds} />
-              </section>
-            )}
+              ) : <SettingsBlock><p className="muted m-0">{t('machines-empty')}</p></SettingsBlock>}
+            </SettingsCard>
+            {loadKinds && <div {...anchor('agents')}><AgentsSettings machines={machines ?? []} loadKinds={loadKinds} /></div>}
           </div>
         </div>
       </div>
+      <ConfirmDialog open={!!confirming} title={t('device-remove-title', { name: isolated(confirming ? deviceLabel(confirming.name, confirming.id) : '') })} body={t('device-remove-body')}
+        cancel={t('device-remove-keep')} confirm={t('device-remove-confirm')} onCancel={() => setConfirming(undefined)} onConfirm={remove} />
     </PageFrame>
   );
 }
+
+// The title bar's three scheme buttons, as a labelled choice in Settings (short words; the whole name is the tooltip).
+const THEME_MODES: { id: Mode; icon: IconName; label: string; title: string }[] = [
+  { id: 'system', icon: 'monitor', label: 'theme-system-short', title: 'theme-system' },
+  { id: 'dark', icon: 'moon', label: 'theme-dark', title: 'theme-dark' },
+  { id: 'light', icon: 'sun', label: 'theme-light', title: 'theme-light' },
+];
 
 // Who did what on this hub, newest first. The hub shows it to its owner only.
 export function AuditPage({ load, onBack }: { load: (who: string) => Promise<AuditResult>; onBack: () => void }) {

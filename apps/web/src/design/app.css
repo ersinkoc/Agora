@@ -142,90 +142,80 @@
   .strip__title { @apply font-semibold whitespace-nowrap; }
 
   .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  .tile {
-    @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start shadow-card transition-colors duration-150 hover:bg-surface-2;
-    border-inline-start: 4px solid var(--tile-accent, var(--border));
-  }
-  .tile--needs-you { border-color: var(--state-needs-you); }
-  .tile__name { @apply font-semibold; }
+  /* An agent as a tile (ADR-0102: colour is a surface, never a stripe). A flat card with one hairline: who it is is its avatar beside the
+     name, its state a pill (tint, colour, shape and word). Hover is a stronger hairline and a one-pixel lift, never a shadow. */
+  .tile { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink transition-[border-color,transform] duration-150; }
+  .tile:hover { border-color: var(--border-strong); @apply -translate-y-px; }
+  .tile__head { @apply flex min-w-0 items-center gap-2.5; }
+  .tile__name { @apply min-w-0 flex-1 break-words font-semibold; font-size: var(--text-strong); }
   .tile__preview { @apply overflow-hidden rounded-s bg-surface-0 p-2 font-mono text-xs whitespace-pre text-muted; min-height: 3.2em; }
+  /* Needs you: the amber tint and its hairline; the pulse is the mark's in the pill, the card itself never moves or glows. */
+  .tile--needs-you { background: var(--tint-needs); border-color: var(--line-needs); }
 
   /* The fleet console (Home): a header of live counts, what needs you, then the tiles grouped by machine or project. Tokens only; sizes in
      rem so Large text grows everything, and rows wrap instead of clipping. */
-  .fleet-console { @apply mx-auto grid w-full min-w-0 max-w-6xl content-start gap-4 p-4; }
-  .fleet-console__bar { @apply sticky top-0 z-10 -mx-4 -mt-4 border-b border-line bg-surface-0 px-4 py-2; }
-  .fleet-summary { @apply flex flex-wrap items-stretch gap-2; }
-  .fleet-count { @apply inline-flex min-h-9 items-center gap-2 rounded-s border border-line bg-surface-1 px-3 py-1 text-start transition-colors duration-150 hover:bg-surface-2 disabled:cursor-default; }
-  .fleet-count[aria-pressed='true'] { @apply border-accent bg-surface-2; }
-  .fleet-count--zero { @apply opacity-70; }
-  .fleet-count:disabled:hover { @apply bg-surface-1; }
-  .fleet-count__n { @apply text-base font-semibold text-ink; min-width: 1ch; }
-  .fleet-count__word { @apply text-xs; }
-  .fleet-count--machines { @apply ms-auto text-muted hover:text-ink; }
+  .fleet-console { @apply mx-auto grid w-full min-w-0 max-w-6xl content-start gap-5 p-4; }
+  /* The counts scroll with the page: as stat tiles they wrap to two or three rows in a narrow pane, too much to pin over the tiles. */
+  .fleet-console__bar { @apply min-w-0; }
+  /* The five counts are stat tiles (the kit's StatTile): a big number and its name; only Needs you is tinted, and only above zero. */
+  .fleet-summary { @apply flex flex-wrap items-stretch gap-2.5; }
+  .fleet-summary > * { flex: 1 1 7.5rem; }
+  .fleet-summary > .fleet-stat--machines { flex-grow: 1.3; }
+  a.kit-stat { @apply text-ink no-underline transition-colors duration-150; }
+  a.kit-stat:hover { border-color: var(--border-strong); }
+  .fleet-stat__total { @apply font-medium text-muted; font-size: var(--text-body); letter-spacing: 0; }
   .fleet-dot { @apply inline-block size-2 flex-none rounded-full; }
   .fleet-stale { @apply m-0 flex flex-wrap items-center justify-between gap-2 rounded-m border border-line bg-surface-1 px-3 py-2 text-muted; }
 
-  .fleet-section__head { @apply flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1; }
+  .fleet-section__head { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1; }
   .fleet-hint { @apply hidden items-center gap-1.5 text-xs text-muted lg:inline-flex; }
-  .fleet-section__title { @apply m-0; }
-  .fleet-section__n { @apply font-normal; }
-  .fleet-attention { @apply grid gap-2; }
+  .fleet-section__title { @apply m-0 inline-flex items-center gap-2 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-strong); }
+  /* What needs you: one request card each (the kit's Callout, amber): an icon chip by the kind of ask, the agent's avatar and name, where
+     and how long, the ask, and the answers at the end. A container, so a narrow column puts the answers under the ask. */
+  .fleet-attention { @apply grid gap-2.5; container-type: inline-size; }
   .fleet-calm { @apply rounded-m border border-line bg-surface-1 px-3 py-2; }
   .fleet-queue { @apply m-0 grid list-none gap-2 p-0; }
   /* ADR-0065: the number to compare, two groups of three, large, so it is read at a glance and aloud. */
   .pair-number { @apply flex items-baseline gap-4 font-mono font-semibold text-ink; font-size: var(--text-28); letter-spacing: 0.08em; font-variant-numeric: tabular-nums; }
   .pair-recent { @apply m-0 grid list-none gap-1 p-0 text-xs text-muted; }
   .pair-window { @apply grid max-w-[24rem] gap-2 rounded-m border border-line bg-surface-1 p-3; }
-  .fleet-ask { @apply grid min-w-0 gap-1 rounded-m border border-line bg-surface-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-x-4; border-inline-start: 0.25rem solid var(--state-needs-you); }
-  .fleet-ask__who { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
+  .fleet-ask { @apply m-0 min-w-0; }
   .fleet-ask__name { @apply min-w-0 break-words; }
-  .fleet-ask__where, .fleet-ask__time { @apply min-w-0 text-xs text-muted; }
-  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink sm:col-start-1; }
+  .fleet-ask__where, .fleet-ask__time { @apply min-w-0 font-normal text-muted; font-size: var(--text-caption); }
+  /* How long ago it asked changes with the clock: a box of its own width (tabular digits, no wrapping inside) so "15 seconds" becoming
+     "45 seconds" or "2 minutes" does not rewrap the title and move the buttons. It is left out of the dwell's identity for that reason. */
+  .fleet-ask__time { @apply inline-block whitespace-nowrap; min-width: 11em; font-variant-numeric: tabular-nums; }
+  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink; }
+  /* A request answered here is shown whole (never cut): the ask as a mono chip, no wider than its card, that wraps instead of clipping. */
+  .fleet-ask__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; }
   .fleet-ask__what--clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .fleet-ask__why { @apply self-center text-xs text-muted; }
-  .fleet-ask--many { @apply sm:grid-cols-[minmax(0,1fr)_auto]; }
-  .fleet-ask__each { @apply col-span-full mt-1 ps-3; }
-  .fleet-ask__actions { @apply flex flex-wrap gap-2 sm:col-start-2 sm:row-span-2 sm:row-start-1; }
+  .fleet-ask__why { @apply mt-1 block text-xs text-muted; }
+  .fleet-ask__each { @apply mt-2; }
+  /* A card opened in place (a machine's join card, "Review each") keeps its button at the top, by its title, not in the middle. */
+  .fleet-ask--open .kit-callout__actions { @apply self-start; }
+  /* Allow and Deny wait out the dwell (T44): the buttons look off and do nothing until it has passed. */
+  .fleet-ask .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
 
   .fleet-more { @apply justify-self-start; }
   .fleet-groups { @apply grid gap-5; }
   .fleet-tools { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1; }
-  .fleet-tools__by { @apply flex min-w-0 max-w-full flex-nowrap items-center gap-1; }
-  .fleet-tools__by > span { @apply min-w-0 shrink-[8] truncate pe-0.5; }
-  /* In a panel narrower than the four words need with their label, the label goes (the group keeps its accessible name) so no word is cut. */
-  @container (max-width: 20rem) { .fleet-tools__by > span { display: none; } }
-  .fleet-seg { @apply inline-flex min-h-7 items-center min-w-0 shrink truncate rounded-xs border border-line bg-surface-1 px-1.5 py-0.5 text-xs text-muted transition-colors duration-150 hover:text-ink; }
-  .fleet-seg[aria-pressed='true'] { @apply border-accent bg-surface-2 text-ink; }
-  .fleet-group { @apply grid min-w-0 gap-2; content-visibility: auto; contain-intrinsic-size: auto 10rem; }
+  .fleet-group { @apply grid min-w-0 gap-2.5; content-visibility: auto; contain-intrinsic-size: auto 10rem; }
   .fleet-group__head { @apply flex flex-wrap items-center gap-x-2 gap-y-0.5; }
-  .fleet-group__name { @apply m-0 min-w-0 break-words text-sm font-semibold normal-case tracking-normal text-ink; }
+  .fleet-group__name { @apply m-0 min-w-0 break-words font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
   .fleet-group--offline .fleet-group__name { @apply text-muted; }
-  .fleet-grid { @apply grid gap-3; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); }
-  .tile--compact { @apply content-start gap-1.5 p-3 shadow-none; }
-  .tile--compact .tile__head { @apply flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5; }
-  .tile--compact .tile__name { @apply min-w-0 break-words; }
-  .tile__activity { @apply min-w-0 text-xs text-ink; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-  .tile__activity--line { @apply font-mono text-muted; }
-  .tile__meta { @apply flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted; }
-  .tile__where { @apply min-w-0 break-all; }
-  .tile--failed { border-color: var(--text-muted); }
-
-  /* Polish (state first): a tile's edge carries its state colour (the state word and mark are inside: never colour alone). What needs you is
-     the loudest thing on the page: a tinted card with a strong edge and its question in full-strength text. Working has a slow line along
-     its foot; finished settles quietly. Motion is only for people who have not asked for reduced motion. */
-  .tile--compact { @apply relative overflow-hidden transition-[background-color,border-color,transform] duration-150; border-inline-start-width: 4px; }
-  .tile--compact:hover { @apply -translate-y-px; }
-  .tile--needs-you { background: color-mix(in oklab, var(--state-needs-you) 9%, var(--surface-1)); border-color: color-mix(in oklab, var(--state-needs-you) 70%, var(--border)); border-inline-start-color: var(--state-needs-you); box-shadow: 0 0 0 1px color-mix(in oklab, var(--state-needs-you) 35%, transparent); }
-  .tile--needs-you:hover { background: color-mix(in oklab, var(--state-needs-you) 14%, var(--surface-1)); }
-  .tile__activity--ask { @apply text-sm font-medium text-ink; }
-  .tile--working::after { content: ''; @apply pointer-events-none absolute inset-x-0 bottom-0 h-0.5; background: linear-gradient(90deg, transparent, var(--state-working), transparent); opacity: 0.55; }
+  .fleet-grid { @apply grid gap-3; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr)); }
+  .tile--compact { @apply content-start gap-2.5 p-3.5; }
+  /* What the agent is doing, in an inset well: two lines of mono at most, the rest is read in the agent. */
+  .tile__activity { @apply min-w-0 rounded-s bg-surface-0 px-2.5 py-2 font-mono text-muted; font-size: var(--text-caption); line-height: 1.45; min-height: calc(2 * 1.45em + 1rem);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .tile--needs-you .tile__activity { @apply text-ink; background: color-mix(in oklab, var(--surface-0) 60%, transparent); }
+  .tile--failed .tile__activity { @apply text-ink; }
+  /* The foot: neutral facts as grey tags (folder, branch, changed files), signs that belong to the agent, and the time at the end. */
+  .tile__foot { @apply flex min-w-0 flex-wrap items-center gap-1.5; }
+  .tile__foot > .kit-tag { @apply min-w-0 max-w-full; }
+  .tile__where { @apply min-w-0 truncate; }
+  .tile__when { @apply ms-auto inline-flex items-center gap-1 whitespace-nowrap text-muted; font-size: var(--text-caption); }
   .tile--closed .tile__name { @apply text-muted; }
-  .tile__when { @apply inline-flex items-center gap-1; }
-  .tile--needs-you .tile__when { @apply font-medium text-needs-you; }
-  @media (prefers-reduced-motion: no-preference) {
-    .tile--working::after { background-size: 200% 100%; animation: sweep 2.8s ease-in-out infinite; }
-    .tile--needs-you:not(.tile--closed) { animation: nudge 2.4s ease-in-out infinite; }
-  }
   .tile--closed { @apply opacity-90; }
 
   .fleet-empty { @apply mx-auto grid max-w-xl justify-items-start gap-3 py-10; }
@@ -252,7 +242,7 @@
   .fleet-empty--wide { @apply max-w-none; }
   .fleet-empty--wide .tile { @apply pointer-events-none; }
   /* Pressed: a controls sinks by a pixel (a state of its own beside hover and focus). */
-  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .fleet-seg:active, .fleet-count:active:not(:disabled), .rail__btn:active { @apply translate-y-px; }
+  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .rail__btn:active { @apply translate-y-px; }
 
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
@@ -303,18 +293,16 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
   .ide-iconbtn, .menu-tile { min-width: var(--tap); }
   /* The widget kit's controls; the switch keeps its look and grows an invisible target around it. */
-  .kit-btn, .kit-row, .kit-seg__item, button.kit-stat { min-height: var(--tap); }
+  .kit-btn, .kit-row, .kit-seg__item, button.kit-stat, a.kit-stat { min-height: var(--tap); }
   .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
 }
 
-@keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-@keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
 /* The chat header's state dot: a ring that spreads and fades while the agent works (colour from the pill's own text colour). */
 @keyframes chat-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
@@ -486,6 +474,52 @@
   .kit-callout__actions { @apply col-start-3 row-span-2 row-start-1 flex flex-wrap gap-2 self-center; }
   @container (max-width: 28rem) { .kit-callout__actions { @apply col-span-2 col-start-2 row-span-1 row-start-auto; } }
 
+  /* Redesign PR 4: one approval request in three densities (row, card, full), on the callout: the same tint, icon chip and button
+     order everywhere. The ask is never cut where it can be answered: one mono chip that wraps. */
+  .approval-req-host { container-type: inline-size; }
+  .approval-req__title { @apply flex min-w-0 items-start gap-2; }
+  .approval-req__title > .kit-avatar { margin-block-start: 0.0625rem; }
+  .approval-req__text { @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5; }
+  .approval-req__ask { @apply min-w-0 break-words; }
+  .approval-req__where { @apply inline-flex min-w-0 flex-wrap items-center gap-1.5 font-normal text-muted; font-size: var(--text-caption); }
+  .approval-req__open { @apply -my-0.5 size-6 flex-none; }
+  .approval-req__what { @apply m-0 min-w-0 break-words text-ink; }
+  .approval-req__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .approval-req__foot { @apply col-start-2 col-end-4 min-w-0; }
+  /* Card and full: the buttons under the ask, at the end. */
+  .approval-req--card .kit-callout__actions, .approval-req--full .kit-callout__actions { @apply col-start-2 col-end-4 row-span-1 row-start-auto mt-1 justify-end; }
+  /* A wide card (above a terminal) keeps its buttons at the end of the first line, as the row does. */
+  @container (min-width: 36rem) { .approval-req--card .kit-callout__actions { @apply col-start-3 col-end-4 row-span-2 row-start-1 mt-0 self-center; } }
+  .approval-req--full { @apply gap-y-1.5; padding: 1rem 1.125rem; }
+  .approval-req--full .approval-req__title { font-size: var(--text-title); }
+  .approval-req--full .approval-req__cmd { font-size: var(--text-body); }
+  /* A narrow pane: the row density with the text across the whole card and the buttons under it, as wide as they can be. */
+  .approval-req--stacked .kit-callout__body, .approval-req--stacked .approval-req__foot { @apply col-start-1 col-end-4; }
+  .approval-req--stacked .kit-callout__actions { @apply col-start-1 col-end-4 row-span-1 row-start-auto mt-1; }
+  .approval-req--stacked .kit-callout__actions > .kit-btn { flex: 1 1 6rem; }
+  .approval-req--stacked > .kit-chip { grid-row: auto; }
+  /* An answer waiting out the dwell, held or already sent (T44): it looks off and does nothing. */
+  .approval-req .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
+  /* The attention dialog is the full density itself: an overlay (the one elevation), the ask scrolls when it is long, the buttons stay. */
+  .attention-card > .approval-req { @apply min-h-0 flex-1 rounded-m; grid-template-rows: auto minmax(0, 1fr) auto; }
+  .approval-req--full > .kit-chip { grid-row: auto; }
+  .attention-card .kit-callout__body { @apply flex min-h-0 flex-col gap-2; }
+  /* Redesign PR 5: a start or a switch in short (two lines, each cut at its end: Review shows it whole), and Review's dialog, whose body
+     scrolls inside the window so the answers stay in view. */
+  .approval-req__summary { @apply grid min-w-0 gap-0.5 text-muted; font-size: var(--text-caption); }
+  .approval-req__line { @apply m-0 flex min-w-0 items-baseline gap-x-1.5; }
+  .approval-req__line > * + *::before { content: '·'; @apply me-1.5; }
+  .approval-req__line > * { @apply min-w-0 truncate; flex: 0 1 auto; }
+  .approval-req__line > .approval-req__clip { flex-shrink: 1000; } /* the quote gives way first */
+  /* A start's red flags are never cut: the folder takes what is left (to nothing), and only flags too wide for the card wrap. */
+  .approval-req__line--facts { flex-wrap: wrap; }
+  .approval-req__line--facts > * { flex: none; max-width: 100%; }
+  .approval-req__line--facts > .approval-req__clip { flex: 1 1 0; }
+  .approval-req__quote { @apply text-ink; }
+  .approval-req__quote::before { content: '“'; }
+  .approval-req__quote::after { content: '”'; }
+  .review-card .kit-callout__body { @apply self-stretch overflow-y-auto; overscroll-behavior: contain; }
+
   .kit-empty { @apply grid justify-items-center gap-1.5 px-4 py-7 text-center; }
   .kit-empty > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }
   .kit-empty__title { @apply m-0 font-semibold text-ink; font-size: var(--text-strong); }
@@ -556,6 +590,93 @@
   .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }
   .kit-gallery__group { @apply grid gap-2; }
   .kit-gallery__row { @apply flex flex-wrap items-center gap-3; }
+
+  /* A dialog (an overlay: the raised surface and the one shadow, ADR-0102): an icon chip, a 16 px title, a muted line, the answers at the end. */
+  .kit-overlay { @apply fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm; }
+  .kit-dialog { @apply fixed left-1/2 top-1/2 z-50 grid -translate-x-1/2 -translate-y-1/2 items-start gap-x-3 gap-y-1 overflow-auto rounded-l border border-line p-5 text-ink;
+    grid-template-columns: auto minmax(0, 1fr); width: min(28rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+  .kit-dialog > .kit-chip { grid-row: span 2; }
+  .kit-dialog__title { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
+  .kit-dialog__body { @apply col-start-2 m-0 text-muted; }
+  .kit-dialog__actions { @apply col-span-2 mt-4 flex flex-wrap justify-end gap-2; }
+}
+
+/* Settings (redesign PR 8): a side index, then each section as a card with setting rows. Built from the kit; these are its layout only. */
+@layer components {
+  .set-page { @apply grid items-start gap-6 md:grid-cols-[13.5rem_minmax(0,1fr)] md:gap-9; }
+  .set-nav { @apply sticky top-10 z-[5] -mx-4 flex gap-x-1 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-0.5 md:overflow-visible md:border-b-0 md:p-0; }
+  .set-nav__group { @apply flex flex-none items-center gap-1 md:grid md:items-stretch md:gap-0.5; }
+  /* The one uppercase label on the page (sidebar group labels, visual-language.md §2). */
+  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold uppercase tracking-wider text-muted md:block; font-size: 0.6875rem; }
+  .set-nav__row { @apply w-auto flex-none whitespace-nowrap text-muted hover:text-ink md:w-full; font-size: var(--text-body); }
+  .set-nav__row[aria-current='true'] { @apply text-ink; }
+  .set-nav__row[aria-current='true'] .set-nav__icon { @apply text-accent; }
+  .set-nav__icon { @apply hidden text-muted md:block; }
+  .set-nav__count { @apply ms-auto inline-grid h-4.5 min-w-4.5 place-items-center rounded-full bg-surface-2 px-1 text-muted; font-size: 0.6875rem; }
+  .set-content { @apply grid min-w-0 max-w-[50rem] gap-7; }
+  .set-head { @apply grid gap-1; }
+  .set-head__title { @apply m-0 font-semibold tracking-tight; font-size: var(--text-page); }
+  .set-head__line { @apply m-0 text-muted; }
+  .set-group { @apply grid gap-3; }
+  .set-group__head { @apply flex flex-wrap items-center justify-between gap-2; }
+  .set-group__title { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
+  .set-card, .set-anchor { scroll-margin-top: 6rem; }
+  /* Not clipped: a kind card's tooltip may reach past the card's edge. The last row's hover keeps the card's corners instead. */
+  .set-card { @apply min-w-0 rounded-m border border-line bg-surface-1; container-type: inline-size; }
+  .set-card > .set-list:last-child > li:last-child > a.set-item { border-end-start-radius: calc(var(--radius-m) - 1px); border-end-end-radius: calc(var(--radius-m) - 1px); }
+  .set-card > * + * { @apply border-t border-line; }
+  .set-card__head { @apply flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3.5; }
+  .set-card__icon { @apply size-8; background: var(--kit-tint); }
+  .set-card__title { @apply grid min-w-0 flex-1 gap-px; flex-basis: 12rem; }
+  .set-card__h { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-strong); }
+  .set-card__desc { @apply m-0 text-muted; font-size: var(--text-caption); }
+  .set-card__end { @apply ms-auto flex max-w-full min-w-0 flex-wrap items-center gap-2; }
+  .set-card__block { @apply grid gap-2 px-4 py-3; }
+  .set-card .codebox { @apply font-mono; font-size: var(--text-caption); }
+  .set-value { @apply rounded-s border border-line bg-surface-0 px-2.5 py-1; font-size: var(--text-body); }
+  .set-print { @apply tracking-wide; font-size: var(--text-title); }
+  /* A form with its labels in one column and its fields in the next, lined up; one column on a narrow card. */
+  .set-form { @apply m-0 grid; }
+  .set-form__row { @apply grid items-center gap-x-4 gap-y-1.5 px-4 py-2.5; grid-template-columns: minmax(8rem, 12.5rem) minmax(0, 20rem); }
+  .set-form__row + .set-form__row { @apply border-t border-line; }
+  .set-form__label { font-weight: 550; }
+  .set-form__row input { @apply w-full min-w-0 bg-surface-0 py-1.5; }
+  .set-form__actions { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5; }
+  @container (max-width: 32rem) { .set-form__row { grid-template-columns: minmax(0, 1fr); } .set-form__row > span.set-form__label { @apply hidden; } }
+  .set-card .kit-setting__control select { @apply bg-surface-0 py-1.5; }
+  /* A list inside a card: a system tile, a name with a caption, its facts and actions at the end. */
+  .set-list { @apply m-0 grid list-none p-0; }
+  .set-list > li + li { @apply border-t border-line; }
+  .set-item { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-ink; }
+  a.set-item { @apply no-underline transition-colors duration-150 hover:bg-surface-2; }
+  .set-item__main { @apply grid min-w-0 flex-1 gap-0.5; flex-basis: 10rem; }
+  .set-item__name { @apply truncate font-semibold; }
+  .set-item__meta { @apply flex min-w-0 flex-wrap gap-x-1.5 text-muted; font-size: var(--text-caption); }
+  .set-item__meta > :not(:last-child)::after { content: '·'; @apply ms-1.5; }
+  .set-item__flag { @apply font-medium text-ink; }
+  .set-item__end { @apply ms-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2; }
+  .set-item__end .kit-pill { @apply max-w-full overflow-hidden text-ellipsis; }
+  .set-item__alert { @apply m-0 basis-full text-danger; font-size: var(--text-caption); }
+  .set-os { @apply grid size-8 flex-none place-items-center rounded-s bg-surface-2 text-ink; }
+  .set-fp { @apply font-mono tracking-wide; overflow-wrap: anywhere; }
+  .set-dot { @apply inline-block size-1.5 flex-none rounded-full; background: currentColor; }
+  /* Agents: a grid of kind cards; one that is not installed is dashed and quieter (its words stay readable). */
+  .set-kinds-wrap { @apply grid gap-3 px-4 pb-4 pt-3; }
+  .set-kinds { @apply m-0 grid list-none items-start gap-2 p-0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); }
+  .set-kind { @apply min-w-0 rounded-s border border-line bg-surface-0; }
+  .set-kind--missing { @apply border-dashed bg-transparent; }
+  .set-kind--missing .kit-avatar { @apply opacity-60; }
+  .set-kind__face { @apply flex min-w-0 cursor-pointer list-none items-center gap-2.5 rounded-s p-2.5; }
+  .set-kind__face::-webkit-details-marker { display: none; }
+  .set-kind__name { @apply grid min-w-0 flex-1; }
+  .set-kind__title { @apply truncate font-semibold; }
+  .set-kind__caption { @apply truncate text-muted; font-size: var(--text-caption); }
+  .set-kind__chev { @apply text-muted transition-transform duration-150 rtl:-scale-x-100; }
+  .set-kind details[open] .set-kind__chev { @apply rotate-90; }
+  .set-kind__more { @apply grid gap-2 border-t border-line px-2.5 pb-2.5 pt-2; }
+  /* The bolt sits at a card's end: its tooltip opens toward the start, so it stays on the page. */
+  .set-kind .kit-tip { inset-inline-start: auto; inset-inline-end: 0; }
+  .set-risk { @apply inline-grid size-5 flex-none place-items-center rounded-xs; color: var(--danger); background: var(--tint-danger); }
 }
 @media (prefers-reduced-motion: no-preference) {
   .kit-pill.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }

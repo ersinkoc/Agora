@@ -50,9 +50,19 @@ approvals-title = Waiting for your answer
 approval-title = { $name } asks permission
 approval-allow = Allow
 approval-deny = Deny
+# Redesign PR 4: the title of a request is the ask itself, in the window's words, from a closed set of kinds (anything else is
+# approval-title). The command, file or address stays on the line under it, whole.
+approval-ask-run = { $name } wants to run a command
+approval-ask-edit = { $name } wants to change a file
+approval-ask-read = { $name } wants to read a file
+approval-ask-fetch = { $name } wants to open a web address
+approval-ask-delete = { $name } wants to delete something
+approval-ask-start = { $name } wants to start another agent
+approval-open-agent = Open { $name }
 approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
 approval-failed = The answer did not go through. Try again.
 approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
+approval-role = Your role does not let you answer for this project. Ask the owner, or someone who works on it.
 approval-no-longer-valid = This request is no longer valid. The agent it was about has ended or restarted.
 approval-ran-out = This request ran out of time. Ask again from the agent's controls.
 # ADR-0101: "Allow always", an answer the agent remembers. The session words are the ADR's, for a kind known to drop the answer when its
@@ -89,19 +99,28 @@ start-approval-prompt = Its first prompt
 start-approval-no-prompt = No prompt: it starts and waits.
 start-approval-scope = What to allow
 start-approval-once = Only this one
+# The second choice of the grant's segmented control (#1070): short, so it is never cut; start-approval-more says it in full under it.
+start-approval-more-short = More like this
 start-approval-no-grant = Only this one can be allowed: this kind runs any program it is given, so it is never started without asking.
 start-approval-settings-once = Only this one can be allowed: a start with its own model or effort is always asked.
 start-approval-options-once = Only this one can be allowed: your answer covers this start with exactly the launch options shown, and every such start is asked again.
 start-approval-does-not-ask = If you allow it, this helper runs commands and changes files without asking you first, for as long as it runs.
 start-approval-more = Up to { $count } { $kind } agents in this folder while { $name } runs, without asking again
 start-approval-nested = Its helpers may ask to start helpers too (you answer each)
+approval-review = Review
+approval-review-for = Read the whole request from { $name }
+approval-review-close = Close
+start-summary-outside = outside its folder
+start-summary-more = { $count ->
+    [one] 1 more line
+   *[other] { $count } more lines
+}
 helper-started-by = started by { $name }
 helper-grants = Helper permissions
 helper-grant-line = Can still start { $count } { $kind } without asking in
 helper-grant-revoke = Revoke
 helper-grants-failed = Could not read or change the helper permissions.
 device-title = This device
-device-intro = Machines only accept an answer from a device they trust. This is what they know this browser by:
 device-name = Device name
 device-key = Device key
 device-link = Settings
@@ -115,11 +134,11 @@ device-asked = Asked. Open the window on a device your machines trust: it shows 
 device-ask-failed = Could not ask. Check the connection and try again.
 device-command-intro = Or run this on the machine (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows):
 device-others = Your other devices
-device-removed = removed
-device-waiting = waiting for your approval
-device-trusted-on = trusted on { $machines }
-device-trusted-nowhere = not trusted on any machine
-device-last-used = last used { $when }
+device-removed = Removed
+device-waiting = Waiting for your approval
+device-trusted-on = Trusted on { $machines }
+device-trusted-nowhere = Not trusted on any machine
+device-last-used = used { $when }
 device-remove = Remove
 device-remove-failed = Could not remove it.
 device-request-title = { $name } asks to be trusted
@@ -196,8 +215,6 @@ signin-refused-password = That did not work. The code may be wrong, expired or a
 lock-now = Lock
 lock-now-hint = Sign this window out. Agents keep running.
 password-title = Screen password
-password-intro = Set a password that a sign-in from another machine must give along with its code. This machine's own browser is never asked.
-password-intro-set = A screen password is set: a sign-in from another machine needs it. Changing it signs out every other window.
 password-current = Current password
 password-new = New password
 password-again = Type it again
@@ -206,10 +223,10 @@ password-change = Change password
 password-saved = Saved. Every other window was signed out.
 password-refused = That password is not right.
 password-too-many = Too many wrong tries. Wait a while and try again.
-password-busy = The hub is busy. Try again in a moment.
+password-busy = Your Agora is busy. Try again in a moment.
 password-too-short = Use at least { $min } characters.
 password-mismatch = The two passwords do not match.
-password-failed = Could not reach your hub. Try again.
+password-failed = Could not reach your Agora. Try again.
 idle-lock = Lock this window when idle
 idle-lock-off = Never
 idle-lock-minutes = After { $minutes } minutes
@@ -567,6 +584,15 @@ audit-action-user-role = Changed a role
 audit-action-user-remove = Removed a team member
 audit-action-user-grant = Gave access to a project
 audit-action-user-revoke = Took back access to a project
+audit-action-pair-open = Let new machines ask to join
+audit-action-pair-close = Stopped new machines from asking to join
+audit-action-pair-status = Checked whether new machines may ask to join
+audit-action-pair-approve = Let a machine join
+audit-action-pair-deny = Turned a machine away
+audit-action-pair-request = A machine asked to join
+audit-action-pair-reveal = A machine checked its request to join
+audit-action-pair-issued = A machine was given its certificate
+audit-action-pair-refused = Requests to join were turned away
 audit-action-agentstart = Started an agent
 audit-action-agentstop = Stopped an agent
 audit-action-agentprompt = Sent a prompt
@@ -612,6 +638,8 @@ start-identity-change = Associate this folder with its changed project identity
 start-directory-unsupported = This machine needs an update to start agents in selected folders.
 start-directory-failed = The folder could not be selected. Check its path and permissions.
 start-directory-forbidden = This device is limited to other projects on this machine. Choose a folder of a project you work in, or ask the machine's owner.
+start-directory-role = Your role does not let you choose folders on this machine. Ask the owner.
+start-role = Your role does not let you start agents here. Ask the owner if you need to.
 workspace-shared = Shared folder · changes belong to the workspace
 filter-project = Project
 filter-all-projects = All projects
@@ -679,6 +707,7 @@ ide-more-tabs-failed = a hidden tab ended with an error
 ide-more-tabs-working = a hidden tab is working
 theme-label = Colour scheme
 theme-system = Follow the system
+theme-system-short = System
 ide-shared = Shared
 ide-memory = Memory used by the agents on this machine
 network-hub = Your Agora
@@ -767,6 +796,7 @@ resume-failed-unsupported = That machine cannot resume agents yet. Update it.
 resume-failed-still-running = Its process from before the restart is still running. Stop it first.
 resume-failed-offline = That machine is offline.
 resume-failed-forbidden = This device is limited to other projects on this machine, so it cannot start this agent.
+resume-failed-role = Your role does not let you start this agent again. Ask the owner.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask
@@ -880,8 +910,11 @@ theme-colours = Colours
 theme-shape = Text and shape
 theme-readability = Readability
 theme-incomplete = Some values are not valid yet; the window keeps the last good ones.
-theme-contrast-ok = All text is readable (WCAG AA).
+theme-contrast-ok = All text and controls are easy to see (WCAG AA).
 theme-contrast-not-applied = Not applied: some text would be hard to read.
+theme-contrast-warning = Applied, but some text or controls would be hard to see in places:
+theme-contrast-also = Also hard to see in places:
+theme-import-warning = Added. When it is shown, some text or controls would be hard to see in places:
 theme-px = { $size } px
 theme-import = Import…
 theme-export = Export
@@ -915,6 +948,44 @@ theme-token-radius-xs = Corners: tiny
 theme-token-radius-s = Corners: small
 theme-token-radius-m = Corners: medium
 theme-token-radius-l = Corners: large
+# A role's soft coloured background (callouts, pills, the current row): the readability check names it as "{ $bg }".
+theme-tint-accent = Accent background
+theme-tint-working = Working background
+theme-tint-needs = Needs you background
+theme-tint-finished = Finished background
+theme-tint-danger = Error background
+theme-tint-idle = Idle background
+# The one red (errors, deletions): fixed, not a theme colour.
+theme-colour-danger = Red (errors)
+theme-colour-on-danger = Text on red
+theme-colour-surface-raised = Chosen option background
+# A role's icon chip (the small square behind a role's icon).
+theme-chip-accent = Accent icon background
+theme-chip-working = Working icon background
+theme-chip-needs = Needs you icon background
+theme-chip-finished = Finished icon background
+theme-chip-danger = Error icon background
+theme-chip-idle = Idle icon background
+# An agent's badge (its initial on its colour); $colour is one of the theme-agent-colour-* names.
+theme-avatar = { $colour } agent badge
+theme-agent-colour-amber = Amber
+theme-agent-colour-teal = Teal
+theme-agent-colour-violet = Violet
+theme-agent-colour-rose = Rose
+theme-agent-colour-slate = Slate
+theme-agent-colour-sky = Sky
+theme-agent-colour-mint = Mint
+# The controls whose state is shown by a colour (they need 3:1 to be seen): named as "{ $control }" in theme-error-control.
+theme-control-segmented = Chosen option ring
+theme-control-switch-off = Switch (off)
+theme-control-switch-on = Switch (on)
+theme-control-risk-switch = Risky switch (on)
+theme-control-selected-card = Selected card ring
+theme-control-pressed-count = Selected count ring
+theme-control-primary-button = Main button
+theme-control-danger-button = Red button
+theme-control-focus-ring = Focus ring
+theme-control-icon = Icon
 theme-error-json = This file is not JSON.
 theme-error-invalid = This is not an Agora theme file.
 theme-error-newer = This theme was made by a newer version of Agora.
@@ -927,6 +998,7 @@ theme-error-bad-color = { $label } ("{ $token }") must be a colour like #1a2b3c.
 theme-error-bad-size = { $label } ("{ $token }") must be between { $min } and { $max } px.
 theme-error-bad-font = { $label } ("{ $token }") must be a list of font names separated by commas.
 theme-error-contrast = { $fg } on { $bg } is { $ratio }:1; it needs at least { $min }:1 to be readable.
+theme-error-control = { $control }: { $fg } on { $bg } is { $ratio }:1; it needs at least { $min }:1 to be seen.
 theme-error-full = You have { $max } themes; delete one first.
 palette-theme-editor = Edit theme
 palette-theme = Theme: { $name }
@@ -947,7 +1019,12 @@ phone-no-agents = No agents on this machine.
 phone-needs = Needs you · { $count }
 phone-answer-below = Answer with the buttons at the bottom of the screen.
 phone-next = Next · { $count }
-phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
+# The one trust notice at the top of the phone's requests (redesign PR 13), naming every machine that asks and has said it does not trust this device.
+phone-untrusted-title = This device is not trusted yet
+phone-untrusted-machines = { $count ->
+    [one] { $machines } does not trust this device yet, so it will refuse an answer from here.
+   *[other] { $machines } do not trust this device yet, so they will refuse an answer from here.
+}
 key-bar = Terminal keys
 key-esc = Esc
 key-tab = Tab
@@ -1045,6 +1122,12 @@ fleet-machines =
         [one] { $online } of { $total } machine online
        *[other] { $online } of { $total } machines online
     }
+fleet-stat-machines =
+    { $total ->
+        [0] Machines online
+        [one] of { $total } machine online
+       *[other] of { $total } machines online
+    }
 fleet-filter-active = Showing only “{ $name }”.
 fleet-filter-clear = Show everything
 fleet-filter-none = Nothing to show here.
@@ -1054,7 +1137,6 @@ fleet-attention-count = { $count ->
 }
 fleet-asked = Asked { $when }
 fleet-waiting-in-terminal = Waiting for you in its terminal
-fleet-asks-start = Asks to start another agent
 fleet-allow-for = Allow: { $name }
 fleet-deny-for = Deny: { $name }
 fleet-review = Review and decide
@@ -1092,6 +1174,8 @@ fleet-empty-step-code = On the machine where Agora started
 fleet-empty-step-join = On the machine to add
 fleet-empty-ca = ca.pem is the file ~/.agora/hub/ca.pem on that machine.
 fleet-empty-machines = See your machines
+fleet-guest-title = No project is yours yet
+fleet-guest-text = You see only the projects you were given access to. Ask the owner to add you to one; it appears here as soon as they do.
 fleet-firstrun-title = Your machines are ready. Start the first agent.
 fleet-firstrun-text = Choose a machine and a project folder, and an agent starts there. It shows up here and tells you when it needs you.
 fleet-firstrun-cli = Or from a terminal on that machine
@@ -1108,11 +1192,9 @@ fleet-same-ask = { $count } { $kind } agents ask for the same thing on { $machin
 fleet-review-each = Review each
 fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
-attention-who = { $name } on { $machine }
-attention-who-only = { $name }
 attention-ask-review = This needs to be read in full before you answer. Review it to decide.
-attention-skip = { $name } was asked to act without asking you. Read the request in its full card before you answer.
-attention-start = { $name } wants to start another agent. Its folder, prompt and settings are read in the full card.
+attention-skip = { $name } was asked to act without asking you. Review shows the whole request before you answer.
+attention-start-read = Review shows its folder, prompt and settings in full before you answer.
 attention-pair = Compare its number with the one on its screen in the full card before you approve.
 attention-later = Later
 attention-review = Review
@@ -1125,14 +1207,11 @@ attention-banner = { $count ->
    *[other] { $count } things need you
 }
 attention-settings-title = Needs you
-attention-settings-intro = How this window gets your attention when an agent is blocked. The Needs you list and its counts always stay in view. Kept in this browser only.
 attention-mode-modal = A card over the window
 attention-mode-banner = A small banner only
 attention-mode-off = Nothing extra
-attention-mode-hint = A card opens only while this window is focused and you are not typing in a terminal or a field; otherwise it waits and a banner shows it. It never answers for you.
-attention-notify-title = Notifications while the window is in the background
-attention-notify-enable = Turn on notifications
-attention-notify-off = Turn off notifications
+attention-mode-hint = A card opens only while this window is focused and you are not typing; otherwise a banner shows it. It never answers for you.
+attention-notify-title = Notifications in the background
 attention-notify-on = Notifications are on. They only say that an agent needs you.
 attention-notify-names = Include the agent and machine name
 attention-notify-blocked = This browser blocks notifications for this page. Allow them in the browser's site settings to turn them on.
@@ -1145,6 +1224,8 @@ notify-body = { $count ->
 notify-body-named = { $name } needs you
 notify-body-named-on = { $name } on { $machine } needs you
 attention-sent = Answer sent. If this card stays, open it with Review.
+# A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
+approval-sent = Answer sent.
 attention-notify-names-warn = These names come from the agents and machines themselves, and a notification may show them on a locked screen. A name that is not plain text is left out.
 
 # Usage (no money: tokens, context and time)
@@ -1407,7 +1488,6 @@ settings-group-machines = My machines
 settings-device = Name and fingerprint
 settings-passkeys = Passkey
 settings-machines = Machines
-settings-machines-intro = Every machine that is connected to this hub, and whether it trusts this browser.
 settings-machines-manage = Manage machines
 
 # Closing a running agent (the agent menu, the command palette, /exit and /quit in a chat agent's message box)
@@ -1433,15 +1513,46 @@ close-failed-hub = the hub could not be reached
 
 # Settings → Agents: the agents each machine can start, which are installed, and what each takes when started.
 settings-agents = Agents
-agents-intro = The agents each machine can start. Model, effort and other choices are made when you start an agent; they are listed here so you can see what each one offers.
+settings-subtitle = Kept in this browser unless it says otherwise.
+device-desc = Machines accept answers only from a device they trust.
+device-fingerprint-hint = Compare it when a machine asks.
+device-trust-on = { $count ->
+    [one] Trusted on 1 machine
+   *[other] Trusted on { $count } machines
+}
+device-trust-none = Not trusted yet
+device-others-desc = Browsers signed in to your Agora.
+device-remove-named = Remove { $name }
+device-remove-title = Remove { $name }?
+device-remove-body = Your machines will no longer accept answers from it. This cannot be undone here.
+device-remove-keep = Keep it
+device-remove-confirm = Remove
+when-day-time = { $day }, { $time }
+attention-settings-desc = How this window gets your attention when an agent waits. Kept in this browser only.
+attention-mode-label = When an agent needs you
+attention-mode-short-modal = Card
+attention-mode-short-banner = Banner
+attention-mode-short-off = Nothing extra
+attention-notify-hint = They only say that an agent needs you, unless you add names.
+password-desc = Asked from browsers on other machines, with their code. This machine's own browser is never asked.
+password-desc-set = Asked from browsers on other machines. Changing it signs out every other window.
+password-state-set = Set
+password-state-unset = Not set
+settings-machines-desc = Every machine connected to your Agora, and whether it trusts this browser.
+settings-machines-online = { $online } of { $total } online
+agents-desc = What each machine can start. Choices are made when you start an agent; open a card to see what it takes.
+agents-machine = Machine
+agents-runs-short-terminal = Terminal
+agents-runs-short-chat = Chat
+agents-runs-short-adapter = Chat
+agents-kind = Id
+agents-runs = Runs
+agents-offers-skip = Offers "Don't ask": it can start so that it skips permission questions. Never chosen for you.
 agents-loading = Asking this machine…
 agents-none-known = This machine is offline and has not told this browser which agents it has.
 agents-empty = This machine lists no agents.
 agents-stale = Offline · as of { $when }
-agents-installed = Installed
 agents-not-installed = Not installed
-agents-state-installed = installed
-agents-state-missing = not installed
 agents-runs-terminal = Runs in a terminal
 agents-runs-chat = Chat
 agents-runs-adapter = Chat through an adapter

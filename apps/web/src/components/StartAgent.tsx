@@ -5,6 +5,7 @@ import { t } from '../i18n';
 import { sharesName } from '../model';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
+import { ROLE_REFUSAL, refusalCode } from '../net/startRefusal';
 import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { LaunchSettings } from './LaunchSettings';
@@ -36,7 +37,7 @@ function AskApproval({ ask }: { ask: () => Promise<boolean> }) {
     <button type="button" className="button button--primary" disabled={state === 'busy' || state === 'asked'}
       onClick={() => { setState('busy'); void ask().then((ok) => setState(ok ? 'asked' : 'failed')); }}>{t('trust-ask')}</button>
     {state === 'asked' && <span role="status" className="text-[0.8125rem] text-muted">{t('trust-asked')}</span>}
-    {state === 'failed' && <span role="alert" className="text-[0.8125rem] text-needs-you">{t('device-ask-failed')}</span>}
+    {state === 'failed' && <span role="alert" className="text-[0.8125rem] text-danger">{t('device-ask-failed')}</span>}
   </div>;
 }
 
@@ -97,19 +98,29 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
-  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; reason?: string } | undefined>();
   const [canBrowse, setCanBrowse] = useState(!!list);
+  const lookGen = useRef(0);
   const look = async (at: string) => {
     if (!list) return;
+    const gen = ++lookGen.current;
     setBrowse((b) => ({ listing: b?.listing, busy: true }));
-    try { setBrowse({ listing: await list(node, at), busy: false }); }
+    try {
+      const listing = await list(node, at);
+      if (lookGen.current === gen) setBrowse({ listing, busy: false });
+    }
     catch (e) {
+      if (lookGen.current !== gen) return;
       // A machine without the command: keep the typed path, and do not offer the picker again.
       if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
-      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
+      else {
+        // A lasting refusal (this device limited to other projects, or this person's role, #1044) says so; anything else says it failed.
+        const why = refusalCode(e, 'DirectoryList');
+        setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, reason: why === 'auth.forbidden' || why === ROLE_REFUSAL ? directoryReasonKey(why) : 'start-browse-failed' }));
+      }
     }
   };
-  useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
+  useEffect(() => { lookGen.current++; setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
   useEffect(() => {
     if (!node) return;
     let current = true;
@@ -139,7 +150,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
     setBusy(true); setError(undefined);
     // For a task the project is the task's: no new project identity is made for the folder (it would make it another project).
     try { setInfo(await inspect(node, at, forTask ? false : createIdentity)); }
-    catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
+    catch (e) { setError(directoryReasonKey(refusalCode(e, 'DirectoryInspect'))); }
     finally { setBusy(false); }
   };
   const go = async () => {
@@ -208,7 +219,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                   <button type="button" className="button button--primary px-2 py-1 text-xs" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</button>
                   <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
                 </div>
-                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t(browse.forbidden ? 'start-directory-forbidden' : 'start-browse-failed')}</p>}
+                {browse.failed && <p role="alert" className="m-0 text-xs text-danger">{t(browse.reason ?? 'start-browse-failed')}</p>}
                 <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
                   {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-xs">{t('start-browse-empty')}</li>}
                   {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="ide-row py-1" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
@@ -229,7 +240,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
             </>}
           </div>
 
-          {otherProject && forTask && <p role="alert" className="m-0 text-sm text-needs-you">{t('start-for-task-other-project', { project: forTask.project })}</p>}
+          {otherProject && forTask && <p role="alert" className="m-0 text-sm text-danger">{t('start-for-task-other-project', { project: forTask.project })}</p>}
           {info && <>
             <div className="grid gap-1.5">
               <h2 className="m-0">{t('ide-agent-pick')}</h2>
@@ -260,20 +271,20 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
               <h2 className="m-0">{t('start-how-it-acts')}</h2>
               {skips.length > 0 && <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-how-it-acts')}>
                 <button type="button" role="radio" aria-checked={launch.permission === ASK} disabled={busy} className={`${chip} ${launch.permission === ASK ? chipOn : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, ASK))}>{t('option-ask')}</button>
-                {skips.map((o) => <button key={o.id} type="button" role="radio" aria-checked={launch.permission === o.id} disabled={busy} className={`${chip} ${launch.permission === o.id ? 'border-needs-you bg-surface-2 text-ink ring-1 ring-needs-you' : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, o.id))}>{labelOf(o, t)}</button>)}
+                {skips.map((o) => <button key={o.id} type="button" role="radio" aria-checked={launch.permission === o.id} disabled={busy} className={`${chip} ${launch.permission === o.id ? 'border-danger bg-surface-2 text-ink ring-1 ring-danger' : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, o.id))}>{labelOf(o, t)}</button>)}
               </div>}
-              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
                 <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('session-confirm-title')}</strong>
                   <span className="text-muted">{t('start-confirm-skip-body', { name: labelOf(pendingOption, t) })}</span></div>
                 <button type="button" className="button px-3 py-1 text-xs" onClick={() => setLaunch(confirmSkip)}>{t('start-confirm-skip-yes')}</button>
                 <button type="button" className="button button--primary px-3 py-1 text-xs" autoFocus onClick={() => setLaunch(keepAsking)}>{t('session-confirm-no')}</button>
               </div>}
-              {launch.permission !== ASK && !pendingOption && <p className="m-0 text-xs text-needs-you">{t('start-does-not-ask-note')}</p>}
+              {launch.permission !== ASK && !pendingOption && <p className="m-0 text-xs text-danger">{t('start-does-not-ask-note')}</p>}
               {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
             </div>}
           </>}
           {sending.length > 0 && !error && <p role="status" className="m-0 text-xs text-muted">{t('start-settings-summary', { kind: kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.name ?? kind : kind, settings: sending.map(([id, value]) => `${settingName(takes.find((x) => x.id === id) as LaunchSettingChoice, t)}: ${value}`).join(', ') })}</p>}
-          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? (binary
+          {error && <p role="alert" className="m-0 text-danger">{error === 'approval-not-trusted' && trust ? (binary
             // A member gets the file name only (#598): no folder to name, so the sentence asks for the folder where that file is.
             ? isBareName(binary)
               ? t('trust-hint-file', { machine: online.find(m => m.id === node)?.name ?? node, file: binary })

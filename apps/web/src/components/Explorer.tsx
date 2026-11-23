@@ -93,7 +93,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                     {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
                   </button>}
                 </div>
-                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
+                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-danger">{t(resumeReasonKey(resumeError.code))}</p>}
               </li>;
   // #945: a row keeps the agent's name readable, and the bolt of an agent that acts without asking whole. The name has at least 40 % of the row and gives way only after "started by …"
   // and the machine; when the name and the badges do not fit on one line the badges wrap below it. While the row is narrower than 16rem the
@@ -111,7 +111,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       <LimitChip agent={a} compact fit />
       {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
       {a.shared && <span className="hidden flex-none text-xs text-muted @3xs:inline" title={t('workspace-shared')}>{t('ide-shared')}</span>}
-      {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
+      {(a.filesChanged ?? 0) > 0 && <span className="kit-tag kit-tag--mono h-4 flex-none">{a.filesChanged}</span>}
     </button>
     {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
     <span className="flex-none opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"><CloseAgentMenu agent={a} where="row" /></span>
@@ -119,7 +119,9 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
     <CloseConfirm agent={a} where="row" />
   </li>;
 
-  return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
+  // Under 1024 px the list stacks above the panes (Console.tsx): there it keeps a height of its own (up to about a third of the window,
+  // never less than its tools and a few rows) and its agents scroll inside it, so the panes' tab bar never slides over its rows (#1069).
+  return <aside className="flex min-h-0 flex-col border-line bg-surface-1 max-lg:max-h-[max(35dvh,16rem)] max-lg:flex-none max-lg:border-b lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
       <h2 className="m-0 flex-1 text-xs">{t('console-agents')}</h2>
       <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>
@@ -202,7 +204,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           </button>
           <button type="button" className="ide-chip me-1 hover:text-ink" onClick={() => onDismiss(closed.map((a) => a.id))} title={everyone ? t('closed-clear-everyone') : undefined}>{t('closed-clear')}</button>
         </div>
-        {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
+        {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-danger">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
         {!folded.has('~closed') && <ul className="m-0 list-none p-0">
           {closed.map((a) => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
