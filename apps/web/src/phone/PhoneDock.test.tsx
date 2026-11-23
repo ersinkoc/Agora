@@ -13,6 +13,9 @@ import type { PairingUi } from '../components/Pairing';
 import { DOCK_DWELL_MS, PhoneAgent, PhoneHome } from './Phone';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// These tests are about request cards, not terminals: a real terminal (xterm, loaded lazily) needs browser APIs jsdom lacks
+// (matchMedia, canvas), and whether its lazy import resolves inside a test depends on how warm the module cache is (#1052's CI).
+vi.mock('../terminal/TerminalView', () => ({ TerminalView: () => null }));
 
 let host: HTMLElement;
 let root: Root;

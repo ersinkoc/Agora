@@ -28,6 +28,9 @@ import { SkipApproval } from './SkipApproval';
 import { AnswerHoldsProvider } from './useAnswerGuard';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// These tests are about request cards, not terminals: a real terminal (xterm, loaded lazily) needs browser APIs jsdom lacks
+// (matchMedia, canvas), and whether its lazy import resolves inside a test depends on how warm the module cache is (#1052's CI).
+vi.mock('../terminal/TerminalView', () => ({ TerminalView: () => null }));
 
 const agent = (over: Partial<AgentTileModel> = {}): AgentTileModel =>
   ({ id: 'n1/a', name: 'claude · teal', accent: 'var(--agent-teal)', kind: 'claude', machine: 'laptop', machineId: 'n1', workspace: 'login-fix', project: 'login-fix', state: 'needs-you', preview: '', ...over });
@@ -130,6 +133,7 @@ describe('a request is held for the whole window, whichever surface answered it 
     dwell();
     act(() => btn('panel', 'a.rs', 'Allow').click());
     expect(sent).toEqual(['r1', 'r1']);
+    await flush(); // that answer settles inside this test, not in the next one
   });
 
   it('the attention dialog shares the holds: answered on a banner it cannot answer, and answered in it the panel holds it', async () => {
@@ -238,6 +242,7 @@ describe('the side panel closed and opened again keeps its holds (#1048)', () =>
     dwell();
     act(() => btn('panel', 'a.rs', 'Allow').click());
     expect(sent).toEqual(['r1', 'r1']);
+    await flush(); // that answer settles inside this test, not in the next one
   });
 });
 
@@ -334,6 +339,7 @@ describe('a switch\'s card honours busy (#1048)', () => {
       expect(named('Deny').disabled).toBe(!back);
       act(() => named('Deny').click());
       expect(on).toHaveBeenCalledTimes(back ? 2 : 1);
+      await flush();
       act(() => root.render(<></>));
     }
     forgetSkipCapable();
@@ -352,6 +358,7 @@ describe('a switch\'s card honours busy (#1048)', () => {
     expect(named('Allow').disabled).toBe(false);
     act(() => named('Allow').click());
     expect(on).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // that answer settles inside this test, not in the next one
     forgetSkipCapable();
   });
 

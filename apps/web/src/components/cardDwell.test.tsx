@@ -16,6 +16,9 @@ import { ApprovalCard } from './ApprovalCard';
 import { Details } from './Inspector';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// These tests are about request cards, not terminals: a real terminal (xterm, loaded lazily) needs browser APIs jsdom lacks
+// (matchMedia, canvas), and whether its lazy import resolves inside a test depends on how warm the module cache is (#1052's CI).
+vi.mock('../terminal/TerminalView', () => ({ TerminalView: () => null }));
 
 const agent = (over: Partial<AgentTileModel> = {}): AgentTileModel =>
   ({ id: 'n1/a', name: 'claude · teal', accent: 'var(--agent-teal)', kind: 'claude', machine: 'laptop', machineId: 'n1', workspace: 'login-fix', project: 'login-fix', state: 'needs-you', preview: '', ...over });
