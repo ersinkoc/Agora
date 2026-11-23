@@ -85,6 +85,10 @@ export function markRanges(html: string, ranges: { start: number; end: number; c
   while (i < html.length) {
     if (html[i] === '<') {
       const end = html.indexOf('>', i);
+      if (end < 0) {
+        out += html.slice(i);
+        break;
+      }
       if (marking) closeMark();
       out += html.slice(i, end + 1);
       i = end + 1;

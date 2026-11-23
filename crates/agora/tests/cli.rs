@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use agora_platform::{spawn, PtyConfig};
 
+mod short_socket;
+
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
 
 fn git(dir: &Path, args: &[&str]) {
@@ -37,7 +39,11 @@ fn setup(name: &str) -> Setup {
 }
 
 fn setup_in(base: &Path, name: &str) -> Setup {
-    let home = base.join(format!("agora-cli-{}-{name}", std::process::id()));
+    setup_at(base.join(format!("agora-cli-{}-{name}", std::process::id())))
+}
+
+/// A fresh node home at `home` (emptied first).
+fn setup_at(home: PathBuf) -> Setup {
     let _ = std::fs::remove_dir_all(&home);
     let repo = home.join("demo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -52,6 +58,14 @@ fn setup_in(base: &Path, name: &str) -> Setup {
     )
     .unwrap();
     Setup { home, repo }
+}
+
+/// The home is removed with the setup: before, every run left its homes in the temp folder. Everything a test starts is declared
+/// after its setup, so it ends first.
+impl Drop for Setup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
 }
 
 struct NodeProc(Child);
@@ -812,8 +826,14 @@ fn with_a_confining_node_the_cli_reads_the_control_token_itself() {
     {
         return;
     }
-    // A folder agents are not granted (the system temp folder is writable to them, and the node refuses to start one then).
-    let s = setup_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "token");
+    // A folder agents are not granted (the system temp folder is writable to them, and the node refuses to start one then), short
+    // enough for the node's sockets in a deep checkout (#1040). Declared before the node, so it is removed after the node ends.
+    let dir = short_socket::SocketDir::new(
+        &Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("agora-cli-{}-token", std::process::id())),
+        "cli-token",
+    );
+    let s = setup_at(dir.path().to_path_buf());
     std::fs::create_dir_all(s.home.join("data")).unwrap();
     std::fs::write(s.home.join("data/policy"), "sandbox = worktree\n").unwrap();
     let _node = start_node(&s);

@@ -35,7 +35,7 @@ describe('screen password in the window', () => {
     expect(renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} />)).not.toContain('type="password"');
     const away = renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} passkeyNeedsPassword />);
     expect(away).toContain('name="passkey-password"');
-    expect(away).toMatch(/<button[^>]*disabled=""[^>]*>Add a passkey/);
+    expect(away).toMatch(/<button[^>]*disabled=""[^>]*>(?:<svg.*?<\/svg>)?Add a passkey/);
   });
 
   it('asks for the current password only when one is set, and offers the idle lock off by default', () => {

@@ -11,6 +11,19 @@ export function ago(ms: number, now: number, style: 'long' | 'short' = 'long'): 
   return rtf.format(-Math.round(s / 86400), 'day');
 }
 
+/** "today, 9:33 PM", "yesterday, 9:05 AM", "Nov 12, 2026, 2:20 PM" (in Turkish "bugün, 21:33" and so on): when something last happened, in the window's language. A day, then the time;
+ * the year only when it is not this one. `now` is a parameter so the same moment always reads the same way. */
+export function when(ms: number, now: number): string {
+  const lang = getLanguage();
+  const at = new Date(ms);
+  const time = new Intl.DateTimeFormat(lang, { hour: 'numeric', minute: '2-digit' }).format(at);
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((midnight(new Date(now)) - midnight(at)) / 86_400_000);
+  if (days === 0 || days === 1) return t('when-day-time', { day: new Intl.RelativeTimeFormat(lang, { numeric: 'auto' }).format(-days, 'day'), time });
+  const sameYear = at.getFullYear() === new Date(now).getFullYear();
+  return new Intl.DateTimeFormat(lang, { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }), hour: 'numeric', minute: '2-digit' }).format(at);
+}
+
 /** "1 h 5 min", "42 s": how long something ran. The unit marks are the same in every language, like KB. */
 export function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));

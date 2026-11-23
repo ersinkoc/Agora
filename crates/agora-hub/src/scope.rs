@@ -195,6 +195,8 @@ impl Scope {
                 let p = self.checkouts.get(&q(&e.checkout_id)).cloned();
                 if let Some(p) = &p {
                     self.worktrees.insert(q(&e.worktree_id), p.clone());
+                } else {
+                    self.worktrees.remove(&q(&e.worktree_id));
                 }
                 self.granted(p.as_ref())
             }
@@ -237,6 +239,8 @@ impl Scope {
                 let p = self.agents.get(&q(&e.agent_id)).cloned();
                 if let Some(p) = &p {
                     self.terminals.insert(q(&e.terminal_id), p.clone());
+                } else {
+                    self.terminals.remove(&q(&e.terminal_id));
                 }
                 self.granted(p.as_ref())
             }
@@ -249,6 +253,8 @@ impl Scope {
                 let p = self.agents.get(&q(&e.agent_id)).cloned();
                 if let Some(p) = &p {
                     self.approvals.insert(q(&e.approval_id), p.clone());
+                } else {
+                    self.approvals.remove(&q(&e.approval_id));
                 }
                 self.granted(p.as_ref())
             }
@@ -857,5 +863,81 @@ mod tests {
         assert!(!s.command_allowed("n1", &Command::NodePolicyGet(v1::NodePolicyGet::default())));
         assert!(!s.command_allowed("n1", &Command::ProjectList(v1::ProjectList::default())));
         assert!(!s.command_allowed("n1", &Command::TerminalOpen(v1::TerminalOpen::default())));
+    }
+
+    #[test]
+    fn reused_terminal_and_approval_ids_do_not_inherit_stale_grants() {
+        let mut projects = BTreeSet::new();
+        projects.insert("n1/mine".into());
+        let mut s = Scope::from_view(projects, &View::default());
+        assert!(s.admit(&ev(
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                agent_id: "a1".into(),
+                project_id: "mine".into(),
+                ..Default::default()
+            }),
+        )));
+        assert!(s.admit(&ev(
+            "n1",
+            Body::TerminalOpened(v1::TerminalOpened {
+                terminal_id: "t1".into(),
+                agent_id: "a1".into(),
+                ..Default::default()
+            }),
+        )));
+        assert!(s.admit(&ev(
+            "n1",
+            Body::ApprovalRequested(v1::ApprovalRequested {
+                approval_id: "ap1".into(),
+                agent_id: "a1".into(),
+                ..Default::default()
+            }),
+        )));
+        // Node restarts: stale terminals and approvals are cleared.
+        assert!(s.admit(&ev(
+            "n1",
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                ..Default::default()
+            }),
+        )));
+        assert!(!s.admit(&ev(
+            "n1",
+            Body::TerminalOpened(v1::TerminalOpened {
+                terminal_id: "t1".into(),
+                agent_id: String::new(),
+                ..Default::default()
+            }),
+        )));
+        assert!(!s.admit(&ev(
+            "n1",
+            Body::TerminalTitleChanged(v1::TerminalTitleChanged {
+                terminal_id: "t1".into(),
+                title: "secret".into(),
+            }),
+        )));
+        assert!(!s.command_allowed(
+            "n1",
+            &Command::TerminalInput(v1::TerminalInput {
+                terminal_id: "t1".into(),
+                ..Default::default()
+            }),
+        ));
+        assert!(!s.admit(&ev(
+            "n1",
+            Body::ApprovalRequested(v1::ApprovalRequested {
+                approval_id: "ap1".into(),
+                agent_id: String::new(),
+                ..Default::default()
+            }),
+        )));
+        assert!(!s.admit(&ev(
+            "n1",
+            Body::ApprovalResolved(v1::ApprovalResolved {
+                approval_id: "ap1".into(),
+                ..Default::default()
+            }),
+        )));
     }
 }

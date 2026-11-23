@@ -293,7 +293,10 @@ pub fn installed_version(home: &Path, name: &str) -> Option<String> {
 }
 
 fn valid_component_text(v: &str) -> bool {
-    v.len() <= 64
+    !v.is_empty()
+        && v != "."
+        && v != ".."
+        && v.len() <= 64
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
@@ -380,6 +383,38 @@ pub struct Tools<'a> {
 pub enum Fault {
     /// Right after the launcher moved, before `current` is written.
     BeforeCurrent,
+    /// After `exe` is written, as if `current` could not be, and putting the records back fails too.
+    RecordsUnrestorable,
+}
+
+/// What a record file (`exe`, `current`) held before the switch, so a failed switch can put it back exactly.
+enum Was {
+    Held(Vec<u8>),
+    Absent,
+    /// It could not be read (a folder in its place, say): it is left as it is.
+    Unknown,
+}
+
+impl Was {
+    fn of(path: &Path) -> Self {
+        match std::fs::read(path) {
+            Ok(b) => Was::Held(b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Was::Absent,
+            Err(_) => Was::Unknown,
+        }
+    }
+
+    /// Puts the file back as it was; `false` when that failed.
+    fn put_back(&self, path: &Path) -> bool {
+        match self {
+            Was::Held(b) => agora_platform::write_private(path, b).is_ok(),
+            Was::Absent => match std::fs::remove_file(path) {
+                Ok(()) => true,
+                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            },
+            Was::Unknown => true,
+        }
+    }
 }
 
 impl<'a> Tools<'a> {
@@ -867,7 +902,7 @@ pub const LIST_STATE_UNREADABLE: &str = "list_state_unreadable";
 
 /// `<AGORA_HOME>/agents/list-state.json`.
 pub fn list_state_path(home: &Path) -> PathBuf {
-    agents_dir(home).join("list-state.json")
+    agents_dir(home).join(LIST_STATE_NAME)
 }
 
 /// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`): 0 only when the file does not exist (no
@@ -875,14 +910,27 @@ pub fn list_state_path(home: &Path) -> PathBuf {
 /// larger than [`MAX_LIST_STATE_BYTES`], not `{"version":N}`) is `agent.install.index_invalid` with the detail
 /// [`LIST_STATE_UNREADABLE`], never 0: an unknown version would let an older list through (#923). The file is opened without
 /// following a link at its name and checked on the opened handle, so a link swapped in after any earlier look is refused, not read.
-/// It is only ever replaced by a rename (`write_private`), so a crash leaves the old one whole; the owner recovers from a damaged one
-/// by removing it (docs/specs/agent-packages.md, rung 3).
+/// This look is a single read by path; [`remember_list_version`] reads the record again, and replaces it, through the one held
+/// `agents` folder (#1000). It is only ever replaced by a rename, so a crash leaves the old one whole; the owner recovers from a
+/// damaged one by removing it (docs/specs/agent-packages.md, rung 3).
 pub fn last_seen_version(home: &Path) -> Result<u64, InstallError> {
+    read_list_state(agora_platform::open_read_no_follow(&list_state_path(home)))
+}
+
+/// The record `list-state.json` in the held `agents` folder, read through that handle (see [`last_seen_version`]).
+fn read_held_list_state(agents: &ConfinedDir) -> Result<u64, InstallError> {
+    read_list_state(agents.open_read(OsStr::new(LIST_STATE_NAME)))
+}
+
+const LIST_STATE_NAME: &str = "list-state.json";
+
+/// The version in an opened `list-state.json` (`opened` is the open's result): see [`last_seen_version`].
+fn read_list_state(opened: io::Result<File>) -> Result<u64, InstallError> {
     let unreadable = || InstallError {
         code: Code::IndexInvalid,
         detail: LIST_STATE_UNREADABLE.into(),
     };
-    let file = match agora_platform::open_read_no_follow(&list_state_path(home)) {
+    let file = match opened {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(_) => return Err(unreadable()),
@@ -925,25 +973,57 @@ fn rolled_back(seen: u64, version: u64) -> Result<(), InstallError> {
 /// Records `version`, the list just opened, as the newest accepted, atomically, under the install lock (two processes cannot
 /// interleave a read and a write). The record is read again here, so a list that was checked against an older record is refused
 /// when a newer one was recorded meanwhile (`agent.install.index_invalid`, detail `rollback`); the same version is already recorded
-/// and is accepted. A record that cannot be read is never replaced (#923).
+/// and is accepted. A record that cannot be read is never replaced (#923). The lock, both reads and the replace go through the one
+/// `agents` folder held open ([`ConfinedDir`]), never by path, so they all address the same folder even if another is put at its
+/// path meanwhile (#1000).
 pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallError> {
-    let seen = last_seen_version(home)?;
+    remember_list_version_with(home, version, &|| {})
+}
+
+/// [`remember_list_version`], with `opened` run once the `agents` folder is held, before anything in it is used (tests change the
+/// folders there).
+fn remember_list_version_with(
+    home: &Path,
+    version: u64,
+    opened: &dyn Fn(),
+) -> Result<(), InstallError> {
+    let (root, agents) = open_agents(home)?;
+    opened();
+    let seen = read_held_list_state(&root)?;
     rolled_back(seen, version)?;
     if version == seen {
         return Ok(());
     }
-    let (_root, dir) = open_agents(home)?;
-    let _lock = Lock::acquire(&dir)?;
-    let seen = last_seen_version(home)?;
+    let _lock = Lock::acquire(&root, &agents)?;
+    let seen = read_held_list_state(&root)?;
     rolled_back(seen, version)?;
     if version == seen {
         return Ok(());
     }
-    agora_platform::write_private(
-        &dir.join("list-state.json"),
-        format!("{{\"version\":{version}}}\n").as_bytes(),
-    )
-    .map_err(|e| io_err(&e))
+    replace_held_list_state(&root, version).map_err(|e| io_err(&e))
+}
+
+/// Writes `{"version":N}` beside the record in the held folder (a new file, private from its creation: `0600` on Unix; on Windows it
+/// takes the owner-only ACL the `agents` folder passes on) and renames it over the record, so a crash leaves the old one whole.
+fn replace_held_list_state(agents: &ConfinedDir, version: u64) -> io::Result<()> {
+    let tmp = std::ffi::OsString::from(format!("{LIST_STATE_NAME}.tmp-{}", std::process::id()));
+    // One left by a crashed run with this pid (the install lock is held, so no live run uses it).
+    match agents.remove_file(&tmp) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut file = agents.create_new(&tmp, 0o600)?;
+    let result = file
+        .write_all(format!("{{\"version\":{version}}}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| agents.rename_over(&file, &tmp, OsStr::new(LIST_STATE_NAME)));
+    if result.is_err() {
+        let _ = agents.remove_owned(&file, &tmp);
+        return result;
+    }
+    // The rename itself survives a power loss only once the folder is on disk; failing that does not undo the write.
+    let _ = agents.sync();
+    Ok(())
 }
 
 /// Makes `<home>/agents` (private) and holds it open. The folder itself must not be a link or junction: it is refused, not followed
@@ -1033,9 +1113,10 @@ fn holder(text: &str) -> Holder {
 }
 
 impl Lock {
-    fn acquire(agents: &Path) -> Result<Self, InstallError> {
+    /// Takes the lock in the held `agents` folder (`root`, whose path is `agents`; the lock file is opened through the handle, #1000).
+    fn acquire(root: &ConfinedDir, agents: &Path) -> Result<Self, InstallError> {
         let mut file =
-            open_lock(agents, &agora_platform::open_lock_private).map_err(|e| io_err(&e))?;
+            open_lock(agents, &|| root.open_lock(OsStr::new(".lock"))).map_err(|e| io_err(&e))?;
         let end = Instant::now() + LOCK_WAIT;
         loop {
             match file.try_lock() {
@@ -1068,17 +1149,16 @@ impl Drop for Lock {
     }
 }
 
-/// Opens `<agents>/.lock` with `open` (the private open). An older version that ended between putting a lock back (`hard_link`) and
+/// Opens `<agents>/.lock` with `open` (the private open, through the held folder). An older version that ended between putting a lock back (`hard_link`) and
 /// removing the name it had moved it to left `.lock` with a second name, which the open refuses (`InvalidInput`). That name is only
 /// ever a `.lock.stale-*` one: those go and the open is tried once more (review of audit F100), also when this caller removed
 /// nothing, since another caller may have removed the name first (Codex's re-review of #934). A second name of any other kind is
 /// still refused. Opening is not holding: the system lock taken afterwards still admits one holder.
-fn open_lock(agents: &Path, open: &dyn Fn(&Path) -> io::Result<File>) -> io::Result<File> {
-    let path = agents.join(".lock");
-    match open(&path) {
+fn open_lock(agents: &Path, open: &dyn Fn() -> io::Result<File>) -> io::Result<File> {
+    match open() {
         Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
             remove_stale_lock_names(agents);
-            open(&path)
+            open()
         }
         r => r,
     }
@@ -1147,6 +1227,14 @@ fn launcher_uses(launcher: &Path, name: &str, version: &str) -> bool {
     v.as_deref() == Some(OsStr::new(version)) && n.as_deref() == Some(OsStr::new(name))
 }
 
+/// After a failed switch, removes a launcher under a name the previous version did not have: the one this attempt `created` (a link,
+/// or a copy where links are not made, whose version `launcher_uses` cannot read), or a link into the new version.
+fn remove_new_launcher(launcher: &Path, name: &str, version: &str, created: bool) {
+    if created || launcher_uses(launcher, name, version) {
+        let _ = std::fs::remove_file(launcher);
+    }
+}
+
 /// Removes a version folder unless the launcher resolves into it.
 fn remove_version(launcher: &Path, name: &str, version: &str, path: &Path) {
     if !launcher_uses(launcher, name, version) {
@@ -1183,7 +1271,7 @@ pub fn install(
         }
     };
     let (root, agents) = open_agents(home)?;
-    let _lock = Lock::acquire(&agents)?;
+    let _lock = Lock::acquire(&root, &agents)?;
     // What the plan saw may have changed while waiting for the lock.
     let installed = installed_version(home, &plan.name);
     if installed.as_deref() == Some(plan.version.as_str()) {
@@ -1285,18 +1373,33 @@ pub fn install(
     }
 
     let old_target = std::fs::read_link(&launcher).ok();
+    // Whether this attempt makes the launcher where there was none (a link, or a copy on Windows, which `launcher_uses` cannot read).
+    let launcher_was_there = std::fs::symlink_metadata(&launcher).is_ok();
+    let mut created = false;
+    // The records as they were, put back exactly if the switch fails (Codex review of #1027: the `exe` record too, so a renamed
+    // program's new name is not left owned by a version that was rolled back).
+    let (exe_was, current_was) = (
+        Was::of(&name_path.join("exe")),
+        Was::of(&name_path.join("current")),
+    );
+    let same_exe =
+        matches!(&exe_was, Was::Held(b) if String::from_utf8_lossy(b).trim() == plan.exe);
     // Switch, then record. Any failure puts the launcher back before the new folder goes.
     let switched = (|| -> Result<(), InstallError> {
         root.subdir(OsStr::new("bin"), true)
             .map_err(|e| io_err(&e))?;
         agora_platform::restrict_to_owner(&bin).map_err(|e| io_err(&e))?;
         link(plan, &plan.version, &version_path, &launcher)?;
+        created = !launcher_was_there;
         if tools.fault == Some(Fault::BeforeCurrent) {
             return err(Code::IoFailed, "injected");
         }
-        agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
-            .map_err(|e| io_err(&e))?;
         agora_platform::write_private(&name_path.join("exe"), plan.exe.as_bytes())
+            .map_err(|e| io_err(&e))?;
+        if tools.fault == Some(Fault::RecordsUnrestorable) {
+            return err(Code::IoFailed, "injected");
+        }
+        agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
             .map_err(|e| io_err(&e))
     })();
     if let Err(e) = switched {
@@ -1305,16 +1408,21 @@ pub fn install(
             (Some(t), _) => {
                 let _ = agora_platform::install_launcher(&bin.join(t), t, &launcher);
             }
-            (None, Some(old)) => {
+            // The previous version had this launcher name (its launcher went missing): it points there again.
+            (None, Some(old)) if same_exe => {
                 let _ = link(plan, old, &name_path.join(old), &launcher);
             }
-            (None, None) => {
-                if launcher_uses(&launcher, &plan.name, &plan.version) {
-                    let _ = std::fs::remove_file(&launcher);
-                }
-            }
+            // A new launcher name (a first install, or an update that renamed the program): it goes; the old one was not touched.
+            (None, _) => remove_new_launcher(&launcher, &plan.name, &plan.version, created),
         }
+        let restored = exe_was.put_back(&name_path.join("exe"))
+            & current_was.put_back(&name_path.join("current"))
+            & (tools.fault != Some(Fault::RecordsUnrestorable));
         remove_version(&launcher, &plan.name, &plan.version, &version_path);
+        if !restored {
+            // Not a clean rollback: said as such, not as the write failure that started it.
+            return err(Code::IoFailed, "rollback_incomplete");
+        }
         return Err(e);
     }
     prune(
@@ -1474,16 +1582,94 @@ mod lock_open_tests {
         // `.lock` has one name again (the other caller removed `.lock.stale-*`); this caller's first open had been refused.
         std::fs::write(agents.join(".lock"), "").unwrap();
         let first = std::cell::Cell::new(true);
-        let open = |p: &Path| {
+        let open = || {
             if first.replace(false) {
                 Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"))
             } else {
-                agora_platform::open_lock_private(p)
+                agora_platform::open_lock_private(&agents.join(".lock"))
             }
         };
         // The file is closed before the folder goes (Windows cannot remove a lock file while it is open).
         let opened = open_lock(&agents, &open).map(drop);
         let _ = std::fs::remove_dir_all(&agents);
         assert!(opened.is_ok(), "{opened:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod rollback_launcher_tests {
+    use super::*;
+
+    /// Codex review of #1027: a launcher this attempt made is removed by a rollback on every platform, a copy as well as a link.
+    /// `launcher_uses` reads only links, so the old criterion left a copy (Windows) under a new name behind. Needs no shell scripts.
+    #[test]
+    fn a_launcher_copy_this_attempt_made_is_removed_and_one_that_was_there_is_kept() {
+        let bin =
+            std::env::temp_dir().join(format!("agora-rollback-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bin);
+        std::fs::create_dir_all(&bin).unwrap();
+        let copy = bin.join("fake-agent-two");
+        std::fs::write(&copy, b"a copy of the program").unwrap();
+        // The old criterion cannot tell a copy's version.
+        assert!(!launcher_uses(&copy, "fake-agent", "2.0.0"));
+        remove_new_launcher(&copy, "fake-agent", "2.0.0", false);
+        assert!(copy.exists(), "a copy this attempt did not make is kept");
+        remove_new_launcher(&copy, "fake-agent", "2.0.0", true);
+        assert!(!copy.exists(), "a copy this attempt made is removed");
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod list_state_handle_tests {
+    use super::*;
+
+    /// #1000: the lock, the read and the replace of `list-state.json` all go through the one `agents` folder held open, so a folder
+    /// put in its place after it was opened is neither locked, read nor written. Here the real record says 2, an empty decoy `agents`
+    /// replaces the folder once it is held, and list 3 is recorded: in the held (real) folder, under its lock, never in the decoy.
+    #[test]
+    fn the_record_is_read_and_replaced_in_the_held_folder_not_one_put_in_its_place() {
+        let home =
+            std::env::temp_dir().join(format!("agora-list-state-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        remember_list_version(&home, 2).unwrap();
+        let agents = agents_dir(&home);
+        let aside = home.join("agents-held");
+        let swapped = std::cell::Cell::new(false);
+        let swap = || {
+            // A system that does not rename a folder held open: nothing to test there.
+            if std::fs::rename(&agents, &aside).is_ok() {
+                std::fs::create_dir(&agents).unwrap();
+                swapped.set(true);
+            }
+        };
+        let result = remember_list_version_with(&home, 3, &swap);
+        if swapped.get() {
+            let decoy = agents.join("list-state.json");
+            let held = aside.join("list-state.json");
+            let outcome = (
+                result.map_err(|e| e.detail),
+                decoy.exists(),
+                agents.join(".lock").exists(),
+                std::fs::read_to_string(&held).ok(),
+                aside.join(".lock").exists(),
+            );
+            let _ = std::fs::remove_dir_all(&home);
+            assert_eq!(
+                outcome,
+                (
+                    Ok(()),
+                    false,
+                    false,
+                    Some("{\"version\":3}\n".to_string()),
+                    true
+                )
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 }

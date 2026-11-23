@@ -601,6 +601,26 @@ describe('shared terminal size', () => {
     expect(shape(second)).toEqual(['subscribe', '120x40']);
     live.close();
   });
+
+  it('unregisters wake listeners when the session is rejected', async () => {
+    let unwakeCalls = 0;
+    let rejected = false;
+    const sockets: FakeSocket[] = [];
+    connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      wake: () => () => { unwakeCalls++; },
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+      onRejected: () => { rejected = true; },
+    });
+    sockets[0]!.onopen?.();
+    sockets[0]!.onclose?.();
+    await new Promise((r) => setTimeout(r, 10));
+    sockets[1]!.onopen?.();
+    sockets[1]!.onclose?.();
+    expect(rejected).toBe(true);
+    expect(unwakeCalls).toBe(1);
+  });
 });
 
 describe('terminal history (ADR-0100 decision 2)', () => {
