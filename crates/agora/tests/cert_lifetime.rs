@@ -22,11 +22,6 @@ use agora_node::uplink_client::{spawn, HubLink};
 use agora_protocol::handshake::Support;
 
 const SHORT: Duration = Duration::from_secs(3);
-/// The certificate of a machine that must connect and then renew before its end. The renewal is due at once (the certificate is
-/// dated five minutes back), but the dial, the TLS handshake and the hub's welcome come first: about 0.1 s on Linux, and on a busy
-/// Windows runner, where each refused address of `localhost` costs up to half a second (`dial::connect_bounded`), it once took longer
-/// than the 3 s of [`SHORT`] (#1111).
-const RENEWING: Duration = Duration::from_secs(8);
 static DIALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct NoClients;
@@ -38,10 +33,10 @@ impl ClientAuth for NoClients {
 }
 
 /// The lifetime of a certificate that a test's first connection must still find valid: the dial, the TLS handshake and the hub's
-/// welcome come before it ends. They take about 0.1 s on Linux, but on a busy Windows runner each refused address of `localhost`
-/// costs up to half a second (`dial::connect_bounded`) and a debug-build handshake runs beside the file's other tests, so the 3 s of
-/// [`SHORT`] (about 2.3 s once `not_after` drops to whole seconds) was too tight (#1111). A test that waits past the end pays these
-/// seconds once.
+/// welcome come before it ends (and, for a machine that renews, the renewal, due at once as the certificate is dated five minutes
+/// back). They take about 0.1 s on Linux, but on a busy Windows runner each refused address of `localhost` costs up to half a second
+/// (`dial::connect_bounded`) and a debug-build handshake runs beside the file's other tests, so the 3 s of [`SHORT`] (2 to 3 s in
+/// fact, as `not_after` is whole seconds) was too tight (#1111). A test that waits past the end pays these seconds once.
 const ROOM_TO_DIAL: Duration = Duration::from_secs(8);
 
 fn tmp(name: &str) -> PathBuf {
@@ -412,7 +407,12 @@ fn a_hub_whose_own_certificate_ended_and_was_not_replaced_is_refused_by_new_conn
 /// of the old.
 #[test]
 fn a_machine_connected_longer_than_its_lifetime_still_connects_after_renewal() {
-    let rig = rig("renew", None, RENEWING, &[("m", true), ("control", false)]);
+    let rig = rig(
+        "renew",
+        None,
+        ROOM_TO_DIAL,
+        &[("m", true), ("control", false)],
+    );
     let addr = rig.listen_with(rig.acceptor.clone());
     let (_sink, first) = rig.dial("m", addr);
     rig.wait_online("m");
@@ -638,7 +638,12 @@ fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
 /// that connection was accepted.
 #[test]
 fn a_node_renews_its_own_short_certificate_and_stays_connected_past_the_original_end() {
-    let rig = rig("auto", None, RENEWING, &[("m", true), ("control", false)]);
+    let rig = rig(
+        "auto",
+        None,
+        ROOM_TO_DIAL,
+        &[("m", true), ("control", false)],
+    );
     let addr = rig.listen_with(rig.acceptor.clone());
     let dir = link_folder(&rig, "m", addr, "auto");
     let original = file(&dir, "cert.pem");
