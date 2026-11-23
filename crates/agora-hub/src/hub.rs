@@ -1910,6 +1910,33 @@ mod tests {
         remove_db(&path);
     }
 
+    /// #996: when only the second of a connection's two end facts is refused, only that one is kept: the first is not written twice.
+    #[test]
+    fn only_the_end_facts_the_store_refused_are_written_later() {
+        let (hub, path) = hub_on_file("presence-end-partial");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        // The log holds the opening; `NodeOffline` is the second event and goes in, `NodeLink` would be the third.
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= 2 BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        hub.record_unrecorded().unwrap();
+        assert_eq!(
+            presence(&hub, "n1"),
+            [
+                (true, NodeLinkReason::Opened as i32, 1),
+                (false, -1, 0),
+                (false, NodeLinkReason::Closed as i32, 1),
+            ]
+        );
+        drop(hub);
+        remove_db(&path);
+    }
+
     /// #996: a machine that dials again after its last end could not be recorded is recorded down, then up, in that order, so the
     /// late end never hides the new connection. While the store still refuses, the new connection is not kept (#957); once it
     /// works, the next one is recorded online, with the next generation.
