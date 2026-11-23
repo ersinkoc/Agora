@@ -120,3 +120,4 @@ Date: YYYY-MM-DD
 | 0101 | A structured agent can be allowed always for its session | Accepted |
 | 0102 | Red is the one danger colour; amber means only "needs you" | Accepted |
 | 0103 | A window gets recent Team chat history | Proposed |
+| 0104 | A kept agent keeps its conversation, usage and options across a node restart | Accepted |

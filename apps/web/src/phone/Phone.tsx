@@ -317,7 +317,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <TrustCallout machines={distrusted} />
         <div className="grid gap-2">
           {needs.map((n) => n.kind === 'approval'
-            // `byId` is built from these same items, so every request in `needs` is in it.
+            // `byId` is built from these same items, so every request listed here is in it.
             ? <PhoneRequest key={n.approval.id} ask={byId.get(n.approval.id)!} guard={guard}
               onResolve={onResolve} onOpen={n.agent ? () => onOpen(n.approval.agentId) : undefined} />
             : <ul key={n.agent.id} className="phone-list phone-list--needs"><AgentRow agent={n.agent} onOpen={onOpen} /></ul>)}

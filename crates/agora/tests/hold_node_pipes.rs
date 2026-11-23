@@ -539,6 +539,16 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
     let id = started(&rig, &node);
     let agent = AgentId::new(id.clone());
     let pid = pid_of(&node, &id);
+    // The adapter reports its modes and config options once, after it says it is idle, and never again by itself: the next node knows
+    // them only from what this one recorded in the kept session (#932). A line the holder handed to this node counts as had, so one this
+    // node read but had not recorded when it stopped is gone for the next node too: wait until both reports are kept.
+    wait_for("the modes and config options in the kept session", || {
+        let kept = node.ledger.kept_session(&id);
+        kept.options.is_some_and(|o| !o.modes.is_empty())
+            && kept
+                .config
+                .is_some_and(|c| c.options.iter().any(|o| o.id == "auto_approve"))
+    });
     drop(node);
     std::thread::sleep(Duration::from_millis(500));
     std::fs::write(
@@ -569,9 +579,9 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
         }))
         .unwrap()
     };
-    // The new node knows the agent's modes and config options (the adopted adapter reports them again after it is taken up; until
-    // then a switch is `agent.option_unknown`, nothing applied): checked with the supervisor's own checks of a mode and a value that
-    // keep asking, which prepare a call and apply nothing.
+    // The new node knows the agent's modes and config options from the kept session (without them a switch is `agent.option_unknown`,
+    // nothing applied): checked with the supervisor's own checks of a mode and a value that keep asking, which prepare a call and
+    // apply nothing.
     wait_for("the agent's modes and config options", || {
         use agora_adapters::host::OptionKind;
         use agora_node::supervisor::Prepared;
