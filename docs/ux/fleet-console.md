@@ -12,7 +12,8 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
 1. **Five counts**, one per question: needs you, working, finished, failed, machines online. They are live. The first four are filters of
    the tiles below (a press shows only those agents, a second press shows everything; a count of zero cannot be pressed); the machines count
    opens the machines page. They use the state words and colours the window already has. *Failed* is the interim presentation of
-   "Ended with an error" (a neutral cross and words; there is no failed state colour yet).
+   "Ended with an error" (a cross and words, still neutral on this screen). ADR-0102 makes failed red; this count switches to the kit's
+   red Failed pill when Home adopts the widget kit (redesign PR 2).
 2. **What needs you**, most urgent first: requests that expire soonest, then requests of unknown expiry, then agents waiting in their
    terminals, the longest-waiting first. Each row names the agent, its machine and project, says in one line what it asks and how long ago it
    asked. Six rows are shown; the rest are one press away.

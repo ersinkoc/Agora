@@ -1348,3 +1348,23 @@ agents-setting-any = ajanın kabul ettiği herhangi bir değer
 agents-setting-default = varsayılan { $value }
 agents-options = Seçenekler
 agents-option-skips = izin sorularını atlar
+
+# Bileşen galerisindeki bileşen takımı (visual-language.md §3). Yalnızca galeri için örnek metin.
+kit-title = Bileşen takımı
+kit-buttons = Düğmeler
+kit-states = Durumlar ve etiketler
+kit-avatars = Ajan simgeleri
+kit-cards = Kartlar, satırlar ve ayarlar
+kit-controls = Denetimler
+kit-counts = Sayılar
+kit-notices = Bildirimler ve istekler
+kit-empty = Boş durumlar
+kit-rtl = Sağdan sola
+kit-sample-forget = Unut
+kit-sample-shared = Paylaşılan
+kit-sample-notify = Arka planda bildirimler
+kit-sample-notify-hint = Adlar yalnızca siz isterseniz görünür.
+kit-sample-ask = { $name } bir komut çalıştırmak istiyor
+kit-sample-offline = Bu makine çevrimdışı
+kit-sample-offline-line = Ajanları çalışmayı sürdürür ve makine dönünce durumlarını bildirir.
+kit-sample-joined = Makine katıldı. Makineleriniz listesinde görünüyor.

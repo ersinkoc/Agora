@@ -38,6 +38,24 @@ const pages = [
 ];
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
 
+// A page is captured once it has settled, so two runs of the same UI match: its fonts have loaded, every dwell has passed (an approval's
+// Allow waits ATTENTION_DWELL_MS, 600 ms, and its "read it first" hint then goes, which moves everything below it: SkipApproval in the
+// gallery), and its height has stopped changing. The real dwell is never shortened; this only waits for it.
+const DWELLS_MS = 600;
+async function settle(page) {
+  await page.evaluate(() => document.fonts.ready);
+  const start = Date.now();
+  let last = -1;
+  let same = 0;
+  while (same < 3 || Date.now() - start < DWELLS_MS + 400) {
+    await page.waitForTimeout(150);
+    const h = await page.evaluate(() => document.documentElement.scrollHeight);
+    same = h === last ? same + 1 : 0;
+    last = h;
+    if (Date.now() - start > 10_000) break; // a page that never settles is compared as it is, and its difference will say so
+  }
+}
+
 mkdirSync(join(visual, 'diff'), { recursive: true });
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--font-render-hinting=none'] });
 let failed = 0;
@@ -49,7 +67,7 @@ for (const p of pages) {
       const page = await ctx.newPage();
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
-      await page.waitForTimeout(300);
+      await settle(page);
       const shot = await page.screenshot({ fullPage: true, animations: 'disabled' });
       await ctx.close();
       const file = join(visual, `${name}.png`);

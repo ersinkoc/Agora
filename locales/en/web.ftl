@@ -1414,3 +1414,23 @@ agents-setting-any = any value the agent accepts
 agents-setting-default = default { $value }
 agents-options = Options
 agents-option-skips = skips permission questions
+
+# The widget kit in the component gallery (visual-language.md §3). Sample text for the gallery only.
+kit-title = Widget kit
+kit-buttons = Buttons
+kit-states = States and tags
+kit-avatars = Agent avatars
+kit-cards = Cards, rows and settings
+kit-controls = Controls
+kit-counts = Counts
+kit-notices = Notices and requests
+kit-empty = Empty states
+kit-rtl = Right to left
+kit-sample-forget = Forget
+kit-sample-shared = Shared
+kit-sample-notify = Notifications in the background
+kit-sample-notify-hint = Names show only if you choose so.
+kit-sample-ask = { $name } wants to run a command
+kit-sample-offline = This machine is offline
+kit-sample-offline-line = Its agents keep running and report back when it returns.
+kit-sample-joined = The machine joined. It appears in Your machines.
