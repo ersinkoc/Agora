@@ -38,23 +38,54 @@ const pages = [
 ];
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
 
-// A page is captured once it has settled, so two runs of the same UI match: its fonts have loaded, every dwell has passed (an approval's
-// Allow waits ATTENTION_DWELL_MS, 600 ms, and its "read it first" hint then goes, which moves everything below it: SkipApproval in the
-// gallery), and its height has stopped changing. The real dwell is never shortened; this only waits for it.
-const DWELLS_MS = 600;
+// A page is captured once it has settled, so two runs of the same UI match (#1023): its fonts have loaded, every dwell has passed and
+// the DOM is quiet. An approval's Allow waits ATTENTION_DWELL_MS (600 ms): the attention dialog's buttons are aria-disabled until then, and
+// SkipApproval's "read it first" hint goes, which moves everything below it. A chat log follows its newest entry, so it sits at its
+// bottom with no "Jump to latest". The real dwell is never shortened; this only waits for it, judged from the DOM rather than elapsed time
+// (on a busy machine the dialog mounts late).
+const QUIET_MS = 700;
 async function settle(page) {
   await page.evaluate(() => document.fonts.ready);
+  await page.evaluate(() => {
+    window.__vrLast = performance.now();
+    new MutationObserver(() => { window.__vrLast = performance.now(); }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  });
   const start = Date.now();
   let last = -1;
   let same = 0;
-  while (same < 3 || Date.now() - start < DWELLS_MS + 400) {
+  for (;;) {
     await page.waitForTimeout(150);
-    const h = await page.evaluate(() => document.documentElement.scrollHeight);
-    same = h === last ? same + 1 : 0;
-    last = h;
-    if (Date.now() - start > 10_000) break; // a page that never settles is compared as it is, and its difference will say so
+    const s = await page.evaluate(() => ({
+      height: document.documentElement.scrollHeight,
+      quiet: performance.now() - window.__vrLast,
+      dwelling: !!document.querySelector('.attention-card [aria-disabled="true"], [id^="skip-wait-"]'),
+      following: [...document.querySelectorAll('[role="log"]')].every((e) => e.scrollHeight - e.scrollTop - e.clientHeight <= 1)
+        && !document.querySelector('.terminal-jump'),
+    }));
+    same = s.height === last ? same + 1 : 0;
+    last = s.height;
+    if (same >= 3 && s.quiet >= QUIET_MS && !s.dwelling && s.following) return;
+    if (Date.now() - start > 15_000) { console.log(`     ${JSON.stringify(s)}: not settled, compared as it is`); return; }
   }
 }
+
+// A full-page capture lays the page out beyond the viewport, which resizes the window under it (innerHeight jumps and comes back): the
+// attention dialog unmounts and remounts with its dwell restarted, and each chat log, whose pinned approvals are sized in vh, loses its
+// place and shows "Jump to latest". Whether the page reacts before the frame is taken depends on how busy the machine is, so page script
+// is held for the capture: the frame is the settled page, every time. The caret is hidden and motion is off as well.
+async function capture(page, cdp) {
+  await page.addStyleTag({ content: '*, *::before, *::after { caret-color: transparent !important; }' });
+  await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+  try {
+    return await page.screenshot({ fullPage: true, animations: 'disabled', caret: 'hide' });
+  } finally {
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+  }
+}
+
+// The gallery's demo data is relative to the clock (an agent started 12 minutes ago, a machine heard 4 seconds ago): Date is pinned so a
+// slow load or a run near a minute boundary draws the same words. Timers stay real, so every dwell still takes its full time.
+const CLOCK = new Date('2026-11-20T10:00:00Z');
 
 mkdirSync(join(visual, 'diff'), { recursive: true });
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--font-render-hinting=none'] });
@@ -63,12 +94,14 @@ for (const p of pages) {
   for (const [vname, viewport] of viewports) {
     for (const scheme of ['dark', 'light']) {
       const name = `${p.name}-${vname}-${scheme}`;
-      const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce' });
+      const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce', locale: 'en-US' });
       const page = await ctx.newPage();
+      const cdp = await ctx.newCDPSession(page);
+      await page.clock.setFixedTime(CLOCK);
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
       await settle(page);
-      const shot = await page.screenshot({ fullPage: true, animations: 'disabled' });
+      const shot = await capture(page, cdp);
       await ctx.close();
       const file = join(visual, `${name}.png`);
       if (update || !existsSync(file)) {
