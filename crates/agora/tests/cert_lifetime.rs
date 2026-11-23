@@ -32,6 +32,13 @@ impl ClientAuth for NoClients {
     }
 }
 
+/// The lifetime of a certificate that a test's first connection must still find valid: the dial, the TLS handshake and the hub's
+/// welcome come before it ends. They take about 0.1 s on Linux, but on a busy Windows runner each refused address of `localhost`
+/// costs up to half a second (`dial::connect_bounded`) and a debug-build handshake runs beside the file's other tests, so the 3 s of
+/// [`SHORT`] (about 2.3 s once `not_after` drops to whole seconds) was too tight (#1111). A test that waits past the end pays these
+/// seconds once.
+const ROOM_TO_DIAL: Duration = Duration::from_secs(8);
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("agora-life-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -328,7 +335,7 @@ fn a_machine_that_missed_its_renewal_is_refused_after_its_certificate_ends() {
     let rig = rig(
         "machine",
         None,
-        SHORT,
+        ROOM_TO_DIAL,
         &[("early", true), ("late", true), ("control", false)],
     );
     let addr = rig.listen_with(rig.acceptor.clone());
@@ -362,7 +369,7 @@ fn a_machine_that_missed_its_renewal_is_refused_after_its_certificate_ends() {
 fn a_hub_whose_own_certificate_ended_and_was_not_replaced_is_refused_by_new_connections() {
     let rig = rig(
         "server",
-        Some(SHORT),
+        Some(ROOM_TO_DIAL),
         SHORT,
         &[("early", false), ("late", false)],
     );
@@ -486,16 +493,18 @@ fn a_machine_whose_certificate_ended_cannot_renew_it() {
 fn the_hubs_certificate_is_replaced_before_it_ends_and_a_new_connection_after_the_old_end_succeeds()
 {
     use agora_hub::leaf::Leaf;
+    // The rig's own server certificate is not served here; the leaf's is.
     let rig = rig(
         "reload",
         Some(SHORT),
         SHORT,
         &[("early", false), ("late", false)],
     );
-    // A leaf whose certificates last 6 seconds, signed by the hub's own CA (the machines pin it).
+    // A leaf whose certificates last `ROOM_TO_DIAL`, signed by the hub's own CA (the machines pin it). Both dials below must finish
+    // inside one of them: the first before the first certificate is 1 s from its end, the late one before the replacement ends.
     let ca = Ca::from_pem(&rig.ca_pem, &rig.state.ca.as_ref().unwrap().key_pem())
         .unwrap()
-        .with_lifetime_for_tests(Duration::from_secs(6));
+        .with_lifetime_for_tests(ROOM_TO_DIAL);
     let (leaf, _) = Leaf::start(
         ca,
         vec![],
@@ -511,7 +520,7 @@ fn the_hubs_certificate_is_replaced_before_it_ends_and_a_new_connection_after_th
     let (_s, _early) = rig.dial("early", addr);
     rig.wait_online("early");
 
-    // Half way through its life the daily check (here with a 4 second threshold) replaces it.
+    // Near the end of its life the daily check (here with a 3 second threshold) replaces it.
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -522,8 +531,8 @@ fn the_hubs_certificate_is_replaced_before_it_ends_and_a_new_connection_after_th
         !leaf.renew_if_ending(now(), 1).unwrap(),
         "a certificate with time left is left alone"
     );
-    std::thread::sleep(Duration::from_secs((first_end - 3 - now()).max(0) as u64));
-    assert!(leaf.renew_if_ending(now(), 4).unwrap());
+    std::thread::sleep(Duration::from_secs((first_end - 2 - now()).max(0) as u64));
+    assert!(leaf.renew_if_ending(now(), 3).unwrap());
     assert_ne!(leaf.hash(), first_hash);
     assert!(leaf.not_after_secs() > first_end);
 
@@ -699,7 +708,7 @@ fn now_secs() -> i64 {
 /// SAME persisted request, the hub answers with the same certificate, and the machine ends with exactly one new certificate.
 #[test]
 fn a_restart_after_a_lost_answer_sends_the_same_request_and_gets_the_same_certificate() {
-    let rig = rig("lost", None, SHORT, &[("m", true)]);
+    let rig = rig("lost", None, ROOM_TO_DIAL, &[("m", true)]);
     let addr = rig.listen_with(rig.acceptor.clone());
     let dir = link_folder(&rig, "m", addr, "lost");
     let original = (file(&dir, "cert.pem"), file(&dir, "key.pem"));

@@ -560,6 +560,13 @@ All additions; nothing published changed.
   session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
   agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
   never deleted. Entries are dropped 14 days after they were last touched (an interrupted one 14 days after it was found).
+- **Ended agents in `agent.list`** (#1120). A node lists in `agent.list` the agents its ledger keeps as ended, also those an earlier
+  process of the node ran, as that process listed them: `running` false, the ledger's last state, its folder as `worktree_id`, no
+  terminal and no restarts, whatever folder they ran in (a project worktree, a directory agent's folder or its separate worktree).
+  An agent the supervisor knows is listed from the supervisor. Nothing is announced to the hub for them: the hub keeps its own closed
+  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is not listed. The list is in id order. An ended agent
+  listed only from the ledger cannot be addressed: `agent.stop`, prompts and the other agent commands answer `agent.not_found`, and its
+  folder is not a `worktree_id` the node accepts.
 - **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event
   `AgentInterrupted` (`Event` field 38: `agent_id`, `kind`, `project_id`, `folder`, `parent_agent_id`, `resumable`, `started_at_ms`,
   `interrupted_at_ms`, `last_state`) says so after the node's `NodeOnline`, and again in every resync announcement, until the agent
