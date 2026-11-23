@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- Security, Linux: a node whose data folder (`--data`) or agent types folder (`--manifests`) lies inside a folder confined agents may read or write (`/tmp`, `/var`, `/opt`, `/etc`, `/run`, or one named in the policy) no longer starts confined agents, which could read its stored secrets, its session ledger and its chat transcripts there; the start is refused (`agent.sandbox_unavailable`, reason `protected_path_reachable`) and `agora doctor` names the folder. Before, only a reachable control token was refused. Keep the node's folder under your home (`~/.agora`, the default). macOS keeps these folders closed itself; macOS and Windows are unchanged (#1114).
 - `agora agent list` keeps listing the agents that ended (stopped, with their last state and folder) after the node restarts, for as long as the node keeps them (14 days), whatever folder they ran in; before, a restarted node said it had no agents although it still kept them (#1120).
 - `agora agent list` now also lists the agents a restarted node found interrupted (they were running when it stopped), with `interrupted` in the fourth column and what can be done in a fifth: `resume`, `start-again`, or `still-running` (its process outlived the node; `agora agent stop` ends it); before, they were missing from the list until resumed in the window or the terminal client, for up to 14 days. Lines of the other agents do not change (ADR-0107, #1121).
 
