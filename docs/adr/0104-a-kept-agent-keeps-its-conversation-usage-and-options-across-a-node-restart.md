@@ -1,8 +1,7 @@
 # 0104. A kept agent keeps its conversation, usage and options across a node restart
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat: "Accept and build" to the question that summarised the options fix, the appended `AgentStarted.same_process` field, the node transcript writer and the stop handler, in that build order)
 
 Origin: issues #931, #930 and #1080, all follow-ups of #907 / PR #928 and #932 (roadmap M1.1, RM-34, RM-47). Since ADR-0093, the terminal
 holder keeps a structured agent's process running across a node restart, and the next node takes it up. The process and its session
