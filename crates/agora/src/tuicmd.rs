@@ -1350,19 +1350,23 @@ fn start_in_folder(
         };
         let folder = match session.list_folder(&node.node_id, &path, auth) {
             Ok(f) => f,
-            Err(code) if code == "approval.signature_invalid" => {
+            Err(e) if e.code == "approval.signature_invalid" => {
                 return not_trusted(&device, &node.node_id)
             }
-            Err(code) if code == "protocol.capability_missing" => {
+            Err(e) if e.code == "protocol.capability_missing" => {
                 return say.text(key!("tui-folder-unsupported"), &[])
             }
-            Err(code) if !path.is_empty() => {
+            // #1044: the hub does not let this person's role look into folders; no other folder would do better.
+            Err(e) if refused_for_role(&e, "DirectoryList") => {
+                return say.text(key!("tui-folder-role"), &[])
+            }
+            Err(e) if !path.is_empty() => {
                 // A folder that cannot be listed (gone, a secret one): back to the home folder, saying why.
-                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]);
+                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
                 path.clear();
                 continue;
             }
-            Err(code) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]),
+            Err(e) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]),
         };
         let mut pick = 0usize;
         loop {
@@ -6041,7 +6045,17 @@ mod forget_tests {
                 resume_notice(&say, &refused("directory")),
                 say.text(key!("tui-resume-role"), &[])
             );
+            // The folder picker's `directory.list` is the first command a folder start sends.
+            assert!(say.0.render("tui-folder-role", &[]).is_some());
         }
+        assert!(refused_for_role(&refused("DirectoryList"), "DirectoryList"));
+        assert!(!refused_for_role(&refused("directory"), "DirectoryList"));
+        assert!(!refused_for_role(
+            &Error::new(ErrorCode::NodeOffline)
+                .with("action", "DirectoryList")
+                .to_info(),
+            "DirectoryList"
+        ));
         let en = Say(Catalog::english());
         for line in [
             start_refusal(&en, &refused("AgentStart"), "AgentStart"),
