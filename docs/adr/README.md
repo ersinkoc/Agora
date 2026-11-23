@@ -119,3 +119,4 @@ Date: YYYY-MM-DD
 | 0100 | The terminal repaint carries the program's modes and its history | Accepted |
 | 0101 | A structured agent can be allowed always for its session | Accepted |
 | 0102 | Red is the one danger colour; amber means only "needs you" | Accepted |
+| 0103 | A window gets recent Team chat history | Proposed |
