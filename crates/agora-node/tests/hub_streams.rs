@@ -108,11 +108,16 @@ fn req(id: &str, cmd: Cmd) -> CommandRequest {
     }
 }
 
-/// `ok` or the error code.
+/// `ok`, or the error code with its `field` when it names one (`protocol.invalid_message/stream_id`).
 fn outcome(r: &CommandResponse) -> String {
     match &r.result {
         Some(command_response::Result::Ok(_)) => "ok".into(),
-        Some(command_response::Result::Err(e)) => e.code.clone(),
+        Some(command_response::Result::Err(e)) => {
+            match e.params.get("field").and_then(|p| p.value.as_ref()) {
+                Some(v1::param_value::Value::Str(f)) => format!("{}/{f}", e.code),
+                _ => e.code.clone(),
+            }
+        }
         None => "none".into(),
     }
 }
@@ -124,7 +129,7 @@ struct Seen {
 }
 
 /// Plays a hub: takes the node's connection, sends each `(stream, request)` once the previous one was answered, then keeps reading
-/// until `done` holds for what came (or a deadline passes).
+/// until `done` holds for what came and half a second more (or a deadline passes).
 fn hub(
     n: &Node,
     socket: &Path,
@@ -189,6 +194,8 @@ fn hub(
         let mut script = script.into_iter();
         let mut waiting = 0;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        // Once everything was answered and `done` holds, frames that should not come get a while longer to show up.
+        let mut settled: Option<tokio::time::Instant> = None;
         loop {
             if waiting == 0 {
                 match script.next() {
@@ -196,11 +203,16 @@ fn hub(
                         c.send(&frame(stream, 0, r.encode_to_vec())).await.unwrap();
                         waiting = 1;
                     }
-                    None if done(&seen) => break,
+                    None if done(&seen) => {
+                        settled.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + Duration::from_millis(500)
+                        });
+                    }
                     None => {}
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline || settled.is_some_and(|at| now >= at) {
                 break;
             }
             match tokio::time::timeout(Duration::from_millis(200), c.recv()).await {
@@ -271,6 +283,22 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
     let n = node(&e);
     let socket = e.dir.join("c.sock");
     let shell = start_shell(&socket);
+    // A launch that the node would carry out if it ran: the folder's real project id, as the window sends it.
+    let project_id = {
+        let mut c = Client::connect(&socket).unwrap();
+        match c
+            .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
+                path: e.repo.to_string_lossy().into_owned(),
+                ..Default::default()
+            }))
+            .unwrap()
+            .unwrap()
+            .result
+        {
+            Some(Ok_::DirectoryInfo(d)) => d.project_id,
+            other => panic!("not a directory: {other:?}"),
+        }
+    };
 
     let start = || {
         Cmd::AgentStart(v1::AgentStart {
@@ -289,6 +317,7 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
                 Cmd::AgentLaunch(v1::AgentLaunch {
                     kind: "stub".into(),
                     path: e.repo.to_string_lossy().into_owned(),
+                    project_id: project_id.clone(),
                     ..Default::default()
                 }),
             ),
@@ -364,7 +393,7 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
     ] {
         assert_eq!(
             a(id),
-            "protocol.invalid_message",
+            "protocol.invalid_message/stream_id",
             "{id}: {:?}",
             seen.answers
         );
@@ -424,7 +453,6 @@ fn a_listed_subscription_needs_a_grant_on_a_dynamic_stream_too() {
         ),
     ];
     let seen = hub(&n, &socket, script, |_| true);
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         seen.answers.get("term").map(String::as_str),
         Some("approval.grant_required"),
