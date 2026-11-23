@@ -5,6 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
+- `agora password set` and `agora password clear` now store the password, sign out every session and remove passkeys added without the password all together or not at all, and say that they failed instead of reporting success when any part could not be done.
 - A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
 - When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
 - A handoff whose receiving agent cannot take it now goes back to the giver even when the giver's machine disconnected first.
