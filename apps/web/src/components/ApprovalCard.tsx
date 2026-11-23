@@ -7,7 +7,7 @@ import { detailText } from '../net/tool';
 import { visible, type ApprovalModel } from '../net/view';
 import { kindOf } from './AgentTile';
 import { AlwaysNote, AlwaysOnly, alwaysNoteId, type AlwaysSurface } from './AllowAlways';
-import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, PINNED_ANSWERS_PX, useBelow, useNarrowPane, usePinnedRow } from './ApprovalRequest';
+import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, PINNED_ANSWERS_REM, useBelowRem, useNarrowPane, usePinnedRow } from './ApprovalRequest';
 import { Icon } from './Icon';
 import { AgentAvatar, Button } from './kit';
 import { ReviewableRequest } from './ReviewRequest';
@@ -49,7 +49,7 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
   const host = useRef<HTMLDivElement>(null);
   const narrow = useNarrowPane(host, narrowable, guard.restart);
   const pin = usePinnedRow(guard.restart);
-  const roomy = !useBelow(host, PINNED_ANSWERS_PX, 'width', pin.short);
+  const roomy = !useBelowRem(host, PINNED_ANSWERS_REM, 'width', pin.short);
   // The row's two forms put the buttons in different places: a change between them (the pane getting wider or narrower) restarts the dwell.
   const inline = pin.row && roomy && !!onAnswer && decidableInline(x);
   const drawnInline = useRef(inline);

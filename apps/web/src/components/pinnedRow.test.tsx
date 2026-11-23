@@ -13,7 +13,9 @@ import { ATTENTION_DWELL_MS } from '../net/attention';
 import type { ApprovalModel } from '../net/view';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ApprovalCard } from './ApprovalCard';
-import { NARROW_PX, PINNED_ANSWERS_PX, PinnedShort, SHORT_PANE_PX } from './ApprovalRequest';
+import { NARROW_PX, PINNED_ANSWERS_REM, PinnedShort, SHORT_PANE_PX } from './ApprovalRequest';
+
+const PINNED_ANSWERS_PX = PINNED_ANSWERS_REM * 16; // at the default text size
 import { PromptBox } from './PromptBox';
 import { AnswerHoldsProvider } from './useAnswerGuard';
 
@@ -35,6 +37,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  document.documentElement.style.removeProperty('font-size');
 });
 
 const agent: AgentTileModel = { id: 'n1/a1', name: 'codex · teal', accent: 'var(--agent-teal)', machine: 'laptop', machineId: 'n1', workspace: 'w', project: 'agora', state: 'needs-you', preview: '', terminal: false };
@@ -142,6 +145,40 @@ describe('a request pinned above a chat in a short pane is one row', () => {
     expect(button('Allow')).toBeUndefined();
     dwell();
     act(() => report(PINNED_ANSWERS_PX + 40));
+    expect(card().getAttribute('data-pinned-row')).toBe('answer');
+    act(() => button('Allow')!.click());
+    expect(onResolve).not.toHaveBeenCalled();
+    dwell();
+    act(() => button('Allow')!.click());
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex on #1087: at the 125 % text size (a 20 px root) the callout stacks its buttons below 28rem = 560 px, so a 504 px card has them
+  // under the title; a gate in px (480) still drew the answers there. The gate is in rem, as the CSS is.
+  it('at a larger text size the gate is larger too: a card the CSS stacks at that size is the title and Review', () => {
+    document.documentElement.style.fontSize = '20px';
+    const report = widths();
+    act(() => root.render(pinned(ask(), true, vi.fn())));
+    act(() => report(504));
+    expect(card().getAttribute('data-pinned-row')).toBe('review');
+    expect(buttons().map((b) => b.textContent)).toEqual(['Review']);
+    act(() => report(PINNED_ANSWERS_REM * 20 + 8));
+    expect(card().getAttribute('data-pinned-row')).toBe('answer');
+  });
+
+  it('the text size changing alone (the card keeps its width) moves the row between its forms, and the dwell starts again', async () => {
+    const report = widths();
+    vi.useFakeTimers();
+    const onResolve = vi.fn(() => true);
+    act(() => root.render(pinned(ask(), true, onResolve)));
+    act(() => report(512));
+    expect(card().getAttribute('data-pinned-row')).toBe('answer');
+    dwell();
+    await act(async () => { document.documentElement.style.fontSize = '20px'; });
+    expect(card().getAttribute('data-pinned-row')).toBe('review');
+    expect(button('Allow')).toBeUndefined();
+    dwell();
+    await act(async () => { document.documentElement.style.removeProperty('font-size'); });
     expect(card().getAttribute('data-pinned-row')).toBe('answer');
     act(() => button('Allow')!.click());
     expect(onResolve).not.toHaveBeenCalled();

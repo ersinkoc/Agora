@@ -35,7 +35,8 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
   the card). Anything else is the title, cut, and **Review**, which opens the whole card in place (a start or a switch: Review's dialog).
   The row and the card put the buttons in different places, so every swap (the pane getting short or tall, Review opening the card)
   starts the dwell again; answers go through the same guard and the window's holds. The buttons sit beside the ask only where the card
-  is at least 480 px wide (narrower, the callout would put them under the text and the row would be as tall as the card). Screens:
+  is at least 30rem wide (480 px at the default text size, 600 px at 125 %; narrower, the callout would put them under the text at its
+  28rem breakpoint and the row would be as tall as the card; the gate follows the text size as that breakpoint does). Screens:
   `docs/ux/screens/polish-redesign-chat-short-{dark,light}.png` (the row with Deny and Allow) and
   `polish-redesign-chat-short-phone-{dark,light}.png` (the title and Review).
 - **Guards (T44):** every surface where a request is answered in place (Home's queue, the side panel, the cards above a terminal and
