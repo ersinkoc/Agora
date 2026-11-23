@@ -632,6 +632,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("env-passed", _) => key!("doctor-env-passed"),
             ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
             ("control-token-reachable", _) => key!("doctor-control-token-reachable"),
+            ("protected-path-reachable", _) => key!("doctor-protected-path-reachable"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),
