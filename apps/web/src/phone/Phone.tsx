@@ -80,10 +80,14 @@ function NavButton({ icon, label, onClick, href, primary }: { icon: IconName; la
 // The one place a tap becomes an answer: a second tap waits for the first, and nothing is sent while the link is down.
 function useAnswer(x: ApprovalModel, onResolve: Resolve | undefined, stale: boolean) {
   const [busy, setBusy] = useState(false);
-  const answer = (ok: boolean, choice?: StartChoice, always?: boolean) => {
-    if (!onResolve || busy || stale) return;
+  // It returns how the answer went (`AnswerResult`: `false` when nothing was sent), so a card that keeps the window's holds (a switch's,
+  // #1048) can free the request again when the answer failed.
+  const answer = (ok: boolean, choice?: StartChoice, always?: boolean): Promise<unknown> | false => {
+    if (!onResolve || busy || stale) return false;
     setBusy(true);
-    void Promise.resolve(always ? onResolve(x, ok, choice, true) : onResolve(x, ok, choice)).finally(() => setBusy(false));
+    const going = Promise.resolve(always ? onResolve(x, ok, choice, true) : onResolve(x, ok, choice)).finally(() => setBusy(false));
+    going.catch(() => { /* a failed answer: the caller that reads the result sees it; the card has already said what it says */ });
+    return going;
   };
   return { busy, answer };
 }

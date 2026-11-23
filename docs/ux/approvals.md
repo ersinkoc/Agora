@@ -29,8 +29,21 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **Never decided on cut text:** where Allow is offered the ask is one mono chip that wraps, never truncated; the agent's whole request is
   one click away when the short form leaves something out. The row and the dialog offer Allow and Deny only for what `decidableInline`
   shows whole; anything else has **Review**.
-- **Each surface keeps its own guards:** Home's queue its dwell and per-request holds (one answer per request, "Answer sent"), the dialog
-  its dwell, answered-once and Later, the switch card its dwell and one-click lock. The component only draws what the surface decided.
+- **Guards (T44):** every surface where a request is answered in place (Home's queue, the side panel, the cards above a terminal and
+  above a chat's composer, the attention dialog) has the same dwell, from one hook (`useAnswerGuard`, #1045, #1052): Allow and Deny do
+  nothing for 600 ms after anything the surface shows changed or moved (a pane narrow enough to put the buttons under the text
+  included), after the panes were rearranged (a move, a split, a resize, a maximize, another tab in front, a pane pointed at or following
+  another agent, a side column opened or dragged; a pane taking the focus is not a rearrangement), after the person came back (at once:
+  a press in the same batch as the focus sends nothing) and after the link came back; off while the link is down, with the reason. A
+  start in a card goes through the same guard. Each surface's dwell is its own.
+- **One answer per request, for the whole window (#1048):** the holds are the window's, not a surface's (`AnswerHoldsProvider` in
+  `App`): a request answered, or on its way, from any surface (a card in a pane, the side panel, Home, the attention dialog, a switch's
+  card) is held on every other one. Off while it goes (nothing says sent yet), "Answer sent" once it went (the dialog adds Review),
+  answerable again after a fresh dwell on every surface that lists it when it failed. Closing a surface (the side panel) drops nothing:
+  an answer that went is forgotten only when its request leaves the window's list, one on its way only when it settles. The dialog keeps
+  Later and its Review-only requests; the switch card keeps its own Allow dwell and one-click lock, and its Deny has no dwell
+  (main-window.md): it is off only while the surface is busy (`busy`: an answer on its way, the link down) or the request is held. The
+  component only draws what the surface decided.
 - **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
   as it can be; nothing of the ask is cut.
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner
@@ -49,7 +62,7 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
   card. The fleet console's one-line rows and the phone's bar keep Allow and Deny; the full card has the third button.
 - **Shape:** a secondary button between Deny and the primary Allow, which stays last, on every surface (the one order of
   [One request, three sizes](#one-request-three-sizes)), under the same rules as Allow on that surface (disabled while the link is down,
-  during the dwell where the surface has one, while an answer goes). Under it one muted line in the
+  during the dwell where the surface has one, which is every surface but the phone's card, while an answer goes). Under it one muted line in the
   window's words and, when the agent named its option, "In its own words: “…”" as plain text; that label is never the button's name.
 - **Only "always":** a request that offers no single answer shows **Allow always** in the place of Allow (after Deny), as the primary button, with
   a line saying the agent offers no single answer. It is never answered from a one-line row (the fleet console, the phone's bar, the

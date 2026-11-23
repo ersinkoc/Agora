@@ -1097,6 +1097,8 @@ notify-body = { $count ->
 notify-body-named = { $name } sana ihtiyaç duyuyor
 notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
 attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
+# A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
+approval-sent = Yanıt gönderildi.
 attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.
 
 # Usage (no money: tokens, context and time)

@@ -1121,6 +1121,8 @@ notify-body = { $count ->
 notify-body-named = { $name } needs you
 notify-body-named-on = { $name } on { $machine } needs you
 attention-sent = Answer sent. If this card stays, open it with Review.
+# A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
+approval-sent = Answer sent.
 attention-notify-names-warn = These names come from the agents and machines themselves, and a notification may show them on a locked screen. A name that is not plain text is left out.
 
 # Usage (no money: tokens, context and time)
