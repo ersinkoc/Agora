@@ -3419,3 +3419,71 @@ fn a_window_that_opens_after_agents_messaged_each_other_gets_the_message_in_its_
     );
     assert!(at <= snapshot.pos);
 }
+
+/// ADR-0106: a hub from before the role was told sends the snapshot first, not a `Welcome`. The terminal client's `connect` reads that
+/// first frame while it waits for a `Welcome`, so it must keep it: the first `next` is that snapshot, and the role stays unspecified (the
+/// client then learns it as before, #1107).
+#[test]
+fn the_terminal_client_keeps_an_older_hubs_first_snapshot_and_knows_no_role() {
+    use agora_protocol::frame::{kinds, STREAM_EVENTS};
+    use agora_protocol::Frame;
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    use prost::Message;
+    let ca = Ca::generate("older hub ca").unwrap();
+    let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+    let acceptor = tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    // The older hub: takes the subscription and answers with its snapshot, nothing before it. The client tries the address's names in
+    // turn (the certificate names `localhost`), so a connection whose handshake fails is let go and the next one is taken.
+    rt.spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(tls) = acceptor.accept(tcp).await else {
+                continue;
+            };
+            let (mut conn, token) = agora_protocol::ws::accept_with_token(tls).await.unwrap();
+            assert_eq!(token.as_deref(), Some("client-token"));
+            let sub = conn.recv().await.unwrap().unwrap();
+            assert_eq!((sub.stream_id, sub.kind), (STREAM_EVENTS, kinds::SUBSCRIBE));
+            let snapshot = agora_protocol::v1::Snapshot {
+                pos: 7,
+                nodes: vec![agora_protocol::v1::NodeSnapshot {
+                    node_id: "older".into(),
+                    online: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            conn.send(&Frame {
+                stream_id: STREAM_EVENTS,
+                kind: kinds::SNAPSHOT,
+                seq: None,
+                payload: snapshot.encode_to_vec(),
+            })
+            .await
+            .unwrap();
+            // Keep the connection open while the client reads.
+            let _ = conn.recv().await;
+            return;
+        }
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: ca.cert_pem().to_string(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    assert_eq!(
+        session.person_role(),
+        agora_protocol::v1::PersonRole::Unspecified
+    );
+    match session.next(Duration::from_secs(2)) {
+        Update::Snapshot(s) => {
+            assert_eq!((s.pos, s.nodes[0].node_id.as_str()), (7, "older"));
+        }
+        _ => panic!("the older hub's first snapshot was lost"),
+    }
+}
