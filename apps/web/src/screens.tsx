@@ -125,13 +125,16 @@ const demoRich: ChatSource = {
 // ADR-0069: and one whose program the machine cannot find, named in the explanation.
 const demoKinds: KindChoice[] = [
   // ADR-0066: Codex takes a model (any name the tool knows) and an effort (a list, with the tool's own default shown).
-  { kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }],
+  { kind: 'codex', name: 'Codex', installed: true, level: 2, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }],
     settings: [{ id: 'model', label: 'setting-model', values: [], defaultValue: '' }, { id: 'effort', label: 'setting-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'], defaultValue: 'medium' }] },
-  { kind: 'gemini', name: 'Gemini CLI', installed: false, program: 'gemini' },
+  // A chat agent (ACP) and a plain terminal beside it, so the cards show both tags.
+  { kind: 'claude', name: 'Claude Code', installed: true, level: 3 },
+  { kind: 'shell', name: 'Shell', installed: true, level: 1 },
+  { kind: 'gemini', name: 'Gemini CLI', installed: false, level: 2, program: 'gemini' },
 ];
 function DemoStart({ onClose }: { onClose: () => void }) {
   return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}
-    machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }]}
+    machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }, { id: 'mac', name: 'mac', os: 'macos', online: true, agentsRunning: 0, lastSeenMs: 0 }, { id: 'win', name: 'win', os: 'windows', online: true, agentsRunning: 0, lastSeenMs: 0 }]}
     loadKinds={async () => demoKinds}
     inspect={async (_node, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false })}
     onStart={async () => { onClose(); return undefined; }} onClose={onClose} />;

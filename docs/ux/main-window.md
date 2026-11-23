@@ -4,7 +4,7 @@
 ![Window, light](screens/window-ide-light.png)
 ![Terminals side by side](screens/window-ide-grid.png)
 ![Full size](screens/window-full-dark.png)
-![Start an agent](screens/window-start-chosen-dark.png)
+![Start an agent](screens/start-redesign-agent-dark.png)
 
 ## Browsing folders
 
@@ -200,7 +200,31 @@ See `experience.md`. Command palette, attention flow, and fleet view are part of
 
 ## Start an agent (ADR-0052)
 
-One window: **Machine** chips, then **Working folder** (a known folder in one click, or a typed path), then **Agent** chips and options. Choosing the folder shows the resolved folder, branch and the rule that nothing is changed before anything starts.
+One window: **Machine**, then **Working folder** (a known folder in one click, or a typed path), then **Agent** and options. Choosing the folder shows the resolved folder, branch and the rule that nothing is changed before anything starts.
+
+![Agent cards, dark](screens/start-redesign-agent-dark.png)
+![Agent cards, light](screens/start-redesign-agent-light.png)
+![Acting without asking, dark](screens/start-redesign-noask-dark.png)
+![Phone](screens/start-redesign-agent-phone-light.png)
+![Confirm step on a phone](screens/start-redesign-confirm-phone-light.png)
+
+Built from the widget kit (redesign PR 10; screens `start-redesign-{agent,missing,confirm,noask}-{dark,light}.png` and
+`start-redesign-{agent,confirm,noask}-phone-{dark,light}.png`):
+
+- **Machine** is a segmented control of the online machines, each with its system's outline (Linux, macOS, Windows; the plain machine
+  for any other) and its name; one tab stop, the arrow keys move and choose.
+- **Agent** is a card per kind the machine lists: a letter avatar, the name, and a **Terminal** or **Chat** tag (Chat for a structured
+  agent, ACP or an adapter). The cards are one radio group with one tab stop: the arrow keys move and choose (mirrored right to left),
+  Home and End go to the ends, and each card is named by the kind's name alone. Installed kinds come first; kinds the machine cannot find
+  follow under **Not installed** as dashed cards. Choosing one of those shows why it cannot start (the missing program by name, ADR-0069),
+  and only then; it offers no options and **Start** stays off for it.
+- **How it acts** is a segmented control, **Ask before acting** or the kind's option that skips permissions (**Don't ask**). Ask is
+  always the default. Picking Don't ask only opens the confirmation ("Let the agent act without asking?", with **Keep asking** as the
+  focused primary answer and **Start without asking** in red; **Start** waits while it is open, ADR-0059). Once confirmed, the control
+  turns red with the note "This agent will act without asking you." (ADR-0102: acting without asking is red, never amber).
+- Beside the buttons a preview line says **Will appear as codex · …** with a letter avatar: the agent's name starts with its kind, and
+  its colour comes from the id the machine gives it when it starts, so the window does not show one before.
+- A refused start, a failed folder listing and a folder outside the task's project are said in red.
 
 Choose an online **Machine**, a known **Project** or another **Working folder** on that machine, then **Use this folder**.
 The canonical folder is shown before choosing an agent and starting it. Default launch uses exactly this folder; it does not

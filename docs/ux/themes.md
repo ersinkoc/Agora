@@ -92,8 +92,8 @@ never throws and reports **every** problem at once, each with a message from `lo
    - the fixed red as words (errors, a red text button) on each surface, and an agent's initial (`text`) on its badge (the
      agent colour mixed 22 % into `surface-1`), at **4.5:1**: "Text on Mint agent badge is 4.4:1; it needs at least 4.5:1 to be
      readable" (`theme-error-contrast` with `theme-colour-*`, `theme-avatar`);
-   - each **control indicator** at **3:1** (WCAG 1.4.11): a switch's track, thumb and outline, the chosen option's ring, a
-     selected card or count's ring, a filled button, the focus ring on every coloured background, a role's icon on its chip
+   - each **control indicator** at **3:1** (WCAG 1.4.11): a switch's track, thumb and outline, the chosen option's ring (red
+     on a risky choice), a selected card or count's ring, a filled button, the focus ring on every coloured background, a role's icon on its chip
      (mixed 22 %). These pairs are one table (`themes/tints.ts` `INDICATORS`), which the kit test holds equal to the rules in
      `app.css`. A failing pair names the control and says it must be seen, not read: "Icon: Idle on Idle icon background is
      2.7:1; it needs at least 3:1 to be seen" (`theme-error-control`, `theme-control-*`). A pair that item 4 or another

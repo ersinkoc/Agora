@@ -54,6 +54,7 @@ const uses = (selector: string, prop: string) => {
 // The control indicators (ADR-0102 item 6, WCAG 1.4.11), read from the kit's own rules: [what, the indicator's colour, what it must stand out from].
 const INDICATORS: readonly [string, [string, string], (string | [string, string])[]][] = [
   ['segmented: chosen ring', [".kit-seg__item[aria-checked='true']", 'box-shadow'], [[".kit-seg__item[aria-checked='true']", 'background'], 'surface-2']],
+  ['risky segmented: chosen ring', [".kit-seg--risk .kit-seg__item[aria-checked='true']", 'box-shadow'], [[".kit-seg__item[aria-checked='true']", 'background'], ['.kit-seg--risk', 'background']]],
   ['switch off: outline', ['.kit-toggle', 'border'], ['surface-0', 'surface-1', 'surface-2']],
   ['switch off: thumb', ['.kit-toggle::after', 'background'], ['surface-0', 'surface-1', 'surface-2']],
   ['switch on: track', [".kit-toggle[aria-checked='true']", 'background'], ['surface-0', 'surface-1', 'surface-2']],
@@ -154,6 +155,9 @@ describe('widget kit colours (ADR-0102)', () => {
           expect(c, `${what}: ${uses(ind[0], ind[1])}`).toMatch(/^#[0-9a-f]{6}$/);
           for (const bg of against) expect(at(c, colour(bg)), `${theme.id}: ${what} (${uses(ind[0], ind[1])}) against ${typeof bg === 'string' ? bg : uses(bg[0], bg[1])}`).toBeGreaterThanOrEqual(3);
         }
+        // The chosen risky segment's label is red text on the raised thumb: 4.5:1.
+        expect(uses(".kit-seg--risk .kit-seg__item[aria-checked='true']", 'color')).toBe('danger');
+        expect(at(d.danger, colour([".kit-seg__item[aria-checked='true']", 'background'])), `${theme.id}: risky segment label`).toBeGreaterThanOrEqual(4.5);
         // Labels on the filled buttons are text: 4.5:1.
         for (const b of ['.kit-btn--primary', '.kit-btn--danger']) expect(at(colour([b, 'color']), colour([b, 'background'])), `${theme.id}: ${b} label`).toBeGreaterThanOrEqual(4.5);
         // The focus ring (the base :focus-visible outline) on every tint, and each role's icon on its chip.

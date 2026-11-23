@@ -82,11 +82,12 @@ export function kitPalette(tokens: Tokens, scheme: Scheme, agents: Readonly<Reco
 // The control indicators (ADR-0102 item 6, WCAG 1.4.11: 3:1): the colour that shows the control's state, and what it must stand out
 // from. The first rows are the kit's rules in app.css, in the order design/kitContrast.test.ts reads them (and holds equal); then the
 // focus ring (the base `:focus-visible` outline) on every tint, and each role's icon on its chip.
-export const CONTROLS = ['segmented', 'switch-off', 'switch-on', 'risk-switch', 'selected-card', 'pressed-count', 'primary-button', 'danger-button', 'focus-ring', 'icon'] as const;
+export const CONTROLS = ['segmented', 'risk-segmented', 'switch-off', 'switch-on', 'risk-switch', 'selected-card', 'pressed-count', 'primary-button', 'danger-button', 'focus-ring', 'icon'] as const;
 export type Control = (typeof CONTROLS)[number];
 const ON_SURFACES = ['surface-0', 'surface-1', 'surface-2'] as const;
 export const INDICATORS: readonly { control: Control; fg: KitColour; bg: readonly KitColour[] }[] = [
   { control: 'segmented', fg: 'accent', bg: ['surface-raised', 'surface-2'] }, // the chosen option's ring
+  { control: 'risk-segmented', fg: 'danger', bg: ['surface-raised', 'tint-danger'] }, // a risky chosen option's ring (Start an agent)
   { control: 'switch-off', fg: 'text-muted', bg: ON_SURFACES }, // outline
   { control: 'switch-off', fg: 'text-muted', bg: ON_SURFACES }, // thumb
   { control: 'switch-on', fg: 'accent', bg: ON_SURFACES }, // track
