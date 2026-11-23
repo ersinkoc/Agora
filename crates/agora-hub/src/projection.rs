@@ -274,16 +274,17 @@ pub struct Ring {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MessageRings {
     /// `<node>/<project>` (the key [`crate::scope::Scope`] grants) → its ring. A ring is removed when it empties.
-    pub projects: BTreeMap<String, Ring>,
+    pub projects: BTreeMap<Arc<str>, Ring>,
     pub unplaced: Ring,
-    /// Every kept message's position → its ring (`None`: `unplaced`), so the oldest over all rings is found without a scan.
-    index: BTreeMap<u64, Option<String>>,
+    /// Every kept message's position → its ring (`None`: `unplaced`), so the oldest over all rings is found without a scan. Keys are
+    /// shared, so copying the rings (a message after a snapshot was taken) allocates no string.
+    index: BTreeMap<u64, Option<Arc<str>>>,
     /// The encoded bytes over all rings.
     pub bytes: usize,
 }
 
 impl MessageRings {
-    fn ring_mut(&mut self, key: Option<&String>) -> Option<&mut Ring> {
+    fn ring_mut(&mut self, key: Option<&Arc<str>>) -> Option<&mut Ring> {
         match key {
             Some(k) => self.projects.get_mut(k),
             None => Some(&mut self.unplaced),
@@ -291,7 +292,7 @@ impl MessageRings {
     }
 
     /// Drops the oldest message of the ring `key`; removes a project ring that empties.
-    fn drop_oldest(&mut self, key: Option<&String>) {
+    fn drop_oldest(&mut self, key: Option<&Arc<str>>) {
         let Some(ring) = self.ring_mut(key) else {
             return;
         };
@@ -312,8 +313,13 @@ impl MessageRings {
             return;
         }
         let (pos, size) = (m.pos, m.size);
+        // The ring's own key when it has one, so every entry of a ring shares one string.
+        let key: Option<Arc<str>> = key.map(|k| match self.projects.get_key_value(k.as_str()) {
+            Some((k, _)) => Arc::clone(k),
+            None => Arc::from(k),
+        });
         let ring = match &key {
-            Some(k) => self.projects.entry(k.clone()).or_default(),
+            Some(k) => self.projects.entry(Arc::clone(k)).or_default(),
             None => &mut self.unplaced,
         };
         ring.entries.push_back(Arc::new(m));
@@ -350,10 +356,10 @@ impl MessageRings {
             }
             let bytes = entries.iter().map(|m| m.size).sum();
             for m in &entries {
-                out.index.insert(m.pos, Some(k.clone()));
+                out.index.insert(m.pos, Some(Arc::clone(k)));
             }
             out.bytes += bytes;
-            out.projects.insert(k.clone(), Ring { entries, bytes });
+            out.projects.insert(Arc::clone(k), Ring { entries, bytes });
         }
         out
     }

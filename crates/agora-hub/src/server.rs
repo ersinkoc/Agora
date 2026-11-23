@@ -958,9 +958,13 @@ where
     let restricted = current.projects.is_some();
     // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its file name.
     let owner = current.role == crate::users::Role::Owner;
-    let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
+    let mut subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
+    // Taken out of the subscription, which lives as long as the connection, and dropped once it is sent: the view it holds shares the
+    // hub's message rings (ADR-0103), and a window that kept it would keep messages the hub has since let go, and make the hub copy the
+    // rings at its next message.
+    let snapshot = subscription.snapshot.take();
     let mut scope = None;
-    if let Some((view, pos)) = &subscription.snapshot {
+    if let Some((view, pos)) = &snapshot {
         let body = match &current.projects {
             Some(projects) => {
                 let s = crate::scope::Scope::from_view(projects.clone(), view);
@@ -984,7 +988,7 @@ where
     // ADR-0090: the snapshot has no field for an agent's config options and slash commands; the last report of each follows it as
     // the event the node sent, at the snapshot's position (a window applies these two, which replace, at its own position). Only
     // what the window may see: the cut view of a member, the shown view of the owner.
-    if let Some((view, pos)) = &subscription.snapshot {
+    if let Some((view, pos)) = &snapshot {
         let replay = match &scope {
             Some(s) => s.filter_view(view).session_replay(),
             None => view.session_replay(),
@@ -993,6 +997,7 @@ where
             send_positioned(&mut conn, &crate::hub::Delivered { pos: *pos, event }).await?;
         }
     }
+    drop(snapshot);
     for d in &subscription.backlog {
         send_shown(&mut conn, d, owner).await?;
     }
