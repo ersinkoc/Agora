@@ -307,6 +307,25 @@ pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
     Ok(SecretMode(saved))
 }
 
+/// The bytes of the keys that arrive on the terminal on stdin within `wait` (`crate::read_confirmation_until`): `None` when none came
+/// or a signal interrupted the wait, empty at the end of input. Read from fd 0 directly, never through `std::io::stdin`'s buffer.
+pub(crate) fn terminal_key(wait: std::time::Duration) -> io::Result<Option<Vec<u8>>> {
+    if !wait_readable(&io::stdin(), wait)? {
+        return Ok(None);
+    }
+    let mut buf = [0u8; 64];
+    // SAFETY: fd 0 is stdin; `buf` is valid for writes of its length.
+    let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        let e = io::Error::last_os_error();
+        return match e.kind() {
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => Ok(None),
+            _ => Err(e),
+        };
+    }
+    Ok(Some(buf[..n.unsigned_abs()].to_vec()))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };

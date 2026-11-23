@@ -49,7 +49,7 @@ export function NetworkView({ machines: all, agents, usage, hubName, onForget, f
       <div className="grid gap-2 rounded-m border border-accent bg-surface-1 p-4 shadow-card">
         <div className="flex items-center gap-2"><span aria-hidden className="grid size-8 place-items-center rounded-xs bg-accent text-sm font-bold text-on-accent">A</span><h2 className="m-0 text-sm normal-case tracking-normal text-ink">{t('network-hub')}</h2></div>
         <code dir="ltr" className="break-all text-xs text-muted">{hubName}</code>
-        <p className="m-0 flex items-center gap-1.5"><span aria-hidden className={`size-2 rounded-full ${online ? 'bg-finished' : 'bg-needs-you'}`} />{t('network-online', { online, total: machines.length })}</p>
+        <p className="m-0 flex items-center gap-1.5"><span aria-hidden className={`size-2 rounded-full ${online ? 'bg-finished' : 'bg-idle'}`} />{t('network-online', { online, total: machines.length })}</p>
         <p className="muted m-0">{t('ide-status-agents', { count: agents.length })}{totalMem > 0 ? ` · ${bytesLabel(totalMem)}` : ''}</p>
       </div>
     </section>

@@ -64,6 +64,9 @@ export const demoStartSettingsApproval = { ...demoStartApproval, id: 'demo/3', l
 // ADR-0059 decision 5: the same request asking for a helper that acts without asking (the card asks for the confirmation before it allows).
 const demoNoAsk = [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }];
 export const demoStartNoAskApproval = { ...demoStartApproval, id: 'demo/4', localId: '4', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), grant_allowed: false, launch_options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skips_permissions: true }] }), start: { ...demoStartApproval.start, grantAllowed: false, options: demoNoAsk } };
+// Redesign PR 5: a helper's start with a long first prompt (audit screenshot 26), summarised on its card and read whole in Review.
+const demoLongPrompt = 'Write unit tests for src/auth.rs.\n\nCover these cases:\n1. A token exactly at its expiry is still valid.\n2. A token one second past its expiry is refused.\n3. A token whose signature was made with another key is refused, and the error says which check failed.\n4. A token issued with a clock 40 seconds ahead is accepted within the skew window.\n\nDo not change anything under src/ except tests; if a case cannot be tested without changing the code, write it down in the task board instead of changing the code. Run the tests with cargo test -p login auth:: and report the output.';
+export const demoStartLongApproval = { ...demoStartApproval, id: 'demo/5', localId: '5', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), prompt: demoLongPrompt }), start: { ...demoStartApproval.start, prompt: demoLongPrompt } };
 
 // ADR-0091: plan-limit observations for the demo window (clearly fake). The Laptop's Codex is getting full, the Build server's almost
 // used up (and one older reading), the Windows PC's window just reset; Claude reports nothing, so it shows as unknown.

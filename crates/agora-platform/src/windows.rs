@@ -1020,6 +1020,57 @@ pub(crate) fn flush_input() {
     }
 }
 
+/// The characters of the keys pressed on the console within `wait` (`crate::read_confirmation_until`), as UTF-8: `None` when none
+/// came. The console's input records are read directly: a key press with a character gives that character (as often as it repeats,
+/// at most 256 times), and every other record (a key release, a key with no character, the mouse, focus, a resize) is consumed and
+/// gives nothing, so a wait never ends in a read that blocks. A console has no end of input, so the result is never empty.
+pub(crate) fn terminal_key(wait: Duration) -> io::Result<Option<Vec<u8>>> {
+    use windows_sys::Win32::System::Console::{
+        GetNumberOfConsoleInputEvents, ReadConsoleInputW, INPUT_RECORD, KEY_EVENT,
+    };
+    let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
+    let mut units: Vec<u16> = Vec::new();
+    // SAFETY: plain calls on the process's standard input handle; `records` is a valid buffer of the length passed, and only the
+    // records the call says it filled are read, each as the union member its `EventType` names.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        match WaitForSingleObject(stdin, ms) {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => return Ok(None),
+            _ => return Err(os_error(GetLastError())),
+        }
+        let mut waiting = 0u32;
+        if GetNumberOfConsoleInputEvents(stdin, &mut waiting) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        if waiting == 0 {
+            return Ok(None);
+        }
+        let mut records: [INPUT_RECORD; 16] = std::mem::zeroed();
+        let mut read = 0u32;
+        // At least one record is waiting, so this returns at once.
+        if ReadConsoleInputW(stdin, records.as_mut_ptr(), records.len() as u32, &mut read) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        for r in records.iter().take(read as usize) {
+            if u32::from(r.EventType) != KEY_EVENT {
+                continue;
+            }
+            let k = r.Event.KeyEvent;
+            let c = k.uChar.UnicodeChar;
+            if k.bKeyDown != 0 && c != 0 {
+                for _ in 0..k.wRepeatCount.clamp(1, 256) {
+                    units.push(c);
+                }
+            }
+        }
+    }
+    if units.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf16_lossy(&units).into_bytes()))
+}
+
 /// Size of the console window on stdout.
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero info structure is a valid out-buffer.
