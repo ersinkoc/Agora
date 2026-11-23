@@ -59,6 +59,10 @@ struct Inner {
     subs_dropped: u64,
     /// How long an agent waited for a person's answer (`GET /api/metrics`).
     approval_wait: crate::metrics::Histogram,
+    /// #996: presence facts about connections that ended while the store refused the write, oldest first, with the hub clock of
+    /// the end. They are written before any later hub fact (so a node's next `NodeLink { up }` always comes after them) and by
+    /// [`Hub::record_unrecorded`] once the store works again. Memory only: a hub that restarts records every node offline anyway.
+    unrecorded: std::collections::VecDeque<(Body, u64)>,
 }
 
 pub struct Hub {
@@ -74,6 +78,8 @@ pub struct Hub {
     store: Arc<SqliteStore>,
     /// At most one node event job is scheduled on the blocking pool per hub.
     pub(crate) event_writer: Arc<tokio::sync::Semaphore>,
+    /// #996: whether a task is retrying the presence facts the store refused (at most one per hub).
+    pub(crate) recording_later: std::sync::atomic::AtomicBool,
     router: std::sync::Arc<crate::router::Router>,
     inner: Mutex<Inner>,
 }
@@ -166,6 +172,7 @@ impl Hub {
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store: Arc::new(store),
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
+            recording_later: std::sync::atomic::AtomicBool::new(false),
             router: crate::router::Router::new(),
             inner: Mutex::new(Inner {
                 view,
@@ -174,6 +181,7 @@ impl Hub {
                 subs: Vec::new(),
                 subs_dropped: 0,
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
+                unrecorded: std::collections::VecDeque::new(),
             }),
         };
         {
@@ -365,13 +373,13 @@ impl Hub {
         session: &mut NodeSession<impl Deref<Target = SqliteStore>>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
-        let outcome = session.event(payload)?;
+        let (outcome, stored) = session.event_stored(payload)?;
         if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
             self.metrics
                 .events_ingested
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
-            if let Ok(event) = Event::decode(payload) {
+            if let Ok(event) = Event::decode(stored.as_deref().unwrap_or(payload)) {
                 let restarted = match &event.body {
                     Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
                     _ => None,
@@ -433,6 +441,9 @@ impl Hub {
     ) -> Result<(), agora_protocol::Error> {
         use agora_protocol::{Error, ErrorCode};
         let mut g = self.lock();
+        // #996: a machine that left while the store refused the record is offline; it is written first so the check sees it.
+        self.write_unrecorded(&mut g)
+            .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
         match g.view.nodes.get(node) {
             None => return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node)),
             Some(n) if n.online => {
@@ -515,8 +526,13 @@ impl Hub {
     /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
     /// `NodeLink { up: false }` under one lock. When a newer connection of the node had already replaced this one, the fact says
     /// `replaced` and the node stays online; otherwise the hub also records `NodeOffline`, which clients from before ADR-0070
-    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether the node is now
-    /// offline.
+    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether this was the node's
+    /// current connection (the node is offline once the facts are stored).
+    ///
+    /// #996: facts the store refuses are not dropped. They are kept in order and written before any later hub fact (a node that
+    /// dials again is recorded down, then up) and by [`Hub::record_unrecorded`], which the server retries until the store works
+    /// ([`Hub::has_unrecorded`]). Before, the failure was dropped: the router had let the node go, but every view kept the machine
+    /// online until it came back or the hub restarted.
     pub fn node_link_closed(
         &self,
         registration: crate::router::Registration,
@@ -534,16 +550,14 @@ impl Hub {
             (true, false) => NodeLinkReason::Closed,
         };
         if current {
-            let _ = self.emit(
-                &mut g,
+            g.unrecorded.push_back((
                 Body::NodeOffline(NodeOffline {
                     node_id: node.clone(),
                 }),
                 now_ms,
-            );
+            ));
         }
-        let _ = self.emit(
-            &mut g,
+        g.unrecorded.push_back((
             Body::NodeLink(NodeLink {
                 node_id: node,
                 up: false,
@@ -552,12 +566,52 @@ impl Hub {
                 last_heard_ms,
             }),
             now_ms,
-        );
+        ));
+        // What the store refuses stays in `unrecorded` (see above); the caller checks `has_unrecorded`.
+        let _kept = self.write_unrecorded(&mut g);
         current
     }
 
-    /// Records an event the hub itself produced (as the reserved hub producer).
+    /// #996: writes the presence facts the store refused before, oldest first. `Ok` when none is left.
+    pub fn record_unrecorded(&self) -> Result<(), StoreError> {
+        let mut g = self.lock();
+        self.write_unrecorded(&mut g)
+    }
+
+    /// #996: whether presence facts the store refused are still waiting to be written.
+    pub fn has_unrecorded(&self) -> bool {
+        !self.lock().unrecorded.is_empty()
+    }
+
+    /// Writes the facts in `unrecorded` in order, stopping at the first the store refuses (it and the ones after it stay).
+    ///
+    /// A fact the store does not apply (its number is already taken, or is not the next: the hub's count of its own facts no longer
+    /// matches the store's) is an error too, never dropped: it stays, the count is read again from the store, and the next
+    /// attempt numbers it from there.
+    fn write_unrecorded(&self, g: &mut Inner) -> Result<(), StoreError> {
+        while let Some((body, at_ms)) = g.unrecorded.front().cloned() {
+            if !self.write(g, body, at_ms)? {
+                let seq = g.hub_seq + 1;
+                g.hub_seq = self.store.acked(RESERVED_HUB_ID)?;
+                return Err(StoreError(format!(
+                    "the hub's fact {seq} was not applied; the store holds {}",
+                    g.hub_seq
+                )));
+            }
+            g.unrecorded.pop_front();
+        }
+        Ok(())
+    }
+
+    /// Records an event the hub itself produced (as the reserved hub producer). Facts the store refused before are written first
+    /// (#996), so the log keeps the order things happened in: a node's late `NodeOffline` can never land after its next `up`.
     fn emit(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<(), StoreError> {
+        self.write_unrecorded(g)?;
+        self.write(g, body, now_ms).map(|_| ())
+    }
+
+    /// Appends one hub fact and publishes it. Returns whether the store applied it (not a duplicate or a gap).
+    fn write(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<bool, StoreError> {
         let seq = g.hub_seq + 1;
         let event = Event {
             producer_id: RESERVED_HUB_ID.to_string(),
@@ -571,8 +625,9 @@ impl Hub {
         {
             g.hub_seq = seq;
             Self::publish(g, Delivered { pos, event });
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// ADR-0039 amendment B: the `(node, project)` pairs that must hand over their local work now (see `Boards::membership`).
@@ -632,7 +687,21 @@ impl Hub {
         call: &agora_protocol::v1::BoardCall,
         now_ms: u64,
     ) -> crate::board::Answer {
+        let refused = || crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store"),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
         let mut g = self.lock();
+        // #996: a machine that left while the store refused the record is offline before the board decides anything (a handoff
+        // to it is refused), and the board's events come after that record in the log.
+        if self.write_unrecorded(&mut g).is_err() {
+            return refused();
+        }
         let key = self.restore_board(&call.project_id, now_ms);
         let project = call.project_id.as_str();
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
@@ -685,15 +754,7 @@ impl Hub {
                 if let Some(board) = before {
                     self.boards.restore(project, board);
                 }
-                crate::board::Answer {
-                    verdict: crate::board::Verdict::Invalid(
-                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
-                            .with("incident_id", "board.store"),
-                    ),
-                    events: Vec::new(),
-                    handoff: None,
-                    fanout: None,
-                }
+                refused()
             }
         }
     }
@@ -1713,6 +1774,42 @@ mod tests {
         assert!(ca.issue_node(RESERVED_HUB_ID, &csr).is_err());
     }
 
+    #[test]
+    fn ingest_publishes_bounded_quota_timestamp_matching_store() {
+        let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+        let sup = Support {
+            generations: vec![1],
+            capabilities: vec![],
+            required: vec![],
+        };
+        let mut session = open_session(&hub, &sup, "n1");
+        let ev = Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 0,
+            body: Some(Body::AgentQuotaObserved(
+                agora_protocol::v1::AgentQuotaObserved {
+                    node_id: "n1".into(),
+                    tool: "claude".into(),
+                    window: "5h".into(),
+                    observed_at_ms: u64::MAX - 1,
+                    used_percent: 20,
+                    ..Default::default()
+                },
+            )),
+        };
+        hub.ingest(&mut session, &ev.encode_to_vec()).unwrap();
+        let key = ("n1".to_string(), "claude".to_string(), "5h".to_string());
+        let live_ts = hub.view().0.quota[&key].observed_at_ms;
+        let rebuilt_ts = crate::projection::View::rebuild(hub.store())
+            .unwrap()
+            .0
+            .quota[&key]
+            .observed_at_ms;
+        assert_eq!(live_ts, rebuilt_ts);
+        assert!(live_ts < u64::MAX - 1);
+    }
+
     /// A hub on a file, another connection to the same file (what another process is: `agora hub login`, the front door, `agora hub
     /// code`), and a cleanup.
     fn hub_on_file(name: &str) -> (Hub, std::path::PathBuf) {
@@ -1770,6 +1867,180 @@ mod tests {
         assert_eq!(generation, 1);
         assert!(hub.router().is_connected("n1"));
         assert!(hub.view().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    const REFUSE_EVENTS: &str =
+        "CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;";
+
+    /// The presence facts in the log about `node`, as `(up, reason, generation)` (`NodeOffline` is `(false, -1, 0)`).
+    fn presence(hub: &Hub, node: &str) -> Vec<(bool, i32, u64)> {
+        hub.store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .iter()
+            .filter_map(decode)
+            .filter_map(|d| match d.event.body {
+                Some(Body::NodeLink(l)) if l.node_id == node => {
+                    Some((l.up, l.reason, l.generation))
+                }
+                Some(Body::NodeOffline(o)) if o.node_id == node => Some((false, -1, 0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #996: the end of a connection the store refused to record is kept, not dropped, and written once the store works again,
+    /// with no reconnect: the view, a live subscriber and a rebuilt view all show the machine offline, and it can be forgotten.
+    /// Before, the failure was dropped and the machine that had left stayed online until it came back or the hub restarted.
+    #[test]
+    fn a_connection_whose_end_cannot_be_recorded_is_recorded_once_the_store_works() {
+        let (hub, path) = hub_on_file("presence-end-refused");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let sub = hub.subscribe(None).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        assert!(!hub.router().is_connected("n1"));
+        assert!(hub.has_unrecorded());
+        assert!(hub.record_unrecorded().is_err());
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        hub.record_unrecorded().unwrap();
+        assert!(!hub.has_unrecorded());
+        let (view, _) = hub.view();
+        assert!(!view.nodes["n1"].online);
+        assert_eq!(view.nodes["n1"].last_event_ms, 5);
+        assert!(!View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        let live: Vec<_> = std::iter::from_fn(|| sub.live.try_recv().ok())
+            .filter_map(|d| match d.event.body {
+                Some(Body::NodeLink(l)) => Some((l.up, l.reason, l.generation)),
+                Some(Body::NodeOffline(_)) => Some((false, -1, 0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            [(false, -1, 0), (false, NodeLinkReason::Closed as i32, 1)]
+        );
+        hub.forget_node("n1", false, 7).unwrap();
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: when only the second of a connection's two end facts is refused, only that one is kept: the first is not written twice.
+    #[test]
+    fn only_the_end_facts_the_store_refused_are_written_later() {
+        let (hub, path) = hub_on_file("presence-end-partial");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        // The log holds the opening; `NodeOffline` is the second event and goes in, `NodeLink` would be the third.
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= 2 BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        hub.record_unrecorded().unwrap();
+        assert_eq!(
+            presence(&hub, "n1"),
+            [
+                (true, NodeLinkReason::Opened as i32, 1),
+                (false, -1, 0),
+                (false, NodeLinkReason::Closed as i32, 1),
+            ]
+        );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a board call writes the ends the store refused before it decides anything, so the board sees a machine that left as
+    /// offline (never hands work to it) and its events come after that record. While the store still refuses, the call is answered
+    /// `internal` (`board.store`) and the end stays waiting.
+    #[test]
+    fn a_board_call_records_a_waiting_end_first() {
+        let (hub, path) = hub_on_file("presence-end-board");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: "p".into(),
+            tool: "task_list".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        match hub.board_call("n2", &call, 7).verdict {
+            crate::board::Verdict::Invalid(e) => assert_eq!(
+                e,
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store")
+            ),
+            _ => panic!("a board call went ahead while a machine's end could not be recorded"),
+        }
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _ = hub.board_call("n2", &call, 8);
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a waiting end the store does not apply (the hub's count of its own facts no longer matches the store's) is not
+    /// dropped: the attempt fails, the count is read again, and the next attempt writes it.
+    #[test]
+    fn a_waiting_end_the_store_does_not_apply_is_kept_and_written_later() {
+        let (hub, path) = hub_on_file("presence-end-unapplied");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        other
+            .execute_batch("DROP TRIGGER no_events; UPDATE producers SET last_seq = last_seq + 1 WHERE producer = 'hub';")
+            .unwrap();
+        assert!(hub.record_unrecorded().is_err());
+        assert!(hub.has_unrecorded());
+        assert!(hub.view().0.nodes["n1"].online);
+        hub.record_unrecorded().unwrap();
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(!View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a machine that dials again after its last end could not be recorded is recorded down, then up, in that order, so the
+    /// late end never hides the new connection. While the store still refuses, the new connection is not kept (#957); once it
+    /// works, the next one is recorded online, with the next generation.
+    #[test]
+    fn a_machine_whose_end_was_not_recorded_comes_back_online_in_order() {
+        let (hub, path) = hub_on_file("presence-end-then-open");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, true, 5, 6));
+        assert!(hub.node_link_opened("n1", Vec::new(), 7).is_err());
+        assert!(!hub.router().is_connected("n1"));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let (_reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 8).unwrap();
+        assert_eq!(generation, 2);
+        assert!(!hub.has_unrecorded());
+        assert!(hub.router().is_connected("n1"));
+        assert!(hub.view().0.nodes["n1"].online);
+        assert!(View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        assert_eq!(
+            presence(&hub, "n1"),
+            [
+                (true, NodeLinkReason::Opened as i32, 1),
+                (false, -1, 0),
+                (false, NodeLinkReason::Silent as i32, 1),
+                (true, NodeLinkReason::Opened as i32, 2),
+            ]
+        );
         drop(hub);
         remove_db(&path);
     }

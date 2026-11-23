@@ -120,4 +120,11 @@ describe('command palette extras', () => {
     expect(isMachinesHash('#/machines') && isMachinesHash('#/machines/n1') && !isMachinesHash('#/machinesx')).toBe(true);
     expect(projectsOf([agent('a'), agent('b'), agent('c', { projectId: 'p2', project: 'blog' }), agent('d', { projectId: undefined })])).toEqual([{ id: 'p1', name: 'login-fix' }, { id: 'p2', name: 'blog' }]);
   });
+  it('decodes a malformed machine hash to nothing instead of throwing while rendering', () => {
+    // The hash is untrusted input (a link from anywhere); a bad escape must not take the page down.
+    expect(machineOfHash('#/machines/%')).toBeUndefined();
+    expect(machineOfHash('#/machines/%zz')).toBeUndefined();
+    expect(machineOfHash('#/machines/%E0%80')).toBeUndefined();
+    expect(machineOfHash(machinesHash('n/1 x'))).toBe('n/1 x');
+  });
 });

@@ -49,6 +49,11 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
+/// True where [`confine_command`] can confine a plain process (not a PTY): Linux (Landlock) and macOS (Seatbelt), when
+/// [`sandbox_supported`] also holds. Windows confines PTY processes only (its restricted token is given at process creation, which
+/// `std::process::Command` cannot do), so adapter and ACP agents are refused there before they start (#897).
+pub const COMMAND_CONFINEMENT_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 /// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
 /// `%ComSpec%` when set, else `cmd.exe`.
 pub fn default_shell() -> String {
@@ -1881,6 +1886,18 @@ pub fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) -> Path
         let _ = child_path;
         PathBuf::from(program)
     }
+}
+
+/// Makes a long-lived child of this process (an adapter agent) start with standard input, output and error and no other descriptor
+/// of this process, not even one another thread has open without close-on-exec at that moment. Where a pipe is not made close-on-exec
+/// in one step (macOS: std makes it, then marks it), a pipe another thread was making as the child started (a `git` whose output the
+/// node reads, a terminal agent's start waiting for its `exec` report) stayed open in the child for its whole life, and whoever waited
+/// for that pipe's end waited as long: three nodes in one test process hung on it until the CI step's limit (#1011). Unix: every other
+/// descriptor is marked close-on-exec between fork and exec. Elsewhere nothing changes.
+pub fn keep_only_standard_streams(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    unix::keep_only_standard_streams(cmd);
+    cmd
 }
 
 /// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
