@@ -529,6 +529,28 @@ const SEND_FLAGS: libc::c_int = 0;
 /// Room for one `SCM_RIGHTS` message of one descriptor, aligned for `cmsghdr`.
 const CONTROL_WORDS: usize = 8;
 
+/// Whether `sock`'s connection is shut in both directions, by the peer closing it or by a shutdown of this end: `poll(2)` with no
+/// wait reports a hang-up (Linux: both directions shut; macOS: the end of the stream, `EV_EOF`), also while bytes the peer sent are
+/// still to be read. This is the state in which macOS refuses a new socket timeout with `EINVAL`.
+pub(crate) fn hung_up(sock: RawFd) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd: sock,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one valid pollfd that lives through the call; a zero timeout never blocks.
+        let r = unsafe { libc::poll(&mut p, 1, 0) };
+        if r >= 0 {
+            return Ok(r > 0 && p.revents & libc::POLLHUP != 0);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
 /// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
 pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
     wait_writable_polling(sock, timeout, libc::c_int::MAX)
@@ -924,6 +946,37 @@ mod tests {
         assert!(!wait_writable_polling(a.as_raw_fd(), want, 20).unwrap());
         let took = began.elapsed();
         assert!(took >= want, "ended early: {took:?}");
+    }
+
+    /// Issue #830: the probe behind `LocalStream::set_read_timeout_or_closed` tells a connection shut in both directions apart from
+    /// one that is open, with or without bytes to read.
+    #[test]
+    fn a_hang_up_is_seen_only_once_the_connection_is_shut() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (a, mut b) = UnixStream::pair().unwrap();
+        assert!(!hung_up(a.as_raw_fd()).unwrap(), "open and idle");
+        b.write_all(b"buffered").unwrap();
+        assert!(!hung_up(a.as_raw_fd()).unwrap(), "open with bytes to read");
+        drop(b);
+        assert!(
+            hung_up(a.as_raw_fd()).unwrap(),
+            "the peer closed, bytes still to read"
+        );
+        let (c, d) = UnixStream::pair().unwrap();
+        drop(d);
+        assert!(hung_up(c.as_raw_fd()).unwrap(), "the peer closed");
+        let (e, _f) = UnixStream::pair().unwrap();
+        e.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(
+            !hung_up(e.as_raw_fd()).unwrap(),
+            "only this end's writing shut"
+        );
+        // A fresh pair: macOS refuses a second shutdown of a half-shut socket (`ENOTCONN`).
+        let (g, _h) = UnixStream::pair().unwrap();
+        g.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(hung_up(g.as_raw_fd()).unwrap(), "this end shut both ways");
     }
 
     #[test]
