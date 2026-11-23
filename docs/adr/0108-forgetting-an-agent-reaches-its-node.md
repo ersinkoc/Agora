@@ -1,4 +1,4 @@
-# 0107. Forgetting an agent in the window reaches its node, which deletes its saved conversation
+# 0108. Forgetting an agent in the window reaches its node, which deletes its saved conversation
 Status: Proposed
 Date: 2026-11-23
 
