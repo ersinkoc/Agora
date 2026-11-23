@@ -19,6 +19,8 @@ export function issueText(i: ThemeIssue): string {
         : t(k.kind === 'color' ? 'theme-error-bad-color' : 'theme-error-bad-font', { label, token: i.token });
     }
     case 'contrast': return t('theme-error-contrast', { fg: tokenLabel(i.fg), bg: tokenLabel(i.bg), ratio: shownRatio(i.ratio), min: i.min });
+    // The same sentence as a surface pair; the background is a role's coloured background, the red is the fixed one.
+    case 'tint-contrast': return t('theme-error-contrast', { fg: i.fg === 'danger' ? t('theme-colour-danger') : tokenLabel(i.fg), bg: t(`theme-tint-${i.tint}`), ratio: shownRatio(i.ratio), min: i.min });
     default: return t(`theme-error-${i.code}`);
   }
 }

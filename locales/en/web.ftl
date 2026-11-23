@@ -887,6 +887,8 @@ theme-readability = Readability
 theme-incomplete = Some values are not valid yet; the window keeps the last good ones.
 theme-contrast-ok = All text is readable (WCAG AA).
 theme-contrast-not-applied = Not applied: some text would be hard to read.
+theme-contrast-tint-warning = Applied, but some text would be hard to read on coloured backgrounds:
+theme-contrast-tint-also = Also hard to read on coloured backgrounds:
 theme-px = { $size } px
 theme-import = Import…
 theme-export = Export
@@ -920,6 +922,15 @@ theme-token-radius-xs = Corners: tiny
 theme-token-radius-s = Corners: small
 theme-token-radius-m = Corners: medium
 theme-token-radius-l = Corners: large
+# A role's soft coloured background (callouts, pills, the current row): the readability check names it as "{ $bg }".
+theme-tint-accent = Accent background
+theme-tint-working = Working background
+theme-tint-needs = Needs you background
+theme-tint-finished = Finished background
+theme-tint-danger = Error background
+theme-tint-idle = Idle background
+# The one red (errors, deletions): fixed, not a theme colour.
+theme-colour-danger = Red (errors)
 theme-error-json = This file is not JSON.
 theme-error-invalid = This is not an Agora theme file.
 theme-error-newer = This theme was made by a newer version of Agora.

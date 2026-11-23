@@ -120,7 +120,7 @@ the kit (redesign PRs 2 and 3).
 - **Tokens first:** colors, type, spacing, radius, motion, and state colors defined once in `design/tokens`
   and generated for the web client (CSS variables), desktop, and TUI (truecolor/256-color mapping).
 - **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
-  the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
+  the person's own, checked for WCAG AA contrast before they are shown (text on the derived tints below too, as a warning). Text and spacing sizes are rem-based so a theme's
   text size (and the browser's) scales them; components never use pixel font sizes.
 - **Widget kit** (`apps/web/src/components/kit/`): one widget per job, and every new or changed screen reuses them instead of setting
   its own padding, border or colour:
@@ -133,7 +133,8 @@ the kit (redesign PRs 2 and 3).
 - **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
   (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed
   per scheme in `tokens.css`, never the theme's on-accent, so a theme cannot make a filled danger button unreadable), `--surface-raised`,
-  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint reaches 4.5:1 in every built-in theme, and control indicators (a switch's track and thumb, a
+  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint reaches 4.5:1 in every built-in theme (the theme
+  editor computes the same pairs for a person's own theme and warns about any below it, `themes.md`), and control indicators (a switch's track and thumb, a
   filled button, a selected ring, the focus ring) reach 3:1; a test computes both from the real tokens. The `--line-*` hairlines are
   decoration around a tinted surface whose icon and words carry the meaning, never the only sign of a control or a state, so they are
   only held visible (about 1.5–2:1), not to 3:1.

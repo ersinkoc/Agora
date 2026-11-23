@@ -1,6 +1,9 @@
+import { ROLE_TOKEN, TINT_ROLES, type TintRole, roleColours, tints } from './tints';
+
 // Themes are data (ADR-0068 rung 2, docs/ux/themes.md): a theme file names design tokens from design/tokens.css and their values.
 // This module is the one door from untrusted text (an imported file, this browser's storage) into a theme: it never throws, refuses
-// unknown or invalid tokens, and refuses colours whose text would be hard to read (WCAG 2.2 AA). Nothing here touches the DOM.
+// unknown or invalid tokens, refuses colours whose text would be hard to read on its surfaces (WCAG 2.2 AA), and warns about text
+// that would be hard to read on the theme's coloured backgrounds. Nothing here touches the DOM.
 
 export const THEME_FORMAT = 1;
 export const MAX_NAME = 60;
@@ -154,6 +157,21 @@ export function contrastIssues(tokens: Tokens): ContrastIssue[] {
   return CONTRAST_PAIRS.map((p) => ({ ...p, ratio: contrast(tokens[p.fg], tokens[p.bg]) })).filter((p) => p.ratio < p.min);
 }
 
+// Text on the widget kit's soft state backgrounds (design/app.css `--tint-*`, ADR-0102), which are mixed from the theme's own colours
+// (themes/tints.ts): each role's colour, ink and secondary text are words there, so 4.5:1. The danger role's colour is the fixed red,
+// but its background is mixed from the theme's panels. A failing pair is a warning, not a refusal: these pairs came after themes were
+// saved under the surface pairs alone, and a stored theme that is refused is dropped (#1021).
+export const TINT_PAIRS: readonly { fg: TokenName | 'danger'; tint: TintRole; min: number }[] = TINT_ROLES.flatMap((tint) => {
+  const own = tint === 'danger' ? 'danger' : ROLE_TOKEN[tint];
+  return ([own, 'text', 'text-muted'] as const).map((fg) => ({ fg, tint, min: 4.5 }));
+});
+export interface TintIssue { fg: TokenName | 'danger'; tint: TintRole; ratio: number; min: number }
+export function tintIssues(tokens: Tokens, scheme: Scheme): TintIssue[] {
+  const bg = tints(tokens, scheme);
+  const red = roleColours(tokens, scheme).danger;
+  return TINT_PAIRS.map((p) => ({ ...p, ratio: contrast(p.fg === 'danger' ? red : tokens[p.fg], bg[p.tint]) })).filter((p) => p.ratio < p.min);
+}
+
 // ---- Theme files --------------------------------------------------------------------------------------------------------------
 
 // The file people import and export. Tokens it leaves out come from the default theme of its scheme.
@@ -165,8 +183,10 @@ export type ThemeIssue =
   | { code: 'unknown-token'; token: string }
   | { code: 'derived-token'; token: string; base: TokenName }
   | { code: 'bad-value'; token: TokenName }
-  | ({ code: 'contrast' } & ContrastIssue);
-export type ParsedTheme = { ok: true; name: string; scheme: Scheme; tokens: Tokens } | { ok: false; issues: ThemeIssue[] };
+  | ({ code: 'contrast' } & ContrastIssue)
+  | ({ code: 'tint-contrast' } & TintIssue);
+// `warnings` (only when there are some) are problems that do not refuse the theme: text on its coloured backgrounds.
+export type ParsedTheme = { ok: true; name: string; scheme: Scheme; tokens: Tokens; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 // Control and bidi characters never reach the screen in a name someone else wrote.
@@ -195,7 +215,9 @@ export function parseTheme(value: unknown): ParsedTheme {
   }
   // Contrast is judged only on colours that were all readable: a bad value already says what is wrong.
   if (!issues.some((i) => i.code === 'bad-value')) for (const c of contrastIssues(tokens)) issues.push({ code: 'contrast', ...c });
-  return issues.length > 0 ? { ok: false, issues: dedupe(issues) } : { ok: true, name, scheme, tokens };
+  if (issues.length > 0) return { ok: false, issues: dedupe(issues) };
+  const warnings: ThemeIssue[] = tintIssues(tokens, scheme).map((w) => ({ code: 'tint-contrast', ...w }));
+  return warnings.length > 0 ? { ok: true, name, scheme, tokens, warnings } : { ok: true, name, scheme, tokens };
 }
 
 function dedupe(issues: ThemeIssue[]): ThemeIssue[] {
