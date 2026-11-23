@@ -864,19 +864,8 @@ pub(crate) fn open_private(
     append: bool,
 ) -> io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let link_error = |e: io::Error| match e.raw_os_error() {
-        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
-        _ => e,
-    };
     let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let cname = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if name.as_bytes().contains(&b'/') {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
     // SAFETY: a NUL-terminated path; the descriptor is owned below.
     let dfd = cvt(unsafe {
         libc::open(
@@ -884,9 +873,36 @@ pub(crate) fn open_private(
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     })
-    .map_err(link_error)?;
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+            io::Error::new(io::ErrorKind::InvalidInput, "a link")
+        }
+        _ => e,
+    })?;
     // SAFETY: a descriptor this call just opened and nothing else owns.
     let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
+    open_private_at(&dir_fd, name, append)
+}
+
+/// [`open_private`] relative to a folder already held open (`dir`, a directory descriptor): the same checks on `name`, no path looked
+/// up (#1000, [`crate::ConfinedDir::open_lock`]).
+pub(crate) fn open_private_at(
+    dir_fd: &impl AsRawFd,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let link_error = |e: io::Error| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    };
+    let cname = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     let access = if append {
         libc::O_WRONLY | libc::O_APPEND
     } else {

@@ -14,6 +14,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
 - A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
 - A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version's records (its version and its program's name) as they were, or says `rollback_incomplete` when it could not put them back.
+- `agora agent install` now checks, takes its lock on and replaces its record of the newest agent list it accepted (`agents/list-state.json`) all in the one `agents` folder it opened, so another folder put in that folder's place meanwhile is neither read nor written (#1000).
 
 ## 0.3.35
 

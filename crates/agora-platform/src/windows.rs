@@ -101,13 +101,31 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
+    let held = hold_dir(dir)?;
+    open_private_held(&held, path, append)
+}
+
+/// [`open_private`] for `name` in a folder already held open (`dir`, #1000, [`crate::ConfinedDir::open_lock`]). The file is opened at
+/// the path the handle has now (its final path) and then must really be inside the folder the handle holds, both final paths taken
+/// after the open: a folder renamed away and another put at its path in between is refused (`InvalidInput`), never used.
+pub(crate) fn open_private_in(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    let path = PathBuf::from(final_path(dir)?).join(name);
+    open_private_held(dir, &path, append)
+}
+
+/// The part of [`open_private`] after its folder is held (`held`): `path` is created private or opened, then checked through its own
+/// handle, including that it is inside `held`.
+fn open_private_held(held: &std::fs::File, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let held = hold_dir(dir)?;
     match create_private_new(path) {
         Ok(f) => drop(f),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -136,7 +154,7 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     if reparse || links > 1 || !file.metadata()?.is_file() {
         return Err(refuse());
     }
-    let (inside, folder) = (final_path(&file)?, final_path(&held)?);
+    let (inside, folder) = (final_path(&file)?, final_path(held)?);
     if !inside.to_lowercase().starts_with(&format!(
         "{}\\",
         folder.trim_end_matches('\\').to_lowercase()
@@ -148,7 +166,6 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     set_owner_only_handle(&file, false)?;
-    drop(held);
     Ok(file)
 }
 
