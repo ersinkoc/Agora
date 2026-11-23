@@ -5,7 +5,8 @@ import { DeviceRequest } from './components/DeviceRequest';
 import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
 import type { SignInApprovalModel } from './components/pairChoice';
-import { ApprovalBanner } from './components/ApprovalBanner';
+import { ApprovalBanner, ApprovalBanners } from './components/ApprovalBanner';
+import { requestShown, useAnswerGuard, type AnswerResult } from './components/useAnswerGuard';
 import { SkipApproval } from './components/SkipApproval';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
@@ -205,11 +206,13 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, approvals = [], onResolve, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, stale = false, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
-  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // The link is not live: its requests cannot be answered (T44: the dwell starts again when it is back).
+  stale?: boolean;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
@@ -219,6 +222,9 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   const preview = agent?.preview ?? '';
   const demo = useMemo(() => demoSource(preview), [preview]);
   const source = live ?? demo;
+  // T44 (`useAnswerGuard`, as Home's queue): one dwell for this agent's cards, above its terminal or its composer.
+  const mine = agent ? approvals.filter((x) => x.agentId === agent.id) : [];
+  const guard = useAnswerGuard(mine.map((x) => x.id), (status) => JSON.stringify([agent?.terminal !== false, mine.map((x) => [requestShown(x, agent), status(x.id)])]), stale);
   if (!agent) {
     return (
       <main className="page">
@@ -228,7 +234,6 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
-  const asks = approvals.filter((x) => x.agentId === agent.id);
   // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
@@ -247,10 +252,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
         <CloseConfirm agent={agent} where="pane" />
-        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} />)}
+        {agent.terminal === false ? null : <ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} />}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
+          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={mine.length ? <div className="grid gap-2"><ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} pinned /></div> : undefined} /> : (
             <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>

@@ -1,6 +1,7 @@
 import type { ActionResult } from '../net/refusal';
 import { asksUnderHeader } from '../net/chatView';
-import { ApprovalBanner } from './ApprovalBanner';
+import { ApprovalBanners } from './ApprovalBanner';
+import { requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
@@ -99,7 +100,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // ADR-0060: resume an interrupted agent (or start it again in its folder); undefined when it did, else the error code.
   onResume?: (agent: AgentTileModel, action: ResumeAction) => Promise<string | undefined>;
   start?: ReactNode;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   // ADR-0057: what an agent may still start without asking, and taking that back.
   helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
@@ -115,6 +116,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
   const fleet = useMemo(() => sortFleet(agents.filter((a) => !(a.closed && cleared.has(a.id)))), [agents, cleared]);
+  // T44 (`useAnswerGuard`, as Home's queue): one guard for every card above a terminal or a composer in this window's panes. Its layout is
+  // every request with what its card shows, so a card that comes, goes or changes in any pane restarts the dwell everywhere; a request is
+  // answered once, whichever pane it was answered in.
+  const banners = useAnswerGuard(approvals.map((x) => x.id), (status) => JSON.stringify(approvals.map((x) => { const a = fleet.find((f) => f.id === x.agentId); return [requestShown(x, a), a ? asksUnderHeader(a) : null, status(x.id)]; })), link !== 'live');
   const groupBy = useGroupBy();
   const spread = useMemo(() => projectSpread(fleet), [fleet]);
   const [now, setNow] = useState(Date.now());
@@ -294,7 +299,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const pinnedAsks = (agentId: string) => {
     const mine = approvals.filter((x) => x.agentId === agentId);
     const agent = fleet.find((f) => f.id === agentId);
-    return mine.length ? <div className="grid gap-2">{mine.map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} pinned />)}</div> : undefined;
+    return mine.length ? <div className="grid gap-2"><ApprovalBanners approvals={mine} agent={agent} guard={banners} onResolve={onResolve} pinned /></div> : undefined;
   };
   // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
   const agentBody = (a: AgentTileModel) => (
@@ -326,7 +331,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
       </div>
       <CloseConfirm agent={a} where="pane" />
-      {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} agent={a} onResolve={onResolve} />)}
+      {!asksUnderHeader(a) ? null : <ApprovalBanners approvals={approvals.filter((x) => x.agentId === a.id)} agent={a} guard={banners} onResolve={onResolve} />}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
@@ -365,7 +370,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   ];
   const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
     <Details tab={PANEL_TAB[id] as DetailsTab} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
-      onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
+      onResolve={onResolve} stale={link !== 'live'} onReview={loadDiff ? setReviewing : undefined} />
   </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
   // Home: the fleet console. It is what an empty window shows and what the Fleet tab is. A tile opens its agent like the tree does.
@@ -412,7 +417,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
 
         <Inspector fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
-          onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onPane={loadDiff ? (id) => openTool('changes', id) : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
+          onResolve={onResolve} stale={link !== 'live'} onReview={loadDiff ? setReviewing : undefined} onPane={loadDiff ? (id) => openTool('changes', id) : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
       </div>
 
       <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>

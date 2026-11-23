@@ -105,15 +105,21 @@ describe('card: the side panel, above a terminal, above a composer', () => {
       observe() { /* reported by hand */ }
       disconnect() { /* nothing */ }
     };
+    vi.useFakeTimers();
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalBanner approval={ask()} agent={agent} onResolve={onResolve} pinned />));
     expect(host.querySelector('[data-density="card"]')).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
     act(() => report(NARROW_PX - 170)); // audit screenshot 35: a chat pane about 190 px wide
     const narrow = host.querySelector('section.approval-req')!;
     expect(narrow.getAttribute('data-density')).toBe('row');
     expect(narrow.className).toContain('approval-req--stacked');
     expect(narrow.querySelector('.approval-req__cmd')!.textContent).toBe('run_command · cargo test -p agora-hub');
     expect(buttons(narrow).map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
+    // #1045: the buttons moved under the text, so the dwell starts again (T44: a ready Allow must not move under a click).
+    act(() => button('Allow', narrow)!.click());
+    expect(onResolve).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
     act(() => button('Allow', narrow)!.click());
     expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'n1/p1' }), true);
     act(() => report(NARROW_PX + 40));
@@ -138,10 +144,12 @@ describe('card: the side panel, above a terminal, above a composer', () => {
   });
 
   it('a start that would not ask has a danger Allow that still asks for the confirmation first; a plain start keeps the primary', () => {
+    vi.useFakeTimers();
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalCard approval={demoStartNoAskApproval as ApprovalModel} onResolve={onResolve} />));
     expect(buttons().map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
     expect(button('Allow')!.className).toContain('kit-btn--danger');
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); }); // #1045: the card's T44 dwell
     act(() => button('Allow')!.click());
     expect(onResolve).not.toHaveBeenCalled();
     expect(host.querySelector('[role=alertdialog]')).not.toBeNull();

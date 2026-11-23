@@ -41,6 +41,8 @@ const both = ask({ always: { label: 'Always allow git status', optionId: 'allow-
 const only = ask({ always: { label: '', optionId: 'edits', only: true } });
 const names = () => [...document.querySelectorAll('button')].map((b) => b.textContent);
 const press = (text: string) => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent === text); if (!b) throw new Error(`no ${text}`); act(() => b.click()); };
+// #1045: a card's answers wait out the T44 dwell, as on every surface.
+const dwell = () => act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
 
 describe('the approval card', () => {
   it('has no third button when the request does not offer it', () => {
@@ -50,7 +52,9 @@ describe('the approval card', () => {
   });
 
   it('adds "Allow always" between Deny and Allow, a secondary button that answers always, with the note and the agent\'s own words', () => {
-    const onResolve = vi.fn();
+    vi.useFakeTimers();
+    // Each answer fails, so the card is answerable again after a fresh dwell and every button can be tried.
+    const onResolve = vi.fn(() => false);
     act(() => root.render(<ApprovalCard approval={both} onResolve={onResolve} />));
     // Redesign PR 4: the order of every request, the attention dialog's: Deny, "Allow always", then Allow (the primary, last).
     expect(names()).toEqual(['Deny', 'Allow always', 'Allow']);
@@ -63,21 +67,27 @@ describe('the approval card', () => {
     expect(note.textContent).toContain('In its own words: “Always allow git status”');
     // Codex's review: "for this session" is not said for a kind nobody checked.
     expect(document.body.textContent).not.toContain('for this session');
+    dwell();
     press('Allow always');
     expect(onResolve).toHaveBeenLastCalledWith(true, undefined, true);
+    dwell();
     press('Allow');
     expect(onResolve).toHaveBeenLastCalledWith(true);
+    dwell();
     press('Deny');
     expect(onResolve).toHaveBeenLastCalledWith(false);
+    expect(onResolve).toHaveBeenCalledTimes(3);
   });
 
   it('puts "Allow always" in the place of Allow, as the primary, when the agent offers nothing else', () => {
+    vi.useFakeTimers();
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalCard approval={only} onResolve={onResolve} />));
     expect(names()).toEqual(['Deny', 'Allow always']);
     expect([...document.querySelectorAll('button')][1]!.className).toContain('kit-btn--primary');
     expect(document.body.textContent).toContain('This agent offers no single answer for this request');
     expect(document.body.textContent).not.toContain('In its own words'); // no label: nothing quoted
+    dwell();
     press('Allow always');
     expect(onResolve).toHaveBeenLastCalledWith(true, undefined, true);
   });
@@ -90,11 +100,13 @@ describe('the approval card', () => {
 
 describe('the banner in the centre panel', () => {
   it('offers it only when offered and answers always', () => {
+    vi.useFakeTimers();
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalBanner approval={ask()} onResolve={onResolve} />));
     expect(names()).toEqual(['Deny', 'Allow']);
     act(() => root.render(<ApprovalBanner approval={both} onResolve={onResolve} pinned />));
     expect(names()).toEqual(['Deny', 'Allow always', 'Allow']);
+    dwell();
     press('Allow always');
     expect(onResolve).toHaveBeenLastCalledWith(both, true, undefined, true);
     act(() => root.render(<ApprovalBanner approval={only} onResolve={onResolve} />));

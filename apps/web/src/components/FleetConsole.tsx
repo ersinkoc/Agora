@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -10,13 +10,13 @@ import type { UsageSummary } from '../net/usage';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
-import { ATTENTION_DWELL_MS } from '../net/attention';
 import { AgentTile, kindOf } from './AgentTile';
 import { Skeleton } from './EmptyState';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, Pill, StatTile } from './kit';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { Mark } from './StateBadge';
+import { useAnswerGuard } from './useAnswerGuard';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
@@ -121,11 +121,10 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const [read, setRead] = useState<ReadonlySet<string>>(new Set());
   const toggleRead = (key: string) => setRead((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
 
-  // T44: Allow and Deny in a card do nothing for a short dwell (ATTENTION_DWELL_MS, as the attention dialog and the phone bar) after anything
-  // on the list changed (a card came, went, moved, or says something else: a card that moves can put a ready Allow under a click meant for
-  // another), after the person came back to the window, and after the link came back. One timer for the whole queue, derived from what is
-  // shown, so no frame has a new list ready.
-  // The model of every agent card on screen, opened "Review each" lists included; the cards are drawn from these same models.
+  // T44 (`useAnswerGuard`, shared with the side panel and the cards above a terminal and a composer): Allow and Deny in a card do nothing
+  // for a short dwell after anything on the list changed, after the person came back to the window and after the link came back, and a
+  // request is answered once. The layout is made of the model of every agent card on screen, opened "Review each" lists included (the
+  // cards are drawn from these same models), and of each card's status, so an answer settling restarts the dwell.
   const model = (it: Exclude<AttentionItem, { kind: 'pair' }>, inlineOk: boolean): RowModel => {
     const agent = it.agent;
     const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
@@ -143,66 +142,16 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       agentId: agent?.id,
     };
   };
-  // Answers, by request (its id: stable across layouts, focus and the dwell). Two sets, each with its own way out:
-  // - `inFlight`: from the accepted press until that answer's own callback settles. Nothing else releases it: not a new layout, not the
-  //   request leaving the list and coming back, not the person coming back to the window.
-  // - `sent`: an answer that went (the window signed it and the machine took it). The card says "Answer sent" and never asks for a second
-  //   answer while the request is listed (T44: answered once; a card that stays is the list catching up). Forgotten when it leaves the list.
-  // A failed answer (`false`, or a promise that rejects) is in neither, so the request is answerable again after a fresh dwell. Each card's
-  // status is part of the layout below, so an answer settling (a status line and a Review button appearing) restarts the queue's dwell.
-  // Other requests stay answerable meanwhile. The click handler and the buttons ask the same question, `canAnswer`.
-  const inFlight = useRef(new Set<string>());
-  const sent = useRef(new Set<string>());
-  const shownIds = useRef(new Set<string>());
-  shownIds.current = new Set(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])));
-  for (const id of sent.current) if (!shownIds.current.has(id)) sent.current.delete(id);
-  const statusOf = (id: string): string => (sent.current.has(id) ? 'sent' : inFlight.current.has(id) ? 'held' : 'open');
-  const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
-    ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
-    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail, statusOf(it.approval.id)] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
-  const layout = JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
-    : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
-
-  // Readiness is a ref, checked in the click handler itself, so it is right even before React has drawn the change: `ready` holds the
-  // layout it was earned for, and each timer only sets it for the generation it was started in. A new layout (seen in render), the person
-  // coming back to the window (focus, or the tab shown again) and the link changing all clear it at once and start a new generation.
-  const ready = useRef<string | undefined>(undefined);
-  const generation = useRef(0);
-  const seenLayout = useRef(layout);
-  const [, redraw] = useState(0);
-  if (seenLayout.current !== layout) { seenLayout.current = layout; ready.current = undefined; generation.current += 1; }
-  const [epoch, setEpoch] = useState(0);
-  const restart = () => { ready.current = undefined; generation.current += 1; setEpoch((n) => n + 1); };
-  useEffect(() => {
-    const seen = () => { if (document.visibilityState === 'visible') restart(); };
-    window.addEventListener('focus', restart);
-    document.addEventListener('visibilitychange', seen);
-    return () => { window.removeEventListener('focus', restart); document.removeEventListener('visibilitychange', seen); };
-  }, []);
-  useEffect(() => {
-    const mine = generation.current;
-    const h = setTimeout(() => { if (generation.current === mine) { ready.current = layout; redraw((n) => n + 1); } }, ATTENTION_DWELL_MS);
-    return () => clearTimeout(h);
-  }, [layout, epoch]);
-
-  const canAnswer = (id: string) => !stale && ready.current === layout && !inFlight.current.has(id) && !sent.current.has(id);
-  // The guard is here as well as on the buttons: a press during the dwell, on a held or answered request, or from an older drawing sends nothing.
-  const answer = (a: ApprovalModel, ok: boolean) => {
-    if (!canAnswer(a.id)) return;
-    inFlight.current.add(a.id);
-    redraw((n) => n + 1);
-    const done = (v: unknown) => {
-      inFlight.current.delete(a.id);
-      if (v !== false && shownIds.current.has(a.id)) sent.current.add(a.id);
-      // Either way what the card shows changed, and the dwell starts again (also for a failure that came back before any redraw).
-      restart();
-    };
-    let result: unknown;
-    try { result = onResolve?.(a, ok); } catch { result = false; }
-    if (result && typeof (result as PromiseLike<unknown>).then === 'function') (result as PromiseLike<unknown>).then(done, () => done(false));
-    else done(result);
-  };
-
+  const guard = useAnswerGuard(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])), (statusOf) => {
+    const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
+      ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
+      : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail, statusOf(it.approval.id)] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
+    return JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
+      : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
+  }, stale);
+  const { canAnswer } = guard;
+  const sentTo = (id: string) => guard.status(id) === 'sent';
+  const answer = (a: ApprovalModel, ok: boolean) => guard.answer(a.id, () => onResolve?.(a, ok));
 
   // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.
   const reviewPair = (key: string, id: string) => {
@@ -241,13 +190,13 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
         {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
         <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{inline ? <span className="fleet-ask__cmd" dir="auto">{ask}</span> : ask}</p>
         {inline && stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
-        {it.kind === 'approval' && sent.current.has(it.approval.id) && <span role="status" className="fleet-ask__why">{t('attention-sent')}</span>}
+        {it.kind === 'approval' && sentTo(it.approval.id) && <span role="status" className="fleet-ask__why">{t('attention-sent')}</span>}
       </>,
       // "Always" is never answered from a row (ADR-0101: `decidableInline` sends a request that offers only that to its full card).
       action === 'answer' && it.kind === 'approval' ? <>
         <AnswerButtons approval={it.approval} size="sm" off={off} denyLabel={t('fleet-deny-for', { name })} allowLabel={t('fleet-allow-for', { name })}
           onDeny={() => answer(it.approval, false)} onAllow={() => answer(it.approval, true)} />
-        {sent.current.has(it.approval.id) && agentId && <Button size="sm" aria-label={t('fleet-review-for', { name })} onClick={() => onOpen(agentId)}>{t('attention-review')}</Button>}
+        {sentTo(it.approval.id) && agentId && <Button size="sm" aria-label={t('fleet-review-for', { name })} onClick={() => onOpen(agentId)}>{t('attention-review')}</Button>}
       </> : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
         : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null,
       <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />,

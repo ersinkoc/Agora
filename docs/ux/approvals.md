@@ -29,8 +29,13 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **Never decided on cut text:** where Allow is offered the ask is one mono chip that wraps, never truncated; the agent's whole request is
   one click away when the short form leaves something out. The row and the dialog offer Allow and Deny only for what `decidableInline`
   shows whole; anything else has **Review**.
-- **Each surface keeps its own guards:** Home's queue its dwell and per-request holds (one answer per request, "Answer sent"), the dialog
-  its dwell, answered-once and Later, the switch card its dwell and one-click lock. The component only draws what the surface decided.
+- **Guards (T44):** every list where a request is answered in place (Home's queue, the side panel, the cards above a terminal and above
+  a chat's composer) has the same dwell and per-request holds, from one hook (`useAnswerGuard`, #1045): Allow and Deny do nothing for
+  600 ms after anything the list shows changed or moved (a pane narrow enough to put the buttons under the text included), after the
+  person came back and after the link came back; one answer per request, held while it goes, "Answer sent" once it went, answerable
+  again after a fresh dwell when it failed; off while the link is down, with the reason. A start or a switch in a card goes through the
+  same guard. The dialog keeps its own dwell, answered-once and Later; the switch card also keeps its own Allow dwell and one-click
+  lock. The component only draws what the surface decided.
 - **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
   as it can be; nothing of the ask is cut.
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner
@@ -49,7 +54,7 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
   card. The fleet console's one-line rows and the phone's bar keep Allow and Deny; the full card has the third button.
 - **Shape:** a secondary button between Deny and the primary Allow, which stays last, on every surface (the one order of
   [One request, three sizes](#one-request-three-sizes)), under the same rules as Allow on that surface (disabled while the link is down,
-  during the dwell where the surface has one, while an answer goes). Under it one muted line in the
+  during the dwell where the surface has one, which is every surface but the phone's card, while an answer goes). Under it one muted line in the
   window's words and, when the agent named its option, "In its own words: “…”" as plain text; that label is never the button's name.
 - **Only "always":** a request that offers no single answer shows **Allow always** in the place of Allow (after Deny), as the primary button, with
   a line saying the agent offers no single answer. It is never answered from a one-line row (the fleet console, the phone's bar, the

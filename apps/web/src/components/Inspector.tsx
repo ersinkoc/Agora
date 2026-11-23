@@ -7,6 +7,7 @@ import { hasUsage } from '../net/usageView';
 import { UsagePanel } from './UsagePanel';
 import type { ApprovalModel, BoardModel, MessageModel, ProjectCost } from '../net/view';
 import { ApprovalCard } from './ApprovalCard';
+import { requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
 import type { StartChoice } from './StartApproval';
 import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
@@ -21,7 +22,7 @@ type Tab = RailTab;
 // The right panel: an icon rail that is always there (it stays visible at every width) and the subject it opens beside it, one at a
 // time (at most two panels are ever visible, visual-language.md). On a wide window the subject sits in the layout; on a narrow one it
 // is a drawer over the content, so the rail never clips and nothing is pushed out of view.
-export function Inspector({ fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onPane, open, onOpenChange, tab, onTab, pairing }: {
+export function Inspector({ fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, stale, onReview, onPane, open, onOpenChange, tab, onTab, pairing }: {
   fleet?: readonly AgentTileModel[];
   now?: number;
   attention: readonly AgentTileModel[];
@@ -33,7 +34,9 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // The link is not live: no request can be answered here (T44: the dwell starts again when it is back).
+  stale?: boolean;
   onReview?: (id: string) => void;
   // Open an agent's changes as a pane of the window, beside what is there.
   onPane?: (id: string) => void;
@@ -86,7 +89,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
         <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <Details tab={active} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} onPane={onPane} />
+        <Details tab={active} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} stale={stale} onReview={onReview} onPane={onPane} />
       </div>
     </section>}
     <nav ref={rail} className="rail" role="tablist" aria-orientation="vertical" aria-label={t('ide-details')} onKeyDown={railKey}>
@@ -112,7 +115,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
 
 // One subject of the details, on its own: the Inspector's tabs and the layout's panels (ADR-0068) draw the same thing.
 export type DetailsTab = Tab;
-export function Details({ tab, fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onPane, pairing }: {
+export function Details({ tab, fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, stale, onReview, onPane, pairing }: {
   tab: Tab;
   fleet?: readonly AgentTileModel[];
   now?: number;
@@ -125,7 +128,9 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // The link is not live: no request can be answered here (T44: the dwell starts again when it is back).
+  stale?: boolean;
   onReview?: (id: string) => void;
   onPane?: (id: string) => void;
   pairing?: PairingUi;
@@ -139,13 +144,18 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   // A start or a switch to act without asking keeps the row until those cards can open the agent themselves (redesign PR 5).
   const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.start && !x.skip && !x.skipUnknown);
   const agentOf = (id: string) => fleet.find((a) => a.id === id) ?? attention.find((a) => a.id === id);
+  // T44 (`useAnswerGuard`, as Home's queue): the cards' answers do nothing for a short dwell after anything on this list moved or changed
+  // (the rows, the notice and the machines asking to join above the cards; a card's request, agent and status), after the person came
+  // back and after the link came back; a request is answered once.
+  const guard = useAnswerGuard(approvals.map((a) => a.id), (status) => JSON.stringify([tab, attention.filter((a) => !carded(a.id)).map((a) => [a.id, a.name, a.state]), notice ?? '',
+    pairing?.cards.map((c) => c.id) ?? [], approvals.map((a) => [requestShown(a, agentOf(a.agentId)), status(a.id)])]), !!stale);
   return <>
     {tab === 'needs' && <div className="grid gap-2">
         {needs === 0 && <p className="muted">{t('attention-empty')}</p>}
         {attention.filter((a) => !carded(a.id)).map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-danger">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
-        {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />; })}
+        {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} guard={guard} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />; })}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid list-none gap-1 p-0">
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">
