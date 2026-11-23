@@ -156,6 +156,11 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 
   ![Applied, with a warning about Idle on its own background (Dark)](../screenshots/theme-tint-warning-dark.png)
   ![The same in Light](../screenshots/theme-tint-warning-light.png)
+  ![Applied, with warnings about an agent's badge and Idle's icon on its chip (Dark)](../screenshots/theme-kit-warning-dark.png)
+  ![Idle's icon on its chip in Light](../screenshots/theme-kit-warning-light.png)
+
+  All of these are taken by `scripts/screenshots-themes.mjs` from the demo window (it turns the "Needs you" card off for
+  the shot, `agora.attention.mode`).
 - **Import…** reads a theme file (refused with its reasons, or added and selected), **Export** saves the theme on screen as
   `theme.json`, **Delete theme** removes one of yours (its scheme falls back to Light or Dark), **Reset to defaults** as above.
 
