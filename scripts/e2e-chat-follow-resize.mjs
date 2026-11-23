@@ -58,6 +58,11 @@ try {
     check((await jumps()) === 0, `${what}: no "Jump to latest"`);
   };
 
+  // A full-page screenshot resizes the window under the page (900 -> 1 -> 900, #1059); found under load (`taskset -c 0`).
+  await page.screenshot({ fullPage: true });
+  await settle();
+  await atBottomEverywhere('after a full-page screenshot');
+
   // The gallery's logs have fixed heights; in the app a log fills its pane, which follows the window. Give every log's box a height that
   // follows the window, then shrink and restore the window (a full-page screenshot does 900 -> 1 -> 900).
   await page.$$eval('[role=log]', (ls) => ls.forEach((l) => { l.parentElement.parentElement.parentElement.style.height = 'calc(100vh - 100px)'; }));
@@ -70,6 +75,14 @@ try {
     await settle();
     await atBottomEverywhere(`after the window went to ${height} px and back`);
   }
+
+  // A width change: the content reflows, so only its height changes.
+  await page.setViewportSize({ width: 700, height: 900 });
+  await settle();
+  await atBottomEverywhere('with a narrower window');
+  await page.setViewportSize({ width, height: 900 });
+  await settle();
+  await atBottomEverywhere('with the window wide again');
 
   // A pane resize: a log grows (the browser clamps its offset), then shrinks below where it was, and is restored.
   for (const [i, h] of [['grows', 'calc(100vh + 100px)'], ['shrinks', 'calc(100vh - 400px)'], ['is restored', 'calc(100vh - 100px)']]) {
@@ -102,6 +115,31 @@ try {
   const went = (await gaps())[0];
   check(went > 64, `going to a file's change leaves the log at that change (${went} px above the bottom)`);
   check(await firstPill(), 'going to a file\'s change shows "Jump to latest"');
+  // Back to the gallery's own heights (one more pane resize for the logs that follow).
+  await page.$$eval('[role=log]', (ls) => ls.forEach((l) => { l.parentElement.parentElement.parentElement.style.height = ''; }));
+  await settle();
+  const back = await gaps();
+  check(back.slice(1).every((x) => x <= 1), `the logs that follow are at their bottom at the gallery's heights (${back})`);
+
+  // The reader opens a fold in the last screen of the second log while it follows: the fold stays under the pointer (the log is not pinned
+  // back to its bottom), and the log leaves the tail with "Jump to latest".
+  const fold = await page.evaluate(() => {
+    const l = document.querySelectorAll('[role=log]')[1];
+    const box = l.getBoundingClientRect();
+    const shown = [...l.querySelectorAll('details:not([open]) > summary')].filter((x) => { const r = x.getBoundingClientRect(); return r.height > 0 && r.top >= box.top && r.bottom <= box.bottom; });
+    const summary = shown[shown.length - 1];
+    if (!summary) return undefined;
+    summary.setAttribute('data-e2e-fold', '');
+    return Math.round(summary.getBoundingClientRect().top - box.top);
+  });
+  check(fold !== undefined, 'the second log shows a closed fold in its last screen');
+  if (fold !== undefined) {
+    await page.locator('[data-e2e-fold]').click();
+    await settle();
+    const moved = await page.evaluate(() => { const l = document.querySelectorAll('[role=log]')[1]; return Math.round(document.querySelector('[data-e2e-fold]').getBoundingClientRect().top - l.getBoundingClientRect().top); });
+    check(moved === fold, `an opened fold stays where the reader clicked it (${fold} -> ${moved} px from the log's top)`);
+    check((await pills())[1] === ((await gaps())[1] > 64), `the log offers "Jump to latest" exactly when the fold took it off its bottom (${(await gaps())[1]} px)`);
+  }
   check(errors.length === 0, `no page errors (${errors.join('; ')})`);
 } finally {
   await browser.close();

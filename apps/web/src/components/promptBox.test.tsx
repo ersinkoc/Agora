@@ -37,11 +37,12 @@ const chunk = (id: number): ChatLine => ({ id, atMs: 0, role: 'agent', kind: 'te
 function layout(log: HTMLElement) {
   let top = 0;
   let height = 500;
-  const scrollHeight = () => (log.firstElementChild?.children.length ?? log.children.length) * 100;
+  let extra = 0; // content that grew in place (a fold opened)
+  const scrollHeight = () => (log.firstElementChild?.children.length ?? log.children.length) * 100 + extra;
   Object.defineProperty(log, 'scrollHeight', { get: scrollHeight });
   Object.defineProperty(log, 'clientHeight', { get: () => height });
   Object.defineProperty(log, 'scrollTop', { get: () => top, set: (v: number) => { top = Math.max(0, Math.min(v, scrollHeight() - height)); } });
-  return { resize: (h: number) => { height = h; } };
+  return { resize: (h: number) => { height = h; }, grow: (px: number) => { extra += px; } };
 }
 const gap = (log: HTMLElement) => log.scrollHeight - log.scrollTop - log.clientHeight;
 const scroll = (log: HTMLElement, top: number) => act(() => { log.scrollTop = top; log.dispatchEvent(new Event('scroll')); });
@@ -71,12 +72,13 @@ describe('older entries and streaming', () => {
   });
   it('follows the tail while the reader is at the bottom', () => {
     let push: (l: ChatLine[]) => void = () => {};
-    const source: ChatSource = { connect(on) { push = (l) => on(l, false); on([user(1)], true); return { close() {} }; } };
+    const source: ChatSource = { connect(on) { push = (l) => on(l, false); on(Array.from({ length: 20 }, (_, i) => user(i + 1)), true); return { close() {} }; } };
     act(() => root.render(<PromptBox agent={agent()} source={source} />));
     const log = host.querySelector<HTMLElement>('[role=log]') as HTMLElement;
     layout(log);
-    act(() => push([chunk(2)]));
-    expect(gap(log)).toBeLessThanOrEqual(0); // the log is taller than what it holds: it is at its end
+    act(() => push([chunk(100)]));
+    expect(log.scrollHeight).toBeGreaterThan(log.clientHeight + 64);
+    expect(gap(log)).toBe(0);
   });
   it('computes the compensation from the heights', () => expect(keepPosition(0, 1000, 13000)).toBe(12000));
 });
@@ -140,6 +142,17 @@ describe('following through a resize', () => {
     expect(pill()).toBe(true);
     scroll(log, log.scrollTop - 100); // and the reader keeps reading upwards
     expect(pill()).toBe(true);
+  });
+  it('pins when the content grows in place while following, but not when the reader opened something in the log', () => {
+    const { log, size } = following();
+    size.grow(150);
+    resizeObserved();
+    expect(gap(log)).toBe(0); // content that grew on its own: still on the newest entry
+    act(() => (log.firstElementChild as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    size.grow(150); // the fold the reader opened
+    resizeObserved();
+    expect(gap(log)).toBe(150); // what they opened stays under the pointer
+    expect(pill()).toBe(true); // and the log has left the tail
   });
   it('lets the reader scroll away while entries stream in', () => {
     const { log, push } = following();

@@ -73,6 +73,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const followingNow = useRef(true);
   const seenSize = useRef<Size | undefined>(undefined);
   const resizing = useRef(false);
+  // The reader just clicked in the log (opened a fold, asked for more output): the size change that follows is theirs, not a resize.
+  const readerActed = useRef(false);
   const composedAt = useRef(0);
   const all = useMemo(() => transcript(lines), [lines]);
   const view = useMemo(() => windowed(all, shown), [all, shown]);
@@ -131,32 +133,38 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const onScroll = useCallback(() => {
     const el = log.current;
     if (!el) return;
-    if (followingNow.current && (resizing.current || resized(seenSize.current, el))) { pin(); return; }
+    if (followingNow.current && !readerActed.current && (resizing.current || resized(seenSize.current, el))) { pin(); return; }
     seenSize.current = sizeOf(el);
     const bottom = atBottom(el);
     followingNow.current = bottom;
     setFollow((f) => scrolled(f, bottom));
   }, [pin]);
+  // Leaving the tail on purpose (older entries, a file's change, a fold opened) is the reader moving: the resize rule must not pull them back.
+  const leave = useCallback(() => { followingNow.current = false; setFollow((f) => scrolled(f, false)); }, []);
   // The log or its content changed size: while following it stays on the newest entry, even when the resize sends no scroll event. A change
-  // of the log's own height also marks the next frames' scroll events as the resize's (one more frame for a late clamp).
+  // of the log's own height also marks the next frames' scroll events as the resize's (one more frame for a late clamp). A change right
+  // after the reader clicked in the log is theirs: the fold they opened stays under the pointer, and the log leaves the tail if it is now
+  // off its bottom.
   useEffect(() => {
     const el = log.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    let frame = 0;
+    const frames = { resizing: 0, acted: 0 };
+    const forTwoFrames = (flag: { current: boolean }, key: keyof typeof frames) => {
+      flag.current = true;
+      cancelAnimationFrame(frames[key]);
+      frames[key] = requestAnimationFrame(() => { frames[key] = requestAnimationFrame(() => { flag.current = false; }); });
+    };
     const observer = new ResizeObserver(() => {
-      if (laidOut(seenSize.current) && el.clientHeight !== seenSize.current.clientHeight) {
-        resizing.current = true;
-        cancelAnimationFrame(frame);
-        frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => { resizing.current = false; }); });
-      }
+      if (laidOut(seenSize.current) && el.clientHeight !== seenSize.current.clientHeight) forTwoFrames(resizing, 'resizing');
+      if (followingNow.current && readerActed.current) { seenSize.current = sizeOf(el); if (!atBottom(el)) leave(); return; }
       if (followingNow.current) pin(); else seenSize.current = sizeOf(el);
     });
     observer.observe(el);
     if (el.firstElementChild) observer.observe(el.firstElementChild);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [pin]);
-  // Leaving the tail on purpose (older entries, a file's change) is the reader moving: the resize rule must not pull them back.
-  const leave = () => { followingNow.current = false; setFollow((f) => scrolled(f, false)); };
+    const acted = () => forTwoFrames(readerActed, 'acted');
+    el.addEventListener('click', acted, true);
+    return () => { observer.disconnect(); el.removeEventListener('click', acted, true); cancelAnimationFrame(frames.resizing); cancelAnimationFrame(frames.acted); };
+  }, [pin, leave]);
   const toLatest = () => { pin(); followingNow.current = true; setFollow(jumped()); };
   const earlier = () => { before.current = log.current?.scrollHeight; leave(); setShown((n) => n + PAGE); };
   const reveal = (path: string): boolean => {
