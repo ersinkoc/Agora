@@ -44,10 +44,18 @@ describe('usage (no money)', () => {
     expect(activeMs(agent({ startedMs: 1_000, closed: true, endedMs: 5_000 }), 999_999)).toBe(4_000);
     expect(activeMs(agent({ startedMs: 1_000 }), 6_000)).toBe(5_000);
   });
-  it('says plainly when there is nothing yet, and keeps the plan limits place', () => {
+  it('says plainly when there is nothing yet, in the empty state that also names the plan limits', () => {
     const html = renderToStaticMarkup(<UsagePanel fleet={[agent({})]} now={1} />);
-    expect(html).toContain('Nothing to show yet');
-    expect(html).toContain('Plan limits');
+    expect(html).toContain('kit-empty__title');
+    expect(html).toContain('No usage yet');
+    expect(html).toContain('plan limits appear here once an agent has worked');
+    expect(html).not.toContain('Plan limits appear here when'); // no second empty note under it
     expect(html).not.toContain('<details');
+  });
+  it('titles its groups in sentence case, not as a tiny uppercase label', () => {
+    const html = renderToStaticMarkup(<UsagePanel fleet={fleet} now={61_000} />);
+    expect(html).toContain('<h3 class="panel-section-title">By project</h3>');
+    expect(html).toContain('<h3 class="panel-section-title">Plan limits</h3>');
+    expect(html).not.toContain('uppercase');
   });
 });

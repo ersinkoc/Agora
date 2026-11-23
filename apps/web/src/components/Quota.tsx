@@ -81,13 +81,15 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
   </li>;
 }
 
-/** The "Plan limits" section of the Usage panel. */
-export function QuotaSection({ fleet }: { fleet: readonly AgentTileModel[] }) {
+/** The "Plan limits" section of the Usage panel. `hideEmpty`: drawn only when a tool reported something (the panel's own empty state already
+ * says that nothing has been reported yet). */
+export function QuotaSection({ fleet, hideEmpty }: { fleet: readonly AgentTileModel[]; hideEmpty?: boolean }) {
   const { obs, machines, now } = useQuota();
   const view = useMemo(() => quotaView(obs, fleet, machines, now), [obs, fleet, machines, now]);
   const empty = view.tools.length === 0 && view.unknown.length === 0;
+  if (empty && hideEmpty) return null;
   return <section className="grid gap-1" aria-label={t('usage-limits-title')}>
-    <h3 className="m-0 text-xs font-semibold tracking-wider text-muted uppercase">{t('usage-limits-title')}</h3>
+    <h3 className="panel-section-title">{t('usage-limits-title')}</h3>
     {empty && <p className="muted m-0 rounded-s border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>}
     {view.tools.map((tool) => {
       const several = tool.machines.length > 1 || machines.size > 1;

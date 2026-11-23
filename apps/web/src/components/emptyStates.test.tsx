@@ -10,12 +10,15 @@ describe('empty and loading panels', () => {
   for (const lang of ['en', 'tr'] as const) {
     describe(lang, () => {
       beforeEach(() => setLanguage(lang));
-      it('Changes and Messages say something friendly, with a hint, not a bare line', () => {
-        for (const tab of ['changes', 'messages'] as const) {
+      it('Team chat, Changes, Shared tasks and Usage say something friendly in the one kit empty state, not a bare line', () => {
+        for (const tab of ['changes', 'messages', 'board', 'usage'] as const) {
           const html = renderToStaticMarkup(<Details tab={tab} {...none} />);
-          expect(html).toContain('empty-state__title');
-          expect(html).toContain('empty-state__hint');
-          expect(html).not.toMatch(/empty-(changes|messages)-(title|hint)/); // a missing message would show its id
+          expect(html).toContain('class="kit-empty kit-tone-accent"');
+          expect(html).toContain('kit-empty__title');
+          expect(html).toContain('kit-empty__hint');
+          expect(html).toContain('role="status"');
+          expect(html).not.toMatch(/empty-(changes|messages|board|usage)-(title|hint)/); // a missing message would show its id
+          expect(html).not.toMatch(/class="muted/); // no plain grey line instead
         }
       });
       it('the fleet draws skeleton tiles while it connects, hidden from assistive tech, with the status said once', () => {

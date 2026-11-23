@@ -691,18 +691,22 @@ export function projectChoices(v: View): ProjectChoice[] {
 // `via`: the machine whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`). It is the
 // machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
 // call itself after the sender's machine.
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
+// `fromId` is the sender's key, so the team chat can draw its avatar; `toMachine` names the recipient's machine on a message between machines.
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string; fromId?: string; toMachine?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
-  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
-  const label = (id: string) => names.get(id) ?? id;
+  const byId = new Map(tiles(v).map((t) => [t.id, t]));
+  const label = (id: string) => byId.get(id)?.name ?? id;
   const machine = (id: string) => id.split('/')[0];
-  return v.messages.slice(-limit).reverse().map((m) => ({
-    from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
-    crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
-    ...(m.via ? { via: m.via } : {}),
-  }));
+  return v.messages.slice(-limit).reverse().map((m) => {
+    const crossMachine = m.to.includes('/') && machine(m.from) !== machine(m.to);
+    return {
+      from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs, crossMachine, fromId: m.from,
+      ...(crossMachine ? { toMachine: byId.get(m.to)?.machine ?? machine(m.to) } : {}),
+      ...(m.via ? { via: m.via } : {}),
+    };
+  });
 }
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.

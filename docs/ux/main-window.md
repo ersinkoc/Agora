@@ -12,6 +12,35 @@
 
 **Browse folders** under the working-folder field opens a list of the machine's sub-folders (`directory.list`, ADR-0053; it starts in the home folder, or the typed path when there is one). Click a folder to step into it, the arrow goes up one, a Git project is marked, and **Use this folder** continues as if the path had been typed (the machine still resolves and shows it before anything starts). A machine without the command keeps the typed path.
 
+## The side panel's lists
+
+![Team chat, dark](screens/panels-redesign-team-chat-dark.png)
+![Team chat, light](screens/panels-redesign-team-chat-light.png)
+![A message read in full](screens/panels-redesign-team-chat-reader-dark.png)
+![Team chat on a narrow window](screens/panels-redesign-team-chat-phone-light.png)
+![Changes, nothing yet](screens/panels-redesign-changes-empty-dark.png)
+![Team chat, nothing yet](screens/panels-redesign-team-chat-empty-light.png)
+![Usage, nothing yet](screens/panels-redesign-usage-empty-dark.png)
+![Usage](screens/panels-redesign-usage-light.png)
+![Shared tasks and files](screens/panels-redesign-shared-tasks-dark.png)
+
+More sizes and themes: `screens/panels-redesign-*` (desktop and narrow, dark and light).
+
+- **Titles:** the panel's name is a 16 px title and a group inside it (Usage's **By machine**, **By project**, **Plan limits**) a 14 px
+  one, both in sentence case: no tiny uppercase labels in the panel.
+- **Team chat** (the agents' messages, the mesh; the rail's Messages subject is named Team chat, as the UI vocabulary says): one row per message with the sender's avatar (its colour and the first letter of its
+  kind; a neutral one for a sender this window does not list), the sender in bold, "to" the recipient, and how long ago on one line;
+  the text under it is cut to two lines. **Show all** appears under the text when the two lines cut it, beside the machine of a message
+  between machines and "reported by" for a copy only another machine recorded, as tags. The whole row is one button: a click, Enter or
+  Space opens the message in full in a reading view (sender, recipient, time, tags and the whole text with its line breaks); Esc or Close
+  goes back to the row, and the panel stays open. Agent text is untrusted data: it is drawn as plain text only (never HTML or markdown,
+  no clickable links), without control or bidirectional characters, in the rows and in the reading view.
+- **Empty lists** (Changes, Team chat, Shared tasks and files, Usage, and the layout's panels that show them) all use the kit's empty
+  state: an icon in a tinted chip, a short title, one line on what will appear. Usage's own empty state names the plan limits, so no
+  second note sits under it; plan limits a tool did report still show.
+- **Shared tasks and files:** a long project identity stays on one line and ends in an ellipsis (the whole id in its tooltip and when
+  copied); a long task title is cut to two lines (the board shows it whole).
+
 ## Closed agents
 
 ![A closed agent's summary](screens/window-closed-dark.png)

@@ -315,7 +315,6 @@ start-for-task-other-project = Bu klasör { $project } projesine ait değil. Gö
 give-none-plain = { $project } projesinde, görev alabilen bağlı bir makinede çalışan ajan yok.
 give-start-late = Ajan henüz görünmedi. Geri dönün ve göründüğünde onu listeden seçin.
 give-machine-unsupported = O ajanın makinesi henüz görev alamıyor; güncellenmesi gerekebilir. Hiçbir şey gönderilmedi.
-messages-title = Son mesajlar
 message-cross = makineler arası
 message-via = bildiren: { $machine }
 console-agents = Ajanlar
@@ -652,7 +651,7 @@ ide-agent-pick = Ajan
 ide-options = Seçenekler
 ide-copy-address = Adresi kopyala
 ide-tab-changes = Değişiklikler
-ide-tab-messages = Mesajlar
+ide-tab-messages = Ekip sohbeti
 ide-more-tabs = Diğer sekmeler
 ide-more-tabs-needs = gizli bir sekme sizi bekliyor
 ide-more-tabs-failed = gizli bir sekme hatayla bitti
@@ -844,7 +843,6 @@ layout-error-invalid = Bu, bu pencerenin okuyabileceği bir yerleşim değil.
 layout-error-newer = Bu yerleşim daha yeni bir sürümle yapılmış. Kullanmak için güncelleyin.
 layout-error-too-deep = Bu yerleşim çok derin iç içe (en çok { $max } düzey).
 layout-error-too-many = Bu yerleşimde çok fazla bölme var (en çok { $max }).
-layout-board-empty = Henüz ortak görev ya da dosya yok.
 
 ## Temalar (ADR-0068 2. basamak, docs/ux/themes.md)
 theme-editor-title = Tema
@@ -1091,7 +1089,6 @@ attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildiri
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
-usage-empty = Henüz gösterilecek bir şey yok. Bir ajan çalışınca kullanım burada görünür.
 usage-agents = { $count } ajan
 usage-by-machine = Makineye göre
 usage-by-project = Projeye göre
@@ -1130,6 +1127,14 @@ empty-changes-title = Her şey temiz
 empty-changes-hint = Bir ajanın değiştirip kaydetmediği dosyalar burada görünür.
 empty-messages-title = Henüz mesaj yok
 empty-messages-hint = Ajanlar birbirine yazdığında burada izleyebilirsiniz.
+# Ekip sohbeti (sağ panel): "codex · teal  alıcı: claude · plum  2 dk. önce", metin iki satırda kesilir; satır tüm metni açar.
+team-chat-to = alıcı: { $name }
+team-chat-show-all = Tümünü göster
+team-chat-close = Kapat
+empty-board-title = Henüz ortak görev yok
+empty-board-hint = Ajanların bir projede paylaştığı görevler ve dosyalar burada görünür.
+empty-usage-title = Henüz kullanım yok
+empty-usage-hint = Bir ajan çalıştıktan sonra token, bağlam, süre ve plan limitleri burada görünür.
 loading-label = Yükleniyor
 chat-code = Kod
 live-summary = Canlı özet

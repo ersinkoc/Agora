@@ -11,6 +11,7 @@ import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
 import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
+import { TeamChat } from './TeamChat';
 
 import { PairCards, type PairingUi } from './Pairing';
 import { badgeText, railItems, railLabel, resolveTab, shortcutIndex, shortcutLabel, type RailTab } from './rail';
@@ -81,7 +82,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
     {open && <section ref={panel} tabIndex={-1} className="inspector__panel" id="inspector-panel" role="tabpanel" aria-labelledby={`rail-${active}`}
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }}>
       <div className="flex h-9 flex-none items-center justify-between gap-2 border-b border-line ps-3 pe-1">
-        <h2 className="m-0 truncate">{label}</h2>
+        <h2 className="panel-title">{label}</h2>
         <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -150,13 +151,8 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         </li>)}
       </ul>)}
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
-    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <ul className="m-0 grid list-none gap-2 p-0">
-        {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
-          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}{m.via ? <span className="ide-chip ms-1.5">{t('message-via', { machine: m.via })}</span> : null}</div>
-          <div className="mt-1 break-words text-muted">{m.body}</div>
-        </li>)}
-      </ul>)}
+    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <TeamChat messages={messages} fleet={fleet} now={now} />)}
     {tab === 'usage' && <UsagePanel fleet={fleet} now={now} />}
-    {tab === 'board' && boards.length === 0 && <p className="muted">{t('layout-board-empty')}</p>}
+    {tab === 'board' && boards.length === 0 && <EmptyState icon="board" title={t('empty-board-title')} hint={t('empty-board-hint')} />}
   </>;
 }

@@ -243,11 +243,31 @@
   .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
   .menu-tile[aria-checked='true'] { @apply border-accent bg-surface-2 text-ink; }
 
-  /* Empty and loading panels: friendly, quiet, never an error look. The skeleton pulses softly and is still for people who asked for less motion. */
-  .empty-state { @apply grid justify-items-center gap-1.5 px-4 py-8 text-center; }
-  .empty-state__icon { @apply grid size-10 place-items-center rounded-full border border-line bg-surface-2 text-muted; }
-  .empty-state__title { @apply m-0 mt-1 font-medium text-ink; }
-  .empty-state__hint { @apply m-0 max-w-64 text-[0.8125rem] text-muted; }
+  /* Loading panels: the skeleton pulses softly and is still for people who asked for less motion. An empty panel is the kit's EmptyState. */
+
+  /* Side panel titles (visual-language.md type roles): the panel's name is a 16 px title, a group inside it a 14 px one; sentence case,
+     never the tiny uppercase label. */
+  .panel-title { @apply m-0 truncate font-semibold tracking-normal text-ink normal-case; font-size: var(--text-title); }
+  .panel-section-title { @apply m-0 font-semibold tracking-normal text-ink normal-case; font-size: var(--text-strong); }
+
+  /* A team chat row: the sender's avatar, one line with who wrote to whom and when, the text cut to two lines. The whole row opens the
+     reading view. Agent text is drawn as text only. */
+  .team-msg { @apply grid w-full min-w-0 items-start gap-x-2.5 gap-y-0.5 rounded-s px-2 py-2 text-start text-ink transition-colors duration-150 hover:bg-surface-2; grid-template-columns: auto minmax(0, 1fr); }
+  .team-msg > .kit-avatar { grid-row: span 3; }
+  .team-msg__line { @apply flex min-w-0 items-baseline gap-1.5 text-muted; font-size: var(--text-caption); }
+  /* Under the text: "Show all" when the two lines cut it, and the machine tags (a long machine name ends in an ellipsis). */
+  .team-msg__foot { @apply col-start-2 flex min-w-0 items-center gap-1.5; font-size: var(--text-caption); }
+  .team-msg__tag { @apply flex min-w-0 max-w-40; }
+  .team-msg__tag .kit-tag { @apply block min-w-0 truncate; height: 1.125rem; line-height: 1.125rem; }
+  .team-msg__from { @apply min-w-0 flex-none truncate font-semibold text-ink; font-size: var(--text-body); max-width: 60%; }
+  .team-msg__to { @apply min-w-10 truncate; }
+  .team-msg__time { @apply ms-auto flex-none whitespace-nowrap ps-1; }
+  .team-msg__body { @apply col-start-2 line-clamp-2 min-w-0 break-words; }
+  .team-msg__more { @apply flex-none text-accent; }
+  .team-reader { @apply fixed z-50 flex flex-col overflow-hidden rounded-l border border-line text-ink; inset-inline: 1rem; inset-block-start: 10vh; max-height: 80vh; margin-inline: auto; max-width: 40rem; background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+  .team-reader__head { @apply flex flex-none items-start gap-3 border-b border-line px-5 py-4; }
+  .team-reader__title { @apply m-0 truncate font-semibold tracking-normal text-ink normal-case; font-size: var(--text-title); }
+  .team-reader__body { @apply min-h-0 flex-1 overflow-auto px-5 py-4 break-words whitespace-pre-wrap select-text; font-size: var(--text-strong); line-height: 1.55; }
   .skeleton { @apply block rounded-xs bg-surface-2; }
   .fleet-empty--wide { @apply max-w-none; }
   .fleet-empty--wide .tile { @apply pointer-events-none; }

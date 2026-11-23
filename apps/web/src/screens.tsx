@@ -48,30 +48,20 @@ import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 import { t } from './i18n';
 import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './model';
+import { GALLERY_NOW, PanelGallery } from './components/PanelGallery';
 
+// The team chat in the gallery: a long message cut to two lines, a helper's first prompt with line breaks, one between machines and one
+// only another machine recorded. Times are before the gallery's fixed clock.
+const minAgo = (n: number) => GALLERY_NOW - n * 60_000;
 const demoMessages: MessageModel[] = [
-  { from: 'claude · amber', to: 'codex · teal', body: 'The login fix is on branch login-fix, ready for review.', atMs: 2, crossMachine: false },
-  { from: 'claude · amber', to: 'laptop/codex · violet', body: 'Can you run the tests on your machine?', atMs: 1, crossMachine: true },
+  { from: 'codex · teal', fromId: 'a2', to: 'claude · amber', atMs: minAgo(1), crossMachine: false,
+    body: 'Fine. While you are there: the expiry check compares against SystemTime::now() inside is_expired, which makes it impossible to test deterministically, so I would pass the clock in. Also the token lifetime is hardcoded as 3600 seconds in issue(), but the spec says fifteen minutes.' },
+  { from: 'claude · amber', fromId: 'a1', to: 'codex · rose', atMs: minAgo(2), crossMachine: false,
+    body: 'Write unit tests for src/auth.rs.\n\nCover these cases:\n1. A token exactly at its expiry is still valid.\n2. A token one second past its expiry is refused.' },
+  { from: 'claude · amber', fromId: 'a1', to: 'wrongstack · rose', toMachine: 'Windows PC', atMs: minAgo(3), crossMachine: true, body: 'I am taking src/auth.rs. Please stay out of it until I am done.' },
   // A copy only another machine than the sender's recorded (a receiver's channel copy, or one a node wrote for another): it says who.
-  { from: 'desktop/claude · rose', to: 'codex · teal', body: '[#ops] Deploy is done.', atMs: 0, crossMachine: true, via: 'laptop' },
+  { from: 'desktop/claude · rose', to: 'codex · teal', toMachine: 'Build server', atMs: minAgo(4), crossMachine: true, via: 'laptop', body: '[#ops] Deploy is done.' },
 ];
-
-function Messages({ messages }: { messages: readonly MessageModel[] }) {
-  if (messages.length === 0) return null;
-  return (
-        <section aria-label={t('messages-title')}>
-        <h2>{t('messages-title')}</h2>
-        <ul className="messages">
-          {messages.map((m, i) => (
-            <li key={`${m.atMs}-${i}`}>
-              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}{m.via ? <span className="muted"> · {t('message-via', { machine: m.via })}</span> : null}
-              <div className="muted">{m.body}</div>
-            </li>
-          ))}
-        </ul>
-      </section>
-  );
-}
 
 const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'];
 
@@ -138,7 +128,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div className="gallery__row">{STATES.map((s) => <StateBadge key={s} state={s} />)}</div>
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
-      <Messages messages={demoMessages} />
+      <PanelGallery messages={demoMessages} fleet={demoAgents} />
       <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       <ChatActionsContext.Provider value={{ setConfig: async (_a, _c, v) => (v === 'yolo' ? { approvalNeeded: 'demo/9' } : true), cancelTurn: async () => true, approvals: new Set(['demo/9']) }}>
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
