@@ -4,7 +4,8 @@
 //!
 //! The owner browses the whole machine from its home folder. A member may look only inside the projects granted to them (ADR-0049
 //! Amendment A, the hub refuses anything else), so their picker opens at their project's folder on that machine, or offers their
-//! projects there when there are several, and never goes above one ([`Nav`], #1086).
+//! projects there when there are several, and never goes above one ([`Nav`], #1086). When the client does not know the role, the
+//! picker opens there too, as the window does, and goes up only as the machine says (#1099).
 
 use std::fmt::Write as _;
 
@@ -67,11 +68,28 @@ pub enum At {
     Projects,
 }
 
+/// What this client knows of the person's role on the current connection (#1086, #1099). The hub ends a connection when a role or a
+/// grant changes, so it holds for one connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Role {
+    /// Not known: the plain list, which does not ask, or a console whose question went unanswered. The picker opens where the window
+    /// does, at the machine's project folder (or the choice of them), and goes up as the machine says: the hub leaves a member's
+    /// project folder without a way up, and gives the owner one. With no project folder there, the home folder.
+    #[default]
+    Unknown,
+    /// The owner (the hub answered `PairStatus`): the whole machine, from its home folder.
+    Owner,
+    /// Not the owner (the hub refused `PairStatus`, or a folder, for the role): only inside their projects.
+    Limited,
+}
+
 /// Where the picker may go on one machine. Pure state: the caller asks the machine for each [`At::Folder`] it answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nav {
-    /// `None`: the whole machine (the owner). `Some`: only inside these project folders (a member, #1086).
+    /// `None`: the whole machine (the owner). `Some`: these project folders first (a member, #1086, or a role not known, #1099).
     roots: Option<Vec<String>>,
+    /// Never above a project folder, whatever the machine says (a member, #1086). False: up as the machine says.
+    confined: bool,
     /// How many folders below the project folder the picker is (a member's only). Counted by the steps taken, not by comparing
     /// paths: the machine answers a folder in its own spelling (links followed, a trailing separator dropped).
     depth: usize,
@@ -82,6 +100,7 @@ impl Nav {
     pub fn machine() -> Self {
         Self {
             roots: None,
+            confined: false,
             depth: 0,
         }
     }
@@ -90,13 +109,84 @@ impl Nav {
     pub fn projects(roots: Vec<String>) -> Self {
         Self {
             roots: Some(roots),
+            confined: true,
             depth: 0,
+        }
+    }
+
+    /// The picker for `role` on a machine whose project folders (see [`project_roots`]) are `roots`.
+    pub fn for_role(role: Role, roots: Vec<String>) -> Self {
+        match role {
+            Role::Owner => Self::machine(),
+            Role::Limited => Self::projects(roots),
+            Role::Unknown => Self {
+                roots: Some(roots),
+                confined: false,
+                depth: 0,
+            },
+        }
+    }
+
+    /// The role this picker was made for.
+    pub fn role(&self) -> Role {
+        match (&self.roots, self.confined) {
+            (None, _) => Role::Owner,
+            (Some(_), true) => Role::Limited,
+            (Some(_), false) => Role::Unknown,
         }
     }
 
     /// Whether this picker stays inside a member's projects.
     pub fn confined(&self) -> bool {
-        self.roots.is_some()
+        self.confined
+    }
+
+    /// The machine's answer for the folder shown. A member's project folder that the hub gave a way up from tells that the hub no
+    /// longer keeps this person inside their projects: made the owner, on a connection that began after the change, which the client
+    /// did not see as a lost link (#1099). From there the picker goes up as the machine says, as with the role not known; true when
+    /// it changed so.
+    pub fn answered(&mut self, folder: &DirectoryEntries) -> bool {
+        if !self.confined || self.depth > 0 || folder.parent.is_empty() {
+            return false;
+        }
+        self.confined = false;
+        true
+    }
+
+    /// The folder to ask the machine `node` for before the choice of projects is offered (#1099): the hub refuses a person whose role
+    /// may not look into folders (a viewer) at once, so they are told before they choose rather than after. The first project folder
+    /// that `snapshot` places in one project only: the hub refuses a member a folder two projects were reported in (a project they were
+    /// not granted is not in their snapshot, so that cannot always be seen here). `None` without a choice.
+    pub fn probe(&self, snapshot: &Snapshot, node: &str) -> Option<String> {
+        let roots = self.roots.as_deref().filter(|r| r.len() > 1)?;
+        let projects_of = |root: &str| {
+            let checkouts = snapshot
+                .checkouts
+                .iter()
+                .filter(|c| c.node_id == node && c.path == root)
+                .map(|c| c.project_id.as_str());
+            let workspaces = snapshot
+                .workspaces
+                .iter()
+                .filter(|w| {
+                    let folder = if w.git_root.is_empty() {
+                        &w.path
+                    } else {
+                        &w.git_root
+                    };
+                    w.node_id == node && folder == root
+                })
+                .map(|w| w.project_id.as_str());
+            let mut ids: Vec<&str> = checkouts.chain(workspaces).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len()
+        };
+        roots
+            .iter()
+            .find(|r| projects_of(r) == 1)
+            .or_else(|| roots.first())
+            .cloned()
     }
 
     /// Where the picker opens: the home folder for the whole machine; a member's project folder, or the choice when they have several
@@ -140,13 +230,14 @@ impl Nav {
     }
 
     /// Up from the folder shown: its parent, as the machine named it. A member stops at their project's folder: from there up is the
-    /// choice of their projects when they have several, else nowhere (`None`).
+    /// choice of their projects when they have several, else nowhere (`None`). With the role not known, up goes as the machine says
+    /// (the hub names no way up out of a member's project), and a folder without one leads back to the choice.
     pub fn up(&mut self, folder: &DirectoryEntries) -> Option<At> {
         let Some(roots) = &self.roots else {
             return (!folder.parent.is_empty()).then(|| At::Folder(folder.parent.clone()));
         };
-        if self.depth > 0 && !folder.parent.is_empty() {
-            self.depth -= 1;
+        if (self.depth > 0 || !self.confined) && !folder.parent.is_empty() {
+            self.depth = self.depth.saturating_sub(1);
             return Some(At::Folder(folder.parent.clone()));
         }
         self.depth = 0;
@@ -513,6 +604,111 @@ mod tests {
         assert_eq!(nav.start(), At::Projects);
         assert_eq!(nav.open_project(1), Some(At::Folder("/b".into())));
         assert_eq!(nav.up(&listing("/b", "/")), Some(At::Projects));
+    }
+
+    #[test]
+    fn with_the_role_not_known_the_picker_opens_where_the_window_does_and_never_at_the_home_folder()
+    {
+        // #1099: the plain list does not ask for the role. Its picker opens at the machine's project folder, as the window does, so a
+        // member's first `f` asks the hub for no folder it refuses (no refused row in the owner's Activity).
+        let s = snapshot();
+        let mut nav = Nav::for_role(Role::Unknown, project_roots(&s, "n2"));
+        assert_eq!(nav.role(), Role::Unknown);
+        assert!(!nav.confined());
+        assert_eq!(nav.start(), At::Folder("/srv/theirs".into()));
+        // Up as the machine says: the hub gives the owner a way up and a member none.
+        let root = listing("/srv/theirs", "/srv");
+        assert_eq!(nav.up(&root), Some(At::Folder("/srv".into())));
+        assert_eq!(nav.up(&listing("/", "")), None);
+        let mut nav = Nav::for_role(Role::Unknown, project_roots(&s, "n2"));
+        nav.start();
+        assert_eq!(nav.up(&listing("/srv/theirs", "")), None);
+        // Several: the choice first; a project folder without a way up leads back to it.
+        let mut nav = Nav::for_role(Role::Unknown, project_roots(&s, "n1"));
+        assert_eq!(nav.start(), At::Projects);
+        assert_eq!(
+            nav.open_project(0),
+            Some(At::Folder("/home/eda/notes".into()))
+        );
+        assert_eq!(nav.up(&listing("/home/eda/notes", "")), Some(At::Projects));
+        // No project folder there: the home folder, as before.
+        assert_eq!(
+            Nav::for_role(Role::Unknown, Vec::new()).start(),
+            At::Folder(String::new())
+        );
+        // A known role keeps its picker.
+        assert_eq!(
+            Nav::for_role(Role::Owner, project_roots(&s, "n1")),
+            Nav::machine()
+        );
+        assert_eq!(
+            Nav::for_role(Role::Limited, project_roots(&s, "n1")),
+            Nav::projects(project_roots(&s, "n1"))
+        );
+        assert_eq!(Nav::machine().role(), Role::Owner);
+        assert_eq!(Nav::projects(Vec::new()).role(), Role::Limited);
+    }
+
+    #[test]
+    fn a_member_made_the_owner_goes_up_from_the_project_folder_once_the_hub_gives_a_way_up() {
+        // #1099: the hub names no way up out of a member's project folder and one for the owner. A picker made for a member that hears
+        // one goes up as the machine says from then on, without waiting for the client to ask the role again.
+        let mut nav = Nav::for_role(Role::Limited, vec!["/srv/mine".into()]);
+        assert_eq!(nav.start(), At::Folder("/srv/mine".into()));
+        assert!(
+            !nav.answered(&listing("/srv/mine", "")),
+            "a member's: no way up"
+        );
+        assert_eq!(nav.role(), Role::Limited);
+        // Below the project folder a way up is the member's too: it tells nothing.
+        assert_eq!(
+            nav.open(&listing("/srv/mine", ""), "api"),
+            At::Folder("/srv/mine/api".into())
+        );
+        assert!(!nav.answered(&listing("/srv/mine/api", "/srv/mine")));
+        assert_eq!(nav.role(), Role::Limited);
+        assert_eq!(
+            nav.up(&listing("/srv/mine/api", "/srv/mine")),
+            Some(At::Folder("/srv/mine".into()))
+        );
+        let root = listing("/srv/mine", "/srv");
+        assert!(nav.answered(&root));
+        assert_eq!(nav.role(), Role::Unknown);
+        assert_eq!(nav.up(&root), Some(At::Folder("/srv".into())));
+        // The owner's picker hears nothing new.
+        let mut nav = Nav::machine();
+        assert!(!nav.answered(&listing("/Users/me", "/Users")));
+    }
+
+    #[test]
+    fn the_choice_of_projects_is_tried_on_the_machine_before_it_is_offered() {
+        // #1099: a viewer is refused every folder; the first project's folder is asked for before the choice is shown, so they are
+        // told at once instead of after Enter. One project or the whole machine opens a folder at once: nothing to try first.
+        let s = snapshot();
+        for role in [Role::Limited, Role::Unknown] {
+            assert_eq!(
+                Nav::for_role(role, project_roots(&s, "n1")).probe(&s, "n1"),
+                Some("/home/eda/notes".into())
+            );
+            assert_eq!(
+                Nav::for_role(role, project_roots(&s, "n2")).probe(&s, "n2"),
+                None
+            );
+        }
+        assert_eq!(
+            Nav::for_role(Role::Owner, project_roots(&s, "n1")).probe(&s, "n1"),
+            None
+        );
+        // A folder two projects were reported in is refused to a member: the next folder that is one project's is tried instead.
+        let mut two = snapshot();
+        two.checkouts.push(agora_protocol::v1::CheckoutSnapshot {
+            checkout_id: "c3".into(),
+            node_id: "n1".into(),
+            project_id: "q".into(),
+            path: "/home/eda/notes".into(),
+        });
+        let nav = Nav::for_role(Role::Limited, project_roots(&two, "n1"));
+        assert_eq!(nav.probe(&two, "n1"), Some("/home/eda/web".into()));
     }
 
     #[test]
