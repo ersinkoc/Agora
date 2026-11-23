@@ -344,6 +344,56 @@ describe('request cards: re-arming and the clock (merger review of #1028)', () =
   });
 });
 
+describe('request cards: an answer in flight, by request (Codex re-review of #1028)', () => {
+  type Resolve = (a: ApprovalModel, ok: boolean) => unknown;
+  const render = (fleet: AgentTileModel[], approvals: ApprovalModel[], onResolve: Resolve) =>
+    act(() => root.render(<AttentionQueue items={attentionList(approvals, fleet)} machines={[]} now={NOW} onOpen={() => {}} onResolve={onResolve as never} />));
+  const allowFor = (name: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="Allow: ${name}"]`) as HTMLButtonElement;
+  const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
+
+  it('never answers the same request again after the person comes back and the dwell passes', () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); return new Promise(() => {}); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · a').click());
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    expect(allowFor('claude · a').getAttribute('aria-disabled')).toBe('true');
+    act(() => allowFor('claude · a').click());
+    act(() => { vi.advanceTimersByTime(60_000); });
+    act(() => allowFor('claude · a').click());
+    expect(sent).toEqual(['r1']);
+  });
+  it('never answers it again when another request arrives while its answer is on the way, and the other one can be answered', async () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    let settle: (v: boolean) => void = () => {};
+    const onResolve = (x: ApprovalModel) => { sent.push(x.id); return x.id === 'r1' ? new Promise<boolean>((r) => { settle = r; }) : undefined; };
+    const fleet = [agent('a', { state: 'needs-you' }), agent('b', { state: 'needs-you' })];
+    render(fleet, [ask('r1', 'a')], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · a').click());
+    render(fleet, [ask('r1', 'a'), ask('r2', 'b')], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    expect(allowFor('claude · a').getAttribute('aria-disabled')).toBe('true');
+    act(() => allowFor('claude · a').click());
+    expect(sent).toEqual(['r1']);
+    // B is not held up by A's answer.
+    expect(allowFor('claude · b').hasAttribute('aria-disabled')).toBe(false);
+    act(() => allowFor('claude · b').click());
+    expect(sent).toEqual(['r1', 'r2']);
+    // A fails: it can be answered again, after a fresh dwell.
+    settle(false);
+    await flush();
+    act(() => allowFor('claude · a').click());
+    expect(sent).toEqual(['r1', 'r2']);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · a').click());
+    expect(sent).toEqual(['r1', 'r2', 'r1']);
+  });
+});
+
 describe('Group by is the shared segmented control', () => {
   it('is a radio group named Group by, chosen with a click or the arrow keys', () => {
     const seen: string[] = [];

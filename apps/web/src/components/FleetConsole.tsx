@@ -22,8 +22,8 @@ import { PairRequest } from './PairRequest';
 import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
-// How long a card that was answered keeps its buttons off while it is still on the list (the answer may have been lost, or the machine
-// refused it). Then it re-arms with a fresh dwell; an answer whose promise has not settled is never joined by a second one.
+// How long after the press a request whose answer went keeps its buttons off while its card is still on the list (the answer may have been
+// lost on the way). Then it re-arms with a fresh dwell. An answer that has not settled always keeps them off; a failed one frees them at once.
 export const ANSWER_REARM_MS = 5_000;
 export type LinkState = 'connecting' | 'live' | 'offline';
 
@@ -143,56 +143,57 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const layout = JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
     : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
 
-  // Readiness is a ref, checked and used up in the click handler itself, so it is right even before React has drawn the change: `ready` holds
-  // the layout it was earned for, and each timer only sets it for the generation it was started in. A new layout (seen in render), the
-  // person coming back to the window (focus, or the tab shown again) and the link changing all clear it at once and start a new generation.
-  // An answer uses it up: one answer at a time, and the buttons stay off until the list changes, or until the answer failed, or until
-  // ANSWER_REARM_MS passed with the card still there and the answer settled; then a fresh dwell. (The state below only redraws.)
+  // Readiness is a ref, checked in the click handler itself, so it is right even before React has drawn the change: `ready` holds the
+  // layout it was earned for, and each timer only sets it for the generation it was started in. A new layout (seen in render), the person
+  // coming back to the window (focus, or the tab shown again) and the link changing all clear it at once and start a new generation.
   const ready = useRef<string | undefined>(undefined);
   const generation = useRef(0);
   const seenLayout = useRef(layout);
   const [, redraw] = useState(0);
-  const [answered, setAnswered] = useState<string | undefined>();
   if (seenLayout.current !== layout) { seenLayout.current = layout; ready.current = undefined; generation.current += 1; }
   const [epoch, setEpoch] = useState(0);
+  const restart = () => { ready.current = undefined; generation.current += 1; setEpoch((n) => n + 1); };
   useEffect(() => {
-    const again = () => { ready.current = undefined; generation.current += 1; setEpoch((n) => n + 1); };
-    const seen = () => { if (document.visibilityState === 'visible') again(); };
-    window.addEventListener('focus', again);
+    const seen = () => { if (document.visibilityState === 'visible') restart(); };
+    window.addEventListener('focus', restart);
     document.addEventListener('visibilitychange', seen);
-    return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
+    return () => { window.removeEventListener('focus', restart); document.removeEventListener('visibilitychange', seen); };
   }, []);
   useEffect(() => {
     const mine = generation.current;
     const h = setTimeout(() => { if (generation.current === mine) { ready.current = layout; redraw((n) => n + 1); } }, ATTENTION_DWELL_MS);
     return () => clearTimeout(h);
   }, [layout, epoch]);
-  const live = ready.current === layout && answered !== layout && !stale;
-  const answerToken = useRef(0);
-  const rearmTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(rearmTimer.current), []);
-  // The guard is here, not only on the button: a press during the dwell, a second press and a press from an older drawing send nothing.
+
+  // Answers, by request (its id: stable across layouts, focus and the dwell). A request is held from the accepted press until its answer
+  // settles, and, when it went, until ANSWER_REARM_MS after the press; a failed answer frees it at once. Only that frees it: a new layout or
+  // the person coming back never does. Other requests stay answerable meanwhile. Freeing a request that is still on the list starts a
+  // fresh dwell. The click handler and the buttons ask the same question, `canAnswer`.
+  const held = useRef(new Set<string>());
+  const holdTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const shownIds = useRef(new Set<string>());
+  shownIds.current = new Set(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])));
+  useEffect(() => () => { for (const h of holdTimers.current.values()) clearTimeout(h); }, []);
+  const canAnswer = (id: string) => !stale && ready.current === layout && !held.current.has(id);
+  const free = (id: string) => {
+    clearTimeout(holdTimers.current.get(id));
+    holdTimers.current.delete(id);
+    if (!held.current.delete(id)) return;
+    if (shownIds.current.has(id)) restart(); else redraw((n) => n + 1);
+  };
+  // The guard is here as well as on the buttons: a press during the dwell, on a held request, or from an older drawing sends nothing.
   const answer = (a: ApprovalModel, ok: boolean) => {
-    if (stale || ready.current !== layout) return;
-    ready.current = undefined;
-    setAnswered(layout);
-    const token = ++answerToken.current;
-    const at = layout;
-    let settled = false;
-    let failed = false;
-    let waited = false;
-    // Only the latest answer re-arms, and only while the list is as it was (a list that changed has started its own dwell).
-    const rearm = () => {
-      if (!settled || !(failed || waited) || answerToken.current !== token || seenLayout.current !== at) return;
-      answerToken.current += 1;
-      ready.current = undefined;
-      generation.current += 1;
-      setAnswered(undefined);
-      setEpoch((n) => n + 1);
+    if (!canAnswer(a.id)) return;
+    held.current.add(a.id);
+    redraw((n) => n + 1);
+    const pressed = Date.now();
+    const done = (v: unknown) => {
+      if (v === false) { free(a.id); return; }
+      const left = pressed + ANSWER_REARM_MS - Date.now();
+      if (left <= 0) { free(a.id); return; }
+      clearTimeout(holdTimers.current.get(a.id));
+      holdTimers.current.set(a.id, setTimeout(() => free(a.id), left));
     };
-    clearTimeout(rearmTimer.current);
-    rearmTimer.current = setTimeout(() => { waited = true; rearm(); }, ANSWER_REARM_MS);
-    const done = (v: unknown) => { settled = true; failed = v === false; rearm(); };
     let result: unknown;
     try { result = onResolve?.(a, ok); } catch { result = false; }
     if (result && typeof (result as PromiseLike<unknown>).then === 'function') (result as PromiseLike<unknown>).then(done, () => done(false));
@@ -227,7 +228,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const agent = it.agent;
     const { name, machine, project, ask, inline, when, action, agentId } = model(it, inlineOk);
     const why = `fleet-stale-why-${it.key}`;
-    const off = { 'aria-disabled': !live || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
+    const off = { 'aria-disabled': !(it.kind === 'approval' && canAnswer(it.approval.id)) || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
     return card(it.key, 'fleet-ask', iconOf(it),
       <>
         <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />
