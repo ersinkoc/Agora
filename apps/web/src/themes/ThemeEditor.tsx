@@ -19,8 +19,10 @@ export function ThemeEditor() {
   const theme = themeStore.active();
   const [problems, setProblems] = useState<string[]>([]);
   const file = useRef<HTMLInputElement>(null);
-  // An imported theme may be for the scheme not on screen: its warnings are said here, since its Readability is not shown.
-  const report = (r: Saved) => setProblems(r.ok ? (r.warnings ? [t('theme-contrast-tint-warning'), ...r.warnings.map(issueText)] : [])
+  // An imported theme for the scheme not on screen has no Readability shown, so its warnings are said here; one on screen lists
+  // them in its own Readability section.
+  const report = (r: Saved) => setProblems(r.ok
+    ? (r.warnings && r.theme.id !== themeStore.active().id ? [t('theme-import-tint-warning'), ...r.warnings.map(issueText)] : [])
     : 'full' in r ? [fullText()] : r.issues.map(issueText));
   const themes = themeStore.themes();
   const choice = (scheme: Scheme) => (

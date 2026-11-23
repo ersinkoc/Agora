@@ -209,7 +209,7 @@ describe('theme messages', () => {
         ...TINT_ROLES.map((tint): ThemeIssue => ({ code: 'tint-contrast', fg: tint === 'danger' ? 'danger' : 'text', tint, ratio: 3.27, min: 4.5 })),
       ];
       for (const i of all) expect(issueText(i), i.code).not.toMatch(/^theme-|\{\$|Unknown variable/);
-      for (const k of ['theme-for-light', 'theme-for-dark', 'theme-error-full', 'theme-contrast-tint-warning', 'theme-contrast-tint-also']) expect(t(k, { max: 1 }), k).not.toBe(k);
+      for (const k of ['theme-for-light', 'theme-for-dark', 'theme-error-full', 'theme-contrast-tint-warning', 'theme-contrast-tint-also', 'theme-import-tint-warning']) expect(t(k, { max: 1 }), k).not.toBe(k);
     });
   }
   it('says the ratio rounded down, so a shown 4.5 always passes', () => {

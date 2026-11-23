@@ -889,6 +889,7 @@ theme-contrast-ok = All text is readable (WCAG AA).
 theme-contrast-not-applied = Not applied: some text would be hard to read.
 theme-contrast-tint-warning = Applied, but some text would be hard to read on coloured backgrounds:
 theme-contrast-tint-also = Also hard to read on coloured backgrounds:
+theme-import-tint-warning = Added. When it is shown, some text would be hard to read on coloured backgrounds:
 theme-px = { $size } px
 theme-import = Import…
 theme-export = Export

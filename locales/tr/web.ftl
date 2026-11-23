@@ -866,6 +866,7 @@ theme-contrast-ok = Tüm yazılar okunabilir (WCAG AA).
 theme-contrast-not-applied = Uygulanmadı: bazı yazılar zor okunur.
 theme-contrast-tint-warning = Uygulandı, ancak renkli arka planlarda bazı yazılar zor okunur:
 theme-contrast-tint-also = Renkli arka planlarda da zor okunur:
+theme-import-tint-warning = Eklendi. Gösterildiğinde renkli arka planlarda bazı yazılar zor okunur:
 theme-px = { $size } px
 theme-import = İçe aktar…
 theme-export = Dışa aktar

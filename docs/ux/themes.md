@@ -137,8 +137,10 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 - **Readability** lists every pair below its minimum; while any is listed the change is **not applied**, so the window never
   becomes unreadable while it is being edited. Text that is hard to read only on a coloured background is listed under
   "Applied, but some text would be hard to read on coloured backgrounds" (`theme-contrast-tint-warning`): the change is
-  applied. An imported theme with such warnings is added and its warnings are shown under the buttons, since it may be the
-  theme of the scheme not on screen.
+  applied. When surface pairs fail too (not applied), they follow under "Also hard to read on coloured backgrounds"
+  (`theme-contrast-tint-also`). An imported theme with such warnings is added; when it is the theme of the scheme not on
+  screen, its warnings are listed under the buttons after "Added. When it is shown, some text would be hard to read on
+  coloured backgrounds" (`theme-import-tint-warning`), since its Readability is not shown.
 
   ![Applied, with a warning about Idle on its own background (Dark)](../screenshots/theme-tint-warning-dark.png)
   ![The same in Light](../screenshots/theme-tint-warning-light.png)
