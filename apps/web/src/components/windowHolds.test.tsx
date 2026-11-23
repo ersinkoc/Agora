@@ -2,7 +2,7 @@
 // #1048: the answer holds of T44 are the window's, not one surface's. A request answered, or on its way, from a card above a terminal is
 // held in the side panel, on Home and in the attention dialog, and the other way round; the side panel closed and opened again finds its
 // holds where they were; a pane moved or resized starts that surface's dwell again (a pane taking the focus does not); a switch's card is
-// off while busy. Each case is drawn in the style of cardDwell.test.tsx, with the surfaces under one window (`AnswerHoldsProvider`).
+// off while busy, and in the window a failed switch answer (also the phone's) frees it again. Each case is drawn in the style of cardDwell.test.tsx, with the surfaces under one window (`AnswerHoldsProvider`).
 import { act, Fragment, type ReactElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +16,7 @@ import { reduce, workspaceOf } from '../layout/engine';
 import { arrangementKey } from '../layout/geometry';
 import { forgetLoaded, saveWorkspace } from '../layout/store';
 import { LAYOUT_VERSION, type Layout } from '../layout/tree';
+import { PhoneHome } from '../phone/Phone';
 import { Focus } from '../screens';
 import { demoSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
@@ -61,6 +62,8 @@ const flush = async () => { await act(async () => { await Promise.resolve(); awa
 
 const Surface = ({ name, children }: { name: string; children: ReactNode }) => <div data-surface={name}>{children}</div>;
 const banner = (approvals: ApprovalModel[], onResolve: Resolve) => <Surface name="banner"><Focus agent={agent()} approvals={approvals} onResolve={onResolve as never} onBack={() => {}} /></Surface>;
+// The card above a chat's composer: a banner with no terminal behind it, for the tests that let async timers run (a terminal would load).
+const composer = (approvals: ApprovalModel[], onResolve: Resolve) => <Surface name="banner"><Focus agent={agent({ terminal: false })} approvals={approvals} onResolve={onResolve as never} onBack={() => {}} /></Surface>;
 const panel = (approvals: ApprovalModel[], onResolve: Resolve) => <Surface name="panel"><Details tab="needs" fleet={[agent()]} attention={[agent()]} approvals={approvals} changed={[]} boards={[]} messages={[]}
   onOpen={() => {}} onResolve={onResolve as never} /></Surface>;
 const home = (approvals: ApprovalModel[], onResolve: Resolve) => <Surface name="home"><AttentionQueue items={attentionList(approvals, [agent()])} machines={[]} now={0} onOpen={() => {}} onResolve={onResolve as never} /></Surface>;
@@ -138,7 +141,7 @@ describe('a request is held for the whole window, whichever surface answered it 
     const dialogBtn = (name: string) => [...(document.querySelector('.attention-card')?.querySelectorAll('button') ?? [])].find((b) => b.textContent === name) as HTMLButtonElement;
     // Answered on the banner first: the dialog's Allow stays off.
     const one = [ask('r1', 'a.rs')];
-    draw(windowOf(one, k('a', banner(one, onResolve)), dialog(one)));
+    draw(windowOf(one, k('a', composer(one, onResolve)), dialog(one)));
     await act(async () => { await vi.advanceTimersByTimeAsync(ATTENTION_DWELL_MS + 600); });
     expect(dialogBtn('Allow')).toBeTruthy();
     act(() => btn('banner', 'a.rs', 'Allow').click());
@@ -158,6 +161,43 @@ describe('a request is held for the whole window, whichever surface answered it 
     expect(off(btn('panel', 'b.rs', 'Allow'))).toBe(true);
     act(() => btn('panel', 'b.rs', 'Allow').click());
     expect(sent).toEqual(['r2']);
+  });
+});
+
+describe('the attention dialog and the window\'s holds (#1048)', () => {
+  const dialogBtn = (name: string) => [...(document.querySelector('.attention-card')?.querySelectorAll('button') ?? [])].find((b) => b.textContent === name) as HTMLButtonElement;
+  const later = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  beforeEach(() => { vi.spyOn(document, 'hasFocus').mockImplementation(() => true); attentionPrefs.reset(); });
+
+  it('an answer from a banner that failed frees the dialog only after a fresh dwell of its own', async () => {
+    const sent: string[] = [];
+    const fromBanner: Resolve = (x) => { sent.push(`banner:${x.id}`); return Promise.resolve(false); };
+    const fromDialog: Resolve = (x) => { sent.push(`dialog:${x.id}`); return new Promise(() => {}); };
+    const one = [ask('r1', 'a.rs')];
+    draw(windowOf(one, k('a', composer(one, fromBanner)), <AttentionLayer key="d" items={attentionList(one, [agent()])} onResolve={fromDialog as never} onReview={() => {}} />));
+    await later(ATTENTION_DWELL_MS + 600);
+    act(() => btn('banner', 'a.rs', 'Allow').click());
+    await flush();
+    expect(sent).toEqual(['banner:r1']);
+    act(() => dialogBtn('Allow').click()); // open again, but the dialog's dwell started again with the settle
+    expect(sent).toEqual(['banner:r1']);
+    await later(ATTENTION_DWELL_MS);
+    act(() => dialogBtn('Allow').click());
+    expect(sent).toEqual(['banner:r1', 'dialog:r1']);
+  });
+
+  it('a dialog on a request answered elsewhere says it was sent and offers Review, not dead buttons alone', async () => {
+    const onResolve: Resolve = () => true;
+    const one = [ask('r1', 'a.rs')];
+    draw(windowOf(one, k('a', composer(one, onResolve))));
+    dwell();
+    act(() => btn('banner', 'a.rs', 'Allow').click());
+    await flush();
+    draw(windowOf(one, k('a', composer(one, onResolve)), <AttentionLayer key="d" items={attentionList(one, [agent()])} onResolve={onResolve as never} onReview={() => {}} />));
+    await later(ATTENTION_DWELL_MS * 2);
+    expect(document.querySelector('.attention-card')?.textContent).toContain(t('attention-sent'));
+    expect(dialogBtn('Review')).toBeTruthy();
+    expect(off(dialogBtn('Allow'))).toBe(true);
   });
 });
 
@@ -205,7 +245,7 @@ describe('a pane rearranged starts the dwell again (#1048)', () => {
   const layout = (): Layout => ({ version: LAYOUT_VERSION, root: { type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [
     { type: 'pane', id: 'p1', panel: 'agent', bind: { agent: 'n1/a' } }, { type: 'pane', id: 'p2', panel: 'empty' }] } });
 
-  it('the key changes for a move, a swap, a resize, a maximize and a column dragged, never for a focus', () => {
+  it('the key changes for a move, a swap, a resize, a maximize, a column dragged and a pane showing another agent, never for a focus', () => {
     const ws = workspaceOf(layout());
     const key = arrangementKey(ws, false, [272, 336]);
     expect(arrangementKey(reduce(ws, { type: 'focus', pane: 'p2' }), false, [272, 336])).toBe(key);
@@ -216,6 +256,10 @@ describe('a pane rearranged starts the dwell again (#1048)', () => {
     expect(arrangementKey(reduce(ws, { type: 'split', pane: 'p2', direction: 'column' }), false, [272, 336])).not.toBe(key);
     expect(arrangementKey(reduce(ws, { type: 'maximize', pane: 'p1' }), false, [272, 336])).not.toBe(key);
     expect(arrangementKey(ws, false, [288, 336])).not.toBe(key);
+    // A pane pointed at another agent (or a following pane that follows another one now) puts another card where this one was.
+    expect(arrangementKey(reduce(ws, { type: 'bind', pane: 'p1', bind: { agent: 'n1/b' }, panel: 'agent' }), false, [272, 336])).not.toBe(key);
+    const follows = (agent: string) => arrangementKey(ws, false, [272, 336], (p) => (p.id === 'p2' ? agent : undefined));
+    expect(follows('n1/a')).not.toBe(follows('n1/b'));
   });
 
   it('in the window: a card above a terminal waits again after its pane moves, and a click that focuses a pane holds nothing back', () => {
@@ -276,6 +320,41 @@ describe('a switch\'s card honours busy (#1048)', () => {
     }
     forgetSkipCapable();
   });
+  it('in the window, a switch answer that failed is answerable again after its lock, and one that went stays off', async () => {
+    markSkipCapable('n1');
+    for (const [went, back] of [[false, true], [true, false]] as const) {
+      const on = vi.fn(() => Promise.resolve(went));
+      const list = [skip()];
+      draw(windowOf(list, <SkipApproval key="a" approval={skip()} onResolve={on} />));
+      dwell();
+      act(() => named('Allow').click());
+      await flush();
+      dwell(4100);
+      expect(named('Allow').disabled).toBe(!back);
+      expect(named('Deny').disabled).toBe(!back);
+      act(() => named('Deny').click());
+      expect(on).toHaveBeenCalledTimes(back ? 2 : 1);
+      act(() => root.render(<></>));
+    }
+    forgetSkipCapable();
+  });
+
+  it('on the phone, a switch answer that failed frees the card again (the phone\'s answer says how it went)', async () => {
+    markSkipCapable('n1');
+    const on = vi.fn(() => Promise.resolve(false));
+    const list = [skip()];
+    const machines = [{ id: 'n1', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }];
+    draw(windowOf(list, <PhoneHome key="p" agents={[agent()]} machines={machines} approvals={list} onResolve={on as never} link="live" onOpen={() => undefined} />));
+    await act(async () => { await vi.advanceTimersByTimeAsync(ATTENTION_DWELL_MS + 700); });
+    act(() => named('Allow').click());
+    expect(on).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4100); });
+    expect(named('Allow').disabled).toBe(false);
+    act(() => named('Allow').click());
+    expect(on).toHaveBeenCalledTimes(2);
+    forgetSkipCapable();
+  });
+
   it('is held with the window: answered from one card, the same switch on another surface is off', () => {
     markSkipCapable('n1');
     const on = vi.fn(() => new Promise(() => {}));

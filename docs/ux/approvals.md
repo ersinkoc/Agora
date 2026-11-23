@@ -32,8 +32,8 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **Guards (T44):** every list where a request is answered in place (Home's queue, the side panel, the cards above a terminal and above
   a chat's composer) has the same dwell, from one hook (`useAnswerGuard`, #1045): Allow and Deny do nothing for 600 ms after anything the
   list shows changed or moved (a pane narrow enough to put the buttons under the text included), after the panes were rearranged (a
-  move, a split, a resize, a maximize, another tab in front, a side column opened or dragged; a pane taking the focus is not a
-  rearrangement), after the person came back and after the link came back; off while the link is down, with the reason. A start in a
+  move, a split, a resize, a maximize, another tab in front, a pane pointed at or following another agent, a side column opened or
+  dragged; a pane taking the focus is not a rearrangement), after the person came back and after the link came back; off while the link is down, with the reason. A start in a
   card goes through the same guard. Each surface's dwell is its own.
 - **One answer per request, for the whole window (#1048):** the holds are the window's, not a surface's (`AnswerHoldsProvider` in
   `App`): a request answered, or on its way, from any surface (a card in a pane, the side panel, Home, the attention dialog, a switch's

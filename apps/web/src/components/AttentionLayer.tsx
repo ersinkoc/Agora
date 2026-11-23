@@ -176,6 +176,9 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
   const key = shownKey(item);
   const [epoch, setEpoch] = useState(0);
   const [readyFor, setReadyFor] = useState<string | undefined>();
+  const xid = x?.id;
+  const settled = useRef(0); // answers to this request that settled anywhere in the window
+  const armed = useRef(0); // how many had settled when the dwell last ran out
   useEffect(() => {
     const again = () => setEpoch((n) => n + 1);
     window.addEventListener('focus', again);
@@ -184,7 +187,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
     return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
   }, []);
   useEffect(() => {
-    const h = setTimeout(() => setReadyFor(key), ATTENTION_DWELL_MS);
+    const h = setTimeout(() => { armed.current = settled.current; setReadyFor(key); }, ATTENTION_DWELL_MS);
     return () => { clearTimeout(h); setReadyFor(undefined); };
   }, [key, epoch, stale]);
   // A request is answered once: after one answer its buttons stay dead until it leaves the list or what it shows changes. The window's
@@ -192,10 +195,15 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
   // or Home is not answerable here either, and one answered here is held there. The dwell stays this card's own.
   const holds = useAnswerHolds([]);
   const [answered, setAnswered] = useState<string | undefined>();
+  // An answer to this request settled on another surface (it went, or it failed and the request is open again): the dwell starts again
+  // here too, and until its timer fires nothing is answerable, even from a drawing made before the settle (`armed`, read at the press).
+  useEffect(() => holds.onSettle((id) => { if (id === xid) { settled.current += 1; setEpoch((n) => n + 1); } }), [holds, xid]);
   // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet (here or anywhere in the
   // window), the link up. The holds are read at the press itself.
-  const answerable = () => !!x && !!onResolve && readyFor === key && answered !== key && !stale && holds.status(x.id) === 'open';
+  const answerable = () => !!x && !!onResolve && readyFor === key && armed.current === settled.current && answered !== key && !stale && holds.status(x.id) === 'open';
   const canAnswer = answerable();
+  // Answered here, or held by the window (answered or on its way from another surface): said, with Review, instead of dead buttons alone.
+  const sentHere = answered === key || (!!x && holds.status(x.id) !== 'open');
   const answer = (ok: boolean, always = false) => {
     if (!answerable() || !x || !onResolve) return;
     if (holds.hold(x.id, () => (always ? onResolve(x, ok, undefined, true) : onResolve(x, ok)))) setAnswered(key);
@@ -229,7 +237,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
                 onDeny={() => answer(false)} onAllow={() => answer(true)}
                 // ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`).
                 onAlways={x.always && !x.always.only ? () => answer(true, true) : undefined} />}
-              {(kind === 'review' || (kind === 'answer' && answered === key)) && <Button variant="primary" onClick={() => onReview(item)}>{t('attention-review')}</Button>}
+              {(kind === 'review' || (kind === 'answer' && sentHere)) && <Button variant="primary" onClick={() => onReview(item)}>{t('attention-review')}</Button>}
             </>}>
             <p aria-live="assertive" className="attention-announce sr-only">{announce}</p>
             <div id="attention-what" className="min-h-0 overflow-auto">
@@ -245,7 +253,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
               {item.kind === 'pair' && <p className="m-0 text-sm text-ink">{t('attention-pair')}</p>}
             </div>
             {more > 0 && <p className="m-0 text-xs text-muted">{t('attention-more', { count: more })}</p>}
-            {kind === 'answer' && answered === key && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
+            {kind === 'answer' && sentHere && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
             {stale && kind === 'answer' && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
           </ApprovalRequest>
         </Dialog.Content>

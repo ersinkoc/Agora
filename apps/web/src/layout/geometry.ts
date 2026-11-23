@@ -1,7 +1,7 @@
 // Where each part of the tree is drawn, as fractions of the workspace. Panes are drawn flat (one list keyed by pane id, not
 // nested in their splits), so a resize, a swap or a move changes only positions and never re-creates a terminal.
 import { displayRoot, type Workspace } from './engine';
-import type { LayoutNode, Pane } from './tree';
+import { bindOf, type LayoutNode, type Pane } from './tree';
 
 export interface Rect { x: number; y: number; w: number; h: number }
 // One tab group, or one pane on its own: a bar on top and the pane in front below it.
@@ -41,11 +41,15 @@ export function dropPlace(x: number, y: number): 'center' | 'start' | 'end' | 't
   return dist < 0.25 ? place : 'center';
 }
 
-// Where every pane is drawn now, as a string: the frames on screen (each one's place, its tabs and the one in front) and the columns beside
-// the workspace (`sides`, in px: 0 for a column that is hidden). A move, a split, a resize, a maximize, another tab in front or a column
-// opened or dragged changes it, and so restarts the T44 dwell of every request card under it (#1048). Which pane has the focus is not in it
+// Where every pane is drawn now, as a string: the frames on screen (each one's place, its tabs, the one in front and what it shows: its
+// panel and, through `shows`, the agent it is pointed at or follows now) and the columns beside the workspace (`sides`, in px: 0 for a
+// column that is hidden). A move, a split, a resize, a maximize, another tab in front, a pane pointed at another agent or a column opened
+// or dragged changes it, and so restarts the T44 dwell of every request card under it (#1048). Which pane has the focus is not in it
 // (except on a narrow screen, where the pane in focus is the one drawn): a click that focuses a pane must not hold back the Allow it lands on.
-export function arrangementKey(ws: Workspace, narrow: boolean, sides: readonly number[] = []): string {
+export function arrangementKey(ws: Workspace, narrow: boolean, sides: readonly number[] = [], shows: (pane: Pane) => string | undefined = bindOf): string {
   const { frames } = arrange(displayRoot(ws, narrow));
-  return JSON.stringify([narrow, sides, frames.map((f) => [f.panes[f.active]?.id ?? '', f.panes.map((p) => p.id), f.rect.x, f.rect.y, f.rect.w, f.rect.h])]);
+  return JSON.stringify([narrow, sides, frames.map((f) => {
+    const front = f.panes[f.active];
+    return [front?.id ?? '', front?.panel ?? '', front ? shows(front) ?? '' : '', f.panes.map((p) => p.id), f.rect.x, f.rect.y, f.rect.w, f.rect.h];
+  })]);
 }

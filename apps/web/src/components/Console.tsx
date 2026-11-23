@@ -245,9 +245,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const presetAgents = () => [...new Set([...shownAgents, ...fleet.filter((a) => !a.closed).map((a) => a.id)])];
   const resetLayout = () => setStored({ ws: homeWorkspace(), touched: false });
 
-  // Where the panes are drawn (#1048): a move, a split, a resize or another tab in front restarts the dwell of every request card in this
-  // window (`Arrangement`), the side panel's and Home's included; never a pane taking the focus.
-  const arrangement = useMemo(() => arrangementKey(ws, narrow, [showAgents ? leftWidth : 0, showDetails ? rightWidth : 0]), [ws, narrow, showAgents, leftWidth, showDetails, rightWidth]);
+  // Where the panes are drawn and what they show (#1048): a move, a split, a resize, another tab in front or a pane that shows another
+  // agent restarts the dwell of every request card in this window (`Arrangement`), the side panel's and Home's included; never a pane
+  // taking the focus.
+  const arrangement = useMemo(() => arrangementKey(ws, narrow, [showAgents ? leftWidth : 0, showDetails ? rightWidth : 0], (p) => agentOf(p, bindings)), [ws, narrow, showAgents, leftWidth, showDetails, rightWidth, bindings]);
   // T44 (`useAnswerGuard`, as Home's queue): one guard for every card above a terminal or a composer in this window's panes. Its layout is
   // every request with what its card shows and where the panes are, so a card that comes, goes or changes in any pane, or a pane that moves,
   // restarts the dwell everywhere; a request is answered once, whichever pane (or other surface: the window's holds) it was answered in.
