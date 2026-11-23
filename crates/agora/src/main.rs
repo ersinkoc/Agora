@@ -745,8 +745,9 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
 const LINK_UNREADABLE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// ADR-0104 O2: the longest `agora node` takes from a stop request (`SIGTERM`, `SIGINT`, `SIGHUP`; Unix) to its end. It stops cleanly
-/// within it (the node's drain waits at most `agora_node::daemon::DRAIN_WAIT`, 2 s, for the held adapters' readers; the rest is
-/// local writes), and ends anyway when it passes, whatever still runs. Under every wait for it: `agora down` waits 10 s for the
+/// within it (the node's drain waits at most `agora_node::daemon::LOCK_WAIT` and `DRAIN_WAIT`, 3 s together, for the supervisor's lock
+/// and the held adapters' readers, and `LOOP_WAIT`, 1 s, for the commands already running; the rest is local writes, and those come
+/// first when the lock is busy), and ends anyway when it passes, whatever still runs. Under every wait for it: `agora down` waits 10 s for the
 /// supervisor, which ends right after the node (`frontdoor::stop_role`, also used by `agora service remove`), and the systemd unit's
 /// `TimeoutStopSec` is 25 s. Windows ends the node with `TerminateProcess`, which cannot be caught.
 const NODE_STOP_DEADLINE: Duration = Duration::from_secs(5);
