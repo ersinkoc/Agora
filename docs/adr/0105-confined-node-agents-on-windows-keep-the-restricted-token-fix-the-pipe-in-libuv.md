@@ -21,8 +21,11 @@ Code, Gemini CLI and others) cannot run a tool or an MCP server while confined o
 so today.
 
 The cause is one access check (measured 2026-11-22 and again below):
-- libuv makes each stdio pipe pair by creating a named pipe (Node 26's `node.exe` holds the name pattern `\\?\pipe\uv\%llu-%lu`).
-  It then opens the other end by name for writing.
+- Node 26.13.0 bundles libuv 1.52.1. In libuv's `src/win/pipe.c` at tag v1.52.1, `uv__pipe_server` creates the server end with
+  `CreateNamedPipeA(name, access | FILE_FLAG_FIRST_PIPE_INSTANCE, …, NULL)`. The name is `\\?\pipe\uv\%llu-%lu`, made by
+  `uv__unique_pipe_name`, and the security attributes are NULL. `uv__create_pipe_pair` then opens the child's end by name with
+  `CreateFileA`, with `sa.lpSecurityDescriptor = NULL`. For a write end it asks for `GENERIC_WRITE`, plus `FILE_READ_ATTRIBUTES`
+  (or `GENERIC_READ`), plus `WRITE_DAC`.
 - A named pipe created without a security descriptor gets the pipe file system's fixed default: full control for SYSTEM,
   Administrators and the owner, and read for Everyone and Anonymous. It does not get the token's default DACL, which ADR-0050 sets
   so that it names the agent's SID (`set_default_dacl` in `crates/agora-platform/src/winconfine.rs:1292`, used at `:1425`).
@@ -48,14 +51,17 @@ The folders and files:
 
 All lab folders were on a data volume whose root grants `Users` read. The battery:
 - Node `spawnSync` and `spawn` with pipes.
-- A stand-in for libuv's pipe pair. The server end is made with `CreateNamedPipeW` and the client end is opened by name for writing.
-  It runs once with the default descriptor and once with an explicit descriptor that carries the token's default DACL.
+- A stand-in for libuv's pipe pair with the same call shape: server `PIPE_ACCESS_INBOUND | WRITE_DAC | FILE_FLAG_FIRST_PIPE_INSTANCE`,
+  client opened by name for `GENERIC_WRITE | FILE_READ_ATTRIBUTES | WRITE_DAC`. It runs once with the default descriptor and once with
+  an explicit descriptor that carries the token's default DACL.
 - A Rust child with piped stdio, `cmd`, `git init` and `git commit`, Git's `sh`, and `python`.
 - The writes, plus the reads of the user-private file and of B's folder.
 
 Each option, as built:
 - **(a) AppContainer:** no capabilities. A's package SID is on A's folder, which has a Low label, and B's package SID is on B's folder.
-- **(b) No restricting SIDs:** the user's own token at Low integrity, with a Low label on both agents' folders.
+- **(b) No restricting SIDs:** the user's own token at Low integrity, with a Low label on both agents' folders. It was run three
+  times: with no deny entry; with a write-deny entry for the Low integrity SID (`S-1-16-4096`) on B's folder; and with a write-deny
+  entry for the logon SID on B's folder.
 - **(c) A wider restricting list:** the ADR-0050 token plus SYSTEM, or plus Administrators. These are the SIDs the default pipe
   descriptor grants full control.
 - **(c′) Write-restricted:** the ADR-0050 token created with `WRITE_RESTRICTED`.
@@ -80,13 +86,20 @@ Each option, as built:
 | Read the **user-private file** | refused | refused | **read** | **read** | **read** | **read** |
 | Read a file in B's folder | read (`Users` read inherited) | refused | read | read | read | read |
 
+Option (b) with deny entries on B's folder:
+- **Deny for the Low integrity SID:** no effect. A still wrote in B's folder, so DACL entries do not match integrity SIDs.
+- **Deny for the logon SID:** A was refused in B's folder. So was the user's own unconfined process (measured), and so would agent
+  B be, since every process of the session holds that SID.
+- **Everything else** was unchanged from the (b) column, including the user-private file being read.
+
 Notes on the table:
 - **Node in the AppContainer.** The installed `node.exe` cannot be started, because `C:\Program Files\nodejs` grants `Users`
   but not `ALL APPLICATION PACKAGES`. The same holds for `C:\Python315`. A copy of `node.exe` placed in A's folder exits before any
   user code: its module loader's `realpathSync` gets `EPERM` on `lstat 'D:\'`. Inside the container, even `cmd`'s `dir` of A's own
   folder by full path is refused, because it enumerates the folders above.
 - **Named pipes in the AppContainer.** The container may create pipes only under `\\.\pipe\LOCAL\`. libuv's `\\?\pipe\uv\…`
-  pipes would be refused even if every grant above were made.
+  pipes would be refused even if every grant above were made. Read from the code, not run: `uv__pipe_server` treats
+  `ERROR_ACCESS_DENIED` as a name collision and retries with the next name, so in a container it would loop instead of failing.
 - **Git's `sh`.** It fails in every Low-integrity variant. msys reports `NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0…)`
   refused (0xC0000022). This is the Git Bash limit already documented (#898). It comes from the Low integrity level, not from the
   restricting SIDs, and no option here changes it.
@@ -101,26 +114,30 @@ Notes on the table:
      worktree, and every toolchain folder. Amendment B's other reasons stand.
    - **(b)** makes Node work but gives up the two guarantees the maintainer accepted in ADR-0050's revised decision: a second
      agent's folder is written, and user-private files are read. A deny entry cannot restore them. It would need a SID that is in
-     agent A's token and in no other process's token, and a token derived from the user's own has none. The logon SID is shared by
-     every process of the session, and integrity SIDs are not matched by DACL entries.
+     agent A's token and in no other process's token, and a token derived from the user's own has none. Both candidates were
+     measured: a deny entry for the Low integrity SID has no effect, and one for the logon SID also locks out the user and agent B.
    - **(c)** makes Node work for the same reason it breaks the rules. SYSTEM and Administrators sit on almost every folder's ACL,
      so B's folder becomes writable and private files readable, the same loss as (b). The write-restricted token (c′) does not
      help Node and opens reads.
 2. **The fix belongs in libuv (d).** The stdio pipe pair should be created with an explicit security descriptor that carries the
    creating token's default DACL, instead of the pipe file system's default. Under the unchanged ADR-0050 token, the stand-in passes
    with that one change. The project reports this upstream with a minimal reproduction that does not need Agora: a restricted token,
-   a piped `spawnSync`, and `EPERM`. The maintainer decides who files the report. Agora's code does not change.
+   a piped `spawnSync`, and `EPERM`. The maintainer decides who files the report. Agora's code does not change. No existing libuv or
+   Node.js report of this was found on 2026-11-23. The nearest is nodejs/node#47086, which notes that libuv creates its pipes with
+   `WRITE_DAC` and default security; it is about changing pipe permissions, not about restricted tokens.
 3. **Until a Node release carries the fix, the behaviour and the documentation stay as they are.**
    - `docs/security/sandbox-recipes.md` keeps saying that a confined Node-based agent cannot start piped children on Windows.
    - `docs/capabilities.md` keeps #895 open.
-   - Owners who need Node-based agents on Windows run them with `sandbox = off`.
+   - Owners who need Node-based agents on Windows run them with `sandbox = off`. The sandbox level is set per node today (the
+     per-project and per-kind choice of ADR-0047 decision 1 is not built), so this leaves every agent on that node unconfined.
 4. **When a fixed Node is released**, the Windows session re-runs these measurements with a confined Claude Code that runs a tool
    and an MCP server. It then updates `docs/capabilities.md` and the recipes, and closes #895.
 
 ## Consequences
 
 - No code, schema or test changes in Agora. The confinement token and its tests stay as they are, so the existing confinement tests
-  cost nothing.
+  cost nothing. Options (a), (b) and (c) were measured in the throwaway harness only and not prototyped in `agora-platform`, so their
+  cost to the existing confinement tests was not measured.
 - Node-based agents stay unusable confined on Windows until the libuv or Node fix ships, and that timing is outside the project.
   Rust agents (Codex) and the shell kind keep working confined.
 - #897 (confining adapter and ACP agents on Windows) is not unblocked. Most adapters are Node programs: they would need this libuv
