@@ -170,7 +170,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 ### RM-03 Hub with the web window, many machines
 - **OS:** Linux, macOS, Windows (the hub on each; machines of any system).
 - **Do:** S1 with `y` for other machines; add a second machine (RM-07, or S3). Open the window; start a Shell on each machine.
-- **See:** Your machines lists both as Online with their system; both agents are in Your agents, each "on <machine>"; typing in either
+- **See:** My machines lists both as Online with their system; both agents are in Your agents, each "on <machine>"; typing in either
   terminal works.
 - **Evidence so far:** LAN run 2026-11-11 (lan-test-findings): a Linux hub with Linux, macOS and Windows nodes; the Windows web window
   pass (L14 to L20). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (#944: the system shown raw).
@@ -225,7 +225,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   not name (on the hub's own computer, `127.0.0.1:PORT` when the hub listens on all addresses).
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
-  the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
+  the new machine says `Joined. This machine is "…"` and is Online in My machines; a denied or timed-out request ends with "Nothing was
   saved"; the hub closes itself after one approval. The join by an address the certificate does not name says at once "The hub at … could
   not be verified, so nothing was saved." with no number, the owner gets no card, and a later join with that name is not offered
   "Replace the existing machine".

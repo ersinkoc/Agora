@@ -995,7 +995,10 @@ machines-add-command = agora join
 machines-add-step-compare = Both screens then show a number. Approve here only if the two are the same.
 machines-add-hint = Allow new machines, run agora join on it, then compare the number here.
 machines-stat-of = of { $total }
-machines-stat-online = machines online
+machines-stat-online = { $total ->
+    [one] machine online
+   *[other] machines online
+}
 machines-stat-agents = { $count ->
     [one] agent running
    *[other] agents running

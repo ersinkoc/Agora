@@ -533,7 +533,6 @@
   .machine-card__foot--away { @apply items-center; }
   .machine-card__actions { @apply flex min-w-0 flex-1 flex-wrap items-center gap-2; }
   .os-tile { @apply grid size-9 flex-none place-items-center rounded-s border border-line bg-surface-2 text-muted; }
-  .os-tile > svg { @apply size-4.5; }
   .machine-meter { @apply grid gap-1.5; }
   .machine-meter__row { @apply flex justify-between gap-3 text-muted; font-size: var(--text-caption); }
   .machine-meter__row > span:last-child { @apply whitespace-nowrap; }

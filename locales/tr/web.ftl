@@ -972,7 +972,10 @@ machines-add-command = agora join
 machines-add-step-compare = Ardından iki ekranda da bir numara görünür. Yalnızca ikisi aynıysa burada onaylayın.
 machines-add-hint = Yeni makinelere izin verin, o makinede agora join çalıştırın, sonra numarayı burada karşılaştırın.
 machines-stat-of = / { $total }
-machines-stat-online = makine çevrimiçi
+machines-stat-online = { $total ->
+    [one] makine çevrimiçi
+   *[other] makine çevrimiçi
+}
 machines-stat-agents = { $count ->
     [one] ajan çalışıyor
    *[other] ajan çalışıyor

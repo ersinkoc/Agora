@@ -5,7 +5,7 @@ import { forgetMachineReasonKey } from '../net/forget';
 import type { MachineModel } from '../net/view';
 import { Icon } from './Icon';
 import { Button, Pill } from './kit';
-import { MachineFacts, OsTile } from './machineFacts';
+import { MachineFacts, MachineName, OsTile } from './machineFacts';
 import { isolated } from './pairChoice';
 
 // ADR-0073: forget one machine, or clean up every old one at once. Each machine is listed with when it was last seen and what was
@@ -56,7 +56,7 @@ export function ForgetMachines({ machines, now, cleanup, onForget, onClose }: {
                   {cleanup && <input type="checkbox" checked={chosen.has(m.id)} onChange={() => toggle(m.id)} />}
                   <OsTile os={m.os} />
                   <span className="grid min-w-0 flex-1">
-                    <strong className="truncate">{m.name}</strong>
+                    <MachineName m={m} />
                     <span className="text-xs text-muted">
                       <MachineFacts m={m} now={now} />
                       {m.agentsRunning > 0 ? ` · ${t('forget-machine-agents', { count: m.agentsRunning })}` : ''}

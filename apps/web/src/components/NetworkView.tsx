@@ -9,7 +9,7 @@ import { AgentAvatar, Button, Callout, ListRow, Pill, StatusPill } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
-import { MachineFacts, OsTile } from './machineFacts';
+import { MachineFacts, MachineName, OsTile } from './machineFacts';
 import { isolated } from './pairChoice';
 
 // My machines (redesign PR 9): every machine your Agora knows, as a card. What is connected now, what runs there, when it was last
@@ -40,6 +40,9 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
   const machines = all.filter((m) => !isOld(m, now));
   const old = all.filter((m) => isOld(m, now));
   const live = agents.filter((a) => !a.closed);
+  // Running means on a machine that is online now; what runs on an offline one is told on its own card ("N agents were running").
+  const online = new Set(machines.filter((m) => m.online).map((m) => m.id));
+  const running = live.filter((a) => online.has(machineKey(a))).length;
   const totalMem = machines.reduce((n, m) => n + (m.memoryBytes ?? 0), 0);
   const needs = live.filter((a) => a.state === 'needs-you').length;
   // Showing the steps never opens the switch for new machines: only its own button does (main-window.md).
@@ -67,8 +70,8 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
       <span aria-hidden className="hub-strip__mark">A</span>
       <div className="grid min-w-0"><h2 className="hub-strip__name">{t('network-hub')}</h2><code dir="ltr" className="truncate text-xs text-muted">{hubName}</code></div>
       <dl className="hub-strip__stats">
-        <Stat value={<>{machines.filter((m) => m.online).length} <small>{t('machines-stat-of', { total: machines.length })}</small></>} label={t('machines-stat-online')} />
-        <Stat value={live.length} label={t('machines-stat-agents', { count: live.length })} />
+        <Stat value={<>{online.size} <small>{t('machines-stat-of', { total: machines.length })}</small></>} label={t('machines-stat-online', { total: machines.length })} />
+        <Stat value={running} label={t('machines-stat-agents', { count: running })} />
         <Stat value={needs} label={t('machines-stat-needs', { count: needs })} needs={needs > 0} />
         {totalMem > 0 && <Stat value={bytesLabel(totalMem)} label={t('machines-stat-memory')} />}
       </dl>
@@ -94,7 +97,7 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
       <ul className="m-0 grid list-none gap-1 p-0">
         {old.map((m) => <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <OsTile os={m.os} />
-          <span className="grid min-w-0 flex-1"><strong className="truncate">{m.name}</strong><span className="text-xs text-muted"><MachineFacts m={m} now={now} /></span></span>
+          <span className="grid min-w-0 flex-1"><MachineName m={m} /><span className="text-xs text-muted"><MachineFacts m={m} now={now} /></span></span>
           {onForget && <Button size="sm" variant="danger-ghost" onClick={() => setForgetting({ list: [m], cleanup: false })}><Icon name="trash" className="size-3.5" />{t('forget-machine-action')}</Button>}
         </li>)}
       </ul>
@@ -121,11 +124,7 @@ function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewT
     <div className="machine-card__head">
       <OsTile os={m.os} />
       <div className="grid min-w-0 flex-1">
-        <span className="flex min-w-0 items-baseline gap-2">
-          <strong id={nameId} className="machine-card__name truncate">{m.name}</strong>
-          {/* The id once, and only when the name does not already say it (two machines may share a host name). */}
-          {m.id !== m.name && <code dir="ltr" className="truncate text-xs text-muted">{m.id}</code>}
-        </span>
+        <MachineName m={m} id={nameId} className="machine-card__name" />
         <span className="text-xs text-muted"><MachineFacts m={m} now={now} /></span>
       </div>
       <Pill tone={m.online ? 'finished' : 'plain'} icon={<span aria-hidden className={`size-1.5 rounded-full ${m.online ? 'bg-finished' : 'bg-unknown'}`} />}>{t(m.online ? 'machine-online' : 'machine-offline')}</Pill>

@@ -119,6 +119,20 @@ describe('My machines as cards (redesign PR 9)', () => {
     expect(card(page({ machines: [{ ...galleryMachines[2]!, agentsRunning: 0 }] }), 'win')).not.toContain('kit-callout');
   });
 
+  it('counts as running only what runs on a machine online now, and says "machine" for one', () => {
+    const away = { id: 'g9', name: 'codex · rose', kind: 'codex', accent: 'var(--agent-rose)', machine: 'win', machineId: 'win', workspace: 'w', state: 'working' as const, preview: '' };
+    expect(text(page({ agents: [...galleryMachineAgents, away] }))).toContain('agents running 5');
+    const one = text(renderToStaticMarkup(<NetworkView now={NOW} machines={[machine('solo', 'linux')]} agents={[]} hubName="h" />));
+    expect(one).toContain('machine online 1 of 1');
+  });
+
+  it('tells two old machines with one host name apart by their ids, on the rows and in the clean-up dialog', () => {
+    const old = (id: string): MachineModel => ({ id, name: 'laptop', os: 'linux', online: false, agentsRunning: 0, lastSeenMs: NOW - 3 * 86_400_000 });
+    const t = text(renderToStaticMarkup(<NetworkView now={NOW} machines={[old('laptop-a1'), old('laptop-b2')]} agents={[]} hubName="h" />));
+    expect(t).toContain('laptop laptop-a1');
+    expect(t).toContain('laptop laptop-b2');
+  });
+
   it('keeps old machines apart and folded, with Clean up… (ADR-0073)', () => {
     const html = page();
     expect(html).toMatch(/<details class="kit-card machines-old"><summary[^>]*>One old machine<\/summary>/);
@@ -217,6 +231,8 @@ describe('My machines in a browser', () => {
     act(() => button('Clean up…').click());
     const dialog = document.querySelector('[role="alertdialog"]') as HTMLElement;
     expect(dialog.textContent).toContain('Clean up one old machine?');
+    // The row names the machine and, as on its card, its id once when the name does not say it.
+    expect(dialog.querySelector('.forget-row')?.textContent).toContain('linuxlinux-test');
     const boxes = [...dialog.querySelectorAll('ul input[type="checkbox"]')] as HTMLInputElement[];
     expect(boxes.map((b) => b.checked)).toEqual([true]);
     expect(dialog.querySelector('label.forget-row--check')?.textContent).toBe('Also refuse them if they connect againEach would need a new join code.');

@@ -509,9 +509,12 @@ export function App() {
   const reviewAttention = useCallback((it: (typeof attention)[number]) => {
     const agent = it.kind === 'pair' ? undefined : it.agent;
     if (agent) { open(agent.id); return; }
+    // My machines shows every request to join in full: reviewing one there brings its card into view instead of leaving the page.
+    const card = it.kind === 'pair' && isMachinesHash(hash) ? document.getElementById(`pair-request-${it.card.id}`)?.closest<HTMLElement>('section') : undefined;
+    if (card) { card.scrollIntoView?.({ block: 'center' }); card.focus({ preventScroll: true }); return; }
     go('#/');
     if (!phone) requestPanel('fleet');
-  }, [go, open, phone]);
+  }, [go, open, phone, hash]);
   // The theme editor is a panel of the window: from any other page, back to the window first.
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
