@@ -25,13 +25,18 @@ pub struct SocketDir {
 
 impl SocketDir {
     /// `preferred` (the test's own folder, which the test removes) if it fits; otherwise a new `agora-<tag>-<pid>` folder in the
-    /// system temp folder or in the real home folder. Panics, naming the folders tried, when no place fits.
+    /// system temp folder or a `.tmp-test-agora-<tag>-<pid>` folder in the real home folder. Panics, naming the folders tried, when
+    /// no place fits.
     pub fn new(preferred: &Path, tag: &str) -> Self {
         let name = format!("agora-{tag}-{}", std::process::id());
         let mut tried = Vec::new();
         let candidates = std::iter::once((preferred.to_path_buf(), false))
             .chain(std::iter::once((std::env::temp_dir().join(&name), true)))
-            .chain(super::private_home::real_home().map(|h| (h.join(format!(".{name}")), true)));
+            .chain(
+                // Named so that nothing matching `~/.agora*` (the node's own folders) can be taken for it.
+                super::private_home::real_home()
+                    .map(|h| (h.join(format!(".tmp-test-{name}")), true)),
+            );
         for (path, own) in candidates {
             if path.as_os_str().len() > MAX {
                 tried.push(path);
