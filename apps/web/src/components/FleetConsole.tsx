@@ -14,7 +14,8 @@ import { ATTENTION_DWELL_MS } from '../net/attention';
 import { AgentTile, kindOf } from './AgentTile';
 import { Skeleton } from './EmptyState';
 import { Icon, type IconName } from './Icon';
-import { AgentAvatar, Button, Callout, Pill, StatTile } from './kit';
+import { AgentAvatar, Button, Pill, StatTile } from './kit';
+import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { Mark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
@@ -53,9 +54,13 @@ export function FleetSummary({ counts, filter, onFilter }: { counts: FleetCounts
 }
 const MARK_TONE: Record<FleetFilter, string> = { 'needs-you': 'needs', working: 'working', finished: 'finished', failed: 'danger' };
 
-// The one line of what an agent asks: the request's own words, short. Anything long goes through the full card.
+// The one line of what an agent asks: the request's own words, short. Anything long goes through the full card. A start request's title
+// already says it wants to start another agent, so its line is the start of its first prompt (cut: it is only ever reviewed, never answered
+// here).
 function askText(x: ApprovalModel): string {
-  if (x.start) return t('fleet-asks-start');
+  // A switch to act without asking: what it would mean, in the window's words (the title names it; the ids are read in its full card).
+  if (x.skip) return t('skip-approval-body');
+  if (x.start) return x.start.prompt.trim() ? visible(x.start.prompt.replace(/\s+/g, ' ').trim()) : t('start-approval-no-prompt');
   const d = x.detail ? detailText(x.detail) : '';
   return visible(d ? `${x.action} · ${d}` : x.action);
 }
@@ -66,13 +71,15 @@ const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(i
 function iconOf(it: AttentionItem): IconName {
   if (it.kind === 'pair') return 'machine';
   if (it.kind === 'agent') return 'terminal';
-  return it.approval.start ? 'plus' : 'bell';
+  return ASK_ICON[askKind(it.approval)];
 }
 
 // What one agent's card shows, worked out once: the card is drawn from it and the dwell's identity is made of it, so nothing on the card
 // can change without the dwell starting again (Codex review of #1028).
 interface RowModel {
   name: string;
+  title: string; // the ask itself ("codex · teal wants to run a command"), or the agent's name when it waits in its terminal
+  icon: IconName;
   machine?: string;
   project?: string;
   ask: string;
@@ -125,6 +132,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
     return {
       name,
+      title: it.kind === 'approval' ? askTitle(it.approval, name) : name,
+      icon: iconOf(it),
       machine: agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined),
       project: agent ? agent.project || agent.workspace : undefined,
       ask: askOf(it),
@@ -204,45 +213,48 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     }
     toggleRead(key);
   };
-  const card = (key: string, cls: string, icon: IconName, title: ReactNode, body: ReactNode, actions: ReactNode) => (
-    <li key={key} className={cls}><Callout tone="needs" icon={icon} title={title} actions={actions}>{body}</Callout></li>
+  // Every card of the queue is the one request component in its row density (redesign PR 4).
+  const card = (key: string, cls: string, icon: IconName, title: ReactNode, body: ReactNode, actions: ReactNode, avatar?: ReactNode, where?: ReactNode) => (
+    <li key={key} className={cls}><ApprovalRequest density="row" icon={icon} avatar={avatar} title={title} where={where} actions={actions}>{body}</ApprovalRequest></li>
   );
   const pairRow = (it: Extract<AttentionItem, { kind: 'pair' }>) => {
     const open = read.has(it.key);
     const c = it.card;
     return card(it.key, `fleet-ask${open ? ' fleet-ask--open' : ''}`, 'machine',
-      <><bdi className="fleet-ask__name">{peerText(c.name)}</bdi><span className="fleet-ask__where">{t('pair-row-where')}</span></>,
+      <bdi className="fleet-ask__name">{peerText(c.name)}</bdi>,
       <>
         <p className="fleet-ask__what">{t('pair-row-what')}</p>
         {open && pairing && <div id={`pair-row-${c.id}`} className="mt-2"><PairRequest inline request={c} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(c, a, r)} /></div>}
       </>,
-      <Button size="sm" variant="primary" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${c.id}` : `pair-row-${c.id}`} aria-label={t('pair-review-for', { name: isolated(c.name) })} onClick={() => reviewPair(it.key, c.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</Button>);
+      <Button size="sm" variant="primary" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${c.id}` : `pair-row-${c.id}`} aria-label={t('pair-review-for', { name: isolated(c.name) })} onClick={() => reviewPair(it.key, c.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</Button>,
+      undefined, <span className="fleet-ask__where">{t('pair-row-where')}</span>);
   };
   const rowOf = (it: AttentionItem, inlineOk: boolean) => {
     if (it.kind === 'pair') return pairRow(it);
     const agent = it.agent;
-    const { name, machine, project, ask, inline, when, action, agentId } = model(it, inlineOk);
+    const { name, title, icon, machine, project, ask, inline, when, action, agentId } = model(it, inlineOk);
     const why = `fleet-stale-why-${it.key}`;
     const off = { 'aria-disabled': !(it.kind === 'approval' && canAnswer(it.approval.id)) || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
-    return card(it.key, 'fleet-ask', iconOf(it),
-      <>
-        <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />
-        <bdi className="fleet-ask__name">{name}</bdi>
-        <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
-        {when && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{when}</time> : null}
-      </>,
+    return card(it.key, 'fleet-ask', icon,
+      <bdi className="fleet-ask__name">{title}</bdi>,
       <>
         {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
         <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{inline ? <span className="fleet-ask__cmd" dir="auto">{ask}</span> : ask}</p>
         {inline && stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
         {it.kind === 'approval' && sent.current.has(it.approval.id) && <span role="status" className="fleet-ask__why">{t('attention-sent')}</span>}
       </>,
+      // "Always" is never answered from a row (ADR-0101: `decidableInline` sends a request that offers only that to its full card).
       action === 'answer' && it.kind === 'approval' ? <>
-        <Button size="sm" {...off} aria-label={t('fleet-deny-for', { name })} onClick={() => answer(it.approval, false)}>{t('approval-deny')}</Button>
-        <Button size="sm" variant="primary" {...off} aria-label={t('fleet-allow-for', { name })} onClick={() => answer(it.approval, true)}>{t('approval-allow')}</Button>
+        <AnswerButtons approval={it.approval} size="sm" off={off} denyLabel={t('fleet-deny-for', { name })} allowLabel={t('fleet-allow-for', { name })}
+          onDeny={() => answer(it.approval, false)} onAllow={() => answer(it.approval, true)} />
         {sent.current.has(it.approval.id) && agentId && <Button size="sm" aria-label={t('fleet-review-for', { name })} onClick={() => onOpen(agentId)}>{t('attention-review')}</Button>}
       </> : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
-        : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null);
+        : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null,
+      <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />,
+      <>
+        <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
+        {when && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{when}</time> : null}
+      </>);
   };
 
   return (

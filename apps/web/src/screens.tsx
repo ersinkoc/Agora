@@ -150,6 +150,11 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
         <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
       </div>
+      {/* Redesign PR 4: the one request component as a card, and in a pane narrower than 360 px (the row density, the buttons under the text). */}
+      <div data-approval-sizes className="gallery__row items-start">
+        <div className="w-full max-w-[22rem]"><ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} /></div>
+        <div data-approval-narrow className="w-[12.5rem]"><ApprovalBanner approval={{ ...demoAlwaysApproval, machineName: 'laptop' }} agent={demoAsksLess} onResolve={() => {}} pinned /></div>
+      </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
       <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
@@ -242,10 +247,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
         <CloseConfirm agent={agent} where="pane" />
-        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
+          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
             <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>

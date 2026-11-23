@@ -85,8 +85,12 @@ describe('the card opens for a plain request', () => {
     mount(list(ask('r1')));
     await wait(0);
     expect(card()).not.toBeNull();
-    expect(card()!.textContent).toContain('Needs you');
-    expect(card()!.textContent).toContain('claude · amber on laptop');
+    // Redesign PR 4: the title is the ask itself, with the agent's avatar and the machine as a tag.
+    const named = document.getElementById(card()!.getAttribute('aria-labelledby')!)!;
+    expect(card()!.contains(named)).toBe(true);
+    expect(named.textContent).toContain('claude · amber wants to change a file');
+    expect(card()!.querySelector('.kit-avatar')).not.toBeNull();
+    expect(card()!.querySelector('.kit-tag')!.textContent).toBe('laptop');
     expect(card()!.textContent).toContain('Edit src/auth.rs · +12 -3');
     expect([...card()!.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Later', 'Deny', 'Allow']);
   });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { needsPanel } from '../net/needsPanel';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { UsageSummary } from '../net/usage';
@@ -133,13 +134,19 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   // Every machine that has a folder on a board: a name is followed by its id only when two of them share it.
   const boardMachines = [...new Map(boards.flatMap((b) => b.folders).map((f) => [f.nodeId, { id: f.nodeId, name: f.machine }] as const)).values()];
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
+  // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
+  useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
+  // An agent is listed once: by its request's card when it has one (the card opens the agent), else by its row (it waits in its terminal).
+  // A start or a switch to act without asking keeps the row until those cards can open the agent themselves (redesign PR 5).
+  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.start && !x.skip && !x.skipUnknown);
+  const agentOf = (id: string) => fleet.find((a) => a.id === id) ?? attention.find((a) => a.id === id);
   return <>
     {tab === 'needs' && <div className="grid gap-2">
         {needs === 0 && <p className="muted">{t('attention-empty')}</p>}
-        {attention.map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
+        {attention.filter((a) => !carded(a.id)).map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-danger">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
-        {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />)}
+        {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />; })}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid grid-cols-1 list-none gap-1 p-0">
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">

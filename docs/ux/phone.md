@@ -22,7 +22,7 @@ terminals get the key bar when the screen is a touch screen.
    **What needs you stays in reach of the thumb**: a bar above the bottom bar (alone at the bottom of an agent) shows the first thing that
    needs you and how many there are. A plain yes or no that can be read whole there (the fleet console's rule, `decidableInline`: one
    short line each of action and detail, no hidden character, never a request to start an agent, never one that offers only an answer the
-   agent remembers, ADR-0101) has **Allow** and **Deny** as 52 px
+   agent remembers, ADR-0101) has **Deny** and **Allow** (the primary, last, as on every request) as 52 px
    buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
    structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
    decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.

@@ -180,7 +180,6 @@
   .pair-recent { @apply m-0 grid list-none gap-1 p-0 text-xs text-muted; }
   .pair-window { @apply grid max-w-[24rem] gap-2 rounded-m border border-line bg-surface-1 p-3; }
   .fleet-ask { @apply m-0 min-w-0; }
-  .fleet-ask .kit-callout__title { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
   .fleet-ask__name { @apply min-w-0 break-words; }
   .fleet-ask__where, .fleet-ask__time { @apply min-w-0 font-normal text-muted; font-size: var(--text-caption); }
   /* How long ago it asked changes with the clock: a box of its own width (tabular digits, no wrapping inside) so "15 seconds" becoming
@@ -476,6 +475,37 @@
   .kit-callout__body { @apply col-start-2 m-0 min-w-0 break-words; }
   .kit-callout__actions { @apply col-start-3 row-span-2 row-start-1 flex flex-wrap gap-2 self-center; }
   @container (max-width: 28rem) { .kit-callout__actions { @apply col-span-2 col-start-2 row-span-1 row-start-auto; } }
+
+  /* Redesign PR 4: one approval request in three densities (row, card, full), on the callout: the same tint, icon chip and button
+     order everywhere. The ask is never cut where it can be answered: one mono chip that wraps. */
+  .approval-req-host { container-type: inline-size; }
+  .approval-req__title { @apply flex min-w-0 items-start gap-2; }
+  .approval-req__title > .kit-avatar { margin-block-start: 0.0625rem; }
+  .approval-req__text { @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5; }
+  .approval-req__ask { @apply min-w-0 break-words; }
+  .approval-req__where { @apply inline-flex min-w-0 flex-wrap items-center gap-1.5 font-normal text-muted; font-size: var(--text-caption); }
+  .approval-req__open { @apply -my-0.5 size-6 flex-none; }
+  .approval-req__what { @apply m-0 min-w-0 break-words text-ink; }
+  .approval-req__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .approval-req__foot { @apply col-start-2 col-end-4 min-w-0; }
+  /* Card and full: the buttons under the ask, at the end. */
+  .approval-req--card .kit-callout__actions, .approval-req--full .kit-callout__actions { @apply col-start-2 col-end-4 row-span-1 row-start-auto mt-1 justify-end; }
+  /* A wide card (above a terminal) keeps its buttons at the end of the first line, as the row does. */
+  @container (min-width: 36rem) { .approval-req--card .kit-callout__actions { @apply col-start-3 col-end-4 row-span-2 row-start-1 mt-0 self-center; } }
+  .approval-req--full { @apply gap-y-1.5; padding: 1rem 1.125rem; }
+  .approval-req--full .approval-req__title { font-size: var(--text-title); }
+  .approval-req--full .approval-req__cmd { font-size: var(--text-body); }
+  /* A narrow pane: the row density with the text across the whole card and the buttons under it, as wide as they can be. */
+  .approval-req--stacked .kit-callout__body, .approval-req--stacked .approval-req__foot { @apply col-start-1 col-end-4; }
+  .approval-req--stacked .kit-callout__actions { @apply col-start-1 col-end-4 row-span-1 row-start-auto mt-1; }
+  .approval-req--stacked .kit-callout__actions > .kit-btn { flex: 1 1 6rem; }
+  .approval-req--stacked > .kit-chip { grid-row: auto; }
+  /* An answer waiting out the dwell, held or already sent (T44): it looks off and does nothing. */
+  .approval-req .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
+  /* The attention dialog is the full density itself: an overlay (the one elevation), the ask scrolls when it is long, the buttons stay. */
+  .attention-card > .approval-req { @apply min-h-0 flex-1 rounded-m; grid-template-rows: auto minmax(0, 1fr) auto; }
+  .approval-req--full > .kit-chip { grid-row: auto; }
+  .attention-card .kit-callout__body { @apply flex min-h-0 flex-col gap-2; }
 
   .kit-empty { @apply grid justify-items-center gap-1.5 px-4 py-7 text-center; }
   .kit-empty > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }

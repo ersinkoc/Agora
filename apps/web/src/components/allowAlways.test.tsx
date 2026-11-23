@@ -45,16 +45,18 @@ const press = (text: string) => { const b = [...document.querySelectorAll('butto
 describe('the approval card', () => {
   it('has no third button when the request does not offer it', () => {
     act(() => root.render(<ApprovalCard approval={ask()} onResolve={() => {}} />));
-    expect(names()).toEqual(['Allow', 'Deny']);
+    expect(names()).toEqual(['Deny', 'Allow']);
     expect(document.body.textContent).not.toContain('remembers');
   });
 
-  it('adds "Allow always" after Allow and Deny, a secondary button that answers always, with the note and the agent\'s own words', () => {
+  it('adds "Allow always" between Deny and Allow, a secondary button that answers always, with the note and the agent\'s own words', () => {
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalCard approval={both} onResolve={onResolve} />));
-    expect(names()).toEqual(['Allow', 'Deny', 'Allow always']);
-    const always = [...document.querySelectorAll('button')][2]!;
-    expect(always.className).not.toContain('button--primary');
+    // Redesign PR 4: the order of every request, the attention dialog's: Deny, "Allow always", then Allow (the primary, last).
+    expect(names()).toEqual(['Deny', 'Allow always', 'Allow']);
+    const always = [...document.querySelectorAll('button')][1]!;
+    expect(always.className).not.toContain('kit-btn--primary');
+    expect([...document.querySelectorAll('button')][2]!.className).toContain('kit-btn--primary');
     expect(always.getAttribute('aria-describedby')).toBe('always-note-card-n1/p1');
     const note = document.getElementById('always-note-card-n1/p1')!;
     expect(note.textContent).toContain('wstack · amber remembers this answer');
@@ -72,8 +74,8 @@ describe('the approval card', () => {
   it('puts "Allow always" in the place of Allow, as the primary, when the agent offers nothing else', () => {
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalCard approval={only} onResolve={onResolve} />));
-    expect(names()).toEqual(['Allow always', 'Deny']);
-    expect([...document.querySelectorAll('button')][0]!.className).toContain('button--primary');
+    expect(names()).toEqual(['Deny', 'Allow always']);
+    expect([...document.querySelectorAll('button')][1]!.className).toContain('kit-btn--primary');
     expect(document.body.textContent).toContain('This agent offers no single answer for this request');
     expect(document.body.textContent).not.toContain('In its own words'); // no label: nothing quoted
     press('Allow always');
@@ -90,13 +92,13 @@ describe('the banner in the centre panel', () => {
   it('offers it only when offered and answers always', () => {
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalBanner approval={ask()} onResolve={onResolve} />));
-    expect(names()).toEqual(['Allow', 'Deny']);
+    expect(names()).toEqual(['Deny', 'Allow']);
     act(() => root.render(<ApprovalBanner approval={both} onResolve={onResolve} pinned />));
-    expect(names()).toEqual(['Allow', 'Deny', 'Allow always']);
+    expect(names()).toEqual(['Deny', 'Allow always', 'Allow']);
     press('Allow always');
     expect(onResolve).toHaveBeenLastCalledWith(both, true, undefined, true);
     act(() => root.render(<ApprovalBanner approval={only} onResolve={onResolve} />));
-    expect(names()).toEqual(['Allow always', 'Deny']);
+    expect(names()).toEqual(['Deny', 'Allow always']);
   });
 });
 

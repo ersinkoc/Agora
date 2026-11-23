@@ -4,6 +4,7 @@ import { approvalName } from '../net/approvalText';
 import type { StartOption } from '../net/approval';
 import { visible, type ApprovalModel, type StartRequest, type StartSetting } from '../net/view';
 import { StateMark } from './StateBadge';
+import { Button } from './kit';
 
 export interface StartChoice { grant: number; nested: boolean }
 
@@ -84,9 +85,11 @@ export function StartApproval({ approval, start, busy, onResolve }: {
         <button type="button" className="button px-3 py-1 text-xs" disabled={busy} onClick={() => { setConfirming(false); onResolve(true, choice()); }}>{t('start-confirm-skip-yes')}</button>
         <button type="button" className="button button--primary px-3 py-1 text-xs" autoFocus onClick={() => setConfirming(false)}>{t('session-confirm-no')}</button>
       </div>}
+      {/* Redesign PR 4: Deny, then Allow, as on every request. An Allow that starts a helper that would not ask is the danger button
+          (ADR-0102), and it still opens the confirmation above first. */}
       <div className="flex gap-2">
-        <button type="button" className="button button--primary px-3 py-1 text-xs" disabled={busy || confirming} onClick={() => (skipping.length > 0 ? setConfirming(true) : onResolve(true, choice()))}>{t('approval-allow')}</button>
-        <button type="button" className="button px-3 py-1 text-xs" disabled={busy} onClick={() => onResolve(false, { grant: 0, nested: false })}>{t('approval-deny')}</button>
+        <Button size="sm" disabled={busy} onClick={() => onResolve(false, { grant: 0, nested: false })}>{t('approval-deny')}</Button>
+        <Button size="sm" variant={skipping.length > 0 ? 'danger' : 'primary'} disabled={busy || confirming} onClick={() => (skipping.length > 0 ? setConfirming(true) : onResolve(true, choice()))}>{t('approval-allow')}</Button>
       </div>
     </article>
   );

@@ -1,10 +1,16 @@
+import { useRef } from 'react';
 import { t } from '../i18n';
+import type { AgentTileModel } from '../model';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
-import type { ApprovalModel } from '../net/view';
+import { visible, type ApprovalModel } from '../net/view';
+import { kindOf } from './AgentTile';
+import { AlwaysNote, AlwaysOnly, alwaysNoteId, type AlwaysSurface } from './AllowAlways';
+import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, useNarrow } from './ApprovalRequest';
+import { Icon } from './Icon';
+import { AgentAvatar } from './kit';
 import { StartApproval, type StartChoice } from './StartApproval';
 import { SkipApproval } from './SkipApproval';
-import { AlwaysNote, AlwaysOnly, allowAlwaysWord, alwaysNoteId } from './AllowAlways';
 
 // The short form names the command or file; what the agent asked for, in full, stays one click (or key) away before Allow.
 export function FullRequest({ detail }: { detail: string }) {
@@ -17,31 +23,59 @@ export function FullRequest({ detail }: { detail: string }) {
   );
 }
 
-export function ApprovalCard({ approval, busy, onResolve }: {
+export type RequestAgent = Pick<AgentTileModel, 'accent' | 'kind' | 'name'>;
+
+// A plain request where it can be answered (the side panel, above a terminal, above a chat's composer): the ask whole, as one mono chip
+// that wraps and is never cut, the agent's full text one click away when the short form leaves something out, then Deny, "Allow always"
+// where offered, and Allow. In a pane (`narrowable`), below 360 px it is drawn in the row density with the buttons under the text; nothing
+// of the ask is cut there either (the pane is where Review leads).
+export function PlainRequest({ approval: x, density, surface, agent, alert, busy, narrowable, onAnswer, onOpen }: {
+  approval: ApprovalModel;
+  density: ApprovalDensity;
+  surface: AlwaysSurface;
+  agent?: RequestAgent;
+  alert?: boolean;
+  busy?: boolean;
+  narrowable?: boolean;
+  onAnswer?: (approved: boolean, always?: boolean) => void;
+  onOpen?: () => void;
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  const narrow = useNarrow(host) && !!narrowable;
+  const name = agent?.name || approvalName(x);
+  const d = x.detail ? detailText(x.detail) : '';
+  const ask = visible(d ? `${x.action} · ${d}` : x.action);
+  return (
+    <div ref={host} className="approval-req-host">
+      <ApprovalRequest density={narrow ? 'row' : density} stacked={narrow} alert={alert} icon={ASK_ICON[askKind(x)]}
+        avatar={agent ? <AgentAvatar accent={agent.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent.kind, name })} size="s" /> : undefined}
+        title={askTitle(x, name)}
+        where={x.machineName?.trim() ? <bdi>{visible(x.machineName)}</bdi> : undefined}
+        titleEnd={onOpen && <button type="button" className="ide-iconbtn approval-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="rtl:rotate-180" /></button>}
+        actions={onAnswer && <AnswerButtons approval={x} size="sm" off={{ disabled: busy }} alwaysNote={alwaysNoteId(x, surface)}
+          onDeny={() => onAnswer(false)} onAllow={() => onAnswer(true)} onAlways={() => onAnswer(true, true)} />}
+        foot={x.always ? <AlwaysNote approval={x} surface={surface} /> : undefined}>
+        <p className="approval-req__what"><span className="approval-req__cmd" dir="auto">{ask}</span></p>
+        {x.detail && <FullRequest detail={x.detail} />}
+        {/* ADR-0101: "Allow always" only when the request offers it; in the place of Allow (the primary) when it offers nothing else. */}
+        <AlwaysOnly approval={x} className="mt-1" />
+      </ApprovalRequest>
+    </div>
+  );
+}
+
+// The side panel's card for one request. `onOpen` opens the agent that asks (the panel lists no separate row for it).
+export function ApprovalCard({ approval, busy, agent, onResolve, onOpen }: {
   approval: ApprovalModel;
   busy?: boolean;
+  agent?: RequestAgent;
   onResolve: (approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onOpen?: () => void;
 }) {
   // ADR-0057: a request to start an agent shows everything it asks for.
   if (approval.start) return <StartApproval approval={approval} start={approval.start} busy={busy} onResolve={onResolve} />;
   // ADR-0090 Amendment A: a switch to a mode that skips permission questions, in the machine's own rendering.
   if (approval.skip || approval.skipUnknown) return <SkipApproval approval={approval} busy={busy} onResolve={(ok) => onResolve(ok)} />;
-  return (
-    <article className="approval" aria-label={t('approval-title', { name: approvalName(approval) })}>
-      <strong>{t('approval-title', { name: approvalName(approval) })}</strong>
-      <span>{approval.action}</span>
-      {approval.detail && <span className="muted">{detailText(approval.detail)}</span>}
-      {approval.detail && <FullRequest detail={approval.detail} />}
-      {/* ADR-0101: "Allow always" only when the request offers it; in the place of Allow (the primary) when it offers nothing else. */}
-      <AlwaysOnly approval={approval} />
-      <div className="approval__actions">
-        {approval.always?.only
-          ? <button type="button" className="button button--primary" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>
-          : <button type="button" className="button button--primary" disabled={busy} onClick={() => onResolve(true)}>{t('approval-allow')}</button>}
-        <button type="button" className="button" disabled={busy} onClick={() => onResolve(false)}>{t('approval-deny')}</button>
-        {approval.always && !approval.always.only && <button type="button" className="button" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>}
-      </div>
-      <AlwaysNote approval={approval} surface="card" />
-    </article>
-  );
+  return <PlainRequest approval={approval} density="card" surface="card" agent={agent} busy={busy} onOpen={onOpen}
+    onAnswer={(ok, always) => (always ? onResolve(true, undefined, true) : onResolve(ok))} />;
 }

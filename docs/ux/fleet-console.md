@@ -23,8 +23,9 @@ rendered page for it.
    the machines count ("2 · of 3 machines online") opens the machines page. *Failed* ("Ended with an error") has the red cross in a ring
    (ADR-0102).
 2. **What needs you**, most urgent first: requests that expire soonest, then requests of unknown expiry, then agents waiting in their
-   terminals, the longest-waiting first. Each is a **request card** (the kit's Callout in amber: a tint and a hairline, never a bar on
-   one side): an icon chip for the kind of ask, the agent's avatar and name, its machine and project, how long ago it asked, what it asks
+   terminals, the longest-waiting first. Each is a **request card** (the row size of the one request component, [approvals.md](approvals.md#one-request-three-sizes):
+   amber tint and hairline, never a bar on one side): an icon chip for the kind of ask, the agent's avatar, the ask as its title
+   ("codex · teal wants to run a command"; a start request's line is the start of its prompt), its machine and project, how long ago it asked, what it asks
    (a request answered here as a mono chip that wraps, never cut), and the answers at the end, Deny then the primary Allow (in a narrow
    column they go under the ask). Six cards are shown; the rest are one press away.
    * **Allow and Deny are in the row only for a plain yes or no that needs no reading and is shown whole**: one line each of action and

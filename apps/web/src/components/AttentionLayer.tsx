@@ -6,8 +6,12 @@ import { titleWithCount } from '../net/alert';
 import { type AttentionItem, askLine } from '../net/fleet';
 import { approvalName } from '../net/approvalText';
 import { pairTitle } from './pairChoice';
-import { AlwaysNote, allowAlwaysWord, alwaysNoteId } from './AllowAlways';
+import { AlwaysNote, alwaysNoteId } from './AllowAlways';
 import { type ApprovalModel, visible } from '../net/view';
+import { needsPanel } from '../net/needsPanel';
+import { kindOf } from './AgentTile';
+import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
+import { AgentAvatar, Button, Tag } from './kit';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
 // this device's choice, a card over the window and a notification while the window is in the background. It holds only memory: what was
@@ -127,12 +131,14 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
 
   // The banner: not modal, in a corner, never over what is typed into. Banner mode shows it whenever something needs the person; modal
   // mode shows it for what the card is holding back (waiting for focus, or put off).
+  // Hidden while a Needs you list is on screen (the side panel on that subject, or a panel of the layout): it would be a third copy.
+  const listShown = useSyncExternalStore(needsPanel.subscribe, needsPanel.isShown, () => false);
   const queued = items.filter((i) => modalKind(i) && i.key !== open?.key).length;
-  const showBanner = !phone && mode !== 'off' && !open && (mode === 'banner' ? items.length > 0 : queued > 0);
+  const showBanner = !phone && mode !== 'off' && !open && !listShown && (mode === 'banner' ? items.length > 0 : queued > 0);
   return (
     <>
       {showBanner && (
-        <div role="status" aria-live="polite" className="attention-banner fixed bottom-4 right-4 z-30 flex max-w-[min(26rem,calc(100vw-2rem))] items-center gap-3 rounded-l border border-line bg-surface-1 px-3 py-2 shadow-card">
+        <div role="status" aria-live="polite" className="attention-banner fixed bottom-4 end-4 z-30 flex max-w-[min(26rem,calc(100vw-2rem))] items-center gap-3 rounded-l border border-line bg-surface-1 px-3 py-2 shadow-card">
           <span className="min-w-0 flex-1 text-sm font-medium text-needs-you">{t('attention-banner', { count: mode === 'banner' ? items.length : queued })}</span>
           <button type="button" className="button" onClick={reveal}>{t('attention-review')}</button>
         </div>
@@ -196,42 +202,47 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
   const w = whoOf(item);
   const name = shorten(w.name || (x ? approvalName(x) : ''), WHO_MAX);
   const machine = shorten(w.machine, WHO_MAX);
-  const who = machine ? t('attention-who', { name, machine }) : t('attention-who-only', { name });
-  const dead = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+  const agent = item.kind === 'pair' ? undefined : item.agent;
   const why = 'attention-why';
+  // The title is the ask itself, in the window's words ("codex · teal wants to run a command"), with the agent's avatar and the machine
+  // as a tag; the request's own words are under it, whole (`attention-what`).
+  const title = item.kind === 'pair' ? pairTitle(item.card) : x ? askTitle(x, name) : name;
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onLater(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
         <Dialog.Content ref={content} role="alertdialog" tabIndex={-1} aria-describedby="attention-what" onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
-          className="attention-card fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-3 rounded-l border border-line bg-surface-1 p-5 shadow-card outline-none">
-          <Dialog.Title className="m-0 text-base font-semibold tracking-normal text-needs-you normal-case">{item.kind === 'pair' ? pairTitle(item.card) : t('attention-title')}</Dialog.Title>
-          <p aria-live="assertive" className="attention-announce sr-only">{announce}</p>
-          <p className="attention-who m-0 min-w-0 flex-none break-words text-sm text-muted">{who}</p>
-          <div id="attention-what" className="min-h-0 overflow-auto">
-            {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
-            {kind === 'answer' && x?.always && <AlwaysNote approval={x} surface="attention" className="mt-2" />}
-            {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
-            {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
-            {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
-              <p className="m-0 mb-2 text-sm text-ink">{t('attention-ask-review')}</p>
-              <pre className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</pre>
-            </>}
-            {item.kind === 'pair' && <p className="m-0 text-sm text-ink">{t('attention-pair')}</p>}
-          </div>
-          {more > 0 && <p className="m-0 text-xs text-muted">{t('attention-more', { count: more })}</p>}
-          {kind === 'answer' && answered === key && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
-          {stale && kind === 'answer' && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
-          <div className="flex flex-wrap justify-end gap-2">
-            <button type="button" className="button" onClick={onLater}>{t('attention-later')}</button>
-            {kind === 'answer' && <>
-              <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
-              {/* ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`). */}
-              {x?.always && !x.always.only && <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : alwaysNoteId(x, 'attention')} onClick={() => answer(true, true)}>{allowAlwaysWord()}</button>}
-              <button type="button" className={`button button--primary ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
-            </>}
-            {(kind === 'review' || (kind === 'answer' && answered === key)) && <button type="button" className="button button--primary" onClick={() => onReview(item)}>{t('attention-review')}</button>}
-          </div>
+          className="attention-card fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-m shadow-pop outline-none">
+          <ApprovalRequest density="full" icon={item.kind === 'pair' ? 'machine' : x ? ASK_ICON[askKind(x)] : 'bell'}
+            titleWrap={(head) => <Dialog.Title asChild>{head}</Dialog.Title>}
+            avatar={agent || x ? <AgentAvatar accent={agent?.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} /> : undefined}
+            title={<span className="attention-who break-words">{title}</span>}
+            where={machine ? <Tag>{machine}</Tag> : undefined}
+            actions={<>
+              <Button onClick={onLater}>{t('attention-later')}</Button>
+              {kind === 'answer' && x && <AnswerButtons approval={x} off={{ 'aria-disabled': !canAnswer, 'aria-describedby': stale ? why : undefined }} alwaysNote={alwaysNoteId(x, 'attention')}
+                onDeny={() => answer(false)} onAllow={() => answer(true)}
+                // ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`).
+                onAlways={x.always && !x.always.only ? () => answer(true, true) : undefined} />}
+              {(kind === 'review' || (kind === 'answer' && answered === key)) && <Button variant="primary" onClick={() => onReview(item)}>{t('attention-review')}</Button>}
+            </>}>
+            <p aria-live="assertive" className="attention-announce sr-only">{announce}</p>
+            <div id="attention-what" className="min-h-0 overflow-auto">
+              {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
+              {kind === 'answer' && x?.always && <AlwaysNote approval={x} surface="attention" className="mt-2" />}
+              {/* The title already says who wants to start another agent; this says where it is read. */}
+              {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start-read')}</p>}
+              {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
+              {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
+                <p className="m-0 mb-2 text-sm text-ink">{t('attention-ask-review')}</p>
+                <pre className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</pre>
+              </>}
+              {item.kind === 'pair' && <p className="m-0 text-sm text-ink">{t('attention-pair')}</p>}
+            </div>
+            {more > 0 && <p className="m-0 text-xs text-muted">{t('attention-more', { count: more })}</p>}
+            {kind === 'answer' && answered === key && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
+            {stale && kind === 'answer' && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
+          </ApprovalRequest>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

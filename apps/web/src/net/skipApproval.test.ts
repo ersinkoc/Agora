@@ -184,7 +184,7 @@ describe('the card', () => {
     expect(text).toContain('Bypass Permissions');
     expect(text).toContain('bypassPermissions'); // the real value id
     expect(text).toContain('session only');
-    expect(buttons().map((b) => b.textContent?.replace('Read it first, then you can allow.', ''))).toEqual(['Allow', 'Deny']);
+    expect(buttons().map((b) => b.textContent?.replace('Read it first, then you can allow.', ''))).toEqual(['Deny', 'Allow']);
     expect(host.contains(document.activeElement) && document.activeElement?.tagName === 'BUTTON').toBe(false); // nothing is focused for you
     await dwell();
     act(() => named('Allow').click());
