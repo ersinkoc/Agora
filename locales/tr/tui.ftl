@@ -146,7 +146,7 @@ tui-split-pick = Soldan bir ajan seç
 tui-split-no-screen = Terminali açılıyor…
 tui-split-status = { $online }/{ $total } makine · { $agents } ajan · { $waiting } seni bekliyor
 tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · u devam et · d kaldır · a onay iste · v cihazlar · q çık
-tui-split-keys-viewer = ↑↓ seç · Enter aç · a onay iste · v cihazlar · q çık
+tui-split-keys-viewer = ↑↓ seç · Enter aç · a onay iste · q çık
 tui-split-chat = Terminali yok: Enter konuşmasını açar
 tui-folder-title = { $machine } üzerinde bir klasörde ajan başlat
 tui-folder-keys = ↑↓ seç · Enter aç · ⌫ yukarı · Boşluk burada başlat · m makine · Esc vazgeç
@@ -205,7 +205,7 @@ tui-tool-other = Adım
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · r değişiklikler · o dosyalar · b pano · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
-tui-app-keys-tree-viewer = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · r değişiklikler · o dosyalar · b pano · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
+tui-app-keys-tree-viewer = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · r değişiklikler · o dosyalar · b pano · a onay iste · Tab sonraki bölüm · i ayrıntılar · q çık
 tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
 tui-app-keys-terminal-viewer = Ctrl-] ya da F12 listeye dön · İzliyorsun: tuşların gönderilmez · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
 tui-app-keys-terminal-waiting = Seni bekliyor: Alt+Y izin verir · Alt+N reddeder · Ctrl-] ya da F12 listeye dön · Alt+K komutlar
@@ -320,6 +320,7 @@ tui-board-col-done-empty = Henüz biten yok.
 tui-board-untitled = Adsız görev
 tui-board-more = ve { $count } tane daha
 tui-board-keys = ↑↓ seç · Enter veya g bekleyen görevi bir ajana ver · q veya Esc geri
+tui-board-keys-viewer = ↑↓ seç · q veya Esc geri
 tui-board-backlog-only = Yalnızca Bekleyen sütunundaki bir görev bir ajana verilebilir.
 tui-machine-name-id = { $name } · { $id }
 tui-give-title = Bir ajana ver

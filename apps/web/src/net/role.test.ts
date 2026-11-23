@@ -119,6 +119,41 @@ describe('the live connection and the role (ADR-0106)', () => {
     live.close();
   });
 
+  it('an owner made a viewer sends no size on the next connection, before or after its Welcome', async () => {
+    const { live, sockets } = connect();
+    const first = sockets[0] as FakeSocket;
+    first.onopen?.();
+    first.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, welcome(v1.PersonRole.PERSON_ROLE_OWNER));
+    const session = live.terminal('laptop', 't-1').connect(() => {});
+    session.resize(120, 40);
+    expect(terminalCommands(first)).toEqual(['subscribe', 'resize']);
+    first.onclose?.();
+    await new Promise((r) => setTimeout(r, 5));
+    const second = sockets[1] as FakeSocket;
+    second.onopen?.();
+    session.sendInput(new TextEncoder().encode('x'));
+    expect(terminalCommands(second)).toEqual(['subscribe']);
+    second.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, welcome(v1.PersonRole.PERSON_ROLE_VIEWER));
+    expect(terminalCommands(second)).toEqual(['subscribe']);
+    live.close();
+  });
+
+  it('typing and sizes wait for the role, then go: a member, and an older hub whose first frame is the snapshot', async () => {
+    for (const first of ['welcome', 'snapshot'] as const) {
+      const { live, sockets } = connect();
+      const s1 = sockets[0] as FakeSocket;
+      s1.onopen?.();
+      const session = live.terminal('laptop', 't-1').connect(() => {});
+      session.resize(120, 40);
+      session.sendInput(new TextEncoder().encode('ls\r'));
+      expect(terminalCommands(s1)).toEqual(['subscribe']);
+      if (first === 'welcome') s1.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, welcome(v1.PersonRole.PERSON_ROLE_MEMBER));
+      else s1.deliver(STREAM_EVENTS, EVENT_KIND.SNAPSHOT, snapshot);
+      expect(terminalCommands(s1), first).toEqual(['subscribe', 'resize', 'input']);
+      live.close();
+    }
+  });
+
   it('a member\'s window types and sizes as before', () => {
     const { live, sockets } = connect();
     const first = sockets[0] as FakeSocket;

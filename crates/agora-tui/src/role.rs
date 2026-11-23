@@ -63,12 +63,12 @@ pub fn learn_on(session: &mut Session, held: Owner, role: Role) -> Option<(Owner
     }
 }
 
-/// A key of the list that changes something (answers a request, starts, stops, resumes, removes): hidden from a viewer, whose window
-/// only watches (ADR-0106). The hub would refuse each, and write the refusal down.
+/// A key of the list that changes something (answers a request, starts, stops, resumes, removes, approves another device with `v`):
+/// hidden from a viewer, whose window only watches (ADR-0106). The hub would refuse each, and write the refusal down.
 pub fn changes(key: char) -> bool {
     matches!(
         key,
-        'y' | 'n' | crate::app::ALLOW_ALWAYS | 's' | 'f' | 'x' | 'u' | 'U' | 'd'
+        'y' | 'n' | crate::app::ALLOW_ALWAYS | 's' | 'f' | 'x' | 'u' | 'U' | 'd' | 'v'
     )
 }
 
@@ -139,10 +139,12 @@ mod tests {
             'u',
             'U',
             'd',
+            'v',
         ] {
             assert!(changes(k), "{k}");
         }
-        for k in ['r', 'o', 'b', 'i', 'a', 'v', 'p', 'q'] {
+        // `a` asks the person's other devices to approve this terminal, which the hub lets a viewer do.
+        for k in ['r', 'o', 'b', 'i', 'a', 'p', 'q'] {
             assert!(!changes(k), "{k}");
         }
     }

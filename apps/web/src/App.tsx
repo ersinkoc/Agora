@@ -9,7 +9,7 @@ import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import type { DiffSource } from './net/diff';
 import { usePairing } from './net/usePairing';
-import { mayChange, type PersonRole } from './net/role';
+import { mayChange, ownsMachines, type PersonRole } from './net/role';
 import { PairRequest } from './components/PairRequest';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
@@ -588,10 +588,10 @@ export function App() {
     <CloseAgentContext.Provider value={hub && api && changes ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
     <GiveContext.Provider value={giveApi}>
-      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined}
+      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
         pairing={pairing.ui} onStart={hub && api && live && changes ? (node) => openStart(node) : undefined} onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
-          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
+          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
@@ -601,14 +601,14 @@ export function App() {
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
         ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'}
+          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes}
           onStart={hub && api && live && changes ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
-          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
+          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api && changes ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live && changes ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api && changes ? forgetAgent : undefined} onResume={hub && api && changes ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} />}
+          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. My machines
           shows every request in full itself, so nothing floats there. */}
@@ -617,7 +617,7 @@ export function App() {
       <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
-      {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
+      {hub && live && changes && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}
         machines={machines(live).filter((m) => trustedOn.includes(m.id)).map((m) => ({ id: m.id, name: m.name }))}
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}

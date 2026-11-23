@@ -123,10 +123,13 @@ message Welcome {
 - **Clients.**
   - Both the web and the terminal client ask `PairStatus` and `UsageReport` only for the owner, and take the picker's role from the
     `Welcome`.
-  - Neither sends a viewer's typing or terminal sizes. Sizes are refused for a viewer too, and the window sends them by itself. A
-    viewer made a member sends the sizes of the terminals it watches once the new `Welcome` arrives.
-  - The terminal client hides from a viewer the keys that change something (`y`/`n`, `s`, `f`, `x`, `u`, `d`). A key pressed anyway
-    says so and sends nothing.
-  - The web hides start, new terminal, close, resume, remove, prompts, options and Give.
+  - Neither sends a viewer's typing or terminal sizes. Sizes are refused for a viewer too, and the window sends them by itself. The web
+    sends neither until the connection has said the role (its `Welcome`, or an older hub's first frame); typing meanwhile waits. So an
+    owner made a viewer sends no size on reconnecting, and a viewer made a member sends its sizes once the new `Welcome` arrives.
+  - The terminal client hides from a viewer the keys that change something (`y`/`n`, `s`, `f`, `x`, `u`, `d`, `v`) and Give on the
+    board. A key pressed anyway says so and sends nothing.
+  - The web hides start, new terminal, close, resume, remove, prompts, options, Give, removing a device, approving another device and
+    revoking a helper's grant. Forgetting a machine is offered to the owner only (the hub refuses `node.forget` to anyone else). A
+    viewer's empty Home says what they will see instead of asking them to start an agent.
 - **Not built:** a viewer's answer buttons on requests in the web, and a chat tab's prompt line in the terminal client (#1140). The hub
   refuses and audits both, as before.

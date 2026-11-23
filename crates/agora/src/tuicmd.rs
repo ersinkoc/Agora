@@ -1819,26 +1819,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     // dropped); without one (output piped) the plain list, as before.
     let mut console_state = if keys {
         match agora_tui::backend::Screen::enter() {
-            Ok(window) => Some(Console {
+            Ok(window) => Some(Console::new(
                 window,
-                app: App::default(),
-                parser: Parser::default(),
-                snapshot: None,
-                selected: String::new(),
-                notice: String::new(),
-                armed: None,
-                read_whole: std::collections::HashSet::new(),
-                shown_request: None,
-                stale: false,
-                not_sized: std::collections::HashSet::new(),
-                drafts: std::collections::HashMap::new(),
-                open_failed_notice: None,
-                notice_at: Instant::now(),
-                links: agora_tui::termio::LinkConfirm::default(),
-                note: Note::default(),
-                pair: agora_tui::pair::Book::default(),
-                role: agora_tui::picker::Role::Unknown,
-                colors: if color {
+                if color {
                     ColorMode::from_env(
                         None,
                         std::env::var("COLORTERM").ok().as_deref(),
@@ -1851,13 +1834,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 } else {
                     ColorMode::Mono
                 },
-                typing_refused: None,
-                typing_notice: String::new(),
-                typing_allowed: None,
-                asked: false,
-                typing_taken: std::collections::HashMap::new(),
-                give_lacking: agora_tui::board::Lacking::default(),
-            }),
+            )),
             Err(_) => None,
         }
     } else {
@@ -2118,8 +2095,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     }
                     3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
                     // ADR-0106: a viewer's list watches; nothing that changes something is sent (the hub would refuse it, written down).
-                    _ if viewer && agora_tui::role::changes(char::from(k)) => {
-                        notice = say.text(key!("tui-viewer-watching"), &[]);
+                    _ if watching_notice(say, viewer, char::from(k)).is_some() => {
+                        notice = watching_notice(say, viewer, char::from(k)).unwrap_or_default();
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b'y' | b'n' => {
@@ -2410,6 +2387,24 @@ fn connected_again(
     pair.reset();
 }
 
+/// ADR-0106: what a new connection says of the person's role, kept in the console: the pairing answer and the picker's role (asking
+/// `PairStatus` only when [`agora_tui::role::learn`] says so), and whether the window only watches (a viewer).
+fn connected_role(session: &mut Session, c: &mut Console) {
+    if let Some((owner, role)) = agora_tui::role::learn_on(session, c.pair.owner, c.role) {
+        if owner != c.pair.owner {
+            c.pair.set_owner(owner);
+        }
+        c.role = role;
+    }
+    c.app.viewer = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
+}
+
+/// ADR-0106: the line a viewer's window shows for a key that changes something (it sends nothing: the hub would refuse it and write the
+/// refusal down); `None` for any other key or person.
+fn watching_notice(say: &Say, viewer: bool, k: char) -> Option<String> {
+    (viewer && agora_tui::role::changes(k)).then(|| say.text(key!("tui-viewer-watching"), &[]))
+}
+
 /// What the console does after its loop ends.
 enum Next {
     Quit,
@@ -2477,6 +2472,39 @@ struct Console {
     /// agents are not offered again until the machine goes offline or comes back with another build, or the link to the hub is lost
     /// (as the web window does, #885).
     give_lacking: agora_tui::board::Lacking,
+}
+
+impl Console {
+    /// A console with nothing held yet, drawn in `window`.
+    fn new(window: agora_tui::backend::Window, colors: ColorMode) -> Self {
+        Console {
+            window,
+            app: App::default(),
+            parser: Parser::default(),
+            snapshot: None,
+            selected: String::new(),
+            notice: String::new(),
+            armed: None,
+            read_whole: std::collections::HashSet::new(),
+            shown_request: None,
+            stale: false,
+            not_sized: std::collections::HashSet::new(),
+            drafts: std::collections::HashMap::new(),
+            open_failed_notice: None,
+            notice_at: Instant::now(),
+            links: agora_tui::termio::LinkConfirm::default(),
+            note: Note::default(),
+            pair: agora_tui::pair::Book::default(),
+            role: agora_tui::picker::Role::Unknown,
+            colors,
+            typing_refused: None,
+            typing_notice: String::new(),
+            typing_allowed: None,
+            asked: false,
+            typing_taken: std::collections::HashMap::new(),
+            give_lacking: agora_tui::board::Lacking::default(),
+        }
+    }
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2604,13 +2632,7 @@ fn console(
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only). ADR-0106: a hub
     // that says the role in its `Welcome` is asked only for the owner, whose pairing may be switched off; a member's or viewer's
     // console asks nothing, so it leaves no refused row in the owner's Activity. An older hub is asked as before (#1099).
-    if let Some((owner, role)) = agora_tui::role::learn_on(session, c.pair.owner, c.role) {
-        if owner != c.pair.owner {
-            c.pair.set_owner(owner);
-        }
-        c.role = role;
-    }
-    c.app.viewer = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
+    connected_role(session, c);
     let mut pair_seen = c.pair.shown().len();
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
@@ -2979,10 +3001,6 @@ fn console(
                                 note_rows,
                             )
                             .then(|| approval.clone());
-                        }
-                        if c.app.viewer {
-                            c.notice = say.text(key!("tui-viewer-watching"), &[]);
-                            continue;
                         }
                         let target = Target::Tab { agent, approval };
                         if answer_command(say, session, rx, c, area, &target, answer)
@@ -4111,6 +4129,11 @@ fn answer_command(
     target: &Target,
     reply: Answer,
 ) -> bool {
+    // ADR-0106: a viewer answers nothing (y / n from the list, Alt+Y / Alt+N in a tab): the hub would refuse it and write it down.
+    if c.app.viewer {
+        c.notice = say.text(key!("tui-viewer-watching"), &[]);
+        return false;
+    }
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let Some(s) = c.snapshot.clone() else {
         return false;
@@ -4229,8 +4252,8 @@ fn command(
     };
     let selected = c.selected.clone();
     // ADR-0106: a viewer's window watches. The hub would refuse each of these and write the refusal down; nothing is sent.
-    if c.app.viewer && agora_tui::role::changes(k) {
-        c.notice = say.text(key!("tui-viewer-watching"), &[]);
+    if let Some(line) = watching_notice(say, c.app.viewer, k) {
+        c.notice = line;
         return false;
     }
     match k {
@@ -4545,6 +4568,8 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
     let mut on: Option<String> = None;
     let mut notice = String::new();
     let mut view = ViewWait::new(say, ask);
+    // ADR-0106: a viewer's board is for reading; giving a task is refused to them (and written down) at the hub.
+    let watching = ask.c.app.viewer;
     loop {
         let Some(b) = ask
             .c
@@ -4563,7 +4588,7 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
         on = cards.get(at).map(|(_, card)| card.task_id.clone());
         let banner = view.banner.clone();
         let _ = ask.c.window.draw(|f| {
-            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text);
+            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text, watching);
         });
         let wake = view.wait(say, ask, session);
         if matches!(wake, Wake::Key(_)) {
@@ -4577,6 +4602,9 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
             Wake::Key(b'k') => {
                 at = at.saturating_sub(1);
                 on = None;
+            }
+            Wake::Key(b'\r' | b'\n' | b'g') if watching => {
+                notice = say.text(key!("tui-viewer-watching"), &[]);
             }
             Wake::Key(b'\r' | b'\n' | b'g') => match cards.get(at) {
                 Some((agora_tui::board::Column::Backlog, card)) => {
@@ -7511,5 +7539,226 @@ mod folder_role_tests {
             (pair.owner, role, notice.as_str()),
             (agora_tui::pair::Owner::Unknown, Role::Unknown, "")
         );
+    }
+}
+
+/// ADR-0106: the console's viewer gates against a real hub (in this process, over TLS) that names the person's role in its first frame:
+/// a viewer's console sends nothing the hub would refuse, so the owner's Activity gets no row from it; a member's console still acts.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod viewer_console_tests {
+    use super::*;
+    use agora_hub::users::{Access, Role as PersonRoleOnHub};
+    use std::sync::Arc;
+
+    struct OneRole(PersonRoleOnHub);
+    impl agora_hub::server::ClientAuth for OneRole {
+        fn check(&self, t: &str) -> bool {
+            t == "token"
+        }
+        fn access(&self, t: &str) -> Option<Access> {
+            self.check(t).then(|| Access {
+                role: self.0,
+                user: "eda".into(),
+                projects: None,
+                session: String::new(),
+            })
+        }
+    }
+
+    struct Hubside {
+        _rt: tokio::runtime::Runtime,
+        state: Arc<agora_hub::server::ServerState>,
+        hub: agora_tui::client::Hub,
+    }
+
+    fn hub(role: PersonRoleOnHub) -> Hubside {
+        let ca = agora_hub::ca::Ca::generate("viewer test ca").unwrap();
+        let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+        let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
+        let ca_pem = ca.cert_pem().to_string();
+        let state = Arc::new(agora_hub::server::ServerState {
+            hub: Arc::new(
+                agora_hub::hub::Hub::open(agora_hub::store::SqliteStore::open_in_memory().unwrap())
+                    .unwrap(),
+            ),
+            support: agora_protocol::handshake::Support {
+                generations: vec![1],
+                capabilities: vec![],
+                required: vec![],
+            },
+            ca: None,
+            lockout: Arc::new(agora_hub::enroll::Lockout::new()),
+            auth: Box::new(OneRole(role)),
+            assets: None,
+            sessions: None,
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = l.local_addr().unwrap();
+        rt.spawn(agora_hub::server::run(
+            l,
+            Arc::clone(&state),
+            Some(acceptor),
+        ));
+        Hubside {
+            _rt: rt,
+            state,
+            hub: agora_tui::client::Hub {
+                addr: addr.to_string(),
+                ca_pem,
+            },
+        }
+    }
+
+    /// What the hub wrote down for the person, as (action, outcome).
+    fn rows(h: &Hubside) -> Vec<(String, String)> {
+        agora_hub::audit::Audit::new(h.state.hub.store())
+            .list(0, Some("eda"), 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.action, e.outcome))
+            .collect()
+    }
+
+    /// A console on a test screen with one running agent on `n1`, selected, that asks for an answer.
+    fn console() -> Console {
+        let mut c = Console::new(
+            agora_tui::backend::Window::offscreen(100, 30).unwrap(),
+            ColorMode::Mono,
+        );
+        c.snapshot = Some(Snapshot {
+            pos: 1,
+            nodes: vec![agora_protocol::v1::NodeSnapshot {
+                node_id: "n1".into(),
+                online: true,
+                ..Default::default()
+            }],
+            agents: vec![agora_protocol::v1::AgentSnapshot {
+                agent_id: "n1/agent-1".into(),
+                node_id: "n1".into(),
+                running: true,
+                ..Default::default()
+            }],
+            approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                approval_id: "n1/r1".into(),
+                agent_id: "n1/agent-1".into(),
+                action: "Edit".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        c.selected = "n1/agent-1".into();
+        c
+    }
+
+    #[test]
+    fn a_viewers_console_learns_it_on_connecting_and_sends_nothing_its_keys_or_answers_would_have_refused(
+    ) {
+        let h = hub(PersonRoleOnHub::Viewer);
+        let say = Say(agora_i18n::Catalog::english());
+        let watching = say.text(key!("tui-viewer-watching"), &[]);
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(
+            c.app.viewer,
+            "the console knows a viewer from the hub's first frame"
+        );
+        assert_eq!(c.role, agora_tui::picker::Role::Limited);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let area = Area::new(0, 0, 100, 30);
+        // A key that would stop, remove, resume, start or answer: the line says why, and nothing goes to the hub.
+        for k in ['x', 'd', 'u', 's', 'f', 'v', 'y', 'n'] {
+            c.notice.clear();
+            assert!(
+                !command(&say, &mut session, &rx, false, &mut c, area, k),
+                "{k}"
+            );
+            assert_eq!(c.notice, watching, "{k}");
+        }
+        // Alt+Y in an agent's tab answers through the same path, and is held back too.
+        c.notice.clear();
+        let tab = Target::Tab {
+            agent: "n1/agent-1".into(),
+            approval: "n1/r1".into(),
+        };
+        assert!(!answer_command(
+            &say,
+            &mut session,
+            &rx,
+            &mut c,
+            area,
+            &tab,
+            Answer::Allow
+        ));
+        assert_eq!(c.notice, watching);
+        // Anything the hub would answer has had time to arrive.
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let _ = session.next(Duration::from_millis(50));
+        }
+        assert_eq!(rows(&h), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn a_members_console_is_not_held_back_and_asks_nothing_on_connecting() {
+        let h = hub(PersonRoleOnHub::Member);
+        let say = Say(agora_i18n::Catalog::english());
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(!c.app.viewer);
+        assert_eq!(c.role, agora_tui::picker::Role::Limited);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        // `d` on a running agent says to stop it first, without asking the hub: it is not the viewer's line.
+        c.notice.clear();
+        let _ = command(
+            &say,
+            &mut session,
+            &rx,
+            false,
+            &mut c,
+            Area::new(0, 0, 100, 30),
+            'd',
+        );
+        assert_eq!(c.notice, say.text(key!("tui-forget-running"), &[]));
+        assert!(rows(&h).iter().all(|(action, _)| action != "pair.status"));
+    }
+
+    /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal; its viewer gate is
+    /// pinned here by its shape: the role comes from the session, and the gate is the first arm that takes a key that changes something,
+    /// with [`watching_notice`] (tested above) deciding.
+    #[test]
+    fn the_plain_lists_keys_pass_the_viewer_gate_first() {
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let t0 = src.find("\npub fn tui(").unwrap();
+        let tui = &src[t0..t0 + src[t0..].find("\n}\n").unwrap()];
+        assert!(tui.contains("let viewer = person == agora_protocol::v1::PersonRole::Viewer;"));
+        let gate = tui
+            .find("_ if watching_notice(say, viewer, char::from(k)).is_some() => {")
+            .expect("the plain list's viewer gate");
+        for arm in [
+            "b'y' | b'n' =>",
+            "b'f' =>",
+            "b's' =>",
+            "b'u' | b'U' =>",
+            "b'd' =>",
+            "b'x' =>",
+            "b'v' =>",
+        ] {
+            let at = tui.find(arm).unwrap_or_else(|| panic!("{arm}"));
+            assert!(gate < at, "{arm} comes before the viewer gate");
+        }
+    }
+
+    #[test]
+    fn the_watching_line_is_for_a_viewer_and_a_key_that_changes_something() {
+        let say = Say(agora_i18n::Catalog::english());
+        assert!(watching_notice(&say, true, 'x').is_some());
+        assert!(watching_notice(&say, true, 'r').is_none());
+        assert!(watching_notice(&say, false, 'x').is_none());
     }
 }

@@ -30,3 +30,6 @@ export const ownerOfRole = (role: PersonRole): PairOwner | undefined => (role ==
 
 /** Whether the window offers actions that change something (start, stop, resume, remove, typing, prompts). A viewer only watches. */
 export const mayChange = (role: PersonRole): boolean => role !== 'viewer';
+
+/** Whether the window offers forgetting machines: the hub lets only the owner do it (`node.forget`). An older hub: as before. */
+export const ownsMachines = (role: PersonRole): boolean => role === 'owner' || role === 'unspecified';
