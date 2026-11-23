@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { createContext, useCallback, useContext, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { t } from '../i18n';
 import { approvalName } from '../net/approvalText';
 import type { ApprovalModel } from '../net/view';
@@ -111,22 +111,46 @@ export function AnswerButtons({ approval: x, size = 'md', off = {}, danger, alwa
 // beside its buttons to one word per line).
 export const NARROW_PX = 360;
 export function useNarrow(ref: RefObject<HTMLElement | null>, below = NARROW_PX): boolean {
-  const [narrow, setNarrow] = useState(false);
-  // Measured before the first paint, so a narrow pane never shows the wide layout for a frame.
+  return useBelow(ref, below, 'width');
+}
+
+// Whether an element is smaller than `below` px along one axis. Unknown (nothing laid out yet, a test without layout) counts as large.
+export function useBelow(ref: RefObject<HTMLElement | null>, below: number, axis: 'width' | 'height'): boolean {
+  const [small, setSmall] = useState(false);
+  // Measured before the first paint, so a small pane never shows the large layout for a frame.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const now = el.getBoundingClientRect().width;
-    if (now > 0) setNarrow(now < below);
+    const now = el.getBoundingClientRect()[axis];
+    if (now > 0) setSmall(now < below);
     if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[entries.length - 1]?.contentRect.width ?? el.getBoundingClientRect().width;
-      if (w > 0) setNarrow(w < below);
+    // A callback without entries (a test's observer that only says "something changed") reads the element itself.
+    const ro = new ResizeObserver((entries?: ResizeObserverEntry[]) => {
+      const size = entries?.[entries.length - 1]?.contentRect[axis] ?? el.getBoundingClientRect()[axis];
+      if (size > 0) setSmall(size < below);
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref, below]);
-  return narrow;
+  }, [ref, below, axis]);
+  return small;
+}
+
+// #1082: a chat pane shorter than this (the whole pane, header and composer included, which the card's own size never changes) draws the
+// request pinned above its composer as one row, so the conversation keeps its room. The pane says so through `PinnedShort`.
+export const SHORT_PANE_PX = 400;
+export const PinnedShort = createContext(false);
+
+// A card pinned above a chat's composer: whether it is drawn as the short row now, and the press that opens it to the whole card in place.
+// The row offers Allow and Deny only for what `decidableInline` shows whole and only where they fit beside it (else Review, which opens
+// the card); "always" is never answered from it (ADR-0101, as Home's row). The row and the card put the buttons in different places, so
+// every change between them (the pane getting short or tall, Review opening the card) restarts the surface's dwell (`restart`, T44).
+export function usePinnedRow(restart: () => void): { short: boolean; row: boolean; open: () => void } {
+  const short = useContext(PinnedShort);
+  const [opened, setOpened] = useState(false);
+  const row = short && !opened;
+  const drawn = useRef(row);
+  useLayoutEffect(() => { if (drawn.current !== row) { drawn.current = row; restart(); } }, [row, restart]);
+  return { short, row, open: useCallback(() => setOpened(true), []) };
 }
 
 // A card in a pane (`narrowable`): whether it is drawn narrow now. The buttons move under the text when the pane gets narrow (and back): a
