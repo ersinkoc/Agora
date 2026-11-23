@@ -293,7 +293,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // What a chat agent waits on, pinned above its composer (a terminal agent's requests are a bar under its header).
   const pinnedAsks = (agentId: string) => {
     const mine = approvals.filter((x) => x.agentId === agentId);
-    return mine.length ? <div className="grid gap-2">{mine.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined;
+    const agent = fleet.find((f) => f.id === agentId);
+    return mine.length ? <div className="grid gap-2">{mine.map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} onResolve={onResolve} pinned />)}</div> : undefined;
   };
   // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
   const agentBody = (a: AgentTileModel) => (
@@ -325,7 +326,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
       </div>
       <CloseConfirm agent={a} where="pane" />
-      {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+      {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} agent={a} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}

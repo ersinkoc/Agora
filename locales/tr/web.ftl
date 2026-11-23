@@ -50,6 +50,15 @@ approvals-title = Yanıtınızı bekleyenler
 approval-title = { $name } izin istiyor
 approval-allow = İzin ver
 approval-deny = Reddet
+# Yeniden tasarım PR 4: bir isteğin başlığı isteğin kendisidir, pencerenin sözleriyle, kapalı bir tür kümesinden (başka her şey
+# approval-title). Komut, dosya veya adres altındaki satırda, bütün olarak kalır.
+approval-ask-run = { $name } bir komut çalıştırmak istiyor
+approval-ask-edit = { $name } bir dosyayı değiştirmek istiyor
+approval-ask-read = { $name } bir dosyayı okumak istiyor
+approval-ask-fetch = { $name } bir web adresini açmak istiyor
+approval-ask-delete = { $name } bir şeyi silmek istiyor
+approval-ask-start = { $name } başka bir ajan başlatmak istiyor
+approval-open-agent = { $name } ajanını aç
 approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
 approval-failed = Yanıt iletilemedi. Yeniden deneyin.
 approval-forbidden = Bu cihazdan bu proje için yanıt veremezsiniz: orada başka projelerle sınırlı. Bu projede çalışan birine sorun.
@@ -1054,8 +1063,6 @@ fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi 
 fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
-attention-who = { $machine } üzerinde { $name }
-attention-who-only = { $name }
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
 attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce isteği tam kartında okuyun.
 attention-start = { $name } başka bir ajan başlatmak istiyor. Klasörü, istemi ve ayarları tam kartta okunur.

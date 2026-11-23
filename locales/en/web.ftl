@@ -50,6 +50,15 @@ approvals-title = Waiting for your answer
 approval-title = { $name } asks permission
 approval-allow = Allow
 approval-deny = Deny
+# Redesign PR 4: the title of a request is the ask itself, in the window's words, from a closed set of kinds (anything else is
+# approval-title). The command, file or address stays on the line under it, whole.
+approval-ask-run = { $name } wants to run a command
+approval-ask-edit = { $name } wants to change a file
+approval-ask-read = { $name } wants to read a file
+approval-ask-fetch = { $name } wants to open a web address
+approval-ask-delete = { $name } wants to delete something
+approval-ask-start = { $name } wants to start another agent
+approval-open-agent = Open { $name }
 approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
 approval-failed = The answer did not go through. Try again.
 approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
@@ -1078,8 +1087,6 @@ fleet-same-ask = { $count } { $kind } agents ask for the same thing on { $machin
 fleet-review-each = Review each
 fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
-attention-who = { $name } on { $machine }
-attention-who-only = { $name }
 attention-ask-review = This needs to be read in full before you answer. Review it to decide.
 attention-skip = { $name } was asked to act without asking you. Read the request in its full card before you answer.
 attention-start = { $name } wants to start another agent. Its folder, prompt and settings are read in the full card.

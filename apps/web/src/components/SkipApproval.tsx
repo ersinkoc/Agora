@@ -5,6 +5,7 @@ import { approvalName } from '../net/approvalText';
 import { dismissUnknown, isDismissedUnknown, useSkipCapable } from '../net/skipApproval';
 import { visible, type ApprovalModel } from '../net/view';
 import { StateMark } from './StateBadge';
+import { Button } from './kit';
 
 // ADR-0090 Amendment A: a window asked to switch a running agent to a mode or option in which it acts without asking, and the machine
 // wants the owner's signed answer first. Every field is the machine's own rendering of the request (`detail`), shown as it gave it with
@@ -73,12 +74,14 @@ export function SkipApproval({ approval, busy, onResolve }: {
       </dl>
       <p className="m-0 text-xs text-muted">{t('skip-approval-scope')}</p>
       {!capable && <p role="note" className="m-0 text-xs text-muted">{t('skip-approval-other-window')}</p>}
+      {/* Redesign PR 4: Deny, then Allow, as on every request; this Allow lets the agent act without asking, so it is the danger button
+          (ADR-0102). The dwell and "Read it first" are unchanged. */}
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="button button--primary relative overflow-hidden px-3 py-1 text-xs" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
+        <Button size="sm" disabled={sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</Button>
+        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
           {t('approval-allow')}
           {answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
-        </button>
-        <button type="button" className="button px-3 py-1 text-xs" disabled={sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</button>
+        </Button>
         {answerable && !ready && <span id={wait} className="text-xs text-muted">{t('skip-approval-read-first')}</span>}
       </div>
     </article>
