@@ -961,6 +961,7 @@ mod tests {
             kind: "codex".into(),
             level: 1,
             parent_agent_id: "a".into(),
+            same_process: false,
             launch_options: Vec::new(),
             skips_permissions: false,
         }));
@@ -989,6 +990,7 @@ mod tests {
                 kind: "codex".into(),
                 level: 1,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 skips_permissions: skips,
             }))
@@ -1067,6 +1069,7 @@ mod tests {
                 kind: "shell".into(),
                 level: 2,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             })),

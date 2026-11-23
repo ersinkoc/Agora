@@ -567,6 +567,7 @@ mod tests {
                 kind: "k".into(),
                 level: 0,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             }),

@@ -1,0 +1,8 @@
+{
+  "agentId": "a1",
+  "projectId": "p1",
+  "nodeId": "n1",
+  "kind": "claude",
+  "level": "INTEGRATION_LEVEL_L3_ADAPTER",
+  "sameProcess": true
+}

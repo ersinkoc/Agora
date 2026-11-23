@@ -1209,8 +1209,6 @@ attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildiri
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
-usage-empty = Bir ajan çalışınca kullanım burada görünür.
-usage-empty-title = Henüz gösterilecek bir şey yok
 usage-stat-tokens = Kullanılan token
 usage-stat-agents = Ajan
 usage-agents = { $count } ajan
@@ -1527,7 +1525,7 @@ kit-sample-notify-hint = Adlar yalnızca siz isterseniz görünür.
 kit-sample-ask = { $name } bir komut çalıştırmak istiyor
 kit-sample-offline = Bu makine çevrimdışı
 kit-sample-offline-line = Ajanları çalışmayı sürdürür ve makine dönünce durumlarını bildirir.
-kit-sample-joined = Makine katıldı. Makineleriniz listesinde görünüyor.
+kit-sample-joined = Makine katıldı. Makinelerim listesinde görünüyor.
 
 # Yeniden tasarımın giriş ekranları (ADR-0102): giriş kartı, boş Ana sayfa ve komut paleti.
 signin-or = ya da

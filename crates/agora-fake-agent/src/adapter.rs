@@ -14,6 +14,7 @@
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `mode:ID` (with `--modes`): switches itself to mode ID, as an agent may on its own (ACP `current_mode_update`), and reports its
 //!   options again with ID as the current mode.
+//! - `config:auto_approve=VALUE` (with `--modes`): sets its option `auto_approve` to VALUE on its own and reports its config options again.
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
@@ -61,6 +62,21 @@ fn all_modes() -> Value {
         mode("turbo", "Turbo", false),
         mode("bypassPermissions", "Bypass Permissions", true),
     ])
+}
+
+/// The config options `--modes` reports: `auto_approve` set to `auto`, and with `--mode-config` the mode as the option `approvals`.
+fn config_options(mode_config: bool, auto: &str) -> Value {
+    let mut options = vec![json!({
+        "id": "auto_approve", "name": "Auto approve", "description": "",
+        "category": "other", "type": "boolean", "current": auto,
+        "choices": [], "skipsPermissions": false})];
+    if mode_config {
+        options.push(json!({
+            "id": "approvals", "name": "Approvals", "description": "",
+            "category": "mode", "type": "select", "current": "default",
+            "choices": all_modes(), "skipsPermissions": false}));
+    }
+    Value::Array(options)
 }
 
 /// Runs until `shutdown` or end of input.
@@ -121,27 +137,16 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 )?;
                 state(out, &session, "IDLE")?;
                 if modes {
-                    let all_modes = all_modes();
                     note(
                         out,
                         "session/options",
-                        json!({"sessionId": session, "modes": all_modes.clone(),
+                        json!({"sessionId": session, "modes": all_modes(),
                                "models": [], "currentMode": "default", "currentModel": ""}),
                     )?;
-                    let mut options = vec![json!({
-                        "id": "auto_approve", "name": "Auto approve", "description": "",
-                        "category": "other", "type": "boolean", "current": "false",
-                        "choices": [], "skipsPermissions": false})];
-                    if mode_config {
-                        options.push(json!({
-                            "id": "approvals", "name": "Approvals", "description": "",
-                            "category": "mode", "type": "select", "current": "default",
-                            "choices": all_modes, "skipsPermissions": false}));
-                    }
                     note(
                         out,
                         "session/config",
-                        json!({"sessionId": session, "options": options}),
+                        json!({"sessionId": session, "options": config_options(mode_config, "false")}),
                     )?;
                 }
             }
@@ -289,6 +294,12 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             }
                         }
                     }
+                    switch if modes && switch.starts_with("config:auto_approve=") => note(
+                        out,
+                        "session/config",
+                        json!({"sessionId": session,
+                               "options": config_options(mode_config, &switch["config:auto_approve=".len()..])}),
+                    )?,
                     switch if modes && switch.starts_with("mode:") => note(
                         out,
                         "session/options",
