@@ -1497,6 +1497,58 @@ fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_t
     });
 }
 
+/// #1119 item 5: an adapter that really ended (it crashed) a moment before its node stopped, and whose end the supervision loop had not
+/// taken yet. The stop lets go of it as of every held adapter and does not record the end (it cannot tell it from the end its own let-go
+/// causes). The next node learns it from the holder: it does not take the agent up, the holder lets it go, and the agent is offered for
+/// Resume, which is not refused as still running.
+///
+/// Deterministic as the drain test above: the test holds the supervisor, so the loop cannot take the end before the stop.
+#[test]
+fn an_adapter_that_ended_just_before_its_node_stopped_is_offered_for_resume_by_the_next_node() {
+    let _serial = serial();
+    let rig = Rig::new("ended");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    let pid = pid_of(&node, &id);
+    let holder = holder_pid(&rig);
+    let sup = std::sync::Arc::clone(&node.supervisor);
+    {
+        let guard = sup.lock().unwrap();
+        // The fake adapter exits with 3 on this prompt, before it answers.
+        let _ = guard.adapter_prompt(&agent, "crash", false);
+        wait_for("the adapter to end", || !alive(pid));
+        // The holder says how it ended with the end of its output, which the reader hands over as `Exited`.
+        std::thread::sleep(Duration::from_millis(1500));
+        node.begin_stop();
+    }
+    drop(sup);
+    assert_eq!(
+        state_of(&node, &id),
+        Some(AgentState::Idle),
+        "the loop took the end"
+    );
+    drop(node);
+
+    let node = rig.node();
+    assert!(!held(&node, &id), "an ended agent was taken up");
+    assert!(
+        !node
+            .supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .any(|v| v.id == agent && v.running),
+        "an ended agent is shown running"
+    );
+    let entry = node.ledger.get(&id).expect("the agent in the ledger");
+    assert!(entry.interrupted(), "not offered for Resume: {entry:?}");
+    assert!(!entry.still_running(), "{entry:?}");
+    // The holder let it go: it ran only this agent, so it ends.
+    wait_for("the holder to let the agent go and end", || !alive(holder));
+}
+
 /// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);
 /// the node's stop waits for it at most `DRAIN_WAIT` and still stops in time. The agent keeps running, and once its holder answers
 /// again the next node takes it up.

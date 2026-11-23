@@ -1311,7 +1311,10 @@ impl Adapter {
     }
 
     /// Everything the adapter said since the last call, oldest first. Never blocks. After [`Self::detach`] or [`Self::let_go`], the end
-    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder.
+    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder. A real end read just before
+    /// the let-go is dropped too (a stopping node would only schedule a restart it never makes): the holder still has the ended process,
+    /// so the next node does not take it up, the holder lets it go, and the agent is offered for Resume (#1119 item 5, tested in
+    /// `hold_node_pipes`).
     pub fn poll(&self) -> Vec<AdapterEvent> {
         let detached = matches!(self.proc, Proc::Held { detached: true, .. });
         std::iter::from_fn(|| self.events.try_recv().ok())
