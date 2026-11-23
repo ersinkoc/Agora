@@ -12,13 +12,20 @@ import { needsPanel } from '../net/needsPanel';
 import { kindOf } from './AgentTile';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { AgentAvatar, Button, Tag } from './kit';
-import { useAnswerHolds } from './useAnswerGuard';
+import { ReviewDialog, type ReviewResolve } from './ReviewRequest';
+import type { StartChoice } from './StartApproval';
+import { ShareHolds, useAnswerHolds } from './useAnswerGuard';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
 // this device's choice, a card over the window and a notification while the window is in the background. It holds only memory: what was
 // put off with Later, what is open and when it appeared are not stored anywhere.
 
-type Resolve = (a: ApprovalModel, approved: boolean, choice?: undefined, always?: boolean) => Promise<unknown> | unknown;
+// `choice`: a start's grant, chosen in Review (#1070); the card itself never sends one.
+type Resolve = (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => Promise<unknown> | unknown;
+
+// #1070: a start or a switch to act without asking is read in Review, opened from this card in its place (one Review, not the agent's card
+// and a second Review there). A switch the window cannot read keeps the old way, to its full card.
+const reviewsHere = (it: AttentionItem): it is Extract<AttentionItem, { kind: 'approval' }> => it.kind === 'approval' && !!(it.approval.start || it.approval.skip);
 
 // What the person is doing, read when it matters: whether the window is the one in front, and whether keys are going into a field or a
 // terminal. Re-read on every focus change, every typed key and, while something waits, twice a second.
@@ -61,6 +68,13 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   const notifyMode = useSyncExternalStore(attentionPrefs.subscribe, () => attentionPrefs.notify(), () => 'off' as NotifyMode);
   const [later, setLater] = useState<ReadonlySet<string>>(new Set());
   const [openKey, setOpenKey] = useState<string | undefined>();
+  // The start or switch whose Review this layer opened, by request id: drawn from the list as it is now, so a request that leaves the list
+  // takes the dialog with it. While it is open no card opens over it.
+  const [reviewId, setReviewId] = useState<string | undefined>();
+  const reviewing = reviewId === undefined ? undefined : items.find((i): i is Extract<AttentionItem, { kind: 'approval' }> => reviewsHere(i) && i.approval.id === reviewId);
+  const holds = useAnswerHolds([]);
+  // Gone from the list: forgotten, so the same request asked again later does not open Review by itself.
+  useEffect(() => { if (reviewId !== undefined && !reviewing) setReviewId(undefined); }, [reviewId, reviewing]);
   const candidates = useMemo(() => items.filter((i) => modalKind(i) && !later.has(i.key)), [items, later]);
   const modalOn = mode === 'modal' && !phone;
   const open = modalOn ? items.find((i) => i.key === openKey && modalKind(i)) : undefined;
@@ -83,18 +97,20 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   // to Review or put off (a newer request waits behind it), so what is under the pointer never changes by itself.
   useEffect(() => {
     if (!modalOn) { if (openKey !== undefined) setOpenKey(undefined); return; }
-    if (open) return;
+    if (open || reviewing) return;
     const first = candidates[0];
     if (first && mayInterrupt(read())) setOpenKey(first.key);
     else if (openKey !== undefined) setOpenKey(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modalOn, open, candidates, tick]);
+  }, [modalOn, open, reviewing, candidates, tick]);
 
   // Showing what needs the person, on their own act (a click on the banner or on a notification): the card opens whatever they were doing.
-  const latest = useRef({ items, candidates, modalOn, onReview });
-  latest.current = { items, candidates, modalOn, onReview };
+  const latest = useRef({ items, candidates, modalOn, onReview, reviewing });
+  latest.current = { items, candidates, modalOn, onReview, reviewing };
   const reveal = () => {
     const c = latest.current;
+    if (c.reviewing) return; // Review is open over the window already
+
     const all = c.items.filter((i) => modalKind(i));
     if (c.modalOn && all[0]) { setLater(new Set()); setOpenKey(all[0].key); return; }
     if (c.items[0]) c.onReview(c.items[0]);
@@ -135,7 +151,7 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   // Hidden while a Needs you list is on screen (the side panel on that subject, or a panel of the layout): it would be a third copy.
   const listShown = useSyncExternalStore(needsPanel.subscribe, needsPanel.isShown, () => false);
   const queued = items.filter((i) => modalKind(i) && i.key !== open?.key).length;
-  const showBanner = !phone && mode !== 'off' && !open && !listShown && (mode === 'banner' ? items.length > 0 : queued > 0);
+  const showBanner = !phone && mode !== 'off' && !open && !reviewing && !listShown && (mode === 'banner' ? items.length > 0 : queued > 0);
   return (
     <>
       {showBanner && (
@@ -144,7 +160,13 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
           <button type="button" className="button" onClick={reveal}>{t('attention-review')}</button>
         </div>
       )}
-      {open && <AttentionCard item={open} more={items.length - 1} stale={stale} onResolve={onResolve} onReview={(it) => { putOff(open.key); onReview(it); }} onLater={() => putOff(open.key)} />}
+      {open && <AttentionCard item={open} more={items.length - 1} stale={stale} onResolve={onResolve} onLater={() => putOff(open.key)}
+        onReview={(it) => { putOff(open.key); if (reviewsHere(it)) setReviewId(it.approval.id); else onReview(it); }} />}
+      {/* Review in the card's place: its own dwell and guards (a start's `useAnswerGuard`, a switch's `useSkipAnswer`), in the window's
+          holds, with the raw answer. Closing it leaves the request put off, as Later does (the banner brings it back). */}
+      {reviewing && <ShareHolds holds={holds}>
+        <ReviewDialog approval={reviewing.approval} agent={reviewing.agent} stale={stale} onResolve={onResolve ? (ok, choice) => onResolve(reviewing.approval, ok, choice) as ReturnType<ReviewResolve> : undefined} onClose={() => setReviewId(undefined)} />
+      </ShareHolds>}
     </>
   );
 }

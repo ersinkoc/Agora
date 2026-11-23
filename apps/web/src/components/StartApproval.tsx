@@ -4,7 +4,7 @@ import { approvalName } from '../net/approvalText';
 import type { StartOption } from '../net/approval';
 import { visible, type ApprovalModel, type StartRequest, type StartSetting } from '../net/view';
 import { ApprovalRequest, ASK_ICON, type ApprovalDensity } from './ApprovalRequest';
-import { Button, KeyValue } from './kit';
+import { Button, KeyValue, SegmentedControl } from './kit';
 
 export interface StartChoice { grant: number; nested: boolean }
 
@@ -77,8 +77,8 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
   // asks for, with "Keep asking" as the primary button (which goes back to the card, where it can be denied).
   const skipping = start.options.filter((o) => o.skipsPermissions);
   const [confirming, setConfirming] = useState(false);
-  // The same request can show in two places at once (its pane and the details panel): each has its own radio group.
-  const group = useId();
+  // The same request can show in two places at once (its pane and the details panel): each names its own choice.
+  const scope = useId();
   // The node gives a grant only when the request says it may (inside the asker's folder, not a shell); the choice is not offered otherwise.
   const who = visible(approvalName(approval));
   const title = startTitle(approval, start);
@@ -109,12 +109,16 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
             : <p className="m-0 mt-1 text-muted">{t('start-approval-no-prompt')}</p>}
         </div>
         {start.inside && !start.grantAllowed && <p className="m-0 text-muted">{t(start.options.length > 0 ? 'start-approval-options-once' : start.settings.length > 0 ? 'start-approval-settings-once' : 'start-approval-no-grant')}</p>}
-        {start.grantAllowed && <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0">
-          <legend className="sr-only">{t('start-approval-scope')}</legend>
-          <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="radio" name={group} checked={!more} onChange={() => setMore(false)} /><span className="min-w-0 break-words">{t('start-approval-once')}</span></label>
-          <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="radio" name={group} checked={more} onChange={() => setMore(true)} /><span className="min-w-0 break-words">{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</span></label>
+        {/* #1070: the grant is the kit's segmented control (one tab stop, the arrow keys choose). Its segments are short so they are never
+            cut; what "More like this" allows is said in full under it, always (it never appears or goes with the choice, so nothing under
+            it moves while the person chooses). What is sent is unchanged: `choice()`. */}
+        {start.grantAllowed && <div className="flex min-w-0 flex-col items-start gap-1.5" data-grant-choice>
+          <span id={`${scope}-label`} className="text-muted">{t('start-approval-scope')}</span>
+          <SegmentedControl labelledBy={`${scope}-label`} value={more ? 'more' : 'once'} onChange={(v) => setMore(v === 'more')}
+            items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short') }]} />
+          <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</p>
           {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
-        </fieldset>}
+        </div>}
         {confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
           <div className="min-w-0 flex-1 basis-64"><strong className="block">{t('session-confirm-title')}</strong>
             <span className="text-muted">{t('start-confirm-skip-body', { name: skipping.map(optionName).join(', ') })}</span></div>

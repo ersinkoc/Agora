@@ -59,7 +59,8 @@ const ask = (id: string, over: Partial<ApprovalModel> = {}): ApprovalModel =>
   ({ id: `n1/${id}`, node: 'n1', localId: id, agentId: 'n1/a1', agentName: 'amber', machineName: 'laptop', action: 'Edit src/auth.rs', detail: '+12 -3', expiresAtMs: 0, ...over });
 const list = (...a: ApprovalModel[]): AttentionItem[] => attentionList(a, [agent]);
 
-const card = () => document.querySelector('.attention-card') as HTMLElement | null;
+// The attention dialog itself (Review, opened in its place for a start or a switch, shares its frame: #1070).
+const card = () => document.querySelector('.attention-card:not([data-review-dialog])') as HTMLElement | null;
 const banner = () => document.querySelector('.attention-banner') as HTMLElement | null;
 const button = (text: string) => [...document.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement | undefined;
 const click = (text: string) => { const b = button(text); if (!b) throw new Error(`no button ${text}`); act(() => { b.click(); }); };
@@ -248,7 +249,9 @@ describe('what has to be read has no Allow', () => {
       await wait(ATTENTION_DWELL_MS + 100);
       expect([...card()!.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Later', 'Review']);
       click('Review');
-      expect(onReview).toHaveBeenCalledTimes(1);
+      // A start is read in Review, opened in the card's place (#1070); the others in their full card, as before.
+      expect(onReview).toHaveBeenCalledTimes(r.start ? 0 : 1);
+      expect(!!document.querySelector('[data-review-dialog]')).toBe(!!r.start);
       expect(onResolve).not.toHaveBeenCalled();
       expect(card()).toBeNull();
     });

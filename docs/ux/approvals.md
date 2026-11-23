@@ -44,11 +44,12 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
   (`busy`: an answer on its way, the link down) or the request is held. The component only draws what the surface decided.
 - **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
   as it can be; nothing of the ask is cut.
-- **One copy:** the side panel lists an agent by its request's card (which opens the agent: a start's and a switch's too), not again as
+- **One copy:** the side panel lists an agent by its request's card (whose chevron opens the agent: a start's and a switch's too), not again as
   a row above it; only a switch of a shape the window cannot read (which can be dismissed) keeps its agent's row. The corner banner is
   hidden while a Needs you list is on screen.
 - **Not yet:** the phone's own cards and bar (its start and switch cards show the whole request in the card size, flat inside the
-  phone's card, with no Review), the close-agent confirmation, and the grant choices as a segmented control and a toggle (they stay radios and a check).
+  phone's card, with no Review), and "Its helpers may ask to start helpers too" as a toggle (it stays a check). The close-agent
+  confirmation is the kit's dialog look and the grant choices a segmented control (#1070).
 - Screens: `docs/ux/screens/approval-row-*.png`, `approval-panel-*.png`, `approval-terminal-*.png`, `approval-card-narrow-*.png`,
   `approval-narrow-pane-*.png`, `approval-dialog-*.png`, `approval-skip-danger-*.png`, `approval-start-noask-danger-*.png` (dark and light;
   the last two show the start and switch cards before PR 5, which `start-cards-*.png` replace).
@@ -69,19 +70,33 @@ composer) they are a **card in short** with **Review**, and the whole request is
   All of it is the agent's or the machine's text, shown as text with any hidden character written out.
 - **Buttons:** **Deny** (secondary), then **Review** (primary) in the place of Allow. The side panel's card also opens the agent.
   A card that cannot be answered (a read-only banner) has Review only.
+- **One Review wherever it is seen (#1070):** Home's row and the attention dialog have **Review** too, and it opens the same dialog
+  straight away (before, it went to the agent's card, where Review had to be pressed again). Home's row has no Deny (it never had);
+  the attention dialog's Review opens the dialog in its place (never stacked over it, and no card opens over Review). Each draws the
+  dialog only while the request is listed, under its holds, and hands it the raw answer, so the dialog's own guard is the one that
+  holds the request. A switch the window cannot read keeps the old way to its full card; the banner-only mode still goes to the agent.
 - **Never decided on cut text:** `decidableInline` never answers these inline, and the short card never offers Allow, however long it
   waits. Review shows everything: the folder, every setting and option, the whole prompt (the dialog scrolls, its buttons stay in
   view), the grant choices, the switch's machine rendering and scope. Close, Escape and a click outside only close it.
+- **The grant** (a start that may allow more like it) is the kit's segmented control, **Only this one** | **More like this** (one tab
+  stop; the arrow keys, Home and End choose; mirrored right to left). Its segments are short so they are never cut, and what "More like
+  this" allows ("Up to 3 codex agents in this folder while claude · amber runs, without asking again") is written whole under it
+  whatever is chosen, so nothing under the control appears, goes or moves while the person chooses. What is signed is unchanged.
 - **Guards:** a start's Deny on the card goes through the surface's dwell (T44, `useAnswerGuard`); a switch's Deny keeps its own rules
   (no dwell, one click one decision, off while busy, held or answered). Review's dialog has guards of its own from the moment it opens,
   so a second click on Review never lands on Allow: a start's answers wait out a fresh dwell (restarted when the request changes, the
   person comes back, the link comes back or an answer settles anywhere); a switch's Allow keeps its dwell, its bar and "Read it first".
+  The same from Home and from the attention dialog: Review opened there starts its own dwell when it opens, and opening or closing it
+  over Home restarts Home's dwell, so a second click on Close never lands on an Allow in a row under it. A switch's Deny in Review has
+  no dwell there either (as on its card: Deny needs no reading).
   Every answer, on the card or in Review, holds the request in the window's holds (#1048): one answer per request everywhere.
 - **Danger:** a start that would not ask and a switch keep the red Allow; the start still opens the confirmation first ("Keep asking"
   is the primary, focused answer), which goes back to Review.
 - Screens: `docs/ux/screens/start-cards-panel-*.png`, `start-cards-terminal-*.png`, `start-cards-review-*.png` (also
   `-review-phone-`, a prompt taller than the screen scrolls inside Review with its buttons in view), `start-cards-review-noask-*.png`,
-  `start-cards-skip-*.png`, and the phone's own cards `start-cards-phone-*.png` (dark and light).
+  `start-cards-skip-*.png`, and the phone's own cards `start-cards-phone-*.png` (dark and light). One Review (#1070):
+  `review-once-home-*.png` (Review opened from Home's row), `review-once-attention-*.png` (from the attention dialog, in its place) and
+  `review-once-grant-*.png` (the grant's segmented control, "More like this" chosen by keyboard).
 
 ## Allow always (ADR-0101)
 
