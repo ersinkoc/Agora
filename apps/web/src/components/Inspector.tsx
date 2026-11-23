@@ -137,7 +137,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
     {tab === 'needs' && <div className="grid gap-2">
         {needs === 0 && <p className="muted">{t('attention-empty')}</p>}
         {attention.map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
-        {notice && <p role="alert" className="text-needs-you">{notice}</p>}
+        {notice && <p role="alert" className="text-danger">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
         {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />)}
       </div>}
@@ -145,7 +145,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">
           <button type="button" className="ide-row min-w-0 flex-1 justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))} title={`${a.workspace} · ${a.machine}`}>
             <span className="min-w-0">{a.shared ? <span className="block font-medium"><FolderPath path={a.workspace} /></span> : <span className="block truncate font-medium">{a.name}</span>}<span className="block truncate text-xs text-muted">{a.shared ? `${a.machine} · ${t('workspace-shared')}` : `${a.machine} · ${a.workspace}`}</span></span>
-            <span className="flex-none text-xs text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
+            <span className="kit-tag flex-none">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
           </button>
           {onPane && <button type="button" className="ide-iconbtn flex-none" onClick={() => onPane(a.id)} aria-label={t('pane-open-beside-named', { name: a.shared ? a.workspace : a.name })} title={t('pane-open-changes')}><Icon name="splitRight" /></button>}
         </li>)}

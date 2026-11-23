@@ -59,12 +59,12 @@ export function StartApproval({ approval, start, busy, onResolve }: {
         </Fragment>)}
         {start.options.length > 0 && <>
           <dt className="text-muted">{t('start-how-it-acts')}</dt>
-          <dd className={`m-0 break-words ${skipping.length > 0 ? 'text-needs-you' : ''}`}>{start.options.map(optionName).join(', ')}</dd>
+          <dd className={`m-0 break-words ${skipping.length > 0 ? 'text-danger' : ''}`}>{start.options.map(optionName).join(', ')}</dd>
         </>}
       </dl>
-      {skipping.length > 0 && <p className="m-0 text-xs text-needs-you">{t('start-approval-does-not-ask')}</p>}
+      {skipping.length > 0 && <p className="m-0 text-xs text-danger">{t('start-approval-does-not-ask')}</p>}
       {start.depth > 1 && <p className="m-0 text-xs text-muted">{t('start-approval-helper')}</p>}
-      {!start.inside && <p className="m-0 text-xs text-needs-you">{t('start-approval-outside')}</p>}
+      {!start.inside && <p className="m-0 text-xs text-danger">{t('start-approval-outside')}</p>}
       <div className="text-xs">
         <span className="text-muted">{t('start-approval-prompt')}</span>
         {start.prompt
@@ -78,7 +78,7 @@ export function StartApproval({ approval, start, busy, onResolve }: {
         <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="radio" name={group} checked={more} onChange={() => setMore(true)} /><span className="min-w-0 break-words">{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</span></label>
         {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
       </fieldset>}
-      {confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+      {confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
         <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('session-confirm-title')}</strong>
           <span className="text-muted">{t('start-confirm-skip-body', { name: skipping.map(optionName).join(', ') })}</span></div>
         <button type="button" className="button px-3 py-1 text-xs" disabled={busy} onClick={() => { setConfirming(false); onResolve(true, choice()); }}>{t('start-confirm-skip-yes')}</button>

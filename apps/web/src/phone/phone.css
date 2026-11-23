@@ -96,7 +96,7 @@ body {
 .phone-notice {
   margin: var(--space-2) var(--space-3) 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--state-needs-you);
+  border: 1px solid var(--danger);
   border-radius: var(--radius-s);
   background: var(--surface-1);
 }

@@ -39,12 +39,12 @@ export function CloseConfirm({ agent, where }: { agent: AgentTileModel; where: C
     if (code) setError(code); else closeAsk.cancel();
   };
   return (
-    <div role="alertdialog" aria-label={t('close-title', { name: agent.name })} data-close-confirm className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
+    <div role="alertdialog" aria-label={t('close-title', { name: agent.name })} data-close-confirm className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-danger/60 bg-surface-2 px-3 py-2">
       <div className="min-w-0 flex-1 basis-64 text-xs">
         <strong className="block">{t('close-title', { name: agent.name })}</strong>
         <span className="text-muted">{t('close-body')}</span>
-        {losesWork(agent) && <span className="mt-0.5 block text-needs-you" data-close-warning>{t('close-working')}</span>}
-        {error && <span role="alert" className="mt-0.5 block text-needs-you">{t('close-failed-prefix', { reason: t(closeReasonKey(error)) })}</span>}
+        {losesWork(agent) && <span className="mt-0.5 block text-danger" data-close-warning>{t('close-working')}</span>}
+        {error && <span role="alert" className="mt-0.5 block text-danger">{t('close-failed-prefix', { reason: t(closeReasonKey(error)) })}</span>}
       </div>
       <button type="button" className="button gap-1.5 border-removed px-3 py-1 text-xs text-removed" disabled={busy} onClick={() => void go()}><Icon name="close" className="size-3.5" />{t('close-agent')}</button>
       <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => closeAsk.cancel()}>{t('close-keep')}</button>
