@@ -817,6 +817,7 @@ message NodeForget {
 }
 
 // ADR-0053. The hub stops listing a closed agent. Answered by the hub; refused with `agent.running` while the agent runs.
+// ADR-0108: the hub then sends it, with the node's own id of the agent, to a node that offers `agent.forget.local`.
 message AgentForget {
   string agent_id = 1;
 }
