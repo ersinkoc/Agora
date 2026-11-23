@@ -4,7 +4,16 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
+- A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
+- When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
+- A handoff whose receiving agent cannot take it now goes back to the giver even when the giver's machine disconnected first.
+- Stopping a chat agent's turn no longer withdraws its waiting request to start a helper.
+- In a Files view, a file that was still loading when you pressed Refresh now opens instead of loading for ever, and revoking two helper permissions one after the other removes both from the list.
+- A malformed `%` escape in a window link (`#/agent/…`, `#/machines/…`) no longer blanks the page, and a file view no longer stops responding on highlighted text with an unclosed tag.
+- `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
+- A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
+- A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version's records (its version and its program's name) as they were, or says `rollback_incomplete` when it could not put them back.
 
 ## 0.3.35
 
