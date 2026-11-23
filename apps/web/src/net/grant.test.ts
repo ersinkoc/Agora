@@ -40,6 +40,8 @@ describe('grants', () => {
       [{ agentSetMode: { agentId: 'a-1' } }, 'agent.set_mode', 'settings'],
       [{ agentSetConfig: { agentId: 'a-1' } }, 'agent.set_config', 'settings'],
       [{ terminalResize: { terminalId: 't-a-1' } }, 'terminal.resize', 'resize'],
+      [{ terminalSubscribe: { terminalId: 't-a-1' } }, 'terminal.subscribe', 'watch'],
+      [{ chatSubscribe: { agentId: 'a-1' } }, 'chat.subscribe', 'watch'],
     ];
     for (const [body, command, kind] of cases) {
       expect(grantFor(body), command).toEqual({ scope: 'agent:a-1', commands: [command], kind });

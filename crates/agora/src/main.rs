@@ -632,6 +632,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("env-passed", _) => key!("doctor-env-passed"),
             ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
             ("control-token-reachable", _) => key!("doctor-control-token-reachable"),
+            ("protected-path-reachable", _) => key!("doctor-protected-path-reachable"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),
@@ -1011,7 +1012,8 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
-/// `agora agent list`: one line per agent, columns separated by tabs (id, kind, state, running or stopped).
+/// `agora agent list`: one line per agent, columns separated by tabs (id, kind, state, running or stopped), and, after a node restart,
+/// the agents it found interrupted (ADR-0107) with a fifth column; see [`agent_list_lines`].
 fn agent_list(say: &Say, o: &Opts) -> ExitCode {
     let mut c = match connect(say, o) {
         Ok(c) => c,
@@ -1021,30 +1023,76 @@ fn agent_list(say: &Say, o: &Opts) -> ExitCode {
         Ok(v1::CommandOk {
             result: Some(Ok_::AgentList(list)),
         }) => {
-            if list.agents.is_empty() {
+            let lines = agent_list_lines(&list);
+            if lines.is_empty() {
                 say.out(key!("cli-agent-list-empty"), &[]);
             }
-            for a in &list.agents {
-                let state = v1::AgentState::try_from(a.state).map_or("unknown", |s| match s {
-                    v1::AgentState::Working => "working",
-                    v1::AgentState::Blocked => "blocked",
-                    v1::AgentState::Idle => "idle",
-                    v1::AgentState::Done => "done",
-                    v1::AgentState::Unspecified => "unknown",
-                });
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    a.agent_id,
-                    a.kind,
-                    state,
-                    if a.running { "running" } else { "stopped" }
-                );
+            for line in lines {
+                println!("{line}");
             }
             ExitCode::SUCCESS
         }
         Ok(_) => ExitCode::from(1),
         Err(code) => code,
     }
+}
+
+/// The lines of `agora agent list`, one list in id order (`agent-2` before `agent-10`) across the node's agents and the ones it found
+/// interrupted. An agent's line is `id, kind, state, running|stopped`, as it always was. ADR-0107: an interrupted agent's line has its
+/// last state, `interrupted` in the fourth column and what can be done in a fifth: `still-running` (its process outlived the node;
+/// `agora agent stop` ends it, and Resume waits until then), `resume`, or `start-again` (no session to continue). Fixed tokens like
+/// `running` and `stopped`, not prose, so scripts can read them.
+fn agent_list_lines(list: &v1::AgentListResult) -> Vec<String> {
+    fn state_word(s: i32) -> &'static str {
+        v1::AgentState::try_from(s).map_or("unknown", |s| match s {
+            v1::AgentState::Working => "working",
+            v1::AgentState::Blocked => "blocked",
+            v1::AgentState::Idle => "idle",
+            v1::AgentState::Done => "done",
+            v1::AgentState::Unspecified => "unknown",
+        })
+    }
+    let mut rows: Vec<(&str, String)> = list
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.agent_id.as_str(),
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    a.agent_id,
+                    a.kind,
+                    state_word(a.state),
+                    if a.running { "running" } else { "stopped" }
+                ),
+            )
+        })
+        .chain(list.interrupted.iter().map(|i| {
+            let next = if i.still_running {
+                "still-running"
+            } else if i.resumable {
+                "resume"
+            } else {
+                "start-again"
+            };
+            (
+                i.agent_id.as_str(),
+                format!(
+                    "{}\t{}\t{}\tinterrupted\t{next}",
+                    i.agent_id,
+                    i.kind,
+                    state_word(i.last_state)
+                ),
+            )
+        }))
+        .collect();
+    // Stable: rows with the same number keep the node's order.
+    rows.sort_by_key(|(id, _)| {
+        id.strip_prefix("agent-")
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+    rows.into_iter().map(|(_, line)| line).collect()
 }
 
 /// `agora agent kinds`: the agents this node can start, and whether each is installed.
@@ -1386,5 +1434,96 @@ mod remote_error_tests {
             .to_info();
         let en = Say(Catalog::english()).remote_error_text(&other);
         assert!(en.contains("field: directory.project_id"), "{en}");
+    }
+}
+
+#[cfg(test)]
+mod agent_list_tests {
+    use super::*;
+
+    fn summary(id: &str, state: v1::AgentState, running: bool) -> v1::AgentSummary {
+        v1::AgentSummary {
+            agent_id: id.into(),
+            kind: "shell".into(),
+            state: state as i32,
+            worktree_id: "/w".into(),
+            terminal_id: String::new(),
+            running,
+            restarts: 0,
+        }
+    }
+
+    fn interrupted(id: &str, resumable: bool, still_running: bool) -> v1::AgentInterrupted {
+        v1::AgentInterrupted {
+            agent_id: id.into(),
+            kind: "claude-code".into(),
+            project_id: "p".into(),
+            folder: "/w".into(),
+            parent_agent_id: String::new(),
+            resumable,
+            started_at_ms: 1,
+            interrupted_at_ms: 2,
+            last_state: v1::AgentState::Working as i32,
+            still_running,
+        }
+    }
+
+    #[test]
+    fn interrupted_agents_get_a_fifth_column_and_one_id_order_across_both_lists() {
+        let list = v1::AgentListResult {
+            agents: vec![
+                summary("agent-2", v1::AgentState::Done, false),
+                summary("agent-10", v1::AgentState::Idle, true),
+            ],
+            interrupted: vec![
+                interrupted("agent-3", true, false),
+                interrupted("agent-4", false, false),
+                // A survivor can be resumable too: Resume waits until it is stopped, so it says still-running.
+                interrupted("agent-11", true, true),
+            ],
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            [
+                "agent-2\tshell\tdone\tstopped",
+                "agent-3\tclaude-code\tworking\tinterrupted\tresume",
+                "agent-4\tclaude-code\tworking\tinterrupted\tstart-again",
+                "agent-10\tshell\tidle\trunning",
+                "agent-11\tclaude-code\tworking\tinterrupted\tstill-running",
+            ]
+        );
+    }
+
+    /// An old node sends no interrupted agents: the lines are exactly the ones `agora agent list` printed before ADR-0107.
+    #[test]
+    fn without_interrupted_agents_the_lines_are_unchanged() {
+        let list = v1::AgentListResult {
+            agents: vec![
+                summary("agent-1", v1::AgentState::Working, true),
+                summary("agent-2", v1::AgentState::Unspecified, false),
+            ],
+            interrupted: Vec::new(),
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            [
+                "agent-1\tshell\tworking\trunning",
+                "agent-2\tshell\tunknown\tstopped"
+            ]
+        );
+        assert!(agent_list_lines(&v1::AgentListResult::default()).is_empty());
+    }
+
+    /// Only interrupted agents: listed, and the "no agents" sentence is not said (the caller says it for no lines at all).
+    #[test]
+    fn a_node_with_only_interrupted_agents_has_lines() {
+        let list = v1::AgentListResult {
+            agents: Vec::new(),
+            interrupted: vec![interrupted("agent-1", true, false)],
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            ["agent-1\tclaude-code\tworking\tinterrupted\tresume"]
+        );
     }
 }

@@ -110,9 +110,11 @@ holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline`
 session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`). Both say `AgentStarted.same_process`, so the hub
 keeps the agent's counters (section "A kept agent's counters", ADR-0104).
 
-SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
-a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
-control socket; the node's agents and policy are unchanged and nothing depends on the hub.
+SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a person or a
+tool can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local control
+socket, so whoever speaks them has the owner's own authority there (the routed-command checks, grants included, apply to the
+hub's connection only). It is not the hub's path (ADR-0032: the hub reaches an SSH-only node through a tunnel to its own TLS
+port); nothing depends on the hub.
 Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
 its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
@@ -196,7 +198,10 @@ have 256 requests waiting. At most 1024 commands from all clients together wait 
 rules of a local command (the hub cannot widen them).
 
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
-other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
+other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`; the hub refuses it, and the node
+refuses it again on its hub connection, never relying on the hub, as it does a second subscription on a stream it still has
+open, and judges an allowed one by the grants it applies on stream 1).
+The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
 (kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
@@ -394,7 +399,9 @@ A node serves the same commands on a local socket (owner-only; `agora node run`,
 so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
-opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
+opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client (`ChatSubscribe` and `PreviewConnect` too; any
+other command on a dynamic stream but `ControlAuth`, which only proves the connection, and any of these three on stream 1, is
+`protocol.invalid_message` here as well). After the response the
 node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
 or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
 that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
@@ -564,7 +571,10 @@ All additions; nothing published changed.
   process of the node ran, as that process listed them: `running` false, the ledger's last state, its folder as `worktree_id`, no
   terminal and no restarts, whatever folder they ran in (a project worktree, a directory agent's folder or its separate worktree).
   An agent the supervisor knows is listed from the supervisor. Nothing is announced to the hub for them: the hub keeps its own closed
-  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is not listed. The list is in id order. An ended agent
+  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is also listed in `AgentListResult.interrupted`
+  (ADR-0107, field 2: each entry the `AgentInterrupted` the node announces for it, built by the same code, so `resumable` and
+  `still_running` are what the window shows; oldest id first; an id the supervisor holds, one being resumed or started again, is in
+  `agents` only; old nodes send none and old readers skip it). The list is in id order. An ended agent
   listed only from the ledger cannot be addressed: `agent.stop`, prompts and the other agent commands answer `agent.not_found`, and its
   folder is not a `worktree_id` the node accepts.
 - **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event

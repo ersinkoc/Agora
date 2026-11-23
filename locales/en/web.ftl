@@ -566,6 +566,7 @@ grant-title-stop = Allow stopping { $agent } for 1 hour?
 grant-title-interrupt = Allow interrupting the current turn of { $agent } for 1 hour?
 grant-title-settings = Allow changing the mode, model or settings of { $agent } for 1 hour?
 grant-title-resize = Allow resizing the terminal of { $agent } for 1 hour?
+grant-title-watch = Allow watching { $agent } for 1 hour?
 grant-title-start = Allow starting agents in this project for 1 hour?
 grant-title-task = Allow giving tasks to { $agent } for 1 hour?
 grant-title-other = Allow this window to act on { $machine } for 1 hour?

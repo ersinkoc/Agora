@@ -484,6 +484,16 @@ impl Drop for Descriptor {
     }
 }
 
+/// What each direction of a local pipe holds before a write waits for the reader.
+const PIPE_BUFFER: u32 = 64 * 1024;
+
+/// Most bytes one `WriteFile` is given while a write timeout is set (#1089, measured on Windows 11). A pending write that is larger than
+/// the pipe's buffer can be partly taken by the reader and still report 0 bytes written when it is cancelled, so a send that timed
+/// out and is tried again would send those bytes twice. A write no larger than the buffer is all or nothing: once the reader takes
+/// any of it, the rest fits the buffer and the write completes, so one that is cancelled moved nothing. A quarter of the buffer keeps
+/// well inside that.
+const BOUNDED_WRITE: usize = PIPE_BUFFER as usize / 4;
+
 fn create_instance(name: &[u16], sd: &Descriptor, first: bool) -> io::Result<Handle> {
     let attrs = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -502,8 +512,8 @@ fn create_instance(name: &[u16], sd: &Descriptor, first: bool) -> io::Result<Han
             open,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
-            64 * 1024,
-            64 * 1024,
+            PIPE_BUFFER,
+            PIPE_BUFFER,
             0,
             &attrs,
         )
@@ -762,6 +772,8 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
 pub struct Stream {
     handle: Arc<Handle>,
     timeout: Arc<Mutex<Option<Duration>>>,
+    /// How long a write may wait for the reader (`None`: for ever); see [`BOUNDED_WRITE`].
+    write_timeout: Arc<Mutex<Option<Duration>>>,
     closed: Arc<AtomicBool>,
     /// Set for good by `shutdown`. Every read and write also waits on it, so one submitted after `shutdown` already cancelled the
     /// handle's I/O (it passed the `closed` check just before) still cannot wait for ever on a peer that stopped reading.
@@ -773,6 +785,7 @@ impl Stream {
         Ok(Self {
             handle: Arc::new(h),
             timeout: Arc::new(Mutex::new(None)),
+            write_timeout: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(Event::new()?),
         })
@@ -797,6 +810,20 @@ impl Stream {
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         *self
             .timeout
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))? = t;
+        Ok(())
+    }
+
+    /// How long a write may wait for the reader to take it; past that the write is cancelled and fails with `TimedOut`, having sent
+    /// nothing, so it can be tried again. While a timeout is set, a write sends at most [`BOUNDED_WRITE`] bytes. A zero timeout is
+    /// refused, as std refuses it for a socket.
+    pub fn set_write_timeout(&self, t: Option<Duration>) -> io::Result<()> {
+        if t.is_some_and(|t| t.is_zero()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        *self
+            .write_timeout
             .lock()
             .map_err(|_| io::Error::other("poisoned"))? = t;
         Ok(())
@@ -910,6 +937,15 @@ impl Stream {
         if buf.is_empty() {
             return Ok(0);
         }
+        let limit = *self
+            .write_timeout
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))?;
+        // A write that can be cancelled must be one the pipe takes whole or not at all (see `BOUNDED_WRITE`).
+        let buf = match limit {
+            Some(_) => &buf[..buf.len().min(BOUNDED_WRITE)],
+            None => buf,
+        };
         let event = Event::new()?;
         let mut ov = overlapped(&event);
         // Only this pointer is used from here on, while the system may write through it.
@@ -928,7 +964,7 @@ impl Stream {
             }
             e => return Err(os_error(e)),
         }
-        match self.finish(ovp, &event, None)? {
+        match self.finish(ovp, &event, limit)? {
             Some(0) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
