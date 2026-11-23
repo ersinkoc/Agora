@@ -2330,7 +2330,7 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     use agora_tui::client::{Hub as ConsoleHub, Session, Update};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED || cfg!(windows) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     struct Member(Arc<Mutex<BTreeSet<String>>>);
@@ -2359,8 +2359,9 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
     )
     .unwrap();
-    // Two projects of the machine; a link inside the member's project leads into the other one.
-    let pick = std::fs::canonicalize({
+    // Two projects of the machine; a link inside the member's project leads into the other one. Spelled as the machine reports
+    // folders (on Windows without the verbatim `\\?\` prefix `std::fs::canonicalize` gives).
+    let pick = agora_platform::canonicalize_plain(&{
         let p = tmp("member-folder-pick");
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -2478,6 +2479,12 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     );
     let out = agora_tui::picker::child(&app, "out");
     let other = pick.join("other").to_string_lossy().into_owned();
+    // `out` is spelled inside the granted project, so the hub lets it through; it leads into the other project (a junction on
+    // Windows), so the refusal below is the machine's, after it followed the link (#1091).
+    assert_eq!(
+        agora_platform::canonicalize_plain(std::path::Path::new(&out)).unwrap(),
+        pick.join("other")
+    );
     for path in [out.as_str(), other.as_str(), ""] {
         assert_eq!(
             refused(session.list_folder("laptop", path, sign("list", path, "", ""))),
