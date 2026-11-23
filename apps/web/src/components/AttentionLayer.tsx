@@ -61,7 +61,7 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   stale?: boolean;
   phone?: boolean;
   onResolve?: Resolve;
-  // Goes to the full card of an item (its agent, or the Needs you list).
+  // Goes to the full card of an item (its agent, or the Needs you list). A start or a switch is read in Review here instead (#1070).
   onReview: (it: AttentionItem) => void;
 }) {
   const mode = useSyncExternalStore(attentionPrefs.subscribe, () => attentionPrefs.mode(), () => 'modal' as AttentionMode);

@@ -142,6 +142,25 @@ describe('one Review from Home (#1070)', () => {
     expect(on).not.toHaveBeenCalled();
   });
 
+  it('opening and closing Review over Home starts Home\'s dwell again: a second click on Close never lands on a row\'s Allow', () => {
+    const on = vi.fn((..._a: unknown[]) => true);
+    const plain = { id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 } as ApprovalModel;
+    act(() => root.render(homeAndCard([plain, start], on)));
+    const home = () => host.querySelector('[data-surface="home"]')!;
+    dwell(5 * ATTENTION_DWELL_MS);
+    expect(off(get(home(), 'Allow'))).toBe(false); // the plain row is ready
+    act(() => homeReview().click());
+    expect(off(get(home(), 'Allow'))).toBe(true);
+    dwell(5 * ATTENTION_DWELL_MS);
+    press(dialog()!, t('approval-review-close'));
+    press(home(), 'Allow');
+    expect(on).not.toHaveBeenCalled();
+    dwell();
+    press(home(), 'Allow');
+    expect(on).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledWith(expect.objectContaining({ id: plain.id }), true);
+  });
+
   it('a start that would not ask keeps its danger Allow and confirmation in Review opened from Home', () => {
     const on = vi.fn();
     const x = demoStartNoAskApproval as ApprovalModel;
@@ -230,6 +249,10 @@ describe('one Review from the attention dialog (#1070)', () => {
     press(attentionCard()!, t('attention-later'));
     const banner = document.querySelector('.attention-banner') as HTMLElement;
     expect(banner).not.toBeNull();
+    // The modals traded places (the card went as Review came, then another card): with none open, the window is clickable again.
+    await settleAll();
+    expect(document.querySelector('[role=dialog],[role=alertdialog]')).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe('none');
     press(banner, t('attention-review'));
     expect(attentionCard()!.textContent).toContain(t('attention-start-read'));
   });

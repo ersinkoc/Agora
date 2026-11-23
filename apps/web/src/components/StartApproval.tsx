@@ -115,7 +115,7 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
         {start.grantAllowed && <div className="flex min-w-0 flex-col items-start gap-1.5" data-grant-choice>
           <span id={`${scope}-label`} className="text-muted">{t('start-approval-scope')}</span>
           <SegmentedControl labelledBy={`${scope}-label`} value={more ? 'more' : 'once'} onChange={(v) => setMore(v === 'more')}
-            items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short') }]} />
+            items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who }) }]} />
           <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</p>
           {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
         </div>}

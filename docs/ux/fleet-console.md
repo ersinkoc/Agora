@@ -53,7 +53,9 @@ rendered page for it.
      and detail, same machine, project and agent kind; a request to start an agent is never collapsed): no stack of identical Allow
      buttons. Each is then reviewed in the full card.
    * How long ago it asked is on every row or on none (when the window does not know it for some, it shows it for no one). Everything else has *Review and
-     decide*, which opens the agent where the whole request is shown and answered. The row's buttons are the banner's buttons: the same
+     decide*, which opens the agent where the whole request is shown and answered; for a start or a switch to act without asking it opens
+     Review's dialog over Home instead (#1070: one Review, with its own dwell and the window's holds, [approvals.md](approvals.md#start-and-switch-requests)),
+     and opening or closing it restarts the queue's dwell. The row's buttons are the banner's buttons: the same
      function answers, the same signing runs (ADR-0020); nothing is decided on text that was cut.
 3. **Tiles**, grouped by machine, by project, by agent kind or by state (the viewer's choice, made with the shared segmented control,
    remembered in this browser only; the agent list uses the same choice). A tile is a flat card: the agent's avatar (its colour) beside
