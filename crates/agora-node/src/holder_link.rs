@@ -1299,6 +1299,12 @@ mod budget_tests {
             let _ = std::fs::remove_dir_all(&dir);
             (got, readings.get())
         };
+        // Out of time only after the last receive: refused.
+        let (got, _) = read(4);
+        assert!(
+            matches!(&got, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut),
+            "a frame completed after its deadline was accepted: {got:?}"
+        );
         // A clock that never runs out: the frame is read whole, with the four readings counted on above.
         let (got, readings) = read(usize::MAX);
         assert!(
@@ -1306,12 +1312,6 @@ mod budget_tests {
             "{got:?}"
         );
         assert_eq!(readings, 4, "the clock readings this test counts on");
-        // Out of time only after the last receive: refused.
-        let (got, _) = read(4);
-        assert!(
-            matches!(&got, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut),
-            "{got:?}"
-        );
     }
 
     #[test]
