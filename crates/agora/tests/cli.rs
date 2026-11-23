@@ -507,6 +507,43 @@ fn agent_list_shows_the_agents_a_restarted_node_found_interrupted() {
     }
 }
 
+/// #1138 review F2: a node whose only agent is interrupted lists it, and does not also say it has no agents (that sentence is for no
+/// line at all, not for no `agents` row).
+#[test]
+fn a_node_with_only_an_interrupted_agent_does_not_say_it_has_none() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("only-interrupted");
+    let node = start_node(&s);
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let end = Instant::now() + Duration::from_secs(30);
+    while ledger_entry(&s, "agent-1").is_none() {
+        assert!(Instant::now() < end, "the ledger never recorded the agent");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    let _node = start_node(&s);
+    let lines = agent_list_lines(&s);
+    assert!(
+        !lines.iter().any(|l| l.contains("This node has no agents.")),
+        "{lines:?}"
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("agent-1\tshell\t"), "{lines:?}");
+    assert!(lines[0].contains("\tinterrupted\t"), "{lines:?}");
+    // A survivor is ended here, so the test leaves no `sh` behind.
+    if lines[0].ends_with("\tstill-running") {
+        let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+        assert_eq!(code, 0, "{err}");
+    }
+}
+
 /// RM-19 (#903): `agora agent start` for a kind whose program this machine cannot find says so in words, with the program, for a
 /// terminal kind and for an ACP kind (started through the bridge, which ends at once), as `agora agent kinds` already marks it missing.
 #[test]

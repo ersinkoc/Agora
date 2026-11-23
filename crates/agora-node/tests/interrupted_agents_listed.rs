@@ -88,6 +88,19 @@ impl Env {
             ),
         )
         .unwrap();
+        // A kind that can resume a session (`[resume]`) whose session id the node never learns (no `[session]`): Resume is not offered
+        // for it, only Start again, although its kind resumes.
+        let mut nosession_resume = probe("nosession-resume-{pid}.json");
+        nosession_resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+        std::fs::write(
+            root.join("manifests/nosession.toml"),
+            format!(
+                "kind = \"nosession\"\ndisplay_name = \"nosession\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {}\n[resume]\nargv = {}\n",
+                q(probe("nosession-{pid}.json")),
+                q(nosession_resume)
+            ),
+        )
+        .unwrap();
         let mut e = Self {
             root,
             node: None,
@@ -352,4 +365,72 @@ fn an_agent_that_outlived_a_crashed_node_is_listed_as_still_running_and_not_as_a
     let l = e.list();
     assert!(running(&l, &probe), "{l:?}");
     assert!(l.interrupted.is_empty(), "{l:?}");
+}
+
+/// #1138 review F1: between the supervisor taking an interrupted agent back (`agent.resume` restores it under the supervisor's lock)
+/// and the ledger recording its `AgentStarted` (which clears `interrupted`), the ledger still holds it as interrupted. It is listed in
+/// `agents` only, from the supervisor, never twice. Modelled by a `restore` without the start that follows it.
+#[test]
+fn an_interrupted_agent_the_supervisor_holds_again_is_listed_in_agents_only() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("held");
+    let plain = e.launch("plain");
+    e.wait("the agent in the ledger", |e| {
+        e.node().ledger.get(&plain).is_some()
+    });
+    e.start();
+    assert_eq!(ids(&e.list().interrupted), [plain.as_str()]);
+    let entry = e.node().ledger.get(&plain).unwrap();
+    e.node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .restore(agora_node::supervisor::Restore {
+            id: agora_core::AgentId::new(plain.clone()),
+            kind: entry.kind.clone(),
+            project: agora_core::ProjectId::portable("00000000-0000-4000-8000-000000000001")
+                .unwrap(),
+            folder: PathBuf::from(&entry.folder),
+            directory: true,
+            branch: String::new(),
+            session: None,
+            carry_on: false,
+            private_config: None,
+        })
+        .unwrap();
+    // The ledger has not caught up: it still offers the agent.
+    assert!(e.node().ledger.get(&plain).unwrap().interrupted());
+    let l = e.list();
+    assert!(l.interrupted.is_empty(), "{l:?}");
+    assert_eq!(
+        l.agents
+            .iter()
+            .map(|a| a.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        [plain.as_str()],
+        "{l:?}"
+    );
+}
+
+/// #1138 review F3: a kind that can resume, of an agent whose own session id the node never learnt, is not offered Resume (only Start
+/// again), in the list as in the announcement.
+#[test]
+fn an_interrupted_agent_without_a_session_is_not_resumable_although_its_kind_resumes() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("nosession");
+    let id = e.launch("nosession");
+    e.wait("the agent in the ledger", |e| {
+        e.node().ledger.get(&id).is_some()
+    });
+    e.start();
+    assert!(e.node().supervisor.lock().unwrap().resumable("nosession"));
+    assert!(e.node().ledger.get(&id).unwrap().session_id.is_empty());
+    let l = e.list();
+    assert_eq!(ids(&l.interrupted), [id.as_str()]);
+    assert!(!l.interrupted[0].resumable, "{l:?}");
+    assert_eq!(l.interrupted[0], e.announced(&id));
 }
