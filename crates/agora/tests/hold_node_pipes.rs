@@ -572,9 +572,20 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
         }))
         .unwrap()
     };
-    // The agent's modes are known to the new node: a mode that keeps asking is applied.
-    wait_for("a mode that asks to be applied", || {
-        set_mode(&mut c, "default").is_ok()
+    // The new node knows the agent's modes and config options (the adopted adapter reports them again after it is taken up; until
+    // then a switch is `agent.option_unknown`, nothing applied): checked with the supervisor's own checks of a mode and a value that
+    // keep asking, which prepare a call and apply nothing.
+    wait_for("the agent's modes and config options", || {
+        use agora_adapters::host::OptionKind;
+        use agora_node::supervisor::Prepared;
+        let sup = node.supervisor.lock().unwrap();
+        matches!(
+            sup.prepare_set_option(&agent, OptionKind::Mode, "default"),
+            Ok(Prepared::Call(_))
+        ) && matches!(
+            sup.prepare_set_config(&agent, "auto_approve", "false"),
+            Ok(Prepared::Call(_))
+        )
     });
     let policy = |e: &v1::ErrorInfo| {
         e.params
