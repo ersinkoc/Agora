@@ -2475,9 +2475,6 @@ impl Node {
     }
 }
 
-/// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
-/// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
-/// workspace is reported too, so a client that connects later sees the current state from the event log.
 /// How often the memory of running agents is measured between changes in their number.
 const MEMORY_CHECK: Duration = Duration::from_secs(30);
 
@@ -2505,6 +2502,9 @@ fn memory_moved(reported: u64, now: u64) -> bool {
     moved > reported / 4 || moved > 256 << 20
 }
 
+/// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
+/// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
+/// workspace is reported too, so a client that connects later sees the current state from the event log.
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
 /// It also makes every folder's count be said again: a start registers its folder with no count, even one already counted.
 fn watch_git(
