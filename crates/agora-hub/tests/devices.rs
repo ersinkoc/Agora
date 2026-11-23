@@ -67,25 +67,42 @@ fn command(id: &str, c: cr::Command) -> Frame {
     )
 }
 
-/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
-/// `Welcome` read it with `c.recv()`.
+/// Subscribes as a window and reads the hub's first frame, which must be the `Welcome` naming the person's role (ADR-0106). [`recv`]
+/// refuses any later one.
+async fn subscribe<S>(c: &mut Conn<S>, payload: Vec<u8>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    c.send(&f(STREAM_EVENTS, kinds::SUBSCRIBE, payload))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(client_welcome(&first), "the Welcome comes first: {first:?}");
+}
+
+/// A `Welcome` that names the person's role: a window's, which comes once and first ([`subscribe`]). A node's names none.
+fn client_welcome(f: &Frame) -> bool {
+    (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
+        && v1::Welcome::decode(f.payload.as_slice())
+            .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified)
+}
+
+/// The next frame. A window's `Welcome` (ADR-0106) is read once, first, by [`subscribe`]; another one here is a bug.
 async fn recv<S>(c: &mut Conn<S>) -> Frame
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    loop {
-        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
-            .await
-            .expect("timeout")
-            .unwrap()
-            .expect("closed");
-        let welcome = (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
-            && v1::Welcome::decode(f.payload.as_slice())
-                .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified);
-        if !welcome {
-            return f;
-        }
-    }
+    let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(!client_welcome(&f), "a second Welcome: {f:?}");
+    f
 }
 
 async fn start(state: Arc<ServerState>) -> std::net::SocketAddr {
@@ -143,13 +160,7 @@ async fn node(
 
 async fn client(addr: std::net::SocketAddr) -> Conn<TcpStream> {
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     c
 }

@@ -91,26 +91,39 @@ fn agent(node: &str, id: &str) -> Body {
     })
 }
 
-/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
-/// `Welcome` read it with `c.recv()`.
-async fn recv(c: &mut Conn<TcpStream>) -> Frame {
-    loop {
-        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
-            .await
-            .expect("timeout")
-            .unwrap()
-            .expect("closed");
-        if !client_welcome(&f) {
-            return f;
-        }
-    }
+/// Subscribes as a window and reads the hub's first frame, which must be the `Welcome` naming the person's role (ADR-0106). [`recv`]
+/// refuses any later one.
+async fn subscribe<S>(c: &mut Conn<S>, payload: Vec<u8>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    c.send(&f(STREAM_EVENTS, kinds::SUBSCRIBE, payload))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(client_welcome(&first), "the Welcome comes first: {first:?}");
 }
 
-/// A `Welcome` that names the person's role: the one a window gets first (ADR-0106).
+/// A `Welcome` that names the person's role: a window's, which comes once and first ([`subscribe`]). A node's names none.
 fn client_welcome(f: &Frame) -> bool {
     (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
         && v1::Welcome::decode(f.payload.as_slice())
             .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified)
+}
+
+/// The next frame. A window's `Welcome` (ADR-0106) is read once, first, by [`subscribe`]; another one here is a bug.
+async fn recv(c: &mut Conn<TcpStream>) -> Frame {
+    let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(!client_welcome(&f), "a second Welcome: {f:?}");
+    f
 }
 
 /// A hub on a loopback port without TLS (the token and enrollment paths).
@@ -402,24 +415,19 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
 
     for tok in [None, Some("wrong")] {
         let mut c = dial(addr, tok).await;
-        c.send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+        // Refused before any Welcome: no subscription is answered.
+        let _ = c
+            .send(&f(
+                STREAM_EVENTS,
+                kinds::SUBSCRIBE,
+                v1::Subscribe::default().encode_to_vec(),
+            ))
+            .await;
         assert!(closed(&mut c).await, "{tok:?}");
     }
 
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut c).await;
     assert_eq!(
         (snap.stream_id, snap.kind),
@@ -447,13 +455,11 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
     );
 
     let mut c2 = dial(addr, Some("good-token")).await;
-    c2.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
+    subscribe(
+        &mut c2,
         v1::Subscribe { after_pos: Some(2) }.encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    )
+    .await;
     let fr = recv(&mut c2).await;
     assert_eq!(fr.kind, kinds::POSITIONED_EVENT);
     assert_eq!(
@@ -608,19 +614,15 @@ async fn dial_tls(addr: std::net::SocketAddr, connector: tokio_rustls::TlsConnec
         .unwrap()
 }
 
-/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
-/// `Welcome` read it with `c.recv()`.
+/// The next frame. A window's `Welcome` (ADR-0106) is read once, first, by [`subscribe`]; another one here is a bug.
 async fn recv_tls(c: &mut TlsConn) -> Frame {
-    loop {
-        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
-            .await
-            .expect("timeout")
-            .unwrap()
-            .expect("closed");
-        if !client_welcome(&f) {
-            return f;
-        }
-    }
+    let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(!client_welcome(&f), "a second Welcome: {f:?}");
+    f
 }
 
 #[tokio::test]
@@ -744,13 +746,7 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "good-token")
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let first = recv(&mut c).await;
     assert_eq!(first.kind, kinds::SNAPSHOT);
 
@@ -758,13 +754,14 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
     let mut bad = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "nope")
         .await
         .unwrap();
-    bad.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = bad
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut bad).await);
 }
 
@@ -800,14 +797,7 @@ async fn a_clients_command_is_routed_to_its_node_and_the_answer_comes_back() {
     next_ack(&mut node).await;
 
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     // Unknown node, no target, and enrollment are refused by the hub itself.
@@ -868,14 +858,7 @@ async fn a_node_that_leaves_mid_command_gives_the_client_node_offline() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&routed("x", "n2")).await.unwrap();
     let _ = recv(&mut node).await; // the node got it and never answers
@@ -959,22 +942,17 @@ async fn signing_in_with_a_code_gives_a_session_token_the_hub_accepts() {
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     let mut bad = dial(addr, Some("0123456789abcdef0123456789abcdef")).await;
-    bad.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = bad
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut bad).await);
 
     // Guessing is rate limited.
@@ -1134,14 +1112,7 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     let ask = |target: &str| {
@@ -1344,13 +1315,7 @@ async fn a_live_client_connection_ends_when_its_session_stops_being_valid() {
     });
     let addr = start(st).await;
     let mut c = dial(addr, Some("any")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     // Expiry or "sign out everywhere": the connection that was already open goes too.
     valid.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1409,14 +1374,7 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     // A viewer's stop is refused by the hub, naming what was refused; the node never hears of it.
@@ -1445,14 +1403,7 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
     client.send(&stop_request("s2", "n1")).await.unwrap();
     assert!(closed(&mut client).await);
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&stop_request("s3", "n1")).await.unwrap();
     let got = recv(&mut node).await;
@@ -1675,14 +1626,11 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
 
     let mut client = dial(addr, Some("good-token")).await;
     // Asking to replay the log from the start must not replay anyone else's events: the answer is a cut snapshot.
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(
+        &mut client,
+        v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+    )
+    .await;
     let fr = recv(&mut client).await;
     assert_eq!(fr.kind, kinds::SNAPSHOT);
     let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
@@ -1852,14 +1800,7 @@ async fn a_member_browses_and_starts_only_inside_a_project_granted_on_that_machi
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     let list = |path: &str| {
         command_request::Command::DirectoryList(v1::DirectoryList {
@@ -2098,14 +2039,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     // It still runs: refused.
     let r = forget_agent(&mut client, "n1/a1").await;
@@ -2141,14 +2075,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
 
     // A client that arrives now no longer sees the agent, but the hub's usage still counts it.
     let mut later = dial(addr, Some("good-token")).await;
-    later
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut later, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut later).await;
     assert_eq!(snap.kind, kinds::SNAPSHOT);
     let snapshot = v1::Snapshot::decode(snap.payload.as_slice()).unwrap();
@@ -2215,14 +2142,7 @@ async fn a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail()
         .unwrap();
         next_ack(&mut node).await;
         let mut client = dial(addr, Some("good-token")).await;
-        client
-            .send(&f(
-                STREAM_EVENTS,
-                kinds::SUBSCRIBE,
-                v1::Subscribe::default().encode_to_vec(),
-            ))
-            .await
-            .unwrap();
+        subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
         assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
         client.send(&routed("gone", node_id)).await.unwrap();
         let got = recv(&mut node).await;
@@ -2280,14 +2200,7 @@ async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("any")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&routed("revoked", "n3")).await.unwrap();
     let got = recv(&mut node).await;
@@ -2323,14 +2236,7 @@ async fn a_model_switch_for_a_node_without_it_is_refused_and_audited() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     for (id, command) in [
         (
@@ -2507,13 +2413,7 @@ async fn a_window_that_pings_the_hub_gets_a_pong() {
     let st = state(None);
     let addr = start(Arc::clone(&st)).await;
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut c).await;
     assert_eq!(
         (snap.stream_id, snap.kind),
@@ -2650,13 +2550,7 @@ fn size_of(req: &v1::CommandRequest) -> (u32, u32) {
 
 async fn signed_in(addr: std::net::SocketAddr) -> Conn<TcpStream> {
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     c
 }
@@ -2774,14 +2668,7 @@ async fn an_offline_machine_is_forgotten_for_every_client() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     assert_eq!(
         err_code(&forget_node(&mut client, "n1", "").await),
@@ -3068,13 +2955,14 @@ async fn a_metrics_token_reaches_nothing_but_the_metrics() {
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = c
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut c).await);
     // And a scrape did not start or renew any session.
     assert_eq!(get_metrics(addr, Some(&token)).await.0, 200);
@@ -3252,14 +3140,7 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
                 .unwrap();
             next_ack(&mut node).await;
             let mut client = dial(addr, Some("good-token")).await;
-            client
-                .send(&f(
-                    STREAM_EVENTS,
-                    kinds::SUBSCRIBE,
-                    v1::Subscribe::default().encode_to_vec(),
-                ))
-                .await
-                .unwrap();
+            subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
             let fr = recv(&mut client).await;
             assert_eq!(fr.kind, kinds::SNAPSHOT);
             let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
@@ -3271,14 +3152,11 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
             seen.push(("live", probe_online_binary(&mut client).await));
             if !scoped {
                 let mut replay = dial(addr, Some("good-token")).await;
-                replay
-                    .send(&f(
-                        STREAM_EVENTS,
-                        kinds::SUBSCRIBE,
-                        v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
-                    ))
-                    .await
-                    .unwrap();
+                subscribe(
+                    &mut replay,
+                    v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+                )
+                .await;
                 seen.push(("backlog", probe_online_binary(&mut replay).await));
             }
             for (route, shown) in seen {
@@ -3374,13 +3252,7 @@ async fn subscribe_after(
     after: Option<u64>,
 ) -> (Conn<TcpStream>, Frame) {
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe { after_pos: after }.encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe { after_pos: after }.encode_to_vec()).await;
     let first = recv(&mut c).await;
     (c, first)
 }
@@ -3677,14 +3549,7 @@ async fn a_window_that_connects_later_is_sent_the_last_config_and_commands_of_a_
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut client).await;
     assert_eq!(snap.kind, kinds::SNAPSHOT);
     let pos = v1::Snapshot::decode(snap.payload.as_slice()).unwrap().pos;
