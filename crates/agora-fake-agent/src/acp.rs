@@ -28,6 +28,10 @@
 //! `extended`), and sends `available_commands_update` after the session opened. `session/set_config_option` takes a configId and
 //! a value from those and answers with the full list.
 //!
+//! With `--load-session` the agent says `loadSession: true`, remembers what it said in `acp-history.txt` in its folder (one line per
+//! echoed answer), and answers `session/load` by first replaying each of those lines as an `agent_message_chunk` of the loaded session,
+//! as ACP agents replay a conversation they load (ADR-0104 C1, review of #1103).
+//!
 //! - `auto`: switches itself to the `plan` mode (`current_mode_update`), says `switched` and finishes.
 //!
 //! `session/new` answers with a model list and a mode list (`build`, `plan`) like real ACP agents; with
@@ -202,6 +206,7 @@ fn update<W: Write>(out: &mut W, session: &str, u: Value) -> io::Result<()> {
 }
 
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
+    let load_session = std::env::args().any(|a| a == "--load-session");
     let mut lines = input.lines();
     // The `mcpServers` of the session, and the servers whose call is still open.
     let mut servers = Value::Array(Vec::new());
@@ -230,7 +235,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
                 }
-                let mut caps = json!({"loadSession": false});
+                let mut caps = json!({"loadSession": load_session});
                 if std::env::var_os("AGORA_FAKE_ACP_NO_STDIO_MCP").is_some() {
                     caps["mcpCapabilities"] = json!({"stdio": false});
                 }
@@ -293,6 +298,32 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             {"name": "compact", "description": "Compact the context"}]}),
                     )?;
                 }
+            }
+            "session/load" if load_session => {
+                // ACP: the conversation is replayed as updates of the loaded session before the answer.
+                let sid = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("acp-s1")
+                    .to_string();
+                servers = params.get("mcpServers").cloned().unwrap_or(Value::Null);
+                let history = std::fs::read_to_string("acp-history.txt").unwrap_or_default();
+                for line in history.lines() {
+                    update(
+                        out,
+                        &sid,
+                        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": line}}),
+                    )?;
+                    // Each its own entry: past the bridge's 150 ms text window.
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                reply(
+                    out,
+                    json!({"models": {"currentModelId": "fake/model-1", "availableModels": [
+                               {"modelId": "fake/model-1", "name": "Fake 1"}]},
+                           "modes": {"currentModeId": "build", "availableModes": [
+                               {"id": "build", "name": "Build"}]}}),
+                )?;
             }
             "session/set_config_option" => {
                 let id_of = params.get("configId").and_then(Value::as_str).unwrap_or("");
@@ -623,11 +654,20 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": said}}),
                         )?;
                     }
-                    other => update(
-                        out,
-                        &session,
-                        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": other}}),
-                    )?,
+                    other => {
+                        if load_session {
+                            let mut f = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("acp-history.txt")?;
+                            writeln!(f, "{other}")?;
+                        }
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": other}}),
+                        )?
+                    }
                 }
                 reply(out, json!({"stopReason": stop}))?;
             }

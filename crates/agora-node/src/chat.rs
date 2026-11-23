@@ -837,6 +837,22 @@ impl ChatBoard {
         }
     }
 
+    /// Review of #1103 (B1): the chat a resumed session replayed before it answered its start (ACP `session/load`). An agent whose
+    /// transcript already gave ids (seeded from its file, or kept in this node's memory across a restart after a crash) holds that
+    /// conversation, so the replay is dropped: shown again it would be every turn twice, and written again a copy on every resume.
+    /// An agent with an empty transcript (no file: purged, `chat.history_max_bytes = 0`, or a first resume after an upgrade) shows
+    /// the replay as before. Returns whether it was kept.
+    pub fn replayed(&self, agent: &AgentId, items: &[ChatItem], now_ms: u64) -> bool {
+        let holds = self.lock().get(agent).is_some_and(|t| t.next_id > 0);
+        if holds {
+            return false;
+        }
+        for item in items {
+            self.push_item(agent, item, now_ms);
+        }
+        true
+    }
+
     /// ADR-0089 decision 1: what changed since the last batch, per agent: the entries as they are now (each once), the changed ones
     /// that left the ring meanwhile, and the ids taken out. Only marks are kept on the chat path: the clones are made here.
     pub fn take_unsaved(&self) -> Vec<Batch> {

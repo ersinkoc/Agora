@@ -2368,6 +2368,11 @@ impl Node {
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
                                 }
+                                // Review of #1103 (B1): a resumed session's replay of its conversation is shown only when this node holds
+                                // none of it (its file was purged, never written, or the agent never spoke here).
+                                SupervisorEvent::ReplayedChat { agent, items } => {
+                                    chat.replayed(agent, items, now);
+                                }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
                                     restart_notice(&chat, e, &views, now);
