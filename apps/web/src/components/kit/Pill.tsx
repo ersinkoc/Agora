@@ -11,12 +11,15 @@ export function Pill({ tone = 'plain', icon, children }: { tone?: Tone; icon?: R
   return <span className={`kit-pill kit-tone-${tone}`}>{icon}{children}</span>;
 }
 
+// The one table from an agent's state to its tone: every pill, mark and count of a state takes its colour here, so amber follows Needs you
+// and nothing else (the amber test counts this table, amberOnlyNeedsYou.test.ts).
 const STATE_TONE: Record<UiState, Tone> = { working: 'working', 'needs-you': 'needs', finished: 'finished', idle: 'idle', unknown: 'plain' };
+export const stateTone = (state: UiState): Tone => STATE_TONE[state];
 
 // An agent's state as a pill: tint, colour, shape and word, never colour alone. Failed is red with a cross in a ring (ADR-0102).
 export function StatusPill({ state, failed }: { state: UiState; failed?: boolean }) {
   return (
-    <Pill tone={failed ? 'danger' : STATE_TONE[state]} icon={<Mark state={state} failed={failed} />}>
+    <Pill tone={failed ? 'danger' : stateTone(state)} icon={<Mark state={state} failed={failed} />}>
       {t(failed ? 'fleet-failed' : `state-${state}`)}
     </Pill>
   );
@@ -25,7 +28,7 @@ export function StatusPill({ state, failed }: { state: UiState; failed?: boolean
 // The state's shape alone, in its kit colour (failed in red), for dense rows and counts; its word stays for screen readers.
 export function StatusMark({ state, failed }: { state: UiState; failed?: boolean }) {
   return (
-    <span className={`kit-mark kit-tone-${failed ? 'danger' : STATE_TONE[state]}`}>
+    <span className={`kit-mark kit-tone-${failed ? 'danger' : stateTone(state)}`}>
       <Mark state={state} failed={failed} />
       <span className="sr-only">{t(failed ? 'fleet-failed' : `state-${state}`)}</span>
     </span>
