@@ -198,10 +198,12 @@ impl ConfinedDir {
         imp::open_read(&self.dir, name)
     }
 
-    /// Opens (creating it) the lock file `name` in this folder with every check of [`crate::open_lock_private`], but relative to this
-    /// handle instead of a folder path: Unix `openat` on the held descriptor; Windows opens it at the folder's present final path and
-    /// then requires the file to be inside the folder this handle holds (both final paths read after the open), so a folder put at
-    /// the path meanwhile is refused (`InvalidInput`), though an empty file may be left in it. Refusals as there.
+    /// Opens (creating it) the lock file `name` in this folder with the file checks of [`crate::open_lock_private`] (created private,
+    /// or an existing regular file with one name and this user's; not shared for delete on Windows), relative to this handle instead
+    /// of a folder path. The folder itself is not checked again: it is whatever [`Self::open_root`] opened. Unix `openat` on the held
+    /// descriptor; Windows opens it at the folder's present final path and then requires the file to be inside the folder this handle
+    /// holds (both final paths read after the open), so a folder put at the path meanwhile is refused (`InvalidInput`), though an
+    /// empty file may be left in it. Refusals as there.
     pub fn open_lock(&self, name: &OsStr) -> io::Result<File> {
         if !valid_component(name) {
             return Err(refused());
