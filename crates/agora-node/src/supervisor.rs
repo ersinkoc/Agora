@@ -5272,16 +5272,10 @@ mod adapter_option_tests {
         assert_eq!(terms(&sup), (Some((false, true)), false, true));
     }
 
-    /// #1009: a switch of a running agent to a mode, a config value or a model that makes it act without asking (and the approved
-    /// switch applied later) follows `skip_permissions = confined_only` by the agent's own launch, as "always" does (ADR-0101 item 7),
-    /// never the node's sandbox setting now: an agent the holder runs (unconfined), also under a node that confines, and one with
-    /// nothing recorded are refused; one launched confined is asked about (a model: unconfirmed), also under a node that no longer
-    /// confines.
-    #[test]
-    fn a_switch_that_skips_permissions_follows_the_agents_own_launch_under_confined_only() {
-        use crate::launch_options::SkipPermissions as S;
-        use crate::sandbox::Level;
-        use Confinement as C;
+    /// #1009: a running adapter agent under `skip_permissions = confined_only` that offers a mode (`bypass`), a model (`yolo`) and a
+    /// config value (`approvals` = `turbo`) that make it act without asking, beside ones that ask. No adapter process: nothing is
+    /// called (a call that passed every check ends in `call_of`'s `NotFound`).
+    fn switch_rig() -> (Supervisor, AgentId) {
         let mut sup = Supervisor::new(SupervisorConfig {
             node: NodeId::new("n"),
             restart: RestartPolicy::default(),
@@ -5294,7 +5288,7 @@ mod adapter_option_tests {
             )
             .unwrap(),
         );
-        sup.set_skip_permissions(S::ConfinedOnly);
+        sup.set_skip_permissions(crate::launch_options::SkipPermissions::ConfinedOnly);
         let id = AgentId::new("agent-1");
         sup.restore(Restore {
             id: id.clone(),
@@ -5313,89 +5307,187 @@ mod adapter_option_tests {
             skips_permissions: skips,
             ..SessionOption::default()
         };
-        {
-            // A running agent that offers a mode, a model and a config value that skip (no adapter process: nothing is called).
-            let e = sup.adapters.get_mut(&id).unwrap();
-            e.running = true;
-            e.capabilities = vec!["set_mode".into(), "set_model".into(), "config".into()];
-            e.options = SessionOptions {
-                modes: vec![opt("default", false), opt("bypass", true)],
-                models: vec![opt("careful", false), opt("yolo", true)],
-                current_mode: "default".into(),
-                current_model: "careful".into(),
-            };
-            e.rich.config = vec![ConfigOption {
-                id: "approvals".into(),
-                current: "ask".into(),
-                choices: vec![opt("ask", false), opt("turbo", true)],
-                ..ConfigOption::default()
-            }];
-        }
-        let set = |sup: &mut Supervisor, confinement: Confinement, level: Level| {
-            sup.adapters.get_mut(&id).unwrap().confinement = confinement;
-            sup.set_sandbox(crate::sandbox::SandboxPolicy {
-                level,
-                ..Default::default()
-            });
+        let e = sup.adapters.get_mut(&id).unwrap();
+        e.running = true;
+        e.capabilities = vec!["set_mode".into(), "set_model".into(), "config".into()];
+        e.options = SessionOptions {
+            modes: vec![opt("default", false), opt("bypass", true)],
+            models: vec![opt("careful", false), opt("yolo", true)],
+            current_mode: "default".into(),
+            current_model: "careful".into(),
         };
-        let forbidden = |r: &SupervisorError, option: &str| matches!(r, SupervisorError::OptionForbidden(k, o, "confined_only") if k == "acp" && o == option);
+        e.rich.config = vec![ConfigOption {
+            id: "approvals".into(),
+            current: "ask".into(),
+            choices: vec![opt("ask", false), opt("turbo", true)],
+            ..ConfigOption::default()
+        }];
+        (sup, id)
+    }
 
-        // Launched confined, under a node that confines no longer: asked about (a model: unconfirmed, it has no card).
-        set(&mut sup, C::Confined, Level::Off);
-        let mode = match sup.prepare_set_option(&id, OptionKind::Mode, "bypass") {
-            Ok(Prepared::Ask(ask)) => ask,
+    /// #1009: the agent's recorded launch and the node's sandbox setting now. The refused cases are an agent the holder runs
+    /// (unconfined) and one with nothing recorded, each under a node that confines now (what the check read before: it said
+    /// confined); the allowed case is a launch recorded as confined under a node that no longer confines (the check before said not).
+    fn launched(
+        sup: &mut Supervisor,
+        id: &AgentId,
+        confinement: Confinement,
+        level: crate::sandbox::Level,
+    ) {
+        sup.adapters.get_mut(id).unwrap().confinement = confinement;
+        sup.set_sandbox(crate::sandbox::SandboxPolicy {
+            level,
+            ..Default::default()
+        });
+    }
+
+    const NOT_CONFINED: [Confinement; 2] = [Confinement::Unconfined, Confinement::Unknown];
+
+    fn forbidden_by_confined_only(r: &SupervisorError, option: &str) -> bool {
+        matches!(r, SupervisorError::OptionForbidden(k, o, "confined_only") if k == "acp" && o == option)
+    }
+
+    /// #1009: `AgentSetMode` of a mode that skips follows `confined_only` by the agent's own launch (as "always" does, ADR-0101
+    /// section 7 item 7), never the node's sandbox setting: refused for an agent the holder runs or one with nothing recorded, asked
+    /// about for one launched confined. A mode that asks is never held to the policy.
+    #[test]
+    fn a_mode_switch_under_confined_only_follows_the_agents_own_launch() {
+        use crate::sandbox::Level;
+        let (mut sup, id) = switch_rig();
+        for confinement in NOT_CONFINED {
+            launched(&mut sup, &id, confinement, Level::Worktree);
+            match sup.prepare_set_option(&id, OptionKind::Mode, "bypass") {
+                Err(e) => assert!(
+                    forbidden_by_confined_only(&e, "bypass"),
+                    "{confinement:?}: {e:?}"
+                ),
+                Ok(Prepared::Ask(_)) => {
+                    panic!("{confinement:?}: a mode that skips was asked about, not refused")
+                }
+                Ok(Prepared::Call(_)) => panic!("{confinement:?}: a mode that skips was applied"),
+            }
+            assert!(!matches!(
+                sup.prepare_set_option(&id, OptionKind::Mode, "default"),
+                Err(SupervisorError::OptionForbidden(..)) | Ok(Prepared::Ask(_))
+            ));
+        }
+        launched(&mut sup, &id, Confinement::Confined, Level::Off);
+        match sup.prepare_set_option(&id, OptionKind::Mode, "bypass") {
+            Ok(Prepared::Ask(ask)) => {
+                assert_eq!((ask.kind, ask.value.as_str()), (SkipKind::Mode, "bypass"))
+            }
             Ok(Prepared::Call(_)) => panic!("a mode that skips was applied"),
             Err(e) => panic!("a confined agent's mode was refused: {e:?}"),
-        };
-        let config = match sup.prepare_set_config(&id, "approvals", "turbo") {
-            Ok(Prepared::Ask(ask)) => ask,
+        }
+    }
+
+    /// #1009: `AgentSetConfig` of a value that skips, as the mode switch above; a value that asks is never held to the policy.
+    #[test]
+    fn a_config_switch_under_confined_only_follows_the_agents_own_launch() {
+        use crate::sandbox::Level;
+        let (mut sup, id) = switch_rig();
+        for confinement in NOT_CONFINED {
+            launched(&mut sup, &id, confinement, Level::Worktree);
+            match sup.prepare_set_config(&id, "approvals", "turbo") {
+                Err(e) => assert!(
+                    forbidden_by_confined_only(&e, "approvals"),
+                    "{confinement:?}: {e:?}"
+                ),
+                Ok(Prepared::Ask(_)) => panic!(
+                    "{confinement:?}: a config value that skips was asked about, not refused"
+                ),
+                Ok(Prepared::Call(_)) => {
+                    panic!("{confinement:?}: a config value that skips was applied")
+                }
+            }
+            assert!(!matches!(
+                sup.prepare_set_config(&id, "approvals", "ask"),
+                Err(SupervisorError::OptionForbidden(..)) | Ok(Prepared::Ask(_))
+            ));
+        }
+        launched(&mut sup, &id, Confinement::Confined, Level::Off);
+        match sup.prepare_set_config(&id, "approvals", "turbo") {
+            Ok(Prepared::Ask(ask)) => assert_eq!(
+                (ask.kind, ask.option_id.as_str(), ask.value.as_str()),
+                (SkipKind::Config, "approvals", "turbo")
+            ),
             Ok(Prepared::Call(_)) => panic!("a config value that skips was applied"),
             Err(e) => panic!("a confined agent's config value was refused: {e:?}"),
-        };
+        }
+    }
+
+    /// #1009: `AgentSetModel` of a model that skips: refused by `confined_only` for an agent the holder runs or one with nothing
+    /// recorded; for one launched confined the policy says nothing and the model stays unconfirmed (it has no approval card).
+    #[test]
+    fn a_model_switch_under_confined_only_follows_the_agents_own_launch() {
+        use crate::sandbox::Level;
+        let (mut sup, id) = switch_rig();
+        for confinement in NOT_CONFINED {
+            launched(&mut sup, &id, confinement, Level::Worktree);
+            match sup.prepare_set_option(&id, OptionKind::Model, "yolo") {
+                Err(e) => assert!(
+                    forbidden_by_confined_only(&e, "yolo"),
+                    "{confinement:?}: {e:?}"
+                ),
+                Ok(_) => panic!("{confinement:?}: a model that skips was not refused"),
+            }
+        }
+        launched(&mut sup, &id, Confinement::Confined, Level::Off);
         match sup.prepare_set_option(&id, OptionKind::Model, "yolo") {
             Err(SupervisorError::OptionUnconfirmed(k, o)) if k == "acp" && o == "yolo" => {}
             Err(e) => panic!("a confined agent's model was refused by the policy: {e:?}"),
             Ok(_) => panic!("a model that skips was applied"),
         }
-        // The approved switch passes the policy and goes on to the call (this entry has no adapter process to call: `NotFound` is
-        // `call_of`'s, after every check).
-        for ask in [&mode, &config] {
-            match sup.prepare_skip_apply(ask) {
-                Err(SupervisorError::NotFound(_)) => {}
-                Err(e) => panic!("a confined agent's approved switch was refused: {e:?}"),
-                Ok(_) => panic!("an entry without an adapter process was called"),
-            }
-        }
+    }
 
-        // Unconfined (the holder runs it) or unknown (nothing launched), under a node that confines now: refused, nothing asked or
-        // applied.
-        for confinement in [C::Unconfined, C::Unknown] {
-            set(&mut sup, confinement, Level::Worktree);
-            let what = format!("{confinement:?}");
-            match sup.prepare_set_option(&id, OptionKind::Mode, "bypass") {
-                Err(e) => assert!(forbidden(&e, "bypass"), "{what}: {e:?}"),
-                Ok(_) => panic!("{what}: a mode that skips was not refused"),
-            }
-            match sup.prepare_set_config(&id, "approvals", "turbo") {
-                Err(e) => assert!(forbidden(&e, "approvals"), "{what}: {e:?}"),
-                Ok(_) => panic!("{what}: a config value that skips was not refused"),
-            }
-            match sup.prepare_set_option(&id, OptionKind::Model, "yolo") {
-                Err(e) => assert!(forbidden(&e, "yolo"), "{what}: {e:?}"),
-                Ok(_) => panic!("{what}: a model that skips was not refused"),
-            }
-            // A card raised while it was confined is refused when its approval arrives.
-            for ask in [&mode, &config] {
+    /// #1009: an approved mode or config switch is checked again when the approval arrives, by the agent's launch as it is then: refused
+    /// for an agent the holder runs or one with nothing recorded, applied (here: on to the call) for one launched confined.
+    #[test]
+    fn an_approved_switch_under_confined_only_follows_the_agents_own_launch() {
+        use crate::sandbox::Level;
+        let (mut sup, id) = switch_rig();
+        let epoch = sup.adapters[&id].rich.epoch;
+        let ask = |kind: SkipKind, option_id: &str, value: &str| SkipAsk {
+            agent: id.clone(),
+            agent_kind: "acp".into(),
+            folder: String::new(),
+            kind,
+            option_id: option_id.into(),
+            option_name: String::new(),
+            value: value.into(),
+            value_name: String::new(),
+            epoch,
+        };
+        let asks = [
+            ask(SkipKind::Mode, "mode", "bypass"),
+            ask(SkipKind::Config, "approvals", "turbo"),
+        ];
+        for confinement in NOT_CONFINED {
+            launched(&mut sup, &id, confinement, Level::Worktree);
+            for ask in &asks {
                 match sup.prepare_skip_apply(ask) {
-                    Err(e) => assert!(forbidden(&e, &ask.option_id), "{what}: {e:?}"),
-                    Ok(_) => panic!("{what}: an approved switch that skips was applied"),
+                    Err(e) => assert!(
+                        forbidden_by_confined_only(&e, &ask.option_id),
+                        "{confinement:?} {:?}: {e:?}",
+                        ask.kind
+                    ),
+                    Ok(_) => panic!(
+                        "{confinement:?} {:?}: an approved switch that skips was applied",
+                        ask.kind
+                    ),
                 }
             }
-            // What keeps protection is never held to the policy.
-            assert!(!matches!(
-                sup.prepare_set_option(&id, OptionKind::Mode, "default"),
-                Err(SupervisorError::OptionForbidden(..)) | Ok(Prepared::Ask(_))
-            ));
+        }
+        launched(&mut sup, &id, Confinement::Confined, Level::Off);
+        for ask in &asks {
+            match sup.prepare_skip_apply(ask) {
+                Err(SupervisorError::NotFound(_)) => {}
+                Err(e) => panic!(
+                    "{:?}: a confined agent's approved switch was refused: {e:?}",
+                    ask.kind
+                ),
+                Ok(_) => panic!("an entry without an adapter process was called"),
+            }
         }
     }
 
