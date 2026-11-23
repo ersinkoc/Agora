@@ -709,6 +709,22 @@ All additions; nothing published changed. Node capability `agent.launch_options`
   `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
   before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
   agent's confinement, ADR-0047/0050, would not be active).
+- **ACP registry kinds (ADR-0092, the maintainer's answers on #1133).**
+  - *Always signed when they fetch.* A registry kind (`registry-<id>`) whose program is a package runner (`npx`, `uvx`; also `pnpx`,
+    `bunx`, `pipx`, under any extension) fetches and runs code when it starts. Where the hub's commands enter the node, an unsigned
+    routed `AgentStart` of one is refused with `node.policy_denied` `{node_id, rule: registry_signed_start, kind}`, whatever the
+    node's `signed_commands` says and whatever grant is live (a grant lets the hub act for a while; it is not a person signing this
+    start). It starts from a signed `AgentLaunch` (its `directory-action` signature names the kind), a helper start the person's signed
+    decision approved (ADR-0057), a signed `AgentResume`, or the node's own control socket (the owner). The window always sends a
+    signed launch; the terminal client's unsigned start in a project (`s`) sends the person to its signed folder start (`f`) for such
+    a kind. A hand-made kind is never held to this, whatever its program, and neither is a registry kind that runs its own program
+    (one the owner installed and the node finds on its `PATH`, with or without a SHA-256 in the registry: no code is fetched at start).
+    An automatic resume the owner's `resume = auto` and `resume.kinds` lines name is the owner's own choice and is not refused.
+  - *A policy line switches them off.* `agents.registry = on | off` (default `on`; any other value, or a policy file that cannot be
+    read, counts as `off` and is a policy problem) and `agents.registry.deny = registry-a, registry-b` in the node's own policy file.
+    A registry kind switched off is not listed by `agent.kinds` and is not started by any path (`node.policy_denied`, rule
+    `registry_off` or `registry_denied`, with `kind`); `agora doctor` says so (`registry-off`, `registry-denied`). Hand-made kinds are
+    never affected. Read when the node starts.
 - **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
   fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
   audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).

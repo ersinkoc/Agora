@@ -3419,3 +3419,168 @@ fn a_window_that_opens_after_agents_messaged_each_other_gets_the_message_in_its_
     );
     assert!(at <= snapshot.pos);
 }
+
+/// ADR-0092 (the maintainer's answer on #1133, "startable, but always signed"): a registry kind that starts through a package runner
+/// (`npx`, `uvx`) fetches and runs code when it starts, so the node accepts a start of one only with a person's device signature, whatever
+/// its `signed_commands` policy says. Here, with no policy file at all: the hub's unsigned `AgentStart` of such a kind is refused with
+/// `node.policy_denied` (rule `registry_signed_start`); the same start signed by a trusted device (`AgentLaunch`) starts it; a hand-made
+/// kind with the very same command is not affected. The "npx" here is a local stub that runs the fake ACP agent: no network, no real npx.
+#[cfg(unix)]
+#[test]
+fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
+    use agora_protocol::v1;
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    use std::os::unix::fs::PermissionsExt;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    // The node runs in this process: its ACP bridge is the `agora` binary, not this test (as in `approval_always.rs`).
+    std::env::set_var("AGORA_ACP_BRIDGE", env!("CARGO_BIN_EXE_agora"));
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("registry-signed-start");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        assert!(std::process::Command::new(
+            std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+        )
+        .args(["build", "-q", "-p", "agora-fake-agent"])
+        .status()
+        .unwrap()
+        .success());
+    });
+    // A stub named `npx`: whatever package it is asked for, it runs the fake ACP agent.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let npx = bin.join("npx");
+    std::fs::write(
+        &npx,
+        format!("#!/bin/sh\nexec {:?} --acp\n", fake.to_string_lossy()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let acp = |kind: &str| {
+        format!(
+            "kind = \"{kind}\"\ndisplay_name = \"Stub\"\nversion = \"1.0.0\"\nmin_engine = 1\n\n[structured]\nacp = {{ argv = [{:?}, \"--yes\", \"stub-agent@1.0.0\"] }}\n",
+            npx.to_string_lossy()
+        )
+    };
+    std::fs::write(manifests.join("registry-stub.toml"), acp("registry-stub")).unwrap();
+    std::fs::write(manifests.join("by-hand.toml"), acp("stub-by-hand")).unwrap();
+    let pick = tmp("registry-signed-start-pick");
+    std::fs::create_dir_all(pick.join("app")).unwrap();
+    git(&pick.join("app"), &["init", "-q", "-b", "main"]);
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![repo],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let (mut session, project) = loop {
+        let mut session = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(sn) = session.next(Duration::from_secs(2)) {
+            if let Some(c) = sn.checkouts.first() {
+                break (session, c.project_id.clone());
+            }
+        }
+        assert!(Instant::now() < end, "no project");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // The hub alone (an unsigned start), with no `signed_commands` on this machine: refused, nothing started.
+    let refused = session
+        .start_agent("laptop", &project, "registry-stub")
+        .unwrap_err();
+    assert_eq!(refused.code, "node.policy_denied", "{refused:?}");
+    let rule = refused.params.get("rule").and_then(|p| match &p.value {
+        Some(v1::param_value::Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        rule.as_deref(),
+        Some("registry_signed_start"),
+        "{refused:?}"
+    );
+    // A hand-made kind with the same command is not affected.
+    let by_hand = session
+        .start_agent("laptop", &project, "stub-by-hand")
+        .unwrap();
+    assert!(!by_hand.is_empty());
+    // Signed by a trusted device: it starts.
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let app = pick.join("app").to_string_lossy().into_owned();
+    let inspect = device
+        .authorize("laptop", "inspect", &app, "", "", false, false, now())
+        .unwrap();
+    let info = session.inspect_folder("laptop", &app, inspect).unwrap();
+    let auth = device
+        .authorize_launch(
+            "laptop",
+            &info.path,
+            "registry-stub",
+            &info.project_id,
+            false,
+            false,
+            &[],
+            &[],
+            now(),
+        )
+        .unwrap();
+    let started = session
+        .launch_in(
+            "laptop",
+            v1::AgentLaunch {
+                path: info.path.clone(),
+                project_id: info.project_id.clone(),
+                kind: "registry-stub".into(),
+                authorization: Some(auth),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(started.starts_with("laptop/"), "{started}");
+    drop(node);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&pick);
+}

@@ -2381,3 +2381,72 @@ fn the_users_prompt_comes_before_the_agents_answer() {
     };
     assert!(id_of(v1::ChatRole::User, "first:hello") < id_of(v1::ChatRole::Agent, "hello"));
 }
+
+/// #1133 ("yes, add a policy line"): `agents.registry = off` in the node's own policy switches the ACP registry's kinds off on this
+/// machine: none is offered, a start of one is refused with `node.policy_denied` (rule `registry_off`), and the hand-made kinds are not
+/// affected. `agents.registry.deny` switches off the kinds it names only (rule `registry_denied`).
+#[test]
+fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_ones() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let rule_of = |r: std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>>| {
+        let e = r.expect("io").expect_err("expected a refusal");
+        let rule = match e.params.get("rule").and_then(|p| p.value.clone()) {
+            Some(v1::param_value::Value::Str(s)) => s,
+            other => format!("{other:?}"),
+        };
+        (e.code, rule)
+    };
+    let kinds = |c: &mut Client| -> Vec<String> {
+        match ok(c.call(Cmd::AgentKinds(v1::AgentKinds {}))).result {
+            Some(Ok_::AgentKinds(k)) => k.kinds.into_iter().map(|k| k.kind).collect(),
+            other => panic!("{other:?}"),
+        }
+    };
+    for (name, line, gone, kept) in [
+        (
+            "registry-off",
+            "agents.registry = off\n",
+            vec!["registry-gemini", "registry-goose"],
+            vec![],
+        ),
+        (
+            "registry-deny",
+            "agents.registry.deny = registry-gemini\n",
+            vec!["registry-gemini"],
+            vec!["registry-goose"],
+        ),
+    ] {
+        let e = env(name);
+        std::fs::create_dir_all(e.dir.join("data")).unwrap();
+        std::fs::write(e.dir.join("data").join("policy"), line).unwrap();
+        let n = node(&e, NodeLimits::default());
+        let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+        let listed = kinds(&mut c);
+        for k in ["codex", "claude-code", "shell"] {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays");
+        }
+        for k in &gone {
+            assert!(!listed.iter().any(|x| x == k), "{name}: {k} is not offered");
+            let want = if name == "registry-off" {
+                "registry_off"
+            } else {
+                "registry_denied"
+            };
+            assert_eq!(
+                rule_of(c.call(start_cmd(k))),
+                ("node.policy_denied".to_string(), want.to_string()),
+                "{name}: {k}"
+            );
+        }
+        for k in &kept {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays offered");
+        }
+        // A hand-made kind still starts.
+        let s = started(ok(c.call(start_cmd("shell"))));
+        assert!(!s.agent_id.is_empty());
+        drop(n);
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}

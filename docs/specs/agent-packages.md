@@ -75,7 +75,10 @@ agent list yet, so nothing in the repository is a signed entry). Two shapes of r
 `provides = [<registry id>]`, the one name the installer leaves on the path for all of them, and the manifest runs that name (the
 arguments must still be the same on every platform, else `registry.inconsistent_command`). An entry the registry's own
 `quarantine.json` names is skipped (`registry.quarantined`), and a `repository`, `website` or `license_url` that is not an `https://`
-address under the URL rule above refuses the entry (`registry.bad_url`).
+address under the URL rule above refuses the entry (`registry.bad_url`). The maintainer's answers on #1133: quarantined entries stay
+skipped (not shown); a per-platform program is named by the registry id as is (`poolside`); an npx or uvx entry is "not installable
+from the window" and its kind starts only on a signed start (`docs/specs/protocol.md`, "ACP registry kinds"), and a node's policy can
+switch registry kinds off.
 
 ## Rung 3: `agora agent install` (binary-download only)
 `agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]` installs one agent program on the machine the owner is

@@ -384,6 +384,58 @@ pub fn shadowing(loaded: &[Loaded]) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// Package runners: a program that fetches the package it is given and runs it (ADR-0092 decision 1 starts registry agents through
+/// `npx --yes PACKAGE@VERSION` or `uvx PACKAGE==VERSION`).
+const PACKAGE_RUNNERS: &[&str] = &["npx", "uvx", "pnpx", "bunx", "pipx"];
+
+/// Whether a kind's program is a package runner, so starting it fetches code (whatever extension a platform gives the runner).
+pub fn fetches_at_start(m: &Manifest) -> bool {
+    let Some(program) = program(m) else {
+        return false;
+    };
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let mut stem = file.to_ascii_lowercase();
+    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1"]
+        .iter()
+        .find_map(|x| stem.strip_suffix(x))
+    {
+        stem = bare.to_string();
+    }
+    PACKAGE_RUNNERS.contains(&stem.as_str())
+}
+
+/// The maintainer's answer on #1133 ("startable, but always signed"): a registry kind (`registry-<id>`) that starts through a package
+/// runner is started only by a start a person's trusted device signed (a routed `AgentLaunch`, or a helper start the person approved) or
+/// from this machine's own control socket, never by a routed unsigned `AgentStart`, whatever `signed_commands` says. A hand-made kind is
+/// not affected, whatever its program; a registry kind that runs its own program (one the owner installed) is not either.
+pub fn needs_signed_start(m: &Manifest) -> bool {
+    m.kind.starts_with(REGISTRY_PREFIX) && fetches_at_start(m)
+}
+
+/// The node's policy for the ACP registry's kinds (ADR-0092; the maintainer's answer on #1133): `agents.registry = off` switches them
+/// all off on this machine, `agents.registry.deny = registry-a, registry-b` some of them. A kind switched off is neither offered nor
+/// started (`node.policy_denied`, rule `registry_off` or `registry_denied`). Hand-made kinds are never affected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryPolicy {
+    pub off: bool,
+    pub deny: std::collections::BTreeSet<String>,
+}
+
+impl RegistryPolicy {
+    /// Why a kind may not be offered or started here (the rule named in the refusal), or `None` when it may.
+    pub fn refusal(&self, kind: &str) -> Option<&'static str> {
+        if !kind.starts_with(REGISTRY_PREFIX) {
+            None
+        } else if self.off {
+            Some("registry_off")
+        } else if self.deny.contains(kind) {
+            Some("registry_denied")
+        } else {
+            None
+        }
+    }
+}
+
 /// The program the node looks for to tell whether a kind is installed: the L3 adapter's command, the ACP command, or the terminal
 /// launch command, whichever the manifest uses (the same order the node starts it in).
 pub fn program(m: &Manifest) -> Option<&str> {
@@ -481,6 +533,72 @@ mod tests {
             );
             assert_eq!(program(&m), acp.argv.first().map(String::as_str));
         }
+    }
+
+    #[test]
+    fn a_registry_kind_that_starts_a_package_runner_needs_a_signed_start_and_nothing_else_does() {
+        let m = |kind: &str, argv: &str| {
+            Manifest::parse(&format!(
+                "kind = \"{kind}\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = {{ argv = [{argv}] }}\n"
+            ))
+            .unwrap()
+        };
+        for argv in [
+            r#""npx", "--yes", "a@1.0.0""#,
+            r#""uvx", "a==1.0.0""#,
+            r#""C:\\n\\npx.CMD""#,
+            r#""/usr/bin/pnpx""#,
+        ] {
+            assert!(needs_signed_start(&m("registry-x", argv)), "{argv}");
+            assert!(
+                !needs_signed_start(&m("by-hand", argv)),
+                "{argv}: a hand-made kind is not affected"
+            );
+        }
+        assert!(
+            !needs_signed_start(&m("registry-x", r#""goose", "acp""#)),
+            "its own program"
+        );
+        assert!(!needs_signed_start(&m("registry-x", r#""npx-like""#)));
+        // The shipped registry: every npx or uvx one needs it, every binary one does not.
+        let (loaded, _) = load(Path::new(""));
+        let registry: Vec<_> = loaded
+            .iter()
+            .filter(|l| l.source == Source::Registry)
+            .collect();
+        let signed = registry
+            .iter()
+            .filter(|l| needs_signed_start(&l.manifest))
+            .count();
+        assert_eq!(signed, 23);
+        for l in registry {
+            let first = program(&l.manifest).unwrap();
+            assert_eq!(
+                needs_signed_start(&l.manifest),
+                first == "npx" || first == "uvx",
+                "{}",
+                l.manifest.kind
+            );
+        }
+    }
+
+    #[test]
+    fn the_registry_policy_switches_only_registry_kinds_off() {
+        let on = RegistryPolicy::default();
+        assert_eq!(on.refusal("registry-gemini"), None);
+        let off = RegistryPolicy {
+            off: true,
+            ..Default::default()
+        };
+        assert_eq!(off.refusal("registry-gemini"), Some("registry_off"));
+        assert_eq!(off.refusal("codex"), None);
+        let deny = RegistryPolicy {
+            off: false,
+            deny: ["registry-gemini".to_string()].into(),
+        };
+        assert_eq!(deny.refusal("registry-gemini"), Some("registry_denied"));
+        assert_eq!(deny.refusal("registry-goose"), None);
+        assert_eq!(deny.refusal("codex"), None);
     }
 
     const ONE_REGISTRY: &[(&str, &str)] = &[

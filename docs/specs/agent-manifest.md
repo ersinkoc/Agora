@@ -32,7 +32,9 @@ under Settings → Agents, "Add an agent", with the version, licence and reposit
 those out of the Start window. Their program is the ACP `argv[0]`: `npx` or `uvx` for a package (which fetches the pinned version
 when the agent first starts), else the registry's own program name. `agora doctor` counts them in one line (`registry-kinds`: how
 many, and how many find their program) instead of one line per kind. No registry kind has a launch option, so none can skip
-permission questions (ADR-0092 decision 5).
+permission questions (ADR-0092 decision 5). A registry kind whose program is a package runner (`npx`, `uvx`) is started from the hub
+only by a signed start, and the node's policy can switch registry kinds off (`agents.registry = off`, `agents.registry.deny`): both in
+`docs/specs/protocol.md`, "ACP registry kinds".
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI

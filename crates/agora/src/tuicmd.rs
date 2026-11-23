@@ -1112,10 +1112,18 @@ fn start(
         return say.text(key!("tui-start-nowhere"), &[]);
     };
     let machine = [("machine", Arg::Str(node.clone()))];
-    let (kinds, missing) = match session.agent_kinds_all(&node) {
-        Ok(all) => split_kinds(say, all),
+    let all = match session.agent_kinds_all(&node) {
+        Ok(all) => all,
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    // #1133: a registry kind that fetches its program starts only by a start this device signs, which `s` (an unsigned start in a
+    // project) cannot be; the folder start (`f`) signs it.
+    let signed_only: Vec<String> = all
+        .iter()
+        .filter(|k| needs_signed_start(&k.kind, &k.program))
+        .map(|k| k.kind.clone())
+        .collect();
+    let (kinds, missing) = split_kinds(say, all);
     if kinds.is_empty() {
         let none = say.text(key!("tui-start-none"), &machine);
         return missing.map_or(none.clone(), |m| format!("{none} {m}"));
@@ -1129,9 +1137,15 @@ fn start(
         missing.as_deref(),
         Duration::from_secs(30),
     );
-    let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
+    let Some((kind, name)) = pick.and_then(|i| kinds.get(i)) else {
         return String::new();
     };
+    if signed_only.contains(kind) {
+        return say.text(
+            key!("tui-start-signed-only"),
+            &[("name", Arg::Str(plain(name)))],
+        );
+    }
     let scope = format!("project:{project}");
     // The last refusal with its parameters, so the line can tell the person's role from anything else (#1044).
     let mut refused = ErrorInfo::default();
@@ -4976,6 +4990,17 @@ fn pick_kind(
 
 /// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
 /// find their program in its `PATH`. Each is named with the program the machine looked for (ADR-0069), when the machine says it.
+/// #1133: whether the machine starts `kind` only on a signed start: an ACP registry kind (`registry-*`) whose program is a package
+/// runner (the node's own rule, `agora_node::manifests::needs_signed_start`, seen from what the machine reports).
+fn needs_signed_start(kind: &str, program: &str) -> bool {
+    let stem = program
+        .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .to_string();
+    kind.starts_with("registry-") && ["npx", "uvx", "pnpx", "bunx", "pipx"].contains(&stem.as_str())
+}
+
 fn split_kinds(
     say: &Say,
     all: Vec<agora_tui::client::Kind>,
@@ -7494,5 +7519,21 @@ mod folder_role_tests {
             (pair.owner, role, notice.as_str()),
             (agora_tui::pair::Owner::Unknown, Role::Unknown, "")
         );
+    }
+}
+
+#[cfg(test)]
+mod registry_start_tests {
+    use super::needs_signed_start;
+
+    /// #1133: the terminal client sends the person to the signed folder start for exactly the kinds the node starts only when signed.
+    #[test]
+    fn only_a_registry_kind_run_by_a_package_runner_needs_the_signed_start() {
+        assert!(needs_signed_start("registry-gemini", "npx"));
+        assert!(needs_signed_start("registry-fast-agent", "uvx"));
+        assert!(needs_signed_start("registry-x", "npx.cmd"));
+        assert!(!needs_signed_start("registry-goose", "goose"));
+        assert!(!needs_signed_start("my-gemini", "npx"));
+        assert!(!needs_signed_start("codex", "codex"));
     }
 }

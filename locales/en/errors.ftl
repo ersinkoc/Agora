@@ -11,7 +11,12 @@ protocol-producer_mismatch = Machine { $node_id } sent events recorded under ano
 node-offline = Machine { $node_id } is not connected.
 node-unknown = Machine { $node_id } is not known to this hub.
 node-timeout = Machine { $node_id } did not answer in time.
-node-policy_denied = Machine { $node_id } does not allow this (rule: { $rule }).
+node-policy_denied = { $rule ->
+        [registry_signed_start] { $kind } downloads its program when it starts, so only a start signed on one of your trusted devices can start it (the window's Start, or a folder start in the terminal client), not the hub alone.
+        [registry_off] This machine's policy switches the ACP registry's agents off (`agents.registry = off`), so { $kind } is not started.
+        [registry_denied] This machine's policy switches { $kind } off (`agents.registry.deny`).
+       *[other] Machine { $node_id } does not allow this (rule: { $rule }).
+    }
 node-resource_limit = Machine limit reached for { $resource } (limit: { $limit }).
 project-not_found = Project { $project_id } was not found.
 worktree-dirty = There are uncommitted changes in { $path }.

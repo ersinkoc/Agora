@@ -1336,6 +1336,10 @@ pub struct Policy {
     pub credentials: std::collections::BTreeMap<String, Vec<String>>,
     /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
     pub credentials_malformed: Vec<String>,
+    /// ADR-0092 (#1133): whether the ACP registry's kinds are offered here (`agents.registry = on | off`, default on) and which of
+    /// them are not (`agents.registry.deny = registry-a, registry-b`). A value other than `on` or `off` switches them off: a typo never
+    /// widens. An unreadable policy file switches them off too.
+    pub registry: crate::manifests::RegistryPolicy,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1395,6 +1399,7 @@ impl Default for Policy {
             credentials: std::collections::BTreeMap::new(),
             credentials_malformed: Vec::new(),
             problems: Vec::new(),
+            registry: crate::manifests::RegistryPolicy::default(),
         }
     }
 }
@@ -1460,6 +1465,8 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
             // The stricter reading here too: a policy the owner wrote and the node cannot read may say `resume.continue = off`, so no
             // "carry on" message is typed into an agent (ADR-0060 Amendment A).
             p.resume.no_carry_on = true;
+            // ...and may switch the registry's kinds off (#1133).
+            p.registry.off = true;
             return p;
         }
     };
@@ -1555,6 +1562,22 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                             }
                         }
                     }
+                }
+                "agents.registry" => match v.trim() {
+                    "on" => p.registry.off = false,
+                    "off" => p.registry.off = true,
+                    _ => {
+                        p.registry.off = true;
+                        p.problems.push(line.chars().take(80).collect());
+                    }
+                },
+                "agents.registry.deny" => {
+                    p.registry.deny = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
                 }
                 "sandbox.trust_manifest" => {
                     p.sandbox.trusted_kinds = v
@@ -1725,6 +1748,7 @@ impl Node {
         ));
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
+        sup.set_registry_policy(read_policy(&cfg.data_dir.join(POLICY_FILE)).registry);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
             sup.register(m);
@@ -1857,6 +1881,15 @@ impl Node {
         );
 
         let supervisor = Arc::new(Mutex::new(sup));
+        {
+            // #1133: a registry kind started through a package runner is started from the hub only by a signed launch.
+            let sup = Arc::clone(&supervisor);
+            grants.set_signed_start_check(Box::new(move |kind| {
+                sup.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .start_needs_signature(kind)
+            }));
+        }
         {
             let sup = Arc::clone(&supervisor);
             let sup2 = Arc::clone(&sup);
@@ -3506,6 +3539,20 @@ mod announce_tests {
         };
         // No file: the maintainer's default.
         assert_eq!(read_policy(&dir.join("absent")).skip_permissions, S::Allow);
+        // #1133: the registry line; anything but `on` or `off` switches the registry's kinds off and is a problem.
+        let reg = |text: &str| {
+            let f = dir.join("registry-policy");
+            std::fs::write(&f, text).unwrap();
+            read_policy(&f)
+        };
+        assert!(!read_policy(&dir.join("absent")).registry.off);
+        assert!(reg("agents.registry = off\n").registry.off);
+        assert!(!reg("agents.registry = on\n").registry.off);
+        let typo = reg("agents.registry = of\n");
+        assert!(typo.registry.off && !typo.problems.is_empty());
+        let deny = reg("agents.registry.deny = registry-gemini, registry-goose\n").registry;
+        assert!(!deny.off);
+        assert_eq!(deny.deny.len(), 2);
         assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
         assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
         assert_eq!(

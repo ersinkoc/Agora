@@ -140,6 +140,11 @@ doctor-registry-kinds = { $detail ->
         [one] 1 agent
        *[other] { $detail } agents
     } of the ACP registry are known here, untested in Agora; { $ready } of them find their program on this machine. Settings → Agents in the window lists them all.
+doctor-registry-off = The ACP registry's agents are switched off on this machine (policy line `agents.registry = off`): it neither offers nor starts them. Your own agent descriptions are not affected.
+doctor-registry-denied = { $detail ->
+        [one] 1 agent of the ACP registry is
+       *[other] { $detail } agents of the ACP registry are
+    } switched off on this machine by the policy line `agents.registry.deny`.
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
     [one] 1 agent now

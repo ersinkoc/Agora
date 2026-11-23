@@ -10,7 +10,12 @@ protocol-producer_mismatch = { $node_id } makinesi başka bir adla ({ $producer_
 node-offline = { $node_id } makinesi bağlı değil.
 node-unknown = { $node_id } makinesi bu hub tarafından tanınmıyor.
 node-timeout = { $node_id } makinesi zamanında yanıt vermedi.
-node-policy_denied = { $node_id } makinesi buna izin vermiyor (kural: { $rule }).
+node-policy_denied = { $rule ->
+        [registry_signed_start] { $kind } başlarken programını indirir; bu yüzden onu yalnızca güvendiğiniz cihazlardan birinde imzalanan bir başlatma başlatabilir (penceredeki Başlat ya da terminal istemcisinde klasörde başlatma), hub tek başına başlatamaz.
+        [registry_off] Bu makinenin politikası ACP kayıt defterinin ajanlarını kapatıyor (`agents.registry = off`); { $kind } başlatılmadı.
+        [registry_denied] Bu makinenin politikası { $kind } ajanını kapatıyor (`agents.registry.deny`).
+       *[other] { $node_id } makinesi buna izin vermiyor (kural: { $rule }).
+    }
 node-resource_limit = { $resource } için makine sınırına ulaşıldı (sınır: { $limit }).
 project-not_found = { $project_id } projesi bulunamadı.
 worktree-dirty = { $path } içinde kaydedilmemiş değişiklikler var.

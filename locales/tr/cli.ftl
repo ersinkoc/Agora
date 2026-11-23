@@ -137,6 +137,11 @@ doctor-registry-kinds = ACP kayıt defterinden { $detail ->
         [one] 1 ajan
        *[other] { $detail } ajan
     } biliniyor, Agora'da denenmedi; bunlardan { $ready } tanesi programını bu makinede buluyor. Penceredeki Ayarlar → Ajanlar hepsini listeler.
+doctor-registry-off = ACP kayıt defterinin ajanları bu makinede kapalı (politika satırı `agents.registry = off`): makine onları ne sunar ne başlatır. Kendi ajan tanımlarınız etkilenmez.
+doctor-registry-denied = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } bu makinede `agents.registry.deny` politika satırıyla kapalı.
 doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-cert-node = Bu makinenin hub sertifikası { $detail ->
