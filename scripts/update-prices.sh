@@ -5,8 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 src="${1:-}"
+tmp=""
+trap 'rm -f "$tmp"' EXIT
 if [ -z "$src" ]; then
-  src="$(mktemp)"
+  tmp="$(mktemp)"
+  src="$tmp"
   curl -fsS --max-time 60 https://models.dev/api.json -o "$src"
 fi
 python3 - "$src" crates/agora-hub/data/prices.json <<'PY'

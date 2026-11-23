@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
@@ -32,6 +33,9 @@ fn temp_home(tag: &str) -> PathBuf {
 struct Rig {
     home: PathBuf,
     holder: Child,
+    /// The agents this rig's holder started for its test, as identified when they started (#1014): ended in `Drop` after the holder,
+    /// so a failed test leaves none running.
+    agents: Mutex<Vec<agora_platform::ProcessIdentity>>,
 }
 
 /// The holder makes its socket file a moment before it listens on it: a connection in between is refused (macOS answers
@@ -56,7 +60,11 @@ impl Rig {
             .stderr(Stdio::null())
             .spawn()
             .expect("start agora hold");
-        let rig = Rig { home, holder };
+        let rig = Rig {
+            home,
+            holder,
+            agents: Mutex::new(Vec::new()),
+        };
         let end = Instant::now() + Duration::from_secs(15);
         while !socket_path(&rig.home).exists() {
             assert!(Instant::now() < end, "the holder never listened");
@@ -82,6 +90,37 @@ impl Rig {
         }
     }
 
+    /// Starts a pipe agent through `c` and records it to be ended with the rig (#1014). Every test starts its agents here.
+    fn start(&self, c: &mut Client, request: &StartPipeRequest) -> Result<u32, LinkError> {
+        let pid = c.start_pipe(request)?;
+        if let Some(id) = self.ours(pid, request) {
+            self.agents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id);
+        }
+        Ok(pid)
+    }
+
+    /// The identity of the agent the holder just started as `pid`, read first and then checked as #1030 does: it must name the
+    /// program asked for, and that pid must still be the holder's child. `None` (nothing is recorded, so nothing is ever signalled by
+    /// its bare number) when it cannot be identified, has ended, or is not it.
+    fn ours(
+        &self,
+        pid: u32,
+        request: &StartPipeRequest,
+    ) -> Option<agora_platform::ProcessIdentity> {
+        let id = agora_platform::process_identity(pid).ok()?;
+        let argv0 = request.argv.first()?;
+        let program = std::path::Path::new(argv0).file_name()?;
+        // macOS's `/bin/sh` is a launcher that runs the shell chosen for it in its place, under that shell's name.
+        let named = std::ffi::OsStr::new(&id.name) == program
+            || (argv0 == "/bin/sh" && ["bash", "dash", "zsh"].contains(&id.name.as_str()));
+        let is_child =
+            agora_platform::process_children(self.holder.id()).is_ok_and(|c| c.contains(&id.pid));
+        (named && is_child).then_some(id)
+    }
+
     /// A node of this link version and nothing newer.
     fn connect_v1(&self) -> Client {
         let end = Instant::now() + Duration::from_secs(10);
@@ -104,7 +143,51 @@ impl Drop for Rig {
     fn drop(&mut self) {
         let _ = self.holder.kill();
         let _ = self.holder.wait();
+        // The agents outlive their holder by design (ADR-0093); a test that failed before it stopped them left them running. Each
+        // is ended only while it is still the process identified at its start: same pid, start time and boot (it may have replaced
+        // its program since, as `sh -c` does with its last command), and with it its process group, which it leads (setsid).
+        let agents = std::mem::take(self.agents.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for id in agents {
+            if let Ok(now) = agora_platform::process_identity(id.pid) {
+                if now.started == id.started && now.boot == id.boot {
+                    let _ = agora_platform::kill_process_if_same(&now);
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// #1014: the rig records the agent it starts, and ending the rig ends it, though the agent outlives its holder by design.
+#[test]
+fn the_rig_ends_the_agents_it_started_when_it_ends() {
+    if agora_platform::process_identity(std::process::id()).is_err() {
+        return;
+    }
+    let rig = Rig::new("rig-ends");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    let pid = rig
+        .start(&mut c, &pipe("p1", "echo up; sleep 600"))
+        .expect("start");
+    read_until(&mut c, "p1", "up");
+    let recorded = rig.agents.lock().expect("agents").clone();
+    assert_eq!(
+        recorded.iter().map(|a| a.pid).collect::<Vec<_>>(),
+        [pid],
+        "the agent was not recorded; it reads as {:?}",
+        agora_platform::process_identity(pid)
+    );
+    drop(c);
+    drop(rig);
+    let same = |now: &agora_platform::ProcessIdentity| {
+        now.started == recorded[0].started && now.boot == recorded[0].boot
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    while agora_platform::process_identity(pid).is_ok_and(|now| same(&now)) {
+        assert!(Instant::now() < end, "the agent outlived the rig");
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -146,11 +229,11 @@ fn a_pipe_agent_reads_the_lines_it_is_written_and_its_output_comes_back_as_lines
     assert_eq!(c.version, LINK_VERSION_PIPES);
     assert!(c.attach().expect("attach").is_empty());
     assert!(c.attach_pipes().expect("attach pipes").is_empty());
-    let pid = c
-        .start_pipe(&pipe(
-            "p1",
-            "echo ready; while read l; do echo \"got:$l\"; done",
-        ))
+    let pid = rig
+        .start(
+            &mut c,
+            &pipe("p1", "echo ready; while read l; do echo \"got:$l\"; done"),
+        )
         .expect("start");
     assert!(pid > 1);
     read_until(&mut c, "p1", "ready");
@@ -174,7 +257,7 @@ fn a_pipe_agent_reads_the_lines_it_is_written_and_its_output_comes_back_as_lines
     ));
     // An id in use is refused.
     assert!(matches!(
-        c.start_pipe(&pipe("p1", "sleep 1")),
+        rig.start(&mut c, &pipe("p1", "sleep 1")),
         Err(LinkError::Refused(Refusal::AgentExists, _))
     ));
     // Stopping ends its process group; its end is reported and it is forgotten on release, and the holder ends with its last agent.
@@ -205,7 +288,7 @@ fn output_nobody_reads_is_kept_to_a_mebibyte_and_the_dropped_bytes_are_counted()
     c.attach().expect("attach");
     c.attach_pipes().expect("attach pipes");
     // 3000 lines of 999 bytes: 2 997 000 bytes, nearly three times what is kept.
-    c.start_pipe(&pipe(
+    rig.start(&mut c, &pipe(
         "p1",
         "i=0; while [ $i -lt 3000 ]; do printf '%0999d\\n' $i; i=$((i+1)); done; echo done-writing; sleep 600",
     ))
@@ -257,10 +340,13 @@ fn a_later_node_gets_what_the_first_had_as_seen_and_what_nobody_had_as_new() {
     let mut a = rig.connect();
     a.attach().expect("attach");
     a.attach_pipes().expect("attach pipes");
-    a.start_pipe(&pipe(
-        "p1",
-        "echo first; read x; echo second; read y; echo third; sleep 600",
-    ))
+    rig.start(
+        &mut a,
+        &pipe(
+            "p1",
+            "echo first; read x; echo second; read y; echo third; sleep 600",
+        ),
+    )
     .expect("start");
     read_until(&mut a, "p1", "first");
     // Node `a` goes away having read `first`; the agent writes `second` while no node is there.
@@ -295,7 +381,7 @@ fn a_node_of_link_version_one_is_refused_pipes_and_keeps_everything_else() {
     assert_eq!(c.version, LINK_VERSION);
     c.attach().expect("attach");
     assert!(matches!(
-        c.start_pipe(&pipe("p1", "sleep 5")),
+        rig.start(&mut c, &pipe("p1", "sleep 5")),
         Err(LinkError::Refused(Refusal::BadRequest, _))
     ));
     assert!(matches!(
@@ -389,8 +475,11 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
     let mut c = rig.connect();
     c.attach().expect("attach");
     c.attach_pipes().expect("attach pipes");
-    c.start_pipe(&pipe("p1", "while read l; do echo \"got:$l\"; done"))
-        .expect("start");
+    rig.start(
+        &mut c,
+        &pipe("p1", "while read l; do echo \"got:$l\"; done"),
+    )
+    .expect("start");
     // A line that cannot be one frame is refused by the sender before anything is sent: the link is whole after.
     let big = vec![b'x'; MAX_FRAME];
     assert!(matches!(
@@ -409,13 +498,19 @@ fn a_flood_of_tiny_lines_cannot_make_a_reply_larger_than_a_frame() {
     let mut c = rig.connect();
     c.attach().expect("attach");
     c.attach_pipes().expect("attach pipes");
-    c.start_pipe(&pipe("calm", "while read l; do echo \"got:$l\"; done"))
-        .expect("start calm");
+    rig.start(
+        &mut c,
+        &pipe("calm", "while read l; do echo \"got:$l\"; done"),
+    )
+    .expect("start calm");
     // `yes` writes "y" lines as fast as the pipe takes them; 1.5 million of them.
-    c.start_pipe(&pipe(
-        "flood",
-        "yes | head -n 1500000; echo done-writing; sleep 600",
-    ))
+    rig.start(
+        &mut c,
+        &pipe(
+            "flood",
+            "yes | head -n 1500000; echo done-writing; sleep 600",
+        ),
+    )
     .expect("start flood");
     drop(c);
     std::thread::sleep(Duration::from_millis(1500));
@@ -458,7 +553,7 @@ fn what_an_ended_agent_left_in_its_group_is_ended_with_it() {
     c.attach().expect("attach");
     c.attach_pipes().expect("attach pipes");
     // The child holds the agent's output open and would run for ten minutes; the agent says its pid and ends.
-    c.start_pipe(&pipe("p1", "sleep 600 & echo $!; exit 0"))
+    rig.start(&mut c, &pipe("p1", "sleep 600 & echo $!; exit 0"))
         .expect("start");
     let lines = read_until_any(&mut c, "p1");
     let child: u32 = lines[0].parse().expect("the child's pid");
@@ -503,15 +598,18 @@ fn what_an_ended_agent_moved_to_a_group_of_its_own_is_ended_with_it() {
     // The child moves to a group of its own and only then lets the agent go on (a pipe it closes), so the agent's end is collected
     // after the move; it holds the agent's output open and would run for ten minutes.
     let perl = "pipe(R,W); my $p=fork(); if($p==0){ close R; setpgrp(0,0); close W; exec('sleep','600'); } close W; my $x=<R>; print \"$p\\n\";";
-    c.start_pipe(&StartPipeRequest {
-        agent: "p1".into(),
-        argv: vec!["/bin/sh".into(), "-c".into(), "perl -e \"$P\"".into()],
-        cwd: None,
-        env: vec![
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("P".into(), perl.into()),
-        ],
-    })
+    rig.start(
+        &mut c,
+        &StartPipeRequest {
+            agent: "p1".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "perl -e \"$P\"".into()],
+            cwd: None,
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("P".into(), perl.into()),
+            ],
+        },
+    )
     .expect("start");
     let lines = read_until_any(&mut c, "p1");
     let child: u32 = lines[0].parse().expect("the child's pid");
@@ -551,9 +649,13 @@ fn a_line_for_an_agent_that_ended_is_refused_never_queued_and_lost() {
     let mut c = rig.connect();
     c.attach().expect("attach");
     c.attach_pipes().expect("attach pipes");
-    c.start_pipe(&pipe("live", "while read l; do echo \"got:$l\"; done"))
-        .expect("start live");
-    c.start_pipe(&pipe("gone", "echo bye")).expect("start gone");
+    rig.start(
+        &mut c,
+        &pipe("live", "while read l; do echo \"got:$l\"; done"),
+    )
+    .expect("start live");
+    rig.start(&mut c, &pipe("gone", "echo bye"))
+        .expect("start gone");
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         let d = c.pipe_read("gone").expect("read");
@@ -647,7 +749,7 @@ fn a_pipe_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_hand
     let mut c = rig.connect();
     assert!(c.attach().expect("attach").is_empty());
     for long in ["p".repeat(MAX_AGENT_ID + 1), "p".repeat(3 << 20)] {
-        match c.start_pipe(&pipe(&long, "echo up; sleep 600")) {
+        match rig.start(&mut c, &pipe(&long, "echo up; sleep 600")) {
             Err(LinkError::Refused(Refusal::BadRequest, _)) => {}
             Err(e) => panic!("refused for another reason: {e}"),
             Ok(pid) => {
@@ -659,8 +761,8 @@ fn a_pipe_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_hand
     assert!(c.list().expect("list").is_empty(), "nothing started");
 
     let at = "q".repeat(MAX_AGENT_ID);
-    let pid = c
-        .start_pipe(&pipe(&at, "echo up; sleep 600"))
+    let pid = rig
+        .start(&mut c, &pipe(&at, "echo up; sleep 600"))
         .expect("start");
     read_until(&mut c, &at, "up");
     let listed = c.list().expect("list");

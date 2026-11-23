@@ -175,8 +175,35 @@ fn resume(
     }
 }
 
-/// Why a resume did not happen, in the selected language (the node's code and parameters, rendered from `errors.ftl`).
+/// ADR-0049: the hub refused `command` because of the person's role or projects (a viewer, or a member outside their projects), naming
+/// the refused command's schema name (`AgentStart`) in `action`. A machine that limits this device to other projects names its own
+/// action (`directory`, `grant.create`), so that refusal is not the person's role (#1044).
+fn refused_for_role(error: &ErrorInfo, command: &str) -> bool {
+    error.code == "auth.forbidden"
+        && matches!(
+            error.params.get("action").and_then(|v| v.value.as_ref()),
+            Some(Value::Str(s)) if s == command
+        )
+}
+
+/// Why a start (`command`: `AgentStart`, or `DirectoryInspect` for a folder) did not happen: the person's role in words when the hub
+/// refused it for that, else the code.
+fn start_refusal(say: &Say, error: &ErrorInfo, command: &str) -> String {
+    if refused_for_role(error, command) {
+        return say.text(key!("tui-start-role"), &[]);
+    }
+    say.text(
+        key!("tui-start-failed"),
+        &[("code", Arg::Str(error.code.clone()))],
+    )
+}
+
+/// Why a resume did not happen, in the selected language (the node's code and parameters, rendered from `errors.ftl`; the person's role
+/// in words when the hub refused it for that, #1044).
 fn resume_notice(say: &Say, error: &ErrorInfo) -> String {
+    if refused_for_role(error, "AgentResume") {
+        return say.text(key!("tui-resume-role"), &[]);
+    }
     let args: Vec<_> = error
         .params
         .iter()
@@ -1111,11 +1138,17 @@ fn start(
         return String::new();
     };
     let scope = format!("project:{project}");
+    // The last refusal with its parameters, so the line can tell the person's role from anything else (#1044).
+    let mut refused = ErrorInfo::default();
     match with_grant(say, session, ask, (&node, &scope, &["agent.start"]), |s| {
-        s.start_agent(&node, &project, kind)
+        s.start_agent(&node, &project, kind).map_err(|e| {
+            let code = e.code.clone();
+            refused = e;
+            code
+        })
     }) {
         Tried::Done(Ok(agent)) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
-        Tried::Done(Err(code)) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+        Tried::Done(Err(_)) => start_refusal(say, &refused, "AgentStart"),
         Tried::Declined => String::new(),
         Tried::Line(l) => l,
     }
@@ -1317,19 +1350,23 @@ fn start_in_folder(
         };
         let folder = match session.list_folder(&node.node_id, &path, auth) {
             Ok(f) => f,
-            Err(code) if code == "approval.signature_invalid" => {
+            Err(e) if e.code == "approval.signature_invalid" => {
                 return not_trusted(&device, &node.node_id)
             }
-            Err(code) if code == "protocol.capability_missing" => {
+            Err(e) if e.code == "protocol.capability_missing" => {
                 return say.text(key!("tui-folder-unsupported"), &[])
             }
-            Err(code) if !path.is_empty() => {
+            // #1044: the hub does not let this person's role look into folders; no other folder would do better.
+            Err(e) if refused_for_role(&e, "DirectoryList") => {
+                return say.text(key!("tui-folder-role"), &[])
+            }
+            Err(e) if !path.is_empty() => {
                 // A folder that cannot be listed (gone, a secret one): back to the home folder, saying why.
-                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]);
+                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
                 path.clear();
                 continue;
             }
-            Err(code) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]),
+            Err(e) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]),
         };
         let mut pick = 0usize;
         loop {
@@ -1388,8 +1425,8 @@ fn start_in_folder(
     };
     let info = match session.inspect_folder(&node, &folder, auth) {
         Ok(i) => i,
-        Err(code) if code == "approval.signature_invalid" => return not_trusted(&device, &node),
-        Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+        Err(e) if e.code == "approval.signature_invalid" => return not_trusted(&device, &node),
+        Err(e) => return start_refusal(say, &e, "DirectoryInspect"),
     };
     // Which agent: the machine's installed kinds by number, as `s` asks.
     let machine = [("machine", Arg::Str(node.clone()))];
@@ -5967,6 +6004,68 @@ mod forget_tests {
             .with("parent_agent_id", "agent-3")
             .to_info();
         assert!(resume_notice(&en, &parent).contains("Resume that agent first"));
+    }
+
+    #[test]
+    fn a_start_or_resume_the_hub_refused_for_the_persons_role_says_the_role_not_a_device() {
+        // #1044: the hub refuses a viewer's (or a member's outside their projects) command naming the command's schema name; a machine
+        // that limits this device to other projects names its own action.
+        let refused = |action: &str| {
+            Error::new(ErrorCode::AuthForbidden)
+                .with("action", action)
+                .to_info()
+        };
+        for say in [Say(Catalog::english()), Say(Catalog::turkish())] {
+            let role = say.text(key!("tui-start-role"), &[]);
+            assert_eq!(
+                start_refusal(&say, &refused("AgentStart"), "AgentStart"),
+                role
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("DirectoryInspect"), "DirectoryInspect"),
+                role
+            );
+            let code = say.text(
+                key!("tui-start-failed"),
+                &[("code", Arg::Str("auth.forbidden".into()))],
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("directory"), "DirectoryInspect"),
+                code
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("AgentStop"), "AgentStart"),
+                code
+            );
+            assert_eq!(
+                resume_notice(&say, &refused("AgentResume")),
+                say.text(key!("tui-resume-role"), &[])
+            );
+            assert_ne!(
+                resume_notice(&say, &refused("directory")),
+                say.text(key!("tui-resume-role"), &[])
+            );
+            // The folder picker's `directory.list` is the first command a folder start sends.
+            assert!(say.0.render("tui-folder-role", &[]).is_some());
+        }
+        assert!(refused_for_role(&refused("DirectoryList"), "DirectoryList"));
+        assert!(!refused_for_role(&refused("directory"), "DirectoryList"));
+        assert!(!refused_for_role(
+            &Error::new(ErrorCode::NodeOffline)
+                .with("action", "DirectoryList")
+                .to_info(),
+            "DirectoryList"
+        ));
+        let en = Say(Catalog::english());
+        for line in [
+            start_refusal(&en, &refused("AgentStart"), "AgentStart"),
+            resume_notice(&en, &refused("AgentResume")),
+        ] {
+            assert!(
+                line.starts_with("Your role") && !line.contains("device"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
