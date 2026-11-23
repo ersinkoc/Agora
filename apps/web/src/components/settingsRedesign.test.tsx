@@ -328,11 +328,15 @@ describe('Add an agent (ADR-0092)', () => {
     expect(more).toContain('Listed byACP registry');
     expect(more).toContain('cannot find goose');
     expect(more).toContain('Nobody has tried it in Agora yet');
-    const link = goose.querySelector<HTMLAnchorElement>('a[href]')!;
-    expect(link.href).toBe('https://github.com/block/goose');
-    expect(link.rel).toBe('noopener noreferrer');
-    expect(link.target).toBe('_blank');
-    expect(link.textContent).toBe('github.com/block/goose');
+    // The licence links to its text; the repository is the other link.
+    const [licence, link] = [...goose.querySelectorAll<HTMLAnchorElement>('a[href]')];
+    expect(licence!.textContent).toBe('Apache-2.0');
+    expect(licence!.href).toMatch(/^https:\/\/github\.com\/block\/goose\/.*LICENSE/);
+    expect(licence!.rel).toBe('noopener noreferrer');
+    expect(link!.href).toBe('https://github.com/block/goose');
+    expect(link!.rel).toBe('noopener noreferrer');
+    expect(link!.target).toBe('_blank');
+    expect(link!.textContent).toBe('github.com/block/goose');
     // One that starts through npx says that it downloads its pinned version the first time.
     expect(card('Qwen Code').querySelector('.set-kind__more')!.textContent).toContain('Starting it runs npx');
     // Nothing here is a button: looking runs nothing, installs nothing.

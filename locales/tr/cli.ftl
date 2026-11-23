@@ -96,6 +96,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` bulundu{ $by ->
         [agora] , Agora kurdu (sürüm { $version })
@@ -104,10 +105,12 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` orada ama bu hesap onu çalıştıramıyor. Dosyayı çalıştırılabilir yapın ya da yeniden kurun.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.

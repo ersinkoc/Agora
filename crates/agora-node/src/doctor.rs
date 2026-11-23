@@ -585,20 +585,12 @@ fn writable(dir: &Path) -> bool {
 /// without the right to run it (`agent-broken`). The agent's own version is not shown: no manifest has a version command yet. A folder file that cannot be read is named; its
 /// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load. The ACP registry's kinds (ADR-0092) are one
 /// line, `registry-kinds` (`$detail`: how many, `$ready`: how many find their program), not one per kind: there are dozens, most are
-/// not installed, and a missing one is not a problem.
+/// not installed, and a missing one is not a problem. A registry kind whose program is broken or unsafe still gets its own line.
 fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
     let (loaded, problems) = crate::manifests::load(dir);
     let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
     let (mut registry, mut registry_ready) = (0usize, 0usize);
     for l in loaded {
-        if l.source == crate::manifests::Source::Registry {
-            registry += 1;
-            let program = crate::manifests::program(&l.manifest).unwrap_or_default();
-            if !program.is_empty() && locate_in(home, program).is_some_and(|f| runnable(f.path())) {
-                registry_ready += 1;
-            }
-            continue;
-        }
         let program = crate::manifests::program(&l.manifest)
             .unwrap_or_default()
             .to_string();
@@ -611,6 +603,12 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
         // find out, so a program that starts and then fails its own checks is not caught here.
         let broken = found.as_ref().is_some_and(|f| !runnable(f.path()));
         let installed = found.is_some() && !broken;
+        // A registry kind is counted, not listed, unless its program is there and cannot run, or is Agora's and not safe.
+        let from_registry = l.source == crate::manifests::Source::Registry;
+        if from_registry {
+            registry += 1;
+            registry_ready += usize::from(installed);
+        }
         let mut c = check(
             if installed {
                 "agent-installed"
@@ -635,7 +633,9 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
             c.args.push(("by", by.to_string()));
             c.args.push(("version", version));
         }
-        out.push(c);
+        if !from_registry || broken {
+            out.push(c);
+        }
         if !program.is_empty() && install_unsafe(home, &program) {
             let mut u = check("agent-unsafe", Status::Warn, l.manifest.kind);
             u.args = vec![("program", program)];

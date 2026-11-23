@@ -96,6 +96,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is found{ $by ->
         [agora] , installed by Agora (version { $version })
@@ -104,6 +105,7 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
@@ -130,6 +132,7 @@ doctor-policy-problems = { $detail ->
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is there but this account may not run it. Make the file executable, or reinstall it.
 doctor-agent-unsafe = { $detail }: `{ $program }` was installed by Agora, but its folder or file is not safe (another user could change it), so it is not used: using the one on your PATH, if there is one. Reinstall it with `agora agent install`, or make the install folders yours alone.

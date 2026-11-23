@@ -12,7 +12,7 @@ export type RegistryRuns = 'npx' | 'uvx' | 'binary';
 
 export interface RegistryInfo {
   kind: string; id: string; name: string; version: string; runs: RegistryRuns;
-  license?: string; repository?: string; website?: string;
+  license?: string; licenseUrl?: string; repository?: string; website?: string;
   /** A URL of the vendored icon (a plain one-colour drawing, checked at conversion), or none. */
   icon?: string;
   /** Always false in this step: nobody has run it through Agora yet. */
@@ -45,10 +45,11 @@ export function cleanLine(v: unknown): RegistryInfo | undefined {
   if (!/^[a-z0-9_-]{1,64}$/.test(id) || kind !== `${REGISTRY_PREFIX}${id}` || !name || !version) return undefined;
   const runs: RegistryRuns = r.runs === 'npx' || r.runs === 'uvx' ? r.runs : 'binary';
   const license = str(r.license, 40);
+  const licenseUrl = safeLink(r.license_url);
   const repository = safeLink(r.repository);
   const website = safeLink(r.website);
   const icon = r.icon === true ? iconOf(id) : undefined;
-  return { kind, id, name, version, runs, tested: false, ...(license ? { license } : {}), ...(repository ? { repository } : {}), ...(website ? { website } : {}), ...(icon ? { icon } : {}) };
+  return { kind, id, name, version, runs, tested: false, ...(license ? { license } : {}), ...(licenseUrl ? { licenseUrl } : {}), ...(repository ? { repository } : {}), ...(website ? { website } : {}), ...(icon ? { icon } : {}) };
 }
 
 const byKind: ReadonlyMap<string, RegistryInfo> = new Map(

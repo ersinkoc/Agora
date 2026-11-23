@@ -513,7 +513,7 @@ pub fn catalog_entry(c: &Converted, icon: bool) -> Value {
         "kind": c.kind, "id": src["id"], "name": c.package["display"], "version": src["version"],
         "runs": runs, "icon": icon, "tested": false,
     });
-    for k in ["license", "repository", "website"] {
+    for k in ["license", "license_url", "repository", "website"] {
         if let Some(s) = src[k].as_str() {
             line[k] = json!(s);
         }
@@ -546,10 +546,10 @@ const ICON_ELEMENTS: &[&str] = &[
     "stop",
     "clipPath",
     "mask",
-    "use",
 ];
 
-/// Attributes an icon may use: geometry and paint. No event handler and no `style`; `href` only to a local `#id`.
+/// Attributes an icon may use: geometry and paint. No event handler, no `style` and no `href` (and no `<use>`): an icon refers to
+/// nothing but its own gradients and clips, through `url(#id)`.
 const ICON_ATTRIBUTES: &[&str] = &[
     "xmlns",
     "xmlns:xlink",
@@ -606,8 +606,6 @@ const ICON_ATTRIBUTES: &[&str] = &[
     "gradientTransform",
     "maskUnits",
     "clipPathUnits",
-    "href",
-    "xlink:href",
     "xml:space",
     "data-name",
     "p-id",
@@ -641,12 +639,6 @@ fn icon_value_ok(name: &str, value: &str) -> bool {
     match name {
         "xmlns" => value == "http://www.w3.org/2000/svg",
         "xmlns:xlink" => value == "http://www.w3.org/1999/xlink",
-        "href" | "xlink:href" => {
-            value.starts_with('#')
-                && value[1..]
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-        }
         _ => {
             plain
                 && scheme_free
@@ -699,7 +691,7 @@ fn strip_prolog(s: &str) -> Result<String, Reason> {
 
 /// ADR-0092 open question 2: an agent's icon is vendored at conversion time only when it is a plain drawing. At most
 /// [`MAX_ICON_BYTES`], UTF-8, one `<svg>` root in the SVG namespace, only the elements and attributes above, every attribute
-/// quoted, `href` and `url(...)` only to a local `#id`, only the five XML entities, no CDATA, processing instruction or internal
+/// quoted, no `href`, `url(...)` only to a local `#id`, only the five XML entities, no CDATA, processing instruction or internal
 /// doctype subset. Returns the drawing without its prolog and comments. The window shows it through an `<img>` (which never runs a
 /// script nor loads anything an SVG names), so this check is a second wall, not the only one.
 pub fn check_icon(bytes: &[u8]) -> Result<String, Reason> {

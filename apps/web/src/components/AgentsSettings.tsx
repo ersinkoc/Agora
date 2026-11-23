@@ -87,7 +87,8 @@ function registryFacts(reg: RegistryInfo) {
   const link = (href: string) => <a href={href} target="_blank" rel="noopener noreferrer" className="set-kind__link">{linkText(href)}</a>;
   return [
     { label: t('agents-version'), value: reg.version, mono: true },
-    ...(reg.license ? [{ label: t('agents-license'), value: reg.license }] : []),
+    // ADR-0092 open question 3: the licence's own text is a link, never bundled.
+    ...(reg.license ? [{ label: t('agents-license'), value: reg.licenseUrl ? <a href={reg.licenseUrl} target="_blank" rel="noopener noreferrer" className="set-kind__link">{reg.license}</a> : reg.license }] : []),
     ...(reg.repository ? [{ label: t('agents-repository'), value: link(reg.repository) }] : []),
     ...(!reg.repository && reg.website ? [{ label: t('agents-website'), value: link(reg.website) }] : []),
     { label: t('agents-source'), value: t('agents-source-registry') },

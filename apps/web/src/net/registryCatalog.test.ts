@@ -14,7 +14,7 @@ describe('the ACP registry catalog (ADR-0092)', () => {
       expect(info.tested).toBe(false);
       expect(isRegistryKind(info.kind)).toBe(true);
       expect(info.version).not.toBe('');
-      for (const href of [info.repository, info.website]) if (href) expect(href.startsWith('https://')).toBe(true);
+      for (const href of [info.repository, info.website, info.licenseUrl]) if (href) expect(href.startsWith('https://')).toBe(true);
     }
     // A hand-made kind is not in it.
     expect(registryInfo('claude-code')).toBeUndefined();
@@ -32,10 +32,11 @@ describe('the ACP registry catalog (ADR-0092)', () => {
     expect(cleanLine({ kind: 'registry-x', id: 'y', name: 'X', version: '1' })).toBeUndefined();
     expect(cleanLine({ kind: 'registry-../x', id: '../x', name: 'X', version: '1' })).toBeUndefined();
     expect(cleanLine(null)).toBeUndefined();
-    const l = cleanLine({ kind: 'registry-x', id: 'x', name: 'Evil‮name', version: '1.0.0', runs: 'sh', repository: 'javascript:alert(1)', license: 'MIT' })!;
+    const l = cleanLine({ kind: 'registry-x', id: 'x', name: 'Evil‮name', version: '1.0.0', runs: 'sh', repository: 'javascript:alert(1)', license_url: 'http://example.com/L', license: 'MIT' })!;
     expect(l.name).toBe('Evil name');
     expect(l.runs).toBe('binary');
     expect(l.repository).toBeUndefined();
+    expect(l.licenseUrl).toBeUndefined();
     expect(l.license).toBe('MIT');
   });
 
