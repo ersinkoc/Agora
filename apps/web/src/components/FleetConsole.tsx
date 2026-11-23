@@ -189,7 +189,9 @@ function Command({ text }: { text: string }) {
 }
 
 // What the page shows when there is no fleet yet: it says where things stand and offers the next step.
-export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi }) {
+// `guest`: the hub said this session is not the owner's (ADR-0049). A person sees only the projects the owner gave them, so an empty
+// window means no project is theirs yet, and the owner's setup (join codes, enrollment) is not theirs to do (#904).
+export function FleetEmpty({ kind, machines, onStart, onRetry, pairing, guest }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi; guest?: boolean }) {
   const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
   const online = machines.filter((m) => m.online);
   if (kind === 'connecting') return <div className="fleet-empty fleet-empty--wide" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p>
@@ -218,6 +220,15 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind
       </div>
     );
   }
+  if (guest) {
+    return (
+      <div className="fleet-empty">
+        <Icon name="machine" className="size-8 text-muted" />
+        <h2 className="fleet-empty__title">{t('fleet-guest-title')}</h2>
+        <p className="fleet-empty__text">{t('fleet-guest-text')}</p>
+      </div>
+    );
+  }
   return (
     <div className="fleet-empty">
       <Icon name="machine" className="size-8 text-accent" />
@@ -234,7 +245,7 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind
 
 // Home: the fleet as a console (docs/ux/visual-language.md, "Glance"). Everything is derived from the props (render is pure): the counts,
 // the queue of what needs you and the tiles are one memoised pass over the list; the clock only moves the times.
-export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry, pairing }: {
+export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry, pairing, guest }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   approvals: readonly ApprovalModel[];
@@ -248,6 +259,8 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   onRetry?: () => void;
   // ADR-0065: machines asking to join (only for an owner's session), and the switch that lets them.
   pairing?: PairingUi;
+  // The hub said this session is not the owner's (see FleetEmpty).
+  guest?: boolean;
 }) {
   const view = useMemo(() => fleetView(fleet, approvals, machines, pairing?.cards), [fleet, approvals, machines, pairing?.cards]);
   const [filter, setFilter] = useState<FleetFilter | undefined>();
@@ -265,7 +278,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     <>
       {view.attention.length > 0 && <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />}
       {pairing && <PairRecentList recent={pairing.recent} />}
-      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} />
+      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} guest={guest} />
     </>
   ) : (
     <>

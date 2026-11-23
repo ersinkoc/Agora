@@ -708,6 +708,13 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             .create_code_for(Some(id), server::now_ms())
             .map_err(|_| "could not create a sign-in code".to_string())
     };
+    // What the hub has heard from its machines, as clients are shown it (a forgotten machine is not offered).
+    let view = || {
+        agora_hub::projection::View::rebuild(&store)
+            .map(|(v, _)| v.shown().into_owned())
+            .unwrap_or_default()
+    };
+    let folders = || agora_hub::project_names::folders(&view());
     let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["add", name] => {
@@ -739,6 +746,7 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Ok(list) => {
+                let known = folders();
                 for u in list {
                     say.out(
                         key!("cli-hub-user-line"),
@@ -748,8 +756,21 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                             ("role", u.role.as_str().into()),
                         ],
                     );
-                    for project in users.grants_of(&u.id).unwrap_or_default() {
-                        say.out(key!("cli-hub-user-project"), &[("project", project.into())]);
+                    for grant in users.grants_of(&u.id).unwrap_or_default() {
+                        let (project, path) = match grant.split_once('/') {
+                            Some((node, project)) => {
+                                agora_hub::project_names::shown_grant(&known, node, project)
+                            }
+                            None => (grant, None),
+                        };
+                        match path {
+                            Some(path) => say.out(
+                                key!("cli-hub-user-project-path"),
+                                &[("project", project.into()), ("path", path.into())],
+                            ),
+                            None => say
+                                .out(key!("cli-hub-user-project"), &[("project", project.into())]),
+                        }
                     }
                 }
                 ExitCode::SUCCESS
@@ -769,25 +790,38 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 Err(e) => fail(e.to_string()),
             }
         }
-        [verb @ ("grant" | "revoke"), id, project] => {
-            let Some((node, project)) = project
-                .split_once('/')
-                .filter(|(n, p)| !n.is_empty() && !p.is_empty())
-            else {
-                return bad();
+        ["projects"] => {
+            let list = folders();
+            if list.is_empty() {
+                say.out(key!("cli-hub-user-projects-none"), &[]);
+            }
+            for f in list {
+                project_line(say, &f, false);
+            }
+            ExitCode::SUCCESS
+        }
+        // #904: `MACHINE/PROJECT` or `MACHINE PROJECT`, as the window names them (a folder's full path or the project's id work too).
+        [verb @ ("grant" | "revoke"), id, rest @ ..] if !rest.is_empty() && rest.len() <= 2 => {
+            let (machine, project) = match rest {
+                [both] => match both.split_once('/') {
+                    Some((m, p)) if !m.is_empty() && !p.is_empty() => (m, p),
+                    _ => return bad(),
+                },
+                [m, p] if !m.is_empty() && !p.is_empty() => (*m, *p),
+                _ => return bad(),
             };
-            let done = if *verb == "grant" {
-                users.grant(id, node, project)
-            } else {
-                users.revoke(id, node, project)
-            };
-            match done {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => {
+            match users.list() {
+                Ok(list) if list.iter().any(|u| u.id == *id) => {}
+                Ok(_) => {
                     say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
-                    ExitCode::from(1)
+                    return ExitCode::from(1);
                 }
-                Err(e) => fail(e.to_string()),
+                Err(e) => return fail(e.to_string()),
+            }
+            if *verb == "grant" {
+                grant_by_name(say, &users, &view(), id, machine, project)
+            } else {
+                revoke_by_name(say, &users, &view(), id, machine, project)
             }
         }
         ["remove", id] => match users.remove(id) {
@@ -813,6 +847,148 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             Err(e) => fail(e.to_string()),
         },
         _ => bad(),
+    }
+}
+
+/// One line of `agora hub user projects` (or of the choice a name that fits several projects gives): what to type, the folder, and the
+/// machine's host name where what to type is its id.
+fn project_line(say: &Say, f: &agora_hub::project_names::Folder, err: bool) {
+    let args = [
+        ("name", f.shown().into()),
+        ("path", f.path.clone().into()),
+        ("host", f.host.clone().into()),
+    ];
+    let k = if f.host.is_empty() || f.host == f.machine {
+        key!("cli-hub-user-projects-line")
+    } else {
+        key!("cli-hub-user-projects-line-host")
+    };
+    if err {
+        say.err(k, &args);
+    } else {
+        say.out(k, &args);
+    }
+}
+
+/// #904: grants the project the owner named as the window does. An unknown machine or project is refused with a reason and nothing
+/// is stored; a name that fits several projects is refused with the folders to choose from.
+fn grant_by_name(
+    say: &Say,
+    users: &agora_hub::users::Users,
+    view: &agora_hub::projection::View,
+    id: &str,
+    machine: &str,
+    project: &str,
+) -> ExitCode {
+    use agora_hub::project_names::{resolve, Resolved};
+    match resolve(view, machine, project) {
+        Resolved::One { node, project } => match users.grant(id, &node, &project) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => {
+                say.err(key!("cli-hub-user-unknown"), &[("id", id.into())]);
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+                ExitCode::from(1)
+            }
+        },
+        Resolved::UnknownMachine => {
+            say.err(
+                key!("cli-hub-user-unknown-machine"),
+                &[("machine", machine.into())],
+            );
+            ExitCode::from(1)
+        }
+        Resolved::UnknownProject => {
+            say.err(
+                key!("cli-hub-user-unknown-project"),
+                &[("machine", machine.into()), ("project", project.into())],
+            );
+            ExitCode::from(1)
+        }
+        Resolved::Ambiguous(candidates) => {
+            ambiguous(say, id, project, &candidates);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn ambiguous(say: &Say, id: &str, project: &str, candidates: &[agora_hub::project_names::Folder]) {
+    let (machine, path) = candidates
+        .first()
+        .map(|f| (f.machine.clone(), f.path.clone()))
+        .unwrap_or_default();
+    say.err(
+        key!("cli-hub-user-ambiguous-project"),
+        &[
+            ("project", project.into()),
+            ("id", id.into()),
+            ("machine", machine.into()),
+            ("path", path.into()),
+        ],
+    );
+    for f in candidates {
+        project_line(say, f, true);
+    }
+}
+
+/// #904: takes back a grant named as the window does, or exactly as it is stored: a row an older build stored without checking names
+/// no project, and must still be removable.
+fn revoke_by_name(
+    say: &Say,
+    users: &agora_hub::users::Users,
+    view: &agora_hub::projection::View,
+    id: &str,
+    machine: &str,
+    project: &str,
+) -> ExitCode {
+    use agora_hub::project_names::{resolve, Resolved};
+    let held = match users.grants_of(id) {
+        Ok(g) => g,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            return ExitCode::from(1);
+        }
+    };
+    let has = |node: &str, project: &str| held.iter().any(|g| *g == format!("{node}/{project}"));
+    let target = if has(machine, project) {
+        Some((machine.to_string(), project.to_string()))
+    } else {
+        match resolve(view, machine, project) {
+            Resolved::One { node, project } if has(&node, &project) => Some((node, project)),
+            Resolved::Ambiguous(candidates) => {
+                let theirs: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|f| has(&f.node, &f.project))
+                    .collect();
+                let distinct: std::collections::BTreeSet<_> =
+                    theirs.iter().map(|f| (&f.node, &f.project)).collect();
+                if distinct.len() > 1 {
+                    ambiguous(say, id, project, &theirs);
+                    return ExitCode::from(1);
+                }
+                theirs.first().map(|f| (f.node.clone(), f.project.clone()))
+            }
+            _ => None,
+        }
+    };
+    let Some((node, stored)) = target else {
+        say.err(
+            key!("cli-hub-user-not-granted"),
+            &[
+                ("id", id.into()),
+                ("project", format!("{machine}/{project}").into()),
+            ],
+        );
+        return ExitCode::from(1);
+    };
+    match users.revoke(id, &node, &stored) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            ExitCode::from(1)
+        }
     }
 }
 

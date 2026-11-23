@@ -19,6 +19,9 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
+      agora hub user projects | grant ID MACHINE/PROJECT | revoke ID MACHINE/PROJECT [--hub-dir DIR]
+      agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
@@ -231,6 +234,14 @@ cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = { $id } adında bir ekip üyesi yok.
 cli-hub-user-project =   { $project } projesinde çalışır
+cli-hub-user-project-path =   { $project } projesinde çalışır ({ $path })
+cli-hub-user-projects-none = Henüz hiçbir makine bu hub'a proje bildirmedi.
+cli-hub-user-projects-line = { $name }    { $path }
+cli-hub-user-projects-line-host = { $name }    { $path }    ({ $host } makinesi)
+cli-hub-user-unknown-machine = { $machine } adında bir makine bu hub'a bağlanmadı. Erişim verebileceğiniz projeleri `agora hub user projects` listeler.
+cli-hub-user-unknown-project = Bu hub { $machine } üzerinde { $project } adında bir proje bilmiyor. Erişim verebileceğiniz projeleri `agora hub user projects` listeler.
+cli-hub-user-ambiguous-project = { $project } birden fazla projeye uyuyor. Makinesi ve klasörüyle birini seçin, örneğin `agora hub user grant { $id } { $machine } { $path }`:
+cli-hub-user-not-granted = { $id } kullanıcısının { $project } projesine erişimi yok.
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.
 cli-enroll-refused = Hub bu makineyi kaydetmeyi reddetti ({ $code }). Kod yanlış, süresi dolmuş veya zaten kullanılmış olabilir.

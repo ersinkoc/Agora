@@ -19,6 +19,9 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
+      agora hub user projects | grant ID MACHINE/PROJECT | revoke ID MACHINE/PROJECT [--hub-dir DIR]
+      agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
@@ -238,6 +241,14 @@ cli-hub-user-none = No team members yet. Add one with `agora hub user add NAME -
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = There is no team member called { $id }.
 cli-hub-user-project =   works in { $project }
+cli-hub-user-project-path =   works in { $project } ({ $path })
+cli-hub-user-projects-none = No machine has reported a project to this hub yet.
+cli-hub-user-projects-line = { $name }    { $path }
+cli-hub-user-projects-line-host = { $name }    { $path }    (machine { $host })
+cli-hub-user-unknown-machine = No machine called { $machine } has reported to this hub. `agora hub user projects` lists the projects you can give access to.
+cli-hub-user-unknown-project = This hub knows no project called { $project } on { $machine }. `agora hub user projects` lists the projects you can give access to.
+cli-hub-user-ambiguous-project = More than one project fits { $project }. Choose one by its machine and folder, for example `agora hub user grant { $id } { $machine } { $path }`:
+cli-hub-user-not-granted = { $id } has no access to { $project }.
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
 cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.

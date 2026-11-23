@@ -74,7 +74,7 @@ const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', tasks: 'boar
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -111,6 +111,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onRetry?: () => void;
   // ADR-0065: machines asking to join, for an owner's session.
   pairing?: PairingUi;
+  // The hub said this session is not the owner's: an empty window says no project is theirs yet (#904).
+  guest?: boolean;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -375,7 +377,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   const home = (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} />
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} guest={guest} />
     </div>
   );
   const welcome = home;
