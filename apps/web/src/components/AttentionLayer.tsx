@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { t } from '../i18n';
-import { ATTENTION_DWELL_MS, type AttentionMode, attentionPrefs, isTypingTarget, mayInterrupt, modalKind, notifyDelay, notifyText, shorten, shownKey, WHO_MAX, whoOf, type NotifyMode, type Presence } from '../net/attention';
+import { type AttentionMode, attentionPrefs, isTypingTarget, mayInterrupt, modalKind, notifyDelay, notifyText, shorten, shownKey, WHO_MAX, whoOf, type NotifyMode, type Presence } from '../net/attention';
 import { titleWithCount } from '../net/alert';
 import { type AttentionItem, askLine } from '../net/fleet';
 import { approvalName } from '../net/approvalText';
@@ -12,7 +12,7 @@ import { needsPanel } from '../net/needsPanel';
 import { kindOf } from './AgentTile';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { AgentAvatar, Button, Tag } from './kit';
-import { useAnswerHolds } from './useAnswerGuard';
+import { useAnswerGuard } from './useAnswerGuard';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
 // this device's choice, a card over the window and a notification while the window is in the background. It holds only memory: what was
@@ -170,43 +170,20 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
 }) {
   const kind = modalKind(item);
   const x = item.kind === 'approval' ? item.approval : undefined;
-  // What is displayed has a dwell of its own, and every change of it (another request, the same one with other words, another agent or
-  // machine) starts it again, and so does the person coming back to the window (focus, or the tab shown again) and the link coming back:
-  // a click that was aimed at something else must not land on Allow. Derived from what is shown, so no frame has a new request ready.
+  // T44 through the shared guard (`useAnswerGuard`, as every other surface; #1052): what is displayed has a dwell of its own, and every change
+  // of it (another request, the same one with other words, another agent or machine) starts it again, and so do the person coming back to
+  // the window (focus, or the tab shown again: at once, so a press in the same batch sends nothing) and the link coming back. A click that
+  // was aimed at something else must not land on Allow. The holds are the window's (#1048): a request answered, or on its way, from any
+  // surface is not answerable here, one answered here is held there; while an answer goes the buttons are off, "Answer sent" (with Review)
+  // only once it went, and a failed answer is answerable again after a fresh dwell.
   const key = shownKey(item);
-  const [epoch, setEpoch] = useState(0);
-  const [readyFor, setReadyFor] = useState<string | undefined>();
-  const xid = x?.id;
-  const settled = useRef(0); // answers to this request that settled anywhere in the window
-  const armed = useRef(0); // how many had settled when the dwell last ran out
-  useEffect(() => {
-    const again = () => setEpoch((n) => n + 1);
-    window.addEventListener('focus', again);
-    const seen = () => { if (document.visibilityState === 'visible') again(); };
-    document.addEventListener('visibilitychange', seen);
-    return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
-  }, []);
-  useEffect(() => {
-    const h = setTimeout(() => { armed.current = settled.current; setReadyFor(key); }, ATTENTION_DWELL_MS);
-    return () => { clearTimeout(h); setReadyFor(undefined); };
-  }, [key, epoch, stale]);
-  // A request is answered once: after one answer its buttons stay dead until it leaves the list or what it shows changes. The window's
-  // holds (#1048, `useAnswerGuard`) are shared with every other surface: a request answered, or on its way, from a banner, the side panel
-  // or Home is not answerable here either, and one answered here is held there. The dwell stays this card's own.
-  const holds = useAnswerHolds([]);
-  const [answered, setAnswered] = useState<string | undefined>();
-  // An answer to this request settled on another surface (it went, or it failed and the request is open again): the dwell starts again
-  // here too, and until its timer fires nothing is answerable, even from a drawing made before the settle (`armed`, read at the press).
-  useEffect(() => holds.onSettle((id) => { if (id === xid) { settled.current += 1; setEpoch((n) => n + 1); } }), [holds, xid]);
-  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet (here or anywhere in the
-  // window), the link up. The holds are read at the press itself.
-  const answerable = () => !!x && !!onResolve && readyFor === key && armed.current === settled.current && answered !== key && !stale && holds.status(x.id) === 'open';
-  const canAnswer = answerable();
-  // Answered here, or held by the window (answered or on its way from another surface): said, with Review, instead of dead buttons alone.
-  const sentHere = answered === key || (!!x && holds.status(x.id) !== 'open');
+  const guard = useAnswerGuard(x ? [x.id] : [], (status) => JSON.stringify([key, x ? status(x.id) : '']), stale);
+  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not held by the window, the link up.
+  const canAnswer = kind === 'answer' && !!x && !!onResolve && guard.canAnswer(x.id);
+  const sentHere = !!x && guard.status(x.id) === 'sent';
   const answer = (ok: boolean, always = false) => {
-    if (!answerable() || !x || !onResolve) return;
-    if (holds.hold(x.id, () => (always ? onResolve(x, ok, undefined, true) : onResolve(x, ok)))) setAnswered(key);
+    if (kind !== 'answer' || !x || !onResolve) return;
+    guard.answer(x.id, () => (always ? onResolve(x, ok, undefined, true) : onResolve(x, ok)));
   };
   const content = useRef<HTMLDivElement>(null);
   // Said to a screen reader when the card opens (the card is an alert dialog; this is the short version of why).
