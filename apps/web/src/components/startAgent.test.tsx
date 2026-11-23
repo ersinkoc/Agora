@@ -1,0 +1,213 @@
+// @vitest-environment jsdom
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setLanguage, t } from '../i18n';
+import type { MachineModel } from '../net/view';
+import { StartAgent, type KindChoice } from './StartAgent';
+
+// The start window with the widget kit (redesign PR 10): agent cards, the machine as a segmented control, "How it acts" with its red risk
+// state and its confirmation (ADR-0059), the not-installed note only for the chosen kind (finding L9), and the name preview.
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+let host: HTMLElement;
+let root: Root;
+beforeEach(() => { setLanguage('en'); localStorage.clear(); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
+afterEach(() => { act(() => root.unmount()); host.remove(); });
+
+const machines: MachineModel[] = [
+  { id: 'n1', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: 0 },
+  { id: 'n2', name: 'mini', os: 'macos', online: true, agentsRunning: 0, lastSeenMs: 0 },
+  { id: 'n3', name: 'box', os: 'plan9', online: true, agentsRunning: 0, lastSeenMs: 0 },
+];
+const skip = { id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true };
+const KINDS: KindChoice[] = [
+  { kind: 'codex', name: 'Codex', installed: true, level: 2, options: [skip] },
+  { kind: 'gemini', name: 'Gemini CLI', installed: false, level: 2, program: 'gemini' },
+  { kind: 'claude', name: 'Claude Code', installed: true, level: 3 },
+  { kind: 'old', name: 'Old agent', installed: false },
+];
+type OnStart = Parameters<typeof StartAgent>[0]['onStart'];
+
+const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
+const win = () => document.querySelector('[role=dialog][aria-label="Start an agent"]') as HTMLElement;
+const button = (text: string) => [...win().querySelectorAll('button')].find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
+const click = (el: Element | null | undefined) => { if (!el) throw new Error('missing element'); act(() => { (el as HTMLElement).click(); }); };
+const key = (el: Element, k: string) => act(() => { el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true })); });
+const group = (name: string) => win().querySelector(`[role=radiogroup][aria-label="${name}"]`) as HTMLElement;
+const radios = (name: string) => [...group(name).querySelectorAll<HTMLButtonElement>('[role=radio]')];
+const checked = (name: string) => radios(name).find((r) => r.getAttribute('aria-checked') === 'true');
+const card = (name: string) => radios('Which agent').find((r) => r.getAttribute('aria-label') === name) as HTMLButtonElement;
+
+async function open(over: Partial<Parameters<typeof StartAgent>[0]> = {}) {
+  const onStart = vi.fn<OnStart>(async () => undefined);
+  act(() => root.render(<StartAgent projects={[{ node: 'n1', projectId: 'p', label: 'shop', path: '/w/shop' }]} machines={machines}
+    loadKinds={async () => KINDS} inspect={async (_n, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false })}
+    onStart={onStart} onClose={() => {}} {...over} />));
+  await flush();
+  click(button('Use this folder'));
+  await flush();
+  return onStart;
+}
+
+describe('the start window, agent cards', () => {
+  it('lists installed kinds first, then the ones the machine cannot find, each a card named by its name with Terminal or Chat', async () => {
+    await open();
+    expect(radios('Which agent').map((r) => r.getAttribute('aria-label'))).toEqual(['Codex', 'Claude Code', 'Gemini CLI', 'Old agent']);
+    const text = group('Which agent').textContent ?? '';
+    expect(text.indexOf('Installed')).toBeLessThan(text.indexOf('Codex'));
+    expect(text.indexOf('Not installed')).toBeGreaterThan(text.indexOf('Claude Code'));
+    // How it runs and "not installed" are the card's description, never its name.
+    const said = (r: HTMLElement) => document.getElementById(r.getAttribute('aria-describedby') ?? '')?.textContent;
+    expect(said(card('Codex'))).toBe('Terminal');
+    expect(said(card('Claude Code'))).toBe('Chat');
+    expect(said(card('Gemini CLI'))).toBe('Terminalnot installed');
+    expect(card('Gemini CLI').className).toContain('border-dashed');
+    expect(card('Codex').querySelector('.kit-avatar')?.textContent).toBe('C');
+    // The first installed kind is chosen, as before; the chosen card is the accent-ringed kit card.
+    expect(checked('Which agent')).toBe(card('Codex'));
+    expect(card('Codex').hasAttribute('data-selected')).toBe(true);
+  });
+
+  it('has no group labels when every kind is installed', async () => {
+    await open({ loadKinds: async () => KINDS.filter((k) => k.installed) });
+    expect(group('Which agent').textContent).not.toContain('Installed');
+  });
+
+  it('is chosen by keyboard: one tab stop, the arrows move and choose (installed into not installed), Home and End go to the ends', async () => {
+    await open();
+    expect(radios('Which agent').map((r) => r.tabIndex)).toEqual([0, -1, -1, -1]);
+    key(card('Codex'), 'ArrowRight');
+    expect(checked('Which agent')).toBe(card('Claude Code'));
+    expect(document.activeElement).toBe(card('Claude Code'));
+    key(card('Claude Code'), 'ArrowDown');
+    expect(checked('Which agent')).toBe(card('Gemini CLI'));
+    key(card('Gemini CLI'), 'End');
+    expect(checked('Which agent')).toBe(card('Old agent'));
+    key(card('Old agent'), 'ArrowRight'); // wraps
+    expect(checked('Which agent')).toBe(card('Codex'));
+    key(card('Codex'), 'ArrowLeft');
+    expect(checked('Which agent')).toBe(card('Old agent'));
+    key(card('Old agent'), 'Home');
+    expect(checked('Which agent')).toBe(card('Codex'));
+    expect(radios('Which agent').map((r) => r.tabIndex)).toEqual([0, -1, -1, -1]);
+    group('Which agent').style.direction = 'rtl';
+    key(card('Codex'), 'ArrowLeft'); // right to left: left is forward
+    expect(checked('Which agent')).toBe(card('Claude Code'));
+  });
+});
+
+describe('the start window, a kind the machine cannot find', () => {
+  it('says why only when that kind is chosen, offers nothing for it and never starts it', async () => {
+    const onStart = await open();
+    const note = () => win().querySelector('[data-start-missing]');
+    expect(note()).toBeNull();
+    expect(win().textContent).not.toContain('cannot find');
+    click(card('Gemini CLI'));
+    expect(note()?.textContent).toBe(t('start-not-installed-program', { program: 'gemini' }));
+    expect(button('Start')?.disabled).toBe(true);
+    expect(win().querySelector('[data-start-preview]')).toBeNull();
+    expect(group('How it acts')).toBeNull();
+    expect(win().textContent).not.toContain(t('start-separate-worktree'));
+    click(button('Start'));
+    await flush();
+    expect(onStart).not.toHaveBeenCalled();
+    // A kind from an older machine that does not name its program gets the general sentence.
+    click(card('Old agent'));
+    expect(note()?.textContent).toBe(t('start-not-installed-why'));
+    click(card('Claude Code'));
+    expect(note()).toBeNull();
+    expect(button('Start')?.disabled).toBe(false);
+  });
+});
+
+describe('the start window, how it acts (ADR-0059, ADR-0102)', () => {
+  it('starts on Ask; Don\'t ask only opens the confirmation, and turns the control and its note red once confirmed', async () => {
+    const onStart = await open();
+    const control = () => group('How it acts');
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    expect(control().className).not.toContain('kit-seg--risk');
+    click(radios('How it acts')[1]);
+    // Not chosen yet: the confirmation is open, Keep asking has the focus, Start waits, nothing is red.
+    const confirm = win().querySelector('[role=alertdialog]') as HTMLElement;
+    expect(confirm.getAttribute('aria-label')).toBe(t('session-confirm-title'));
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    expect(control().className).not.toContain('kit-seg--risk');
+    expect(document.activeElement?.textContent).toBe(t('session-confirm-no'));
+    expect(button('Start')?.disabled).toBe(true);
+    expect(win().querySelector('[data-start-risk]')).toBeNull();
+    // The answer that lets it act freely is the red button.
+    expect(button(t('start-confirm-skip-yes'))?.className).toContain('kit-btn--danger');
+    click(button(t('session-confirm-no')));
+    expect(win().querySelector('[role=alertdialog]')).toBeNull();
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    // The arrow keys open the same confirmation; they never choose Don't ask on their own.
+    key(radios('How it acts')[0]!, 'ArrowRight');
+    expect(win().querySelector('[role=alertdialog]')).not.toBeNull();
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    click(button(t('start-confirm-skip-yes')));
+    expect(checked('How it acts')?.textContent).toBe("Don't ask");
+    expect(control().className).toContain('kit-seg--risk');
+    const note = win().querySelector('[data-start-risk]') as HTMLElement;
+    expect(note.textContent).toBe(t('start-does-not-ask-note'));
+    expect(note.className).toContain('text-danger');
+    click(button('Start'));
+    await flush();
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onStart.mock.calls[0]![5]).toEqual({ ids: ['skip-permissions'], confirmed: ['skip-permissions'], settings: [] });
+  });
+
+  it('sends nothing that skips permissions without the confirmation, and a new kind starts over on Ask', async () => {
+    const onStart = await open();
+    click(radios('How it acts')[1]);
+    click(button(t('start-confirm-skip-yes')));
+    click(card('Claude Code'));
+    click(card('Codex'));
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    click(button('Start'));
+    await flush();
+    expect(onStart.mock.calls[0]![5]).toEqual({ ids: [], confirmed: [], settings: [] });
+  });
+});
+
+describe('the start window, machine, preview and errors', () => {
+  it('shows the machines as a segmented control with their system, named by the machine alone', async () => {
+    await open();
+    expect(radios('Machine').map((r) => r.textContent)).toEqual(['laptop', 'mini', 'box']);
+    expect(checked('Machine')?.textContent).toBe('laptop');
+    // Each has an icon (a system this build has no outline for gets the plain machine).
+    for (const r of radios('Machine')) expect(r.querySelector('svg')).not.toBeNull();
+    const paths = radios('Machine').map((r) => r.querySelector('path')?.getAttribute('d'));
+    expect(new Set(paths).size).toBe(3);
+  });
+
+  it('previews the new agent\'s name with its avatar, by its kind, and says its colour comes when it starts', async () => {
+    await open();
+    const preview = () => win().querySelector('[data-start-preview]') as HTMLElement | null;
+    expect(preview()?.textContent).toBe('CWill appear as codex · …, with a colour picked when it starts.');
+    expect(preview()?.querySelector('strong')?.textContent).toBe('codex · …');
+    expect(preview()?.querySelector('.kit-avatar')).not.toBeNull();
+    click(card('Claude Code'));
+    expect(preview()?.querySelector('strong')?.textContent).toBe('claude · …');
+    // The words follow the language (the window re-renders on the next change); the name keeps its order inside the sentence.
+    setLanguage('tr');
+    click(document.querySelector('[data-kind="codex"]'));
+    expect(document.querySelector('[role=dialog] [data-start-preview]')?.textContent).toBe('Ccodex · … olarak görünecek; rengi başlarken seçilir.');
+  });
+
+  it('shows a refused start in red, and still offers the device approval ask (ADR-0061)', async () => {
+    const ask = vi.fn(async () => false);
+    await open({ onStart: async () => 'approval-not-trusted', trust: { id: 'd', key: 'k' }, askApproval: { can: () => true, ask } });
+    click(button('Start'));
+    await flush();
+    const alert = win().querySelector('[role=alert]') as HTMLElement;
+    expect(alert.textContent).toBe(t('trust-hint', { machine: 'laptop' }));
+    expect(alert.className).toContain('text-danger');
+    click(button(t('trust-ask')));
+    await flush();
+    expect(ask).toHaveBeenCalledTimes(1);
+    const failed = [...win().querySelectorAll('[role=alert]')].find((a) => a.textContent === t('device-ask-failed'));
+    expect(failed?.className).toContain('text-danger');
+    expect(win().textContent).toContain('agora node trust --from-hub');
+  });
+});

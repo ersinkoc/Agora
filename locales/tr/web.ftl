@@ -236,8 +236,14 @@ start-kinds-failed = Makine yanıt vermedi. Yeniden deneyin.
 start-no-kinds = Bu makinede henüz ajan tanımlı değil.
 start-no-projects = Bağlı hiçbir makinede proje yok. Birinde "agora node run --project YOL" çalıştırın.
 start-not-installed = kurulu değil
-start-not-installed-why = Bu makine "kurulu değil" olarak işaretlenen ajanların programlarını PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
+start-not-installed-why = Bu makine bu ajanın programını PATH içinde bulamıyor. Onu oraya kurun ya da düğümü programın çalıştığı bir terminalden başlatın.
 start-not-installed-program = Bu makine { $program } programını PATH içinde bulamıyor. Onu oraya kurun ya da Agora'yı o makinede { $program } programının çalıştığı bir terminalden başlatın.
+start-group-installed = Kurulu
+start-group-missing = Kurulu değil
+start-runs-terminal = Terminal
+start-runs-chat = Sohbet
+# Yeni ajanın Ana sayfada ve sekmelerde alacağı ad: türü, sonra başlarken seçilen bir renk ($name "codex · …" biçimindedir).
+start-preview = { $name } olarak görünecek; rengi başlarken seçilir.
 start-go = Başlat
 start-cancel = Vazgeç
 start-kind-unknown = Bu makine o ajanı tanımıyor.

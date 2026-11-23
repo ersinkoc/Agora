@@ -240,8 +240,14 @@ start-kinds-failed = The machine did not answer. Try again.
 start-no-kinds = This machine has no agents set up yet.
 start-no-projects = No project is set up on a connected machine. Run "agora node run --project PATH" on one.
 start-not-installed = not installed
-start-not-installed-why = This machine cannot find the programs of the agents marked "not installed" in its PATH. Install them there, or start the node from a terminal where they run.
+start-not-installed-why = This machine cannot find this agent's program in its PATH. Install it there, or start the node from a terminal where it runs.
 start-not-installed-program = This machine cannot find { $program } in its PATH. Install it there, or start Agora on that machine from a terminal where { $program } runs.
+start-group-installed = Installed
+start-group-missing = Not installed
+start-runs-terminal = Terminal
+start-runs-chat = Chat
+# The name a new agent will have on Home and in the tabs: its kind, then a colour picked when it starts ($name is "codex · …").
+start-preview = Will appear as { $name }, with a colour picked when it starts.
 start-go = Start
 start-cancel = Cancel
 start-kind-unknown = That machine does not know this agent.

@@ -460,6 +460,10 @@
   .kit-seg { @apply inline-flex max-w-full gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
   .kit-seg__item { @apply inline-flex min-w-0 items-center justify-center gap-1.5 truncate rounded-xs px-2.5 font-medium text-muted transition-colors duration-150 hover:text-ink; height: 1.5rem; font-size: var(--text-caption); }
   .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .kit-seg__item:disabled { @apply cursor-not-allowed opacity-50; }
+  /* A choice that lets an agent act without asking, once chosen: the track takes the red tint, the thumb a red ring and red text. */
+  .kit-seg--risk { background: var(--tint-danger); border-color: var(--line-danger); }
+  .kit-seg--risk .kit-seg__item[aria-checked='true'] { color: var(--danger); box-shadow: inset 0 0 0 1.5px var(--danger); }
 
   /* A switch: off is an outline with a muted thumb, on is filled; one that lets an agent act without asking is red when on. */
   .kit-toggle { @apply relative inline-flex flex-none items-center rounded-full p-0.5 transition-colors duration-150; width: 2.25rem; height: 1.25rem; border: 1.5px solid var(--text-muted); background: transparent; }

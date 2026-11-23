@@ -126,7 +126,7 @@ the kit (redesign PRs 2 and 3).
   its own padding, border or colour:
   Button (primary, secondary, ghost, danger, danger-ghost; sm and md), StatusPill and Pill, Tag, AgentAvatar (the agent's colour and
   the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
-  SettingRow, SegmentedControl (a radio group: arrows move and choose), Toggle (a switch; red when it lets an agent act without asking),
+  SettingRow, SegmentedControl (a radio group: arrows move and choose; red when its chosen item lets an agent act without asking), Toggle (a switch; red when it lets an agent act without asking),
   StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
   (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
   touch target on a touch screen, and respect reduced motion.
