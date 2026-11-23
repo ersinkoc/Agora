@@ -301,7 +301,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
                   return (
                     <div key={e.name} role="row" aria-rowindex={i + 2} aria-selected={path === preview?.path || undefined} data-path={path} tabIndex={path === focusPath ? 0 : -1} style={{ position: 'absolute', insetInline: 0, top: i * ROW, height: ROW }}
                       aria-label={e.secret ? t('files-secret-row', { name: e.name }) : undefined}
-                      className={`flex cursor-pointer items-center gap-2 px-3 text-[0.8125rem] outline-none hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:shadow-[inset_2px_0_0_var(--accent)] ${path === preview?.path ? 'bg-surface-2' : ''}`}
+                      className={`fm-row flex cursor-pointer items-center gap-2 px-3 text-[0.8125rem] outline-none ${path === preview?.path ? 'font-semibold' : 'hover:bg-surface-2'}`}
                       onFocus={() => setCursor((c) => (c === path ? c : path))} onClick={() => open(e)}>
                       <div role="gridcell" className="flex min-w-0 flex-1 items-center gap-2">
                         <Icon name={KIND_ICON[kind]} className={`size-3.5 ${kind === 'folder' ? 'text-accent' : 'text-muted'}`} />
@@ -351,7 +351,7 @@ function TreeNode({ path, name, depth, listings, expanded, list, toggle, current
   return (
     <div role="none">
       <div role="treeitem" aria-level={depth + 1} aria-expanded={open} aria-selected={path === current} data-path={path} tabIndex={path === current ? 0 : -1}
-        className={`flex min-h-7 cursor-pointer items-center gap-1.5 pe-2 text-[0.8125rem] outline-none hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:shadow-[inset_2px_0_0_var(--accent)] ${path === current ? 'bg-surface-2 font-medium' : ''}`}
+        className={`fm-row flex min-h-7 cursor-pointer items-center gap-1.5 pe-2 text-[0.8125rem] outline-none ${path === current ? 'font-semibold' : 'hover:bg-surface-2'}`}
         style={{ paddingInlineStart: 8 + depth * 12 }} onClick={() => go(path)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(path); } }}>
         <button type="button" tabIndex={-1} aria-hidden className="grid size-4 flex-none place-items-center rounded-xs text-muted hover:text-ink" onClick={(e) => { e.stopPropagation(); toggle(path); }}>

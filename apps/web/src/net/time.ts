@@ -26,3 +26,12 @@ export function preciseDuration(ms: number): string {
   if (v < 10_000) return `${(Math.round(v / 100) / 10).toFixed(1)} s`;
   return duration(v);
 }
+
+/** "12 sec", "5 min", "2 hr", "3 days": how long ago, short enough for the end of a row, in the window's language (the browser's own unit
+ *  words). */
+export function agoShort(ms: number, now: number): string {
+  if (!ms) return t('network-never');
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  const [n, unit] = s < 60 ? [s, 'second'] : s < 3600 ? [Math.round(s / 60), 'minute'] : s < 86400 ? [Math.round(s / 3600), 'hour'] : [Math.round(s / 86400), 'day'];
+  return new Intl.NumberFormat(getLanguage(), { style: 'unit', unit, unitDisplay: 'short' }).format(n);
+}

@@ -223,6 +223,8 @@ machines-empty = No machines connected yet.
 machine-online = Online
 machine-offline = Offline
 machine-last-seen = last seen { $when }
+# The Agents list: an offline machine's row ends with how long it has been away ("offline · 2 hr").
+explorer-offline-for = offline · { $when }
 machine-agents =
     { $count ->
         [one] { $count } agent running
@@ -718,6 +720,7 @@ terminal-copy-offer-copy = Copy
 terminal-copy-offer-ignore = Ignore
 closed-section = Closed
 closed-clear = Clear closed
+closed-clear-short = Clear
 closed-dismiss = Remove from this list
 closed-forget = Remove for everyone
 closed-ok = Finished
@@ -756,6 +759,7 @@ trust-show-path = Show the whole path
 trust-copy = Copy
 trust-copied = Copied
 interrupted-section = Stopped when the machine shut down
+interrupted-section-short = Stopped
 interrupted-hint = These were running when the machine stopped.
 interrupted-note = It was running when its machine stopped. Resume continues its conversation in the same folder.
 interrupted-note-new = It was running when its machine stopped. Its conversation cannot be continued; Start again opens a new one in the same folder.
