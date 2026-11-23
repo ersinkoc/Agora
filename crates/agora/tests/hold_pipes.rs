@@ -111,10 +111,14 @@ impl Rig {
         request: &StartPipeRequest,
     ) -> Option<agora_platform::ProcessIdentity> {
         let id = agora_platform::process_identity(pid).ok()?;
-        let program = std::path::Path::new(request.argv.first()?).file_name()?;
+        let argv0 = request.argv.first()?;
+        let program = std::path::Path::new(argv0).file_name()?;
+        // macOS's `/bin/sh` is a launcher that runs the shell chosen for it in its place, under that shell's name.
+        let named = std::ffi::OsStr::new(&id.name) == program
+            || (argv0 == "/bin/sh" && ["bash", "dash", "zsh"].contains(&id.name.as_str()));
         let is_child =
             agora_platform::process_children(self.holder.id()).is_ok_and(|c| c.contains(&id.pid));
-        (std::ffi::OsStr::new(&id.name) == program && is_child).then_some(id)
+        (named && is_child).then_some(id)
     }
 
     /// A node of this link version and nothing newer.
@@ -151,6 +155,39 @@ impl Drop for Rig {
             }
         }
         let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// #1014: the rig records the agent it starts, and ending the rig ends it, though the agent outlives its holder by design.
+#[test]
+fn the_rig_ends_the_agents_it_started_when_it_ends() {
+    if agora_platform::process_identity(std::process::id()).is_err() {
+        return;
+    }
+    let rig = Rig::new("rig-ends");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    let pid = rig
+        .start(&mut c, &pipe("p1", "echo up; sleep 600"))
+        .expect("start");
+    read_until(&mut c, "p1", "up");
+    let recorded = rig.agents.lock().expect("agents").clone();
+    assert_eq!(
+        recorded.iter().map(|a| a.pid).collect::<Vec<_>>(),
+        [pid],
+        "the agent was not recorded; it reads as {:?}",
+        agora_platform::process_identity(pid)
+    );
+    drop(c);
+    drop(rig);
+    let same = |now: &agora_platform::ProcessIdentity| {
+        now.started == recorded[0].started && now.boot == recorded[0].boot
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    while agora_platform::process_identity(pid).is_ok_and(|now| same(&now)) {
+        assert!(Instant::now() < end, "the agent outlived the rig");
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
