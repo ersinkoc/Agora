@@ -57,7 +57,7 @@
 //!   in the agent's words (its text and thinking) as one stream across the pieces they came in, joined with the words held back
 //!   after them and with the last words written before them (the carry, in memory);
 //! - **(b) fragments** (4 bytes or more) at every place a value may have been cut (an edge): a value's start just before an edge,
-//!   its end just after one, and a part of a value between two neighbouring edges.
+//!   its end just after one, and a part of a value between any two edges (pieces of under 4 bytes beside several edges add up).
 //!
 //! Every place agent text is cut, split, spliced, partly redacted or written before it is final, and what covers it:
 //!
@@ -69,26 +69,25 @@
 //! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place |
 //! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges |
 //! | bridge: stderr tail (400 bytes, cut at the front) | into a notice's parameters | (b): both ends of every notice parameter are edges |
-//! | bridge: a line over 4 MiB, every long string halved (`fit_line`) | head and tail kept | **not covered** (an item that large does not reach it in practice) |
+//! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) |
 //! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step and permission label 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
 //! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB | end dropped | recorded (`cap_end`): (b); a parameter's ends always are edges |
 //! | node: a tool call's text, a plan's text | made of the call's arguments, the plan's steps | made again by the writer from the redacted parts |
 //! | node: a tool call still running | its output and arguments are written as they are, then replaced | (b): the end of a version not final is an edge |
 //! | node: a prompt, a queued prompt or a notice between the agent's words | entries between pieces of one value | not a break: the stream is the agent's words only |
 //! | node: the ring drops words not written yet (a flood) | written before what follows | the carry keeps the value's start; their end is an edge (b) |
-//! | writer: the turn ends (the agent leaves Working) | held words written | the end of a turn is not an edge |
-//! | writer: words said outside a turn, a stop's flush (`take_unsaved`) | written without what may follow | the end is an edge (b); the carry joins what follows in this node |
-//! | take-up and resume (seeding) | the earlier node's carry is gone | the start of the next words is an edge (b) |
-//! | Start again | the earlier session's words flushed, the new session starts | as a stop's flush; the new session has no carry |
+//! | writer: any release of held words with less than a value's length after them (the turn ends, words said outside a turn, a stop's flush `take_unsaved`) | written without what may follow | the end is an edge (b), even at a turn's end (an adapter may say it is idle before its last words); the carry (raw, in memory) joins what follows in this node |
+//! | take-up and resume (seeding) | this node does not have the earlier node's raw words | the earlier node's last words as written become the carry (up to 16 KiB, its `<redacted>` marks are edges), with an edge at their end and at the file's first word; fragments under 4 bytes on each side then add up to no more than 3 |
+//! | Start again | the earlier session's words flushed to its file, the new session starts | as a stop's flush; the new session's first word is an edge |
 //! | rotation | the newest whole lines kept | nothing split |
 //!
 //! Every cut in the node's chat code and the bridge goes through those helpers or is listed with why it needs no record
 //! (`chat::every_cut`), and a seeded random test drives the whole path (`chat::property`, 600 cases by default). Not covered: a value
 //! shorter than 8 bytes; a fragment shorter than 4 bytes; a word that only begins (or ends) like a value is replaced too when it
-//! stands at an edge; cuts another adapter makes on its own (#1123) and the bridge's `fit_line` halving; JSON forms of a value other
-//! than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; an adapter that says it is idle before its last words (the words
-//! before are written with no edge after them); words the ring dropped and that the carry no longer reaches; and a secret the node
-//! does not hold. Ids (`call_id`, `approval_id`) are never changed. What the window is sent live is not redacted (#1147). The file is
+//! stands at an edge (at a stop's flush, the end of words said outside a turn and a turn's end, too); cuts another adapter makes on
+//! its own (#1123) and the bridge's `fit_line` halving; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`)
+//! in arguments; words the ring dropped and that the carry no longer reaches; and a secret the node does not hold. The bridge cleans
+//! and redacts a tool's whole output before cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed. What the window is sent live is not redacted (#1147). The file is
 //! as sensitive as the terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
@@ -646,15 +645,24 @@ fn fragments(s: &str, edges: &[usize], known: &[Needle], out: &mut Vec<Range<usi
             }
         }
     }
-    for w in edges.windows(2) {
-        let (a, z) = (w[0], w[1]);
-        let span = &b[a..z];
-        if z - a >= MIN_PIECE
-            && known
+    // Between any two places (not only neighbours: pieces of under 4 bytes on each side of several places add up), a span that is
+    // part of a known value.
+    let longest = known.iter().map(|n| n.k.len()).max().unwrap_or(0);
+    for (i, &a) in edges.iter().enumerate() {
+        for &z in &edges[i + 1..] {
+            if z - a >= longest {
+                break;
+            }
+            if z - a < MIN_PIECE {
+                continue;
+            }
+            let span = &b[a..z];
+            if known
                 .iter()
                 .any(|n| n.k.len() > z - a && n.k.windows(span.len()).any(|w| w == span))
-        {
-            out.push(a..z);
+            {
+                out.push(a..z);
+            }
         }
     }
 }
@@ -715,7 +723,14 @@ fn run_masks(batch: &Batch, known: &[String], pieces: &[Needle]) -> Vec<Vec<Rang
     for run in &batch.runs {
         let mut found = Vec::new();
         whole(&run.text, known, &mut found);
-        fragments(&run.text, &run.edges, pieces, &mut found);
+        // The node's own marks in words written already (a carry from the file) are places a value was cut too.
+        let mut edges = run.edges.clone();
+        edges.extend(
+            run.text
+                .match_indices(REDACTED)
+                .flat_map(|(i, m)| [i, i + m.len()]),
+        );
+        fragments(&run.text, &edges, pieces, &mut found);
         for r in &found {
             for p in &run.parts {
                 let (Some(line), a, b) = (p.line, r.start.max(p.start), r.end.min(p.end)) else {
@@ -760,7 +775,14 @@ fn redacted(
         redact_field(&mut e.output, known, pieces, edges, Vec::new());
         redact_field(&mut e.path, known, pieces, Vec::new(), Vec::new());
         for (k, v) in e.params.iter_mut() {
-            let mut edges = vec![0, v.len()];
+            // Both ends of a parameter are edges (a stderr tail is cut at its front), but not of the node's own numbers and ids
+            // (`bytes`, `entries`), which would only be masked by chance.
+            let numbers = v.bytes().all(|b| b.is_ascii_digit() || b == b',');
+            let mut edges = if numbers {
+                Vec::new()
+            } else {
+                vec![0, v.len()]
+            };
             if let Some((_, cuts)) = c.params.iter().find(|(key, _)| key == k) {
                 edges.extend(cuts);
             }

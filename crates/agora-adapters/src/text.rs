@@ -7,6 +7,10 @@
 //! leaves a piece on each side, which the node's transcript writer looks for (`agora_node::transcript`). A test reads the node's chat
 //! code and the bridge for any other cut.
 
+/// The longest secret value the node looks for in what it writes (a value is at most 8 KiB, ADR-0084), with room for JSON's escapes:
+/// how much of an agent's earlier words the node keeps beside new ones.
+pub const MAX_SECRET_SPAN: usize = 16 * 1024;
+
 /// `text` as is when it fits `max` bytes; otherwise its first bytes (cut on a character boundary) and where it now ends.
 pub fn cap_end(mut text: String, max: usize) -> (String, Option<usize>) {
     if text.len() <= max {

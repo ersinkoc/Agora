@@ -1384,8 +1384,8 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
     }
 }
 
-/// Review of #1103, round 3: on a node that holds a secret, the agent's newest words are held back only while its turn runs. The
-/// answer reaches the file once the agent goes idle (no stop needed), with the node's value replaced.
+/// Review of #1103, round 3: on a node that holds a secret, the agent's newest words are held back while its turn runs, and reach the
+/// file when it ends (no stop needed), with the node's value replaced.
 #[test]
 fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value() {
     let _serial = serial();
@@ -1400,12 +1400,22 @@ fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value
     let node = rig.node();
     let id = started(&rig, &node);
     let words = format!("my token is {value} ok");
-    prompt(&node, &id, &words);
-    wait_for("the answer", || said(&node, &id, &words));
+    prompt(&node, &id, &format!("hold:{words}"));
+    wait_for("the words", || said(&node, &id, &words));
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    // The writer ran (it does each second): the turn is open, so the words wait.
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert!(
+        !on_disk(&rig, &id, "my token is"),
+        "written while the turn was open"
+    );
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
     wait_for("the agent to be idle", || {
         state_of(&node, &id) == Some(AgentState::Idle)
     });
-    wait_for("the answer on disk", || on_disk(&rig, &id, "my token is"));
+    wait_for("the words on disk", || on_disk(&rig, &id, "my token is"));
     let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
     assert!(!body.contains(value), "{body}");
     assert!(body.contains("my token is <redacted> ok"), "{body}");

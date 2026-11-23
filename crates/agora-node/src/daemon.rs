@@ -2410,6 +2410,14 @@ impl Node {
                                 _ => {}
                             }
                         }
+                        // Review of #1103, round 3: the state each agent is in, as a backstop for a change no event carried (the
+                        // transcript writer holds an agent's newest words only while it works).
+                        for v in &views {
+                            chat.set_working_if_known(
+                                &v.id,
+                                v.running && v.state == agora_core::AgentState::Working,
+                            );
+                        }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
                             // ADR-0090 Amendment A: nobody decided a switch in time: nothing is applied, and no adapter asked.
                             if approvals.forget_skip(&node_approval) {
