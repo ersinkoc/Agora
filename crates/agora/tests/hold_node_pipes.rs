@@ -3,7 +3,8 @@
 //! (`agora-fake-agent --adapter`); never a real agent.
 //!
 //! The "node" is this test process (the role lock names it, as in `hold_node.rs`). A node that stops is [`Node`] dropped, which lets
-//! a held adapter go and leaves it running: to the holder this is a link that closed, as when a node is killed.
+//! a held adapter go and leaves it running: to the holder this is a link that closed, as when a node is killed. Since ADR-0104 O2 the
+//! drop is a clean stop: it records what the node had read and not recorded and writes what it held, before it lets go.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -1038,8 +1039,8 @@ fn a_kept_agents_usage_counters_survive_its_node_restarting() {
     let pid = pid_of(&node, &id);
     prompt(&node, &id, "hello");
     wait_for("the answer", || said(&node, &id, "hello"));
-    // The node gathers usage for a few seconds before it logs it (`usage_merge`); a report still gathering when a node stops is lost
-    // (ADR-0104 "Still lost"), so this waits until it is logged.
+    // The node gathers usage for a few seconds before it logs it (`usage_merge`); a killed node loses a report still gathering (a clean
+    // stop logs it, tested below), so this waits until it is logged and the take-up is what this test is about.
     wait_for("the usage in the node's log", || {
         logged_usage(&node, &id) == (10, 5)
     });
@@ -1150,8 +1151,8 @@ fn chat(node: &Node, id: &str) -> Vec<v1::ChatEntry> {
 }
 
 /// ADR-0104 C1 (#931): a kept agent's conversation is written to its node's disk, and the next node, which takes the agent up from the
-/// holder, shows the earlier turns with the same ids and numbers what comes after past them. The node here stops the way a killed one
-/// does for the transcript: nothing is flushed when it goes (the test waits until the writer, which runs once a second, has written).
+/// holder, shows the earlier turns with the same ids and numbers what comes after past them. The test waits until the writer (once a
+/// second) has written both turns before the node stops, so they are in the file as after a kill (a clean stop's flush is tested below).
 #[test]
 fn a_kept_agents_conversation_and_its_ids_survive_its_node_restarting() {
     let _serial = serial();
@@ -1286,4 +1287,155 @@ fn a_node_that_cannot_write_history_runs_its_agent_and_says_so_once() {
     }
     assert_eq!(notices(&node), 1);
     assert_eq!(state_of(&node, &id), Some(AgentState::Idle));
+}
+
+/// Whether the agent said `word` (its own entry, not the person's).
+fn agent_said(node: &Node, id: &str, word: &str) -> bool {
+    chat(node, id)
+        .iter()
+        .any(|e| e.text == word && e.role == v1::ChatRole::Agent as i32)
+}
+
+/// The process id of the holder the rig's node started (a process of this test).
+fn holder_pid(rig: &Rig) -> u32 {
+    std::fs::read_to_string(rig.root.join("run/hold.pid"))
+        .expect("the holder's file")
+        .split_whitespace()
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("the holder's pid")
+}
+
+/// Sends `SIGSTOP` to a process this test started and `SIGCONT` when dropped, however the test ends.
+struct Paused(u32);
+
+impl Paused {
+    fn new(pid: u32) -> Paused {
+        assert!(Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+        Paused(pid)
+    }
+}
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-CONT", &self.0.to_string()])
+            .status();
+    }
+}
+
+/// ADR-0104 O2: the node had read a turn (the agent's answer, its usage and its states) from the holder and not recorded it when it
+/// stopped. The holder counted those lines as given, so no later node reads them again; the clean stop records them before it lets
+/// the adapter go, and the next node has the answer in the conversation and the usage in its log.
+///
+/// Deterministic: the test holds the supervisor, so the supervision loop cannot take the events, waits until the adapter's reader has
+/// handed all four over, and asks the node to stop before it lets go (the loop then never ticks again).
+#[test]
+fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the_next_node() {
+    let _serial = serial();
+    let rig = Rig::new("drain");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    let pid = pid_of(&node, &id);
+    let sup = std::sync::Arc::clone(&node.supervisor);
+    {
+        let guard = sup.lock().unwrap();
+        let before = guard.adapter_events_read(&agent);
+        guard
+            .adapter_prompt(&agent, "drained", false)
+            .expect("prompt");
+        // Working, the answer, the usage, idle.
+        wait_for("the reader to hand over the turn", || {
+            guard.adapter_events_read(&agent) >= before + 4
+        });
+        node.begin_stop();
+    }
+    drop(sup);
+    assert!(!agent_said(&node, &id, "drained"), "the loop took the turn");
+    let stopping = Instant::now();
+    drop(node);
+    assert!(stopping.elapsed() < Duration::from_secs(3));
+    assert!(alive(pid), "the adapter ended with its node");
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert!(
+        agent_said(&node, &id, "drained"),
+        "the answer the old node read is not in the conversation"
+    );
+    assert_eq!(logged_usage(&node, &id), (10, 7), "the usage of the turn");
+}
+
+/// ADR-0104 O2: a clean stop writes what the conversation's writer (once a second) and the usage merge (5 s) still held: an answer
+/// shown a moment before the stop is in the file after it, and its usage is in the log.
+#[test]
+fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
+    let _serial = serial();
+    let rig = Rig::new("flush");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    // A turn whose answer is shown and not yet written (the writer may have run just after it: then another turn).
+    let mut caught = None;
+    for n in 0..20 {
+        let word = format!("last-{n}");
+        prompt(&node, &id, &word);
+        wait_for("the answer", || agent_said(&node, &id, &word));
+        if !on_disk(&rig, &id, &word) {
+            caught = Some(word);
+            break;
+        }
+    }
+    let word = caught.expect("every answer was on disk before the stop");
+    let gathered = logged_usage(&node, &id);
+    drop(node);
+    assert!(
+        on_disk(&rig, &id, &word),
+        "the last answer is not in the file"
+    );
+    let node = rig.node();
+    let logged = logged_usage(&node, &id);
+    assert!(
+        logged.0 > gathered.0,
+        "the usage still being gathered was lost: {gathered:?} then {logged:?}"
+    );
+    let turns = chat(&node, &id)
+        .iter()
+        .filter(|e| e.role == v1::ChatRole::Agent as i32 && e.text.starts_with("last-"))
+        .count() as u64;
+    assert_eq!(logged.0, 10 * turns, "one usage report per turn");
+}
+
+/// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);
+/// the node's stop waits for it at most `DRAIN_WAIT` and still stops in time. The agent keeps running, and once its holder answers
+/// again the next node takes it up.
+#[test]
+fn a_node_stops_in_time_while_its_holder_does_not_answer() {
+    let _serial = serial();
+    let rig = Rig::new("hung");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    let paused = Paused::new(holder_pid(&rig));
+    // The reader asks the holder every few milliseconds; let it be in a read that does not come back.
+    std::thread::sleep(Duration::from_millis(300));
+    let stopping = Instant::now();
+    drop(node);
+    let took = stopping.elapsed();
+    assert!(
+        took < agora_node::daemon::DRAIN_WAIT + Duration::from_secs(1),
+        "the stop waited {took:?} for a holder that does not answer"
+    );
+    drop(paused);
+    assert!(alive(pid), "the adapter ended with its node");
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    prompt(&node, &id, "after");
+    wait_for("the answer after the restart", || {
+        agent_said(&node, &id, "after")
+    });
 }

@@ -733,7 +733,7 @@ impl Wake {
 
 /// Runs the writer of `board` until `stop`: a batch once per [`BATCH_INTERVAL`] or when woken, and retention at its start and every
 /// [`SWEEP_EVERY`] (`running` names the agents that run). A failed write is said once in that agent's conversation. Nothing is
-/// written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
+/// written when it stops: a clean stop writes the last batch itself with [`flush`] once it has recorded everything (ADR-0104 O2).
 pub fn spawn_writer(
     board: Arc<crate::chat::ChatBoard>,
     running: Box<dyn Fn() -> HashSet<String> + Send>,
@@ -756,26 +756,39 @@ pub fn spawn_writer(
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
-                for batch in board.take_unsaved() {
-                    match store.write(&batch) {
-                        Ok(()) => {
-                            failed.remove(&batch.agent);
-                        }
-                        Err(e) => {
-                            if failed.insert(batch.agent.clone(), ()).is_none() {
-                                // Operational log, not UI text; the person is told by the notice.
-                                eprintln!(
-                                    "transcripts: {}: history not written: {e}",
-                                    batch.agent.as_str()
-                                );
-                            }
-                            board.not_saved(&batch.agent, crate::daemon::now_ms());
-                        }
-                    }
-                }
+                write_unsaved(&board, &store, &mut failed);
             }
         })
         .map(Some)
+}
+
+/// ADR-0104 O2: writes what `board` has not saved yet, now, on the caller's thread: the last batch of a node that stops cleanly, after
+/// its writer ([`spawn_writer`]) has ended. Nothing when the board keeps no history.
+pub fn flush(board: &crate::chat::ChatBoard) {
+    if let Some(store) = board.store() {
+        write_unsaved(board, &store, &mut HashMap::new());
+    }
+}
+
+/// One batch per agent with unsaved entries; a failed write is logged once per agent in `failed` and said in its conversation.
+fn write_unsaved(board: &crate::chat::ChatBoard, store: &Store, failed: &mut HashMap<AgentId, ()>) {
+    for batch in board.take_unsaved() {
+        match store.write(&batch) {
+            Ok(()) => {
+                failed.remove(&batch.agent);
+            }
+            Err(e) => {
+                if failed.insert(batch.agent.clone(), ()).is_none() {
+                    // Operational log, not UI text; the person is told by the notice.
+                    eprintln!(
+                        "transcripts: {}: history not written: {e}",
+                        batch.agent.as_str()
+                    );
+                }
+                board.not_saved(&batch.agent, crate::daemon::now_ms());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

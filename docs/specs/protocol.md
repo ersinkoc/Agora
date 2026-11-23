@@ -465,8 +465,9 @@ removed by retention. A tool call or a plan from before the restart is changed i
 still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
 there is dropped with an `adapter.queue_dropped` notice. A fresh start ("Start again") that went through begins a new file (the earlier
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
-changes neither. A node killed loses at most the last batch (up to a second): those entries were shown live and are not in the
-file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+changes neither. A node that stops cleanly writes the last batch first (ADR-0104 O2: `agora node` on `SIGTERM`, Unix); a node killed
+loses at most the last batch (up to a second): those entries were shown live and are not in the file, and the next node may give
+their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
 `chat.history_max_bytes = N` (per agent; default 32 MiB, at most 256 MiB, 0 writes nothing) and `chat.history_days = N` (default and

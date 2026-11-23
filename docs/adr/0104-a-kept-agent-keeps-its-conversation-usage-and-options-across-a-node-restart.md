@@ -339,4 +339,20 @@ references are at main `9760e901`.
   finishes after the restart (one entry, updated in place), in `hold_node_pipes`, plus node unit tests and `agora-bench transcript`.
   Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
   file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop does
-  not flush the last batch (step 5). Step 5 is not built.
+  not flush the last batch (step 5, now built).
+- Step 5 (O2) is built, and with it the ADR: `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` on Unix (`agora_platform::catch_stop_requests`,
+  a stop watch thread in `crates/agora/src/main.rs`) and stops its node with `Node::stop_keeping_agents`: the supervision loop takes nothing more,
+  `Supervisor::let_go_held` lets every held adapter go (`Adapter::let_go`, then its reader is waited for at most `DRAIN_WAIT`, 2 s, as a read of a
+  holder that does not answer waits up to the link's 5 s frame time; `Adapter::detach` is bounded the same way) and takes what the readers had
+  handed over as a tick does, with no restart and no queued prompt sent; the node records it through the loop's own paths (`supervisor_events`,
+  and `chat_event` for the conversation; a waiting request is left to the next node's replay, ADR-0093 decision 3), then writes the transcript's
+  last batch (`transcript::flush`), all the usage still being gathered (`EventSink::flush_all_usage`) and the ledger with the kept session files,
+  and the process ends by the same signal with its default action (`agora_platform::end_as_stopped`), so the supervisor and systemd see the
+  same end as before. It ends no agent: the holder's run on, and the node's own are left as a killed node leaves them (ADR-0060). The whole stop
+  is bounded by `NODE_STOP_DEADLINE`, 5 s, after which the stop watch ends the process anyway: under `agora down`'s 10 s wait for the supervisor
+  (`frontdoor::stop_role`, also `agora service remove`) and the systemd unit's `TimeoutStopSec=25`. A node dropped in-process drains the same
+  way and still ends its own agents. Windows has no clean stop (`TerminateProcess` cannot be caught): there every stop stays a kill. Tested with
+  a turn the node had read and not recorded when it stopped, an answer and usage still held by the writer and the merge, and a stopped holder
+  (`hold_node_pipes`); with `agora down` twice, once with a stopped holder (`front_door`); and with a detach whose read hangs (`agora-adapters`).
+  Still lost: on a kill, as before; on a clean stop, lines a reader still waiting on a holder that does not answer is handed after the wait (the
+  holder counts them given), and a waiting request is asked again rather than recorded.

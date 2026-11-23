@@ -2216,13 +2216,14 @@ impl Supervisor {
     }
 
     /// Drains what adapters said since the last call: states are applied (a report always wins over anything
-    /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`.
-    fn poll_adapters(&mut self, now: Instant, events: &mut Vec<SupervisorEvent>) {
+    /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`. `letting_go` ([`Self::let_go_held`]): only
+    /// the adapters the holder runs, with no restart and no queued prompt sent.
+    fn poll_adapters(&mut self, now: Instant, events: &mut Vec<SupervisorEvent>, letting_go: bool) {
         let policy = self.cfg.restart;
         let due: Vec<AgentId> = self
             .adapters
             .iter()
-            .filter(|(_, e)| e.restart_at.is_some_and(|t| now >= t))
+            .filter(|(_, e)| !letting_go && e.restart_at.is_some_and(|t| now >= t))
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
@@ -2242,7 +2243,7 @@ impl Supervisor {
                         tag,
                         sent: was_sent,
                     });
-                    if let Some(next) = next {
+                    if let Some(next) = next.filter(|_| !letting_go) {
                         begin_send(e, &id, next, &sent, events);
                     }
                 }
@@ -2254,8 +2255,11 @@ impl Supervisor {
             }
         }
         for (id, e) in &mut self.adapters {
+            if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
+                continue;
+            }
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
-            if let Some(next) = e.rich.expire(now) {
+            if let Some(next) = e.rich.expire(now).filter(|_| !letting_go) {
                 begin_send(e, id, next, &sent, events);
             }
             // #933: an adapter whose output ended keeps its launch's Git file until its process is collected (a look that never waits;
@@ -2280,7 +2284,7 @@ impl Supervisor {
                         // ADR-0090: an adapter that reports its turns (`turns`) tells when one is open; the next queued prompt goes
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
-                            if let Some(next) = e.rich.observe(state, now) {
+                            if let Some(next) = e.rich.observe(state, now).filter(|_| !letting_go) {
                                 begin_send(e, id, next, &sent, events);
                             }
                         }
@@ -3296,8 +3300,39 @@ impl Supervisor {
         for id in ids {
             self.tick_agent(&id, now, &mut events);
         }
-        self.poll_adapters(now, &mut events);
+        self.poll_adapters(now, &mut events, false);
         events
+    }
+
+    /// ADR-0104 O2: the node is stopping cleanly. Every adapter the holder runs is let go (it runs on for the next node), each reader
+    /// is waited for until `until` at most, and what they had read and the node had not taken yet is taken as a tick takes it (states,
+    /// options, config and commands applied; chat, usage and the rest passed on), for the node to record before it ends. Nothing is
+    /// restarted and no queued prompt is sent. A reader still running at `until` is left (a holder that does not answer): lines the
+    /// holder hands it after that are counted as given and lost, as with a kill, and the next node rebuilds only waiting requests and the
+    /// newest options, config and commands from them (ADR-0093, ADR-0104 O1). Adapters the node runs itself are left as they are.
+    pub fn let_go_held(&mut self, until: Instant) -> Vec<SupervisorEvent> {
+        for e in self.adapters.values_mut() {
+            e.restart_at = None;
+            if let Some(a) = e.adapter.as_mut().filter(|a| a.is_held()) {
+                a.let_go();
+            }
+        }
+        for e in self.adapters.values_mut() {
+            if let Some(a) = e.adapter.as_mut().filter(|a| a.is_held()) {
+                a.reader_ended_by(until);
+            }
+        }
+        let mut events = Vec::new();
+        self.poll_adapters(Instant::now(), &mut events, true);
+        events
+    }
+
+    /// ADR-0104 O2: how many events the reader of `id`'s adapter has handed over (0 for none), so a test can tell a line was read.
+    pub fn adapter_events_read(&self, id: &AgentId) -> usize {
+        self.adapters
+            .get(id)
+            .and_then(|e| e.adapter.as_ref())
+            .map_or(0, Adapter::events_read)
     }
 
     fn tick_agent(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {

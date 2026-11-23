@@ -744,6 +744,45 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
 /// again later instead of giving up.
 const LINK_UNREADABLE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// ADR-0104 O2: the longest `agora node` takes from a stop request (`SIGTERM`, `SIGINT`, `SIGHUP`; Unix) to its end. It stops cleanly
+/// within it (the node's drain waits at most `agora_node::daemon::DRAIN_WAIT`, 2 s, for the held adapters' readers; the rest is
+/// local writes), and ends anyway when it passes, whatever still runs. Under every wait for it: `agora down` waits 10 s for the
+/// supervisor, which ends right after the node (`frontdoor::stop_role`, also used by `agora service remove`), and the systemd unit's
+/// `TimeoutStopSec` is 25 s. Windows ends the node with `TerminateProcess`, which cannot be caught.
+const NODE_STOP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often the stop watch looks for a caught stop request (the handler itself may only set a flag).
+const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// ADR-0104 O2: from now on a stop request does not end `agora node` at once: what this returns says it arrived, so the node stops
+/// cleanly, and the process ends anyway [`NODE_STOP_DEADLINE`] after it. `None` where stop requests are not caught (Windows) or the
+/// watch could not start: a request then ends the process at once, as before.
+fn node_stop_watch() -> Option<std::sync::mpsc::Receiver<()>> {
+    if !agora_platform::STOP_REQUESTS_CAUGHT {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The watch first: requests are caught only once something is there to act on them.
+    std::thread::Builder::new()
+        .name("agora-stop-watch".into())
+        .spawn(move || loop {
+            if agora_platform::stop_requested() {
+                let _ = tx.send(());
+                std::thread::sleep(NODE_STOP_DEADLINE);
+                // Operational log, not UI text.
+                eprintln!(
+                    "node: not stopped {} s after the stop request; ending now",
+                    NODE_STOP_DEADLINE.as_secs()
+                );
+                agora_platform::end_as_stopped();
+            }
+            std::thread::sleep(STOP_POLL);
+        })
+        .ok()?;
+    agora_platform::catch_stop_requests().ok()?;
+    Some(rx)
+}
+
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
     agora_platform::recover_sandbox_leftovers();
@@ -752,6 +791,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     }
     let h = home();
+    // ADR-0104 O2: a stop request from here on ends the node cleanly (its agents in the holder keep running), within the deadline.
+    let stop = node_stop_watch();
     // A machine enrolled with a hub reports under the id the hub's certificate names. A link folder another command held past every
     // working hold is not read (it may be half saved) and the node does not start with no link or half of one: it ends, and its
     // supervisor starts it again later (Codex review of F1031). A folder that cannot be read yet (a volume still being mounted) is tried
@@ -863,10 +904,17 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         l.state_dir = Some(cfg.data_dir.clone());
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
-    // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
-    loop {
-        std::thread::sleep(Duration::from_secs(3600));
-    }
+    // Run until the process is stopped; the socket file is replaced on next start. ADR-0104 O2: on a stop request the node stops cleanly
+    // (it records what the held adapters said and it had not recorded, writes the conversation, the usage and the ledger, and lets the
+    // held agents go; no agent is ended) and the process then ends as the request would have ended it.
+    let Some(stop) = stop else {
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    };
+    let _ = stop.recv();
+    node.stop_keeping_agents();
+    agora_platform::end_as_stopped()
 }
 
 fn connect(say: &Say, o: &Opts) -> Result<Client, ExitCode> {

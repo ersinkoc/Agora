@@ -335,6 +335,10 @@ pub struct HeldIo {
     pub exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
 }
 
+/// How long [`Adapter::detach`] waits for the reader of a held adapter's output to end. A read of the holder waits up to the link's frame
+/// time (5 s) when the holder does not answer; a node that stops must not wait that long for each adapter (ADR-0104 O2).
+pub const DETACH_WAIT: Duration = Duration::from_secs(2);
+
 pub struct Adapter {
     proc: Proc,
     /// Lines for the adapter's stdin with the id of the call each one belongs to. A thread of its own writes them, so a
@@ -344,6 +348,8 @@ pub struct Adapter {
     events: Receiver<AdapterEvent>,
     next_id: Arc<AtomicU64>,
     ignored: Arc<AtomicUsize>,
+    /// Events the reader has put in `events` (ADR-0104 O2: so a test can tell that a line was read and is waiting to be taken).
+    read: Arc<AtomicUsize>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -887,18 +893,51 @@ impl Adapter {
 
     /// ADR-0093: lets go of a process the holder runs: it keeps running, for the next node. The node stops reading and writing
     /// (what it had asked for and not yet had is the holder's to keep). `false` for a process the node runs itself, which is left as
-    /// it was (it ends with this value, as before).
+    /// it was (it ends with this value, as before). The reader is waited for at most [`DETACH_WAIT`] ([`Self::let_go`] and
+    /// [`Self::reader_ended_by`]); what it read before it ended stays to be taken with [`Self::poll`].
     pub fn detach(&mut self) -> bool {
+        if !self.let_go() {
+            return false;
+        }
+        self.reader_ended_by(std::time::Instant::now() + DETACH_WAIT);
+        true
+    }
+
+    /// ADR-0104 O2: the first half of [`Self::detach`], so that a node letting go of many adapters waits for all their readers within one
+    /// time: the reader is told to stop and nothing more is written. It still hands over the lines it already had from the holder
+    /// (which the holder counts as given), then ends; their events stay to be taken with [`Self::poll`]. `false` for a process the
+    /// node runs itself, which is left as it was.
+    pub fn let_go(&mut self) -> bool {
         let Proc::Held { stop, detached, .. } = &mut self.proc else {
             return false;
         };
         *detached = true;
         stop.store(true, Ordering::Release);
         self.writer = None;
-        if let Some(t) = self.reader.take() {
-            let _ = t.join();
-        }
         true
+    }
+
+    /// ADR-0104 O2: waits until `until` at most for the reader to end. `true` when it ended (or there was none). A reader still
+    /// running then (a holder that does not answer: a read waits up to the link's frame time) is left to end on its own, never
+    /// waited for again: a hung read must not keep a node from stopping.
+    pub fn reader_ended_by(&mut self, until: std::time::Instant) -> bool {
+        let Some(t) = self.reader.take() else {
+            return true;
+        };
+        while !t.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if t.is_finished() {
+            let _ = t.join();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// ADR-0104 O2: how many events the reader has handed over so far (taken or not), so that a test can tell a line was read.
+    pub fn events_read(&self) -> usize {
+        self.read.load(Ordering::Acquire)
     }
 
     /// ADR-0093: an adapter whose process the holder runs, over the link the node has to it. `replay` are events the node rebuilt from
@@ -923,6 +962,7 @@ impl Adapter {
             events,
             next_id: Arc::new(AtomicU64::new(1)),
             ignored: Arc::new(AtomicUsize::new(0)),
+            read: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
         let (writer, lines) = sync_channel(WRITE_QUEUE);
@@ -932,15 +972,16 @@ impl Adapter {
             .name("agora-adapter-write".into())
             .spawn(move || write_loop(input, &lines, &pending))?;
         adapter.writer = Some(writer);
-        let (pending, ignored, output) = (
+        let (pending, ignored, read, output) = (
             Arc::clone(&adapter.pending),
             Arc::clone(&adapter.ignored),
+            Arc::clone(&adapter.read),
             io.output,
         );
         adapter.reader = Some(
             std::thread::Builder::new()
                 .name("agora-adapter-read".into())
-                .spawn(move || read_loop(output, &pending, &ignored, &tx))?,
+                .spawn(move || read_loop(output, &pending, &ignored, &read, &tx))?,
         );
         Ok(adapter)
     }
@@ -1013,10 +1054,10 @@ impl Adapter {
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
         }
-        Self::attach_child(cmd.spawn()?, |stdout, pending, ignored, tx| {
+        Self::attach_child(cmd.spawn()?, |stdout, pending, ignored, read, tx| {
             std::thread::Builder::new()
                 .name("agora-adapter-read".into())
-                .spawn(move || read_loop(stdout, &pending, &ignored, &tx))
+                .spawn(move || read_loop(stdout, &pending, &ignored, &read, &tx))
         })
     }
 
@@ -1025,6 +1066,7 @@ impl Adapter {
         start_reader: impl FnOnce(
             ChildStdout,
             Pending,
+            Arc<AtomicUsize>,
             Arc<AtomicUsize>,
             Sender<AdapterEvent>,
         ) -> io::Result<std::thread::JoinHandle<()>>,
@@ -1038,6 +1080,7 @@ impl Adapter {
             events,
             next_id: Arc::new(AtomicU64::new(1)),
             ignored: Arc::new(AtomicUsize::new(0)),
+            read: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
         let Proc::Child(child) = &mut adapter.proc else {
@@ -1058,6 +1101,7 @@ impl Adapter {
             stdout,
             Arc::clone(&adapter.pending),
             Arc::clone(&adapter.ignored),
+            Arc::clone(&adapter.read),
             tx,
         )?);
         Ok(adapter)
@@ -1224,9 +1268,13 @@ impl Adapter {
         .map(drop)
     }
 
-    /// Everything the adapter said since the last call, oldest first. Never blocks.
+    /// Everything the adapter said since the last call, oldest first. Never blocks. After [`Self::detach`] or [`Self::let_go`], the end
+    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder.
     pub fn poll(&self) -> Vec<AdapterEvent> {
-        std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+        let detached = matches!(self.proc, Proc::Held { detached: true, .. });
+        std::iter::from_fn(|| self.events.try_recv().ok())
+            .filter(|e| !(detached && *e == AdapterEvent::Exited))
+            .collect()
     }
 
     /// Waits up to `timeout` for the next event.
@@ -1354,6 +1402,7 @@ fn read_loop<R: Read>(
     stdout: R,
     pending: &Pending,
     ignored: &AtomicUsize,
+    read: &AtomicUsize,
     events: &Sender<AdapterEvent>,
 ) {
     let mut r = BufReader::new(stdout);
@@ -1375,6 +1424,7 @@ fn read_loop<R: Read>(
                     if events.send(e).is_err() {
                         break;
                     }
+                    read.fetch_add(1, Ordering::Release);
                 }
                 None => {
                     ignored.fetch_add(1, Ordering::Relaxed);
@@ -1551,6 +1601,105 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// A holder's control for tests: the process runs, and nothing is asked of it.
+    struct Running;
+
+    impl agora_platform::HeldControl for Running {
+        fn signal(&self, _: agora_platform::HeldSignal) -> io::Result<()> {
+            Ok(())
+        }
+        fn exit_status(&self) -> io::Result<Option<agora_platform::ExitStatus>> {
+            Ok(None)
+        }
+    }
+
+    fn held(output: Box<dyn Read + Send>, stop: Arc<AtomicBool>) -> Adapter {
+        Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(io::sink()),
+                output,
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    /// A held adapter's output as the node's link reads it: `lines` first, then nothing until the stop (then its end).
+    struct Lines(Cursor<Vec<u8>>, Arc<AtomicBool>);
+
+    impl Read for Lines {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            loop {
+                let n = self.0.read(out)?;
+                if n > 0 || self.1.load(Ordering::Acquire) {
+                    return Ok(n);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// ADR-0104 O2: what the reader handed over before a detach stays to be taken, and the end of the output that the detach caused is
+    /// not an `Exited` (the process runs on in the holder).
+    #[test]
+    fn a_detached_held_adapter_keeps_what_it_read_and_is_not_said_to_have_exited() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let lines = b"{\"jsonrpc\":\"2.0\",\"method\":\"chat/append\",\"params\":{\"sessionId\":\"s\",\"text\":{\"text\":\"hi\"}}}\n\
+                      {\"jsonrpc\":\"2.0\",\"method\":\"state/update\",\"params\":{\"sessionId\":\"s\",\"state\":\"AGENT_STATE_IDLE\"}}\n";
+        let mut a = held(
+            Box::new(Lines(Cursor::new(lines.to_vec()), Arc::clone(&stop))),
+            stop,
+        );
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while a.events_read() < 2 {
+            assert!(std::time::Instant::now() < end, "the lines were not read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.detach());
+        let events = a.poll();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(events[0], AdapterEvent::Chat { .. }), "{events:?}");
+        assert!(matches!(
+            events[1],
+            AdapterEvent::State {
+                state: AgentState::Idle,
+                ..
+            }
+        ));
+        assert!(a.poll().is_empty());
+    }
+
+    /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a
+    /// node's stop, waiting longer than [`DETACH_WAIT`].
+    #[test]
+    fn a_detach_whose_read_hangs_returns_in_bounded_time() {
+        struct Hung(std::sync::mpsc::Receiver<()>);
+        impl Read for Hung {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+        let (release, hung) = std::sync::mpsc::channel();
+        let mut a = held(Box::new(Hung(hung)), Arc::new(AtomicBool::new(false)));
+        let began = std::time::Instant::now();
+        assert!(a.detach());
+        let took = began.elapsed();
+        assert!(
+            took >= DETACH_WAIT && took < DETACH_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        assert!(a.poll().is_empty());
+        drop(a);
+        drop(release);
+    }
+
     #[test]
     fn startup_cleanup_child() {
         if std::env::var_os("AGORA_TEST_STARTUP_CLEANUP_CHILD").is_some() {
@@ -1575,7 +1724,7 @@ mod tests {
             .spawn()
             .unwrap();
         let identity = agora_platform::process_identity(child.id()).unwrap();
-        let result = Adapter::attach_child(child, |_, _, _, _| {
+        let result = Adapter::attach_child(child, |_, _, _, _, _| {
             assert!(agora_platform::process_still_running(&identity));
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         });
@@ -1859,7 +2008,13 @@ mod tests {
         let head = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":";
         let tail = b"\"done\"}";
         let input = Cursor::new(head).chain(InterruptOnce(false, Cursor::new(tail)));
-        read_loop(input, &pending, &AtomicUsize::new(0), &events);
+        read_loop(
+            input,
+            &pending,
+            &AtomicUsize::new(0),
+            &AtomicUsize::new(0),
+            &events,
+        );
         assert_eq!(response.try_recv().unwrap().unwrap(), json!("done"));
         assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);
         assert!(output.try_recv().is_err());
@@ -1886,7 +2041,13 @@ mod tests {
         let (events, output) = channel();
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"\xff\"}}\n\
                       {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"valid\"}}\n";
-        read_loop(Cursor::new(input), &pending, &ignored, &events);
+        read_loop(
+            Cursor::new(input),
+            &pending,
+            &ignored,
+            &AtomicUsize::new(0),
+            &events,
+        );
         assert_eq!(response.recv().unwrap().unwrap(), json!({"text": "valid"}));
         assert_eq!(ignored.load(Ordering::Relaxed), 1);
         assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);

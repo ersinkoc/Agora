@@ -826,10 +826,13 @@ pub(crate) fn detach(cmd: &mut Command) {
 /// The child a caught stop request is passed on to (0: none), and whether one was caught: see [`crate::catch_stop_requests`].
 static STOP_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static STOP_CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The first stop request's signal (0: none yet), for [`end_as_stopped`].
+static STOP_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-extern "C" fn on_stop_request(_: libc::c_int) {
+extern "C" fn on_stop_request(sig: libc::c_int) {
     use std::sync::atomic::Ordering::SeqCst;
     // Only lock-free atomics and `kill`, all async-signal-safe.
+    let _ = STOP_SIGNAL.compare_exchange(0, sig, SeqCst, SeqCst);
     STOP_CAUGHT.store(true, SeqCst);
     let pid = STOP_TARGET.load(SeqCst);
     if pid > 0 {
@@ -1038,6 +1041,28 @@ pub(crate) fn forward_stop_to(pid: Option<u32>) {
 
 pub(crate) fn stop_requested() -> bool {
     STOP_CAUGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// See [`crate::end_as_stopped`]: the caught signal (or `SIGTERM`) with its default action again, raised at this process.
+pub(crate) fn end_as_stopped() -> ! {
+    let sig = match STOP_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => libc::SIGTERM,
+        s => s,
+    };
+    // SAFETY: an all-zero sigaction with `SIG_DFL` is valid; plain system calls on this process.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(sig, &action, std::ptr::null_mut());
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
+    }
+    // Not reached: the default action of each caught signal ends the process. The shell's code for an end by that signal otherwise.
+    std::process::exit(128 + sig)
 }
 
 /// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].

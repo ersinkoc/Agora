@@ -135,18 +135,11 @@ pub struct EventSink {
 }
 
 impl Drop for EventSink {
-    /// When the sink is dropped in-process, the usage still being gathered is logged. A node ended from outside (`agora down`, a
-    /// restart, a crash: `SIGTERM` or `TerminateProcess` with no handler) does not unwind, so up to [`crate::usage_merge::WINDOW_MS`]
-    /// of each agent's usage is lost then (#522 review; a stop handler that flushes first is the follow-up).
+    /// When the sink is dropped in-process, the usage still being gathered is logged. A node that stops cleanly logs it before
+    /// (`Node::drop`, which `agora node` runs on `SIGTERM`, ADR-0104 O2); one ended outright (a crash, `SIGKILL`, `TerminateProcess`)
+    /// does not unwind, so up to [`crate::usage_merge::WINDOW_MS`] of each agent's usage is lost then (#522 review).
     fn drop(&mut self) {
-        let rest = self
-            .usage
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_all();
-        for u in rest {
-            self.write(Body::AgentUsageReported(u));
-        }
+        self.flush_all_usage();
     }
 }
 
@@ -649,6 +642,18 @@ impl EventSink {
             .unwrap_or_else(|e| e.into_inner())
             .due(now_ms());
         for u in due {
+            self.write(Body::AgentUsageReported(u));
+        }
+    }
+
+    /// Logs all the usage still being gathered, due or not (a node that stops, ADR-0104 O2).
+    pub fn flush_all_usage(&self) {
+        let rest = self
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_all();
+        for u in rest {
             self.write(Body::AgentUsageReported(u));
         }
     }
@@ -1658,6 +1663,8 @@ pub struct Node {
     pub ledger: Arc<crate::ledger::Ledger>,
     /// See [`Node::crash`].
     crashed: bool,
+    /// See [`Node::stop_keeping_agents`].
+    keep_agents: bool,
 }
 
 impl Node {
@@ -2050,7 +2057,7 @@ impl Node {
                         // ADR-0095: when the list below is taken (under the lock, after the tick): a dispatch made after this is not
                         // dropped by a list that predates it.
                         let views_at = Instant::now();
-                        let (
+                        let Some((
                             events,
                             views,
                             usage_targets,
@@ -2059,19 +2066,28 @@ impl Node {
                             pids,
                             held,
                             adapter_states,
-                        ) = {
+                        )) = ({
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                            let events = s.tick(Instant::now());
-                            (
-                                events,
-                                s.list(),
-                                s.usage_targets(),
-                                s.take_ended_usage_targets(),
-                                s.session_file_targets(),
-                                s.agent_pids(),
-                                s.held_agents(),
-                                s.held_adapter_states(),
-                            )
+                            // ADR-0104 O2: once the node is stopping, what the adapters said is the stop's to take (`Node::drop`), all
+                            // of it and in one place, never half by a last tick.
+                            if stop.load(Ordering::Acquire) {
+                                None
+                            } else {
+                                let events = s.tick(Instant::now());
+                                Some((
+                                    events,
+                                    s.list(),
+                                    s.usage_targets(),
+                                    s.take_ended_usage_targets(),
+                                    s.session_file_targets(),
+                                    s.agent_pids(),
+                                    s.held_agents(),
+                                    s.held_adapter_states(),
+                                ))
+                            }
+                        })
+                        else {
+                            break;
                         };
                         // ADR-0079 decision 9: which holder each running agent is in, so the next node attaches instead of calling
                         // it interrupted. An agent the node runs itself records none (also after a fallback).
@@ -2241,17 +2257,6 @@ impl Node {
                         let now = now_ms();
                         for e in &events {
                             match e {
-                                // What a chat agent says goes to its transcript (ADR-0038).
-                                SupervisorEvent::Adapter {
-                                    agent,
-                                    event: AdapterEvent::Chat { item, .. },
-                                } => {
-                                    // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
-                                    if let Some(word) = activity_word(item) {
-                                        mesh.set_activity(agent, word);
-                                    }
-                                    chat.push_item(agent, item, now);
-                                }
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:
@@ -2341,33 +2346,6 @@ impl Node {
                                         let _ = call.and_then(|c| c.run());
                                     }
                                 }
-                                // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now,
-                                // not the tick's, which is older than what this tick already said).
-                                SupervisorEvent::PromptSending { agent, tag } => {
-                                    chat.sending(agent, *tag, crate::daemon::now_ms());
-                                }
-                                // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
-                                SupervisorEvent::PromptDequeued { agent, tag, sent } => {
-                                    if *sent {
-                                        chat.unqueue(agent, *tag, now);
-                                    } else {
-                                        chat.drop_queued(agent, &[*tag], now);
-                                    }
-                                    // ADR-0095: a dispatch prompt that could not be sent gives its task back.
-                                    if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent)
-                                    {
-                                        mesh.give_back(&g);
-                                    }
-                                }
-                                SupervisorEvent::PromptsDropped { agent, tags } => {
-                                    chat.drop_queued(agent, tags, now);
-                                    for g in mesh.dispatches().dropped(agent, tags) {
-                                        mesh.give_back(&g);
-                                    }
-                                }
-                                SupervisorEvent::OutputDropped { agent, bytes } => {
-                                    chat.output_dropped(agent, *bytes, now);
-                                }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
                                     restart_notice(&chat, e, &views, now);
@@ -2387,7 +2365,7 @@ impl Node {
                                         );
                                     }
                                 }
-                                _ => {}
+                                other => chat_event(&chat, &mesh, other, now),
                             }
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
@@ -2538,6 +2516,7 @@ impl Node {
             events_set_aside,
             ledger,
             crashed: false,
+            keep_agents: false,
         })
     }
 
@@ -2546,6 +2525,22 @@ impl Node {
     /// outlives the node that way). They are left running for good.
     pub fn crash(mut self) {
         self.crashed = true;
+    }
+
+    /// ADR-0104 O2: the stop of `agora node` on a stop request. As dropping the node (what the held adapters said is recorded, the
+    /// conversation, the usage and the ledger are written, the held adapters are let go), but no agent is ended and nothing more is
+    /// said: the agents the node runs itself are left as a node ended from outside leaves them (ADR-0060: a terminal agent in its own
+    /// session runs on and is found still running at the next start; an adapter sees its input end), and the hub learns that the
+    /// node went from its connection, as before. Only the drop of a node in-process (tests, an embedding) ends its own agents.
+    pub fn stop_keeping_agents(mut self) {
+        self.keep_agents = true;
+    }
+
+    /// Tells the node's threads that it is stopping, as dropping it does first: the supervision loop takes nothing more from the
+    /// agents, and the stop that follows ([`Drop`]) records what they said since (ADR-0104 O2). For a test that holds the supervisor
+    /// while it stops the node, so the loop cannot take what is waiting before the stop does.
+    pub fn begin_stop(&self) {
+        self.stop.store(true, Ordering::Release);
     }
 
     pub fn socket(&self) -> Option<&Path> {
@@ -2681,6 +2676,12 @@ fn resume_round(
 }
 
 impl Drop for Node {
+    /// A clean stop (ADR-0104 O2): the threads stop, then every adapter the holder runs is let go and what the node had read from it
+    /// and not recorded yet is recorded as the supervision loop would (its states, options, usage and conversation; a request for the
+    /// person is asked again by the next node from the holder's replay, ADR-0093), then the conversation's last batch, the usage still
+    /// being gathered and the ledger's kept files are written. Waiting for the adapters' readers is bounded by [`DRAIN_WAIT`]; the rest
+    /// is local work. Agents the holder runs keep running; the node's own end with it, unless it stops with
+    /// [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`).
     fn drop(&mut self) {
         drop(self.server.take());
         self.stop.store(true, Ordering::Release);
@@ -2703,7 +2704,30 @@ impl Drop for Node {
             let _ = t.join();
         }
         if self.crashed {
-            // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
+            // Nothing is said, recorded or stopped: the supervisor, which owns the agents' processes, is never dropped.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
+        }
+        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (the ticker stopped without a last tick).
+        let (drained, views) = {
+            let mut s = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
+            let drained = s.let_go_held(Instant::now() + DRAIN_WAIT);
+            (drained, s.list())
+        };
+        if !drained.is_empty() {
+            self.events.supervisor_events(&drained, &views);
+            let now = now_ms();
+            for e in &drained {
+                chat_event(&self.chat, &self.mesh, e, now);
+            }
+        }
+        // The conversation's last batch (the writer has stopped), then the usage still being gathered, then the ledger and the kept
+        // session files (before anything that could take long: a stop has a deadline).
+        crate::transcript::flush(&self.chat);
+        self.events.flush_all_usage();
+        let _ = self.ledger.flush_all();
+        if self.keep_agents {
+            // As `crash`: the supervisor, which owns the agents' processes, is never dropped, so none is ended.
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
@@ -2716,6 +2740,61 @@ impl Drop for Node {
         // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
         // what the kept agents last reported of their session (#932).
         let _ = self.ledger.flush_all();
+    }
+}
+
+/// ADR-0104 O2: how long a node that stops waits at most for the readers of the adapters the holder runs to hand over what they read.
+/// A read of a holder that does not answer waits up to the link's frame time (5 s); the stop does not, and the lines a reader never
+/// handed over stay the holder's (it counts only lines it gave). Under `agora node`'s whole stop deadline (`crates/agora/src/main.rs`).
+pub const DRAIN_WAIT: Duration = Duration::from_secs(2);
+
+/// What an adapter's event changes in its conversation (and the mesh's view of it), as the supervision loop and a clean stop's drain
+/// (ADR-0104 O2) both record it. Approval requests, ends and restarts are the loop's own.
+fn chat_event(
+    chat: &crate::chat::ChatBoard,
+    mesh: &crate::mesh_server::MeshServer,
+    e: &SupervisorEvent,
+    now: u64,
+) {
+    match e {
+        // What a chat agent says goes to its transcript (ADR-0038).
+        SupervisorEvent::Adapter {
+            agent,
+            event: AdapterEvent::Chat { item, .. },
+        } => {
+            // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
+            if let Some(word) = activity_word(item) {
+                mesh.set_activity(agent, word);
+            }
+            chat.push_item(agent, item, now);
+        }
+        // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now, not the tick's, which is older
+        // than what this tick already said).
+        SupervisorEvent::PromptSending { agent, tag } => {
+            chat.sending(agent, *tag, crate::daemon::now_ms());
+        }
+        // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
+        SupervisorEvent::PromptDequeued { agent, tag, sent } => {
+            if *sent {
+                chat.unqueue(agent, *tag, now);
+            } else {
+                chat.drop_queued(agent, &[*tag], now);
+            }
+            // ADR-0095: a dispatch prompt that could not be sent gives its task back.
+            if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent) {
+                mesh.give_back(&g);
+            }
+        }
+        SupervisorEvent::PromptsDropped { agent, tags } => {
+            chat.drop_queued(agent, tags, now);
+            for g in mesh.dispatches().dropped(agent, tags) {
+                mesh.give_back(&g);
+            }
+        }
+        SupervisorEvent::OutputDropped { agent, bytes } => {
+            chat.output_dropped(agent, *bytes, now);
+        }
+        _ => {}
     }
 }
 
