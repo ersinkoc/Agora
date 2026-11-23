@@ -1458,8 +1458,8 @@ pub struct Sandbox {
     /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
     /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
-    /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
-    /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
+    /// refuses to start an agent whose grants contain the control token file (ADR-0082) or any of these paths
+    /// ([`PROTECTED_PATHS_BY_REFUSAL`], #1114); Windows keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
     pub deny: Vec<PathBuf>,
     /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
     /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
@@ -1539,6 +1539,12 @@ pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
 /// Linux, whose Landlock rules do not restrict connecting to a pathname socket. macOS closes the node's home in the Seatbelt profile
 /// and Windows refuses the pipe to a restricted token. Callers use this instead of a `cfg`.
 pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
+
+/// True where [`Sandbox::deny`] is kept only by the node refusing the start (#1114): Linux, whose Landlock rules can only allow, so a
+/// node path below a folder an agent is given (a `--data` under `/tmp`, `/var` or `/opt`) would be open to it. There the node refuses
+/// to start a confined agent whose read or write grants reach one of its own paths. macOS enforces `deny` in the Seatbelt profile, and
+/// Windows keeps the node's files out by their ACLs and the agent's restricted token. Callers use this instead of a `cfg`.
+pub const PROTECTED_PATHS_BY_REFUSAL: bool = cfg!(target_os = "linux");
 
 /// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents
 /// itself (Windows joins in a later step).

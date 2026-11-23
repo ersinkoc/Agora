@@ -1513,7 +1513,8 @@ impl Supervisor {
 
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
     /// write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). ADR-0084: the same for the folder of stored
-    /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. Refused, never started.
+    /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. #1114: and, where
+    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started.
     fn refuse_reachable(
         &self,
         kind: &str,
@@ -1534,6 +1535,15 @@ impl Supervisor {
                     "secrets_reachable",
                 ));
             }
+        }
+        // #1114: the same for every path of the node's own (its data folder with the secrets, the ledger and the transcripts, its
+        // manifests, its socket folder) where only a refusal keeps them closed (Linux). Checked last, so the two above keep their reason.
+        if self.sandbox.protected_reachable(profile).is_some() {
+            return Err(SupervisorError::SandboxRefused(
+                kind.to_string(),
+                self.sandbox.level.name(),
+                "protected_path_reachable",
+            ));
         }
         Ok(())
     }

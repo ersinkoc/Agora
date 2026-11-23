@@ -77,7 +77,8 @@ names Claude Code and Codex read are removed from every agent that is not listed
 
 Three limits of the protection around the store itself. (a) With `sandbox = off` an agent is not confined and can read `<data>/secrets` like any
 file of yours; the store protects nothing from an unconfined agent. (b) The node refuses to start a confined agent whose read or write grants
-reach the secrets folder (`agent.sandbox_unavailable`, reason `secrets_reachable`), but only **at start** and only once a secret is stored:
+reach the secrets folder (`agent.sandbox_unavailable`, reason `secrets_reachable`), but only **at start** and only once a secret is stored
+(on Linux a grant that reaches the data folder is refused whether or not a secret is stored, reason `protected_path_reachable`, #1114):
 a secret you add while an agent with a broad grant (a read grant on your whole data folder or above) is already running is not caught, so
 restart such agents after storing a secret. (c) Names Windows cannot use as file names (`CON`, `NUL`, `COM1`, ...) and a name that differs from
 a stored one only in capitals are refused as secret names on every system.
@@ -142,6 +143,14 @@ sandbox.write = ~/.cargo/registry, ~/.npm, ~/.cache
 ```
 
 `/tmp` is writable to agents already.
+
+Landlock can only allow, so the node keeps its own folders closed by refusing instead: a confined start is refused
+(`agent.sandbox_unavailable`) when a folder an agent is given contains the node's control token (`control_token_reachable`) or any other
+folder of the node's own, its data folder (stored secrets, the session ledger, chat transcripts) or its manifests (`protected_path_reachable`,
+#1114). Every agent may read `/usr`, `/lib*`, `/bin`, `/sbin`, `/etc`, `/opt`, `/proc`, `/sys`, `/run` and `/var` and write `/tmp`, so a
+node whose `--data` or `--manifests` lies under one of them starts no confined agent; keep the node's folder under your home (`~/.agora`).
+`agora doctor` names the folder. A `sandbox.read` or `sandbox.write` entry *inside* the node's data folder is not refused on Linux and opens
+what it names: do not add one.
 
 ## Windows (restricted token, ADR-0050)
 
