@@ -158,7 +158,7 @@ pair-address = Address
 pair-number = Number
 pair-failed = Your answer could not be sent. Try again.
 pair-deny = Deny
-pair-approve = Approve
+pair-approve = Numbers match…
 pair-machine-compare = Compare with the number on the new machine. Approve only if they are the same.
 pair-browser-compare = Compare with the number on that browser. Approve only if they are the same.
 pair-expires-in = Runs out in { $time }
@@ -235,7 +235,7 @@ idle-lock-hint-no-password = Kept in this browser only. An idle window signs out
 audit-action-sign-out = Signed out
 audit-action-password-set = Set the screen password
 audit-action-password-clear = Removed the screen password
-machines-title = Your machines
+machines-title = My machines
 machines-empty = No machines connected yet.
 machine-online = Online
 machine-offline = Offline
@@ -710,16 +710,11 @@ theme-system = Follow the system
 theme-system-short = System
 ide-shared = Shared
 ide-memory = Memory used by the agents on this machine
-network-hub = Your hub
+network-hub = Your Agora
 network-build = Version running on this machine
 network-never = never
 network-heard = heard { $when }
 network-last-seen = last seen { $when }
-network-online =
-    { $total ->
-        [one] { $online } of { $total } machine online
-       *[other] { $online } of { $total } machines online
-    }
 network-terminals =
     { $count ->
         [one] { $count } terminal open
@@ -1058,16 +1053,57 @@ forget-machine-agents = { $count ->
     [one] one agent was running then; it may still run there
    *[other] { $count } agents were running then; they may still run there
 }
-forget-machines-refuse = Also refuse them if they connect again (each would need a new join code)
 forget-machines-cancel = Keep
 forget-machines-confirm = { $count ->
     [one] Forget
    *[other] Forget { $count }
 }
-forget-machine-reason-forbidden = Only the hub's owner can forget machines.
+forget-machine-reason-forbidden = Only the owner can forget machines.
 forget-machine-reason-online = It is connected again, so it was not forgotten.
-forget-machine-reason-gone = The hub no longer knows this machine.
-forget-machine-reason-other = The hub could not forget it. Try again.
+forget-machine-reason-gone = Your Agora no longer knows this machine.
+forget-machine-reason-other = It could not be forgotten. Try again.
+
+# My machines as cards (the redesign's PR 9): the page's header, the steps to add a machine, the strip of counts, a machine's card.
+machines-intro = Every machine connected to your Agora. Agents keep running on a machine while it is away.
+machines-add = Add a machine
+machines-add-step-allow = Allow a new machine to join. It stays open for 10 minutes.
+machines-add-step-run = On the new machine, run this command:
+machines-add-command = agora join
+machines-add-step-compare = Both screens then show a number. Approve here only if the two are the same.
+machines-add-hint = Allow new machines, run agora join on it, then compare the number here.
+machines-stat-of = of { $total }
+machines-stat-online = { $total ->
+    [one] machine online
+   *[other] machines online
+}
+machines-stat-agents = { $count ->
+    [one] agent running
+   *[other] agents running
+}
+machines-stat-needs = { $count ->
+    [one] needs you
+   *[other] need you
+}
+machines-stat-memory = memory used by Agora
+machine-memory = Agora on this machine
+machine-memory-share = { $percent } % of the memory Agora uses on all your machines
+machine-start-here = Start an agent here
+machine-new-terminal = New terminal
+machine-more = More for { $name }
+machine-copy-id = Copy machine ID
+machine-agent-settings = Agent settings
+machine-away-agents = { $count ->
+    [one] One agent was running
+   *[other] { $count } agents were running
+}
+machine-away-explain = They keep going on { $name }. What they did appears here when it connects again.
+machine-not-back = Not coming back?
+forget-machine-explain = It and its finished agents leave every window. Its history and usage stay. If it connects again, it comes back.
+forget-machine-refuse = Also refuse it if it connects again
+forget-machine-refuse-hint = It would need a new join code.
+forget-machines-refuse-title = Also refuse them if they connect again
+forget-machines-refuse-hint = Each would need a new join code.
+forget-machine-confirm-one = Forget { $name }
 
 # ADR-0066: the model and effort a kind takes, in the start window.
 setting-default = The agent's own default

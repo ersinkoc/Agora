@@ -54,12 +54,14 @@ describe('pairing (ADR-0065)', () => {
     expect(tag).toContain('&lt;img');
   });
 
-  it('puts the number and what to compare it with on the card, with Deny and Approve', () => {
+  it('puts the number and what to compare it with on the card, with Deny and "Numbers match…"', () => {
     const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />);
     expect(m).toContain('<span>482</span><span>193</span>');
     expect(m).toContain('Compare with the number on the new machine. Approve only if they are the same.');
     expect(m).toContain('>Deny<');
-    expect(m).toContain('>Approve<');
+    expect(m).toContain('>Numbers match…<');
+    // The number comes before the buttons that answer it.
+    expect(m.indexOf('<span>482</span>')).toBeLessThan(m.indexOf('>Deny<'));
     // The card is described by the comparison sentence, so a screen reader reads it with the title.
     expect(m).toContain('aria-describedby="pair-request-p1-compare"');
     expect(m).toContain('id="pair-request-p1-compare"');

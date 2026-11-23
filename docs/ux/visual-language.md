@@ -121,9 +121,10 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
   reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
-  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8).
-  Until the rest follow, existing overlays use the older `--shadow`, other screens keep their selection bars, and the global `h2` is
-  still an uppercase label. Amber means only "needs you" everywhere (PR 3).
+  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8), and
+  My machines and its forget dialog have (PR 9), their animated links gone. Until the rest follow, existing overlays use the older
+  `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label. Amber means only "needs you"
+  everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.

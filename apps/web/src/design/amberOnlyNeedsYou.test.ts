@@ -26,6 +26,8 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'phone/Phone.tsx': { uses: 2, why: 'the Needs you count on the phone list and on its bar (its request cards are ApprovalRequest)' },
   'phone/phone.css': { uses: 3, why: 'the needs tint and hairline of an agent that waits, and the hairline of the start and switch frames' },
   'screens.tsx': { uses: 1, why: 'Settings: another device of yours waiting for your approval (redesign PR 8)' },
+  'components/NetworkView.tsx': { uses: 1, why: 'My machines: the Needs you count in the hub strip, when an agent waits (redesign PR 9)' },
+  'components/PairRequest.tsx': { uses: 1, why: 'a request to join that waits on the owner: the needs tone of its card (redesign PR 9)' },
   'components/Quota.tsx': { uses: 11, why: 'the quota warning sign (triangle and percentage)' },
   'components/UsagePanel.tsx': { uses: 1, why: 'a usage meter at 80 % or more: the quota warning sign family (the audit lists it under quota)' },
   'components/sessionChoice.ts': { uses: 2, why: 'the context meter at 80 % or more, the quota warning sign family' },

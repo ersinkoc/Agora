@@ -29,6 +29,7 @@ import { Icon, type IconName } from './components/Icon';
 import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
 import { ago, when } from './net/time';
 import { NetworkView } from './components/NetworkView';
+import type { PairingUi } from './components/Pairing';
 import { Mark, StateBadge } from './components/StateBadge';
 import { KitGallery } from './components/kit/KitGallery';
 import { Button, ConfirmDialog, Pill, SegmentedControl, SettingRow, Tag } from './components/kit';
@@ -36,15 +37,14 @@ import { SettingsBlock, SettingsCard, SystemTile } from './components/SettingsCa
 import { isolated, peerText, systemName } from './components/pairChoice';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
-import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
+import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
-import type { UsageSummary } from './net/usage';
 import { demoSettingsDevices, demoSettingsKinds, demoSettingsMachines, demoSettingsNow, demoSettingsTrustedOn } from './fixtures';
 import { ScreenPasswordSettings } from './components/Locks';
 import type { IdleMinutes } from './net/idle';
-import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { GALLERY_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -193,6 +193,12 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <PairRequest inline now={0} offline request={{ id: 'pair-offline', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: 200_000 }} onAnswer={async () => 'ok'} />
         <PairRequest inline now={300_000} request={{ id: 'pair-expired', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: 272_000 }} onAnswer={async () => 'ok'} />
         <PairRequest inline request={{ id: 'pair-browser', kind: 'browser', name: 'Chrome · macOS', address: '192.168.1.57', number: '731004' }} onAnswer={async () => 'ok'} />
+      </div>
+      {/* My machines (redesign PR 9): a request to join, the strip, cards online and offline, Add a machine, the old ones. Forget opens
+          the danger dialog; nothing is sent from the gallery. */}
+      <div data-machines className="max-w-5xl">
+        <NetworkView now={GALLERY_NOW} machines={galleryMachines} agents={galleryMachineAgents} hubName="localhost:7444" pairing={galleryPairing}
+          onForget={async (ids) => new Map(ids.map((id) => [id, undefined]))} onStart={() => {}} onNewTerminal={() => {}} />
       </div>
       <div className="gallery__row">
         <SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />
@@ -631,10 +637,11 @@ export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = fal
   );
 }
 
-export function MachinesPage({ machines, agents = [], usage, projects = [], onBack, onForget, focus }: { focus?: string; machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>> }) {
+// `pairing`: an owner's session (requests to join are shown here in full, not floating); `onStart` / `onNewTerminal`: a live link.
+export function MachinesPage({ machines, agents = [], onBack, onForget, focus, pairing, onStart, onNewTerminal }: { focus?: string; machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; onBack: () => void; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>>; pairing?: PairingUi; onStart?: (node: string) => void; onNewTerminal?: (node: string) => void }) {
   return (
     <PageFrame wide title={t('machines-title')} onBack={onBack}>
-      <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} onForget={onForget} focus={focus} />
+      <NetworkView machines={machines} agents={agents} hubName={window.location.host} onForget={onForget} focus={focus} pairing={pairing} onStart={onStart} onNewTerminal={onNewTerminal} />
     </PageFrame>
   );
 }
