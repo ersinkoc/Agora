@@ -76,10 +76,11 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   and notes of a start that would not ask, and the confirm box of a destructive or acts-freely choice (close a working agent, drop a
   queued message, turn asking off); a deleted file's mark is red; change counts are grey tags or chips; an offline machine's dot is the
   idle grey; a "run" step in the chat is the working blue; a list cut short or out of date is a neutral accent-tinted notice; a hint (two
-  machines change one project, a device that does not trust this browser) is plain text. Besides "needs you" and the quota sign, amber
-  stays in three places: a usage or context meter at 80 % or more (the quota sign's family), the terminal's search matches (content, the
-  current match is the accent) and the muted syntax colours mixed from it. A web test lists every file that uses the amber token or its
-  classes, with a count and a reason, so a new use has to be one of these.
+  machines change one project, a device that does not trust this browser) is plain text. The terminal's search matches are the theme's
+  accent mixed toward the terminal background (opaque, as xterm needs; recomputed on a theme change), the current one stronger with a
+  full accent border, and the terminal's text stays at 4.5:1 on both. Besides "needs you" and the quota sign, amber stays in two places: a
+  usage or context meter at 80 % or more (the quota sign's family) and the muted syntax colours mixed from it. A web test lists every
+  file that uses the amber token or its classes, with a count and a reason, so a new use has to be one of these.
 
 ### Agent state language
 | State | Color role | Shape | Motion |

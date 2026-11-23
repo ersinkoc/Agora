@@ -30,7 +30,6 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'components/Quota.tsx': { uses: 11, why: 'the quota warning sign (triangle and percentage)' },
   'components/UsagePanel.tsx': { uses: 1, why: 'a usage meter at 80 % or more: the quota warning sign family (the audit lists it under quota)' },
   'components/sessionChoice.ts': { uses: 2, why: 'the context meter at 80 % or more, the quota warning sign family' },
-  'terminal/renderer.ts': { uses: 1, why: 'terminal search matches: highlighted content, not chrome (the current match is the accent)' },
 };
 
 const SRC = 'src';
