@@ -52,6 +52,7 @@ export function FilesView({ files, load, changed, compact = false }: {
   const findRef = useRef<HTMLInputElement>(null);
   // The refresh a listing belongs to: one that completes after Refresh is dropped.
   const generation = useRef(0);
+  const listTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   // A folder that cannot be listed is tried twice more, a little later each time (just after an agent starts, the node may not hold
   // its workspace yet); then it says so, with a way to try again.
@@ -61,11 +62,31 @@ export function FilesView({ files, load, changed, compact = false }: {
     setListings((l) => { const v = l.get(dir); return v === undefined || v === 'failed' ? new Map(l).set(dir, 'loading') : l; });
     const attempt = (n: number) => files.list(dir).then(
       (items) => put([...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))),
-      () => { if (gen !== generation.current) return; if (n < 2) setTimeout(() => attempt(n + 1), 1000 * (n + 1)); else put('failed'); },
+      () => {
+        if (gen !== generation.current) return;
+        if (n < 2) {
+          const timer = setTimeout(() => {
+            listTimers.current.delete(timer);
+            if (gen === generation.current) attempt(n + 1);
+          }, 1000 * (n + 1));
+          listTimers.current.add(timer);
+        } else {
+          put('failed');
+        }
+      },
     );
     attempt(0);
   }, [files]);
-  useEffect(() => { generation.current++; setListings(new Map()); list(''); }, [list, round]);
+  useEffect(() => {
+    generation.current++;
+    setListings(new Map());
+    list('');
+    return () => {
+      generation.current++;
+      for (const timer of listTimers.current) clearTimeout(timer);
+      listTimers.current.clear();
+    };
+  }, [list, round]);
   // The caller may pass a new function on every render (a pane does); the diff is read on opening and when asked, not on each one.
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -134,17 +155,36 @@ export function FilesView({ files, load, changed, compact = false }: {
     }
   };
 
+  // A read is dropped when a newer read of the same file started or when the workspace's files were replaced (not on Refresh, which
+  // lists the tree again and leaves open files alone: a read in flight then still lands, so its tab does not wait for ever).
+  const filesNow = useRef(files);
+  filesNow.current = files;
+  const reads = useRef(new Map<string, number>());
   const read = useCallback((path: string) => {
+    const seq = (reads.current.get(path) ?? 0) + 1;
+    reads.current.set(path, seq);
+    const stale = () => reads.current.get(path) !== seq || filesNow.current !== files;
+    // Dropped for replaced files: the tab is not left saying it is loading, so opening it again reads it again.
+    const forget = () => {
+      if (reads.current.get(path) !== seq) return;
+      setContents((c) => { if (c.get(path) !== 'loading') return c; const n = new Map(c); n.delete(path); return n; });
+    };
     setContents((c) => new Map(c).set(path, 'loading'));
     files.read(path).then(
-      (b) => setContents((c) => {
-        const text = decodeText(b);
-        if (text === undefined) return new Map(c).set(path, 'binary');
-        const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
-        if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-        return new Map(c).set(path, { lines, bytes: b.length });
-      }),
-      (e) => setContents((c) => new Map(c).set(path, readFailure(e))),
+      (b) => {
+        if (stale()) { forget(); return; }
+        setContents((c) => {
+          const text = decodeText(b);
+          if (text === undefined) return new Map(c).set(path, 'binary');
+          const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
+          if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+          return new Map(c).set(path, { lines, bytes: b.length });
+        });
+      },
+      (e) => {
+        if (stale()) { forget(); return; }
+        setContents((c) => new Map(c).set(path, readFailure(e)));
+      },
     );
   }, [files]);
   const openFile = (path: string, size: number) => {
@@ -240,7 +280,7 @@ export function FilesView({ files, load, changed, compact = false }: {
           </button>}
           <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('files-refresh')} title={t('files-refresh')}><Icon name="restore" /></button>
         </div>
-        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{changed !== undefined && changed > status.size ? t('files-truncated-count', { count: status.size, total: changed }) : t('files-truncated')}</p>}
+        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-tint-accent px-3 py-1.5 text-xs text-ink">{changed !== undefined && changed > status.size ? t('files-truncated-count', { count: status.size, total: changed }) : t('files-truncated')}</p>}
         <div ref={treeRef} className="min-h-0 flex-1 overflow-auto py-1" role="tree" aria-label={t('files-tree')} onKeyDown={onTreeKey}
           onFocus={(e) => { const p = (e.target as HTMLElement).dataset.path; if (p !== undefined) setCursor(p); }}>
           {flat ? (
@@ -353,7 +393,7 @@ export function TreeLevel({ dir, depth, listings, open, list, toggle, pick, acti
   useEffect(() => { if (l === undefined) list(dir); }, [dir, l, list]);
   const pad = { paddingInlineStart: 8 + depth * 14 };
   if (l === undefined || l === 'loading') return <p className="muted m-0 px-2 py-1 text-xs" style={pad}>…</p>;
-  if (l === 'failed') return <p role="alert" className="m-0 flex items-center gap-2 px-2 py-1 text-xs text-needs-you" style={pad}>{t('files-failed')}<button type="button" className="button" onClick={() => list(dir)}>{t('changes-retry')}</button></p>;
+  if (l === 'failed') return <p role="alert" className="m-0 flex items-center gap-2 px-2 py-1 text-xs text-danger" style={pad}>{t('files-failed')}<button type="button" className="button" onClick={() => list(dir)}>{t('changes-retry')}</button></p>;
   if (l.length === 0 && depth === 0) return <p className="muted m-0 px-3 py-2">{t('files-empty')}</p>;
   return (
     <div role="group">
@@ -388,7 +428,7 @@ export function keepLetters(e: KeyboardEvent<HTMLElement>): void {
   if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation();
 }
 
-const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-needs-you' };
+const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-danger' };
 
 // A file's lines with numbers and change marks, drawn a screenful at a time. Lines do not wrap; the view scrolls sideways.
 export function CodeView({ label, lines, html, marks, matches, current }: { label: string; lines: string[]; html?: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {

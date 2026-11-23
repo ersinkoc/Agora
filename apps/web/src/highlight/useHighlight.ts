@@ -5,7 +5,11 @@ type Highlighter = typeof import('./hl');
 
 // The highlighter is a chunk of its own, loaded the first time a file is shown and kept for the session.
 let loading: Promise<Highlighter | undefined> | undefined;
-const loaded = (): Promise<Highlighter | undefined> => (loading ??= import('./hl').catch(() => undefined));
+const loaded = (): Promise<Highlighter | undefined> =>
+  (loading ??= import('./hl').catch(() => {
+    loading = undefined;
+    return undefined;
+  }));
 
 /** Larger files stay plain. A whole-file pass is one task on the page's thread: 128 KiB of TypeScript takes about 10 ms in
  *  Chromium on a developer laptop (256 KiB: 19 ms), well inside the 50 ms long-task budget (docs/design/performance.md) with room

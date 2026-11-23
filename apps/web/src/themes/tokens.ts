@@ -217,7 +217,7 @@ export const serialiseTheme = (file: ThemeFile) => JSON.stringify(file, null, 2)
 
 // ---- Agent colours -------------------------------------------------------------------------------------------------------------
 
-// The colours agents are told apart by (an agent's tile edge, the second word of its name: design/tokens.css `--agent-*`). They are
+// The colours agents are told apart by (an agent's avatar, the second word of its name: design/tokens.css `--agent-*`). They are
 // not theme tokens a person sets: a theme gets the set that shows best on its own surfaces, whatever its scheme says (a theme in the
 // Light slot may have dark surfaces). Dark and Light draw them from design/tokens.css; a test keeps these values equal to it.
 export const AGENT_COLOUR_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'] as const;

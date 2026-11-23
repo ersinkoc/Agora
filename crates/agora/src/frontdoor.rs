@@ -103,7 +103,8 @@ impl Machine {
 
     /// Where this machine reaches its own hub (loopback, whatever address the hub listens on).
     fn local_addr(&self) -> Option<String> {
-        Some(format!("127.0.0.1:{}", self.port()?))
+        crate::hubcli::local_dial_addr(&self.hub_listen)
+            .or_else(|| Some(format!("127.0.0.1:{}", self.port()?)))
     }
 
     /// The hub address a node enrolled with this machine's own hub keeps in its link folder.
@@ -959,8 +960,6 @@ fn hub_addr(home: &Path, m: &Machine) -> Option<String> {
     running
         .then(|| crate::hubcli::own_hub_addr(&m.hub_dir))
         .flatten()
-        .and_then(|a| a.parse::<SocketAddr>().ok())
-        .map(|a| format!("127.0.0.1:{}", a.port()))
         .or_else(|| m.local_addr())
 }
 
@@ -1883,6 +1882,15 @@ mod tests {
         touch(&record, at - secs);
         assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7446"));
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn hub_addr_and_local_addr_preserve_ipv6_loopback() {
+        let mut m = Machine::joined(&tmp("ipv6-addr"));
+        m.hub_listen = "[::1]:7448".into();
+        assert_eq!(m.local_addr().as_deref(), Some("[::1]:7448"));
+        m.hub_listen = "[::]:7449".into();
+        assert_eq!(m.local_addr().as_deref(), Some("[::1]:7449"));
     }
 
     fn tmp(name: &str) -> PathBuf {

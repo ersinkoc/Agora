@@ -5,6 +5,8 @@
 
 #[path = "private_home/mod.rs"]
 mod private_home;
+#[path = "short_socket/mod.rs"]
+mod short_socket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -32,13 +34,23 @@ fn git(dir: &Path, args: &[&str]) {
 struct Env {
     root: PathBuf,
     node: Option<Node>,
+    /// Dropped after the node (`drop` takes the node first).
+    _dir: Option<short_socket::SocketDir>,
 }
 
 impl Env {
-    /// A node under `base` (a folder no confined agent is granted) whose policy file says `policy`.
+    /// A node under `base` (here a folder a confined agent is granted) whose policy file says `policy`.
     fn in_base(base: &Path, name: &str, policy: Option<&str>) -> Self {
         private_home::init();
-        let root = base.join(format!("ct-{}-{name}", std::process::id()));
+        Self::at(
+            base.join(format!("ct-{}-{name}", std::process::id())),
+            policy,
+            None,
+        )
+    }
+
+    /// A node whose home is `root`, kept for as long as `dir` (when the home is that folder).
+    fn at(root: PathBuf, policy: Option<&str>, dir: Option<short_socket::SocketDir>) -> Self {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("manifests")).unwrap();
         std::fs::create_dir_all(root.join("data")).unwrap();
@@ -72,11 +84,18 @@ impl Env {
         Self {
             root,
             node: Some(node),
+            _dir: dir,
         }
     }
 
+    /// A node in a folder no confined agent is granted: #926, its home (and the socket, token and mesh sockets in it) short enough
+    /// for a unix socket and out of the agent's reach, whatever the checkout's depth and `TMPDIR`.
     fn new(name: &str, policy: Option<&str>) -> Self {
-        Self::in_base(Path::new(env!("CARGO_TARGET_TMPDIR")), name, policy)
+        private_home::init();
+        let preferred = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("ct-{}-{name}", std::process::id()));
+        let dir = short_socket::SocketDir::new(&preferred, &format!("ct-{name}"));
+        Self::at(dir.path().to_path_buf(), policy, Some(dir))
     }
 
     fn socket(&self) -> PathBuf {
@@ -348,8 +367,10 @@ fn a_stale_token_file_is_replaced_at_start_and_a_second_node_leaves_it_alone() {
         return;
     }
     private_home::init();
-    let root =
+    let preferred =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ct-{}-stale", std::process::id()));
+    let dir = short_socket::SocketDir::new(&preferred, "ct-stale");
+    let root = dir.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("data")).unwrap();
     std::fs::create_dir_all(root.join("manifests")).unwrap();

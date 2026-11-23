@@ -484,6 +484,12 @@ impl SandboxPolicy {
             }
         }
     }
+
+    /// #897: whether an agent started as a plain process (an adapter or ACP bridge, not a terminal) can be confined at this level here.
+    pub fn enforceable_for_commands(&self) -> bool {
+        matches!(self.level, Level::Off)
+            || (self.enforceable() && agora_platform::COMMAND_CONFINEMENT_SUPPORTED)
+    }
 }
 
 #[cfg(test)]

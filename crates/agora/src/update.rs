@@ -74,6 +74,20 @@ fn release_key(o: &Opts) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+fn create_staging_dir(base: &Path) -> std::io::Result<PathBuf> {
+    let mut rand = [0u8; 16];
+    getrandom::getrandom(&mut rand)
+        .map_err(|e| std::io::Error::other(format!("random bytes unavailable: {e}")))?;
+    let hex: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = base.join(format!("agora-update-{hex}"));
+    std::fs::create_dir(&dir)?;
+    if let Err(e) = agora_platform::ensure_private_dir(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    Ok(dir)
+}
+
 /// Downloads `version` into `dir`, checks it and returns the path of the new program.
 fn fetch(
     base: &str,
@@ -180,15 +194,13 @@ pub fn update(say: &Say, o: &Opts) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    let dir = std::env::temp_dir().join(format!("agora-update-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    if std::fs::create_dir_all(&dir).is_err() {
+    let Ok(dir) = create_staging_dir(&std::env::temp_dir()) else {
         say.err(
             key!("cli-update-failed"),
             &[("reason", "could not make a temporary folder".into())],
         );
         return ExitCode::from(1);
-    }
+    };
     // The new program lands beside the old one first, so the final step is one rename on the same disk.
     let result = fetch(&base, &wanted, o, &dir).and_then(|file| {
         let mut beside = exe.clone().into_os_string();
@@ -256,5 +268,19 @@ mod tests {
         if let Some((t, _)) = target() {
             assert!(t.contains('-'));
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn create_staging_dir_creates_unique_private_directory() {
+        let base = std::env::temp_dir().join(format!("agora-update-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let d1 = create_staging_dir(&base).unwrap();
+        let d2 = create_staging_dir(&base).unwrap();
+        assert_ne!(d1, d2);
+        assert!(d1.is_dir() && d2.is_dir());
+        assert!(agora_platform::ensure_private_dir(&d1).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

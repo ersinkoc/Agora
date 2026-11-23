@@ -988,6 +988,8 @@ impl Adapter {
         // The node has no console: on Windows the adapter (and the agent it starts, which shares its console) would otherwise keep a
         // window of its own open for the agent's whole life.
         agora_platform::no_console_window(&mut cmd);
+        // It runs as long as the agent: it must not keep a pipe another thread of the node was making as it started (#1011).
+        agora_platform::keep_only_standard_streams(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.
