@@ -509,7 +509,9 @@ impl EventSink {
                     }));
                 }
             }
-            self.agent_up(v, known.sessions.get(id), false);
+            // ADR-0104: this node announced the process that runs now under this id before (its start, a resume or a take-up), so the
+            // hub keeps the counters it summed for it.
+            self.agent_up(v, known.sessions.get(id), false, true);
             // `AgentStarted` leaves the hub with no session options: what an adapter agent last reported of its session follows it
             // (#932: a kept agent's adapter does not report it again by itself).
             if let Some(ledger) = self.ledger.get() {
@@ -532,13 +534,22 @@ impl EventSink {
     /// everything it ran before is gone, so the agent is said up again after it (started, its state, its session if known, its terminal
     /// if it has one), as an announcement says it. Re-stated: the ledger already holds the agent and took it back (`Ledger::reclaim`).
     /// What an adapter agent last reported of its session follows from the supervisor (`Supervisor::session_events`, #932).
+    /// ADR-0104: its `AgentStarted` says `same_process`, so the hub keeps the counters it summed for it before the node restarted.
     pub fn agent_taken_up(&self, view: &AgentView, session: Option<&String>) {
-        self.agent_up(view, session, false);
+        self.agent_up(view, session, false, true);
     }
 
     /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
-    /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)).
-    fn agent_up(&self, view: &AgentView, session: Option<&String>, learn: bool) {
+    /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)). `same_process` (ADR-0104):
+    /// this re-states a process this node announced before under this id (a take-up or an announcement); never for a new start, a
+    /// resume or a restart after a crash, whose counters start again from 0.
+    fn agent_up(
+        &self,
+        view: &AgentView,
+        session: Option<&String>,
+        learn: bool,
+        same_process: bool,
+    ) {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
         record(Body::AgentStarted(v1::AgentStarted {
@@ -562,6 +573,7 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
+            same_process,
             launch_options: view.launch_options.clone(),
             skips_permissions: view.skips_permissions,
         }));
@@ -715,6 +727,7 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
+            same_process: false,
             launch_options: launch.ids.clone(),
             skips_permissions: launch.skips_permissions,
         }));
@@ -726,7 +739,7 @@ impl EventSink {
             match e {
                 SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
                     if let Some(view) = views.iter().find(|v| v.id == *agent) {
-                        self.agent_up(view, None, true);
+                        self.agent_up(view, None, true, false);
                     }
                 }
                 SupervisorEvent::SessionReported { agent, session } => {
@@ -1750,8 +1763,22 @@ impl Node {
                         },
                         l.identity.as_deref(),
                     )
+                    // #1093: the agent still starts, outside the mesh; the node's log says so (operational log, not UI text).
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} could not get its endpoint and runs outside the mesh: {e}",
+                            l.id.as_str()
+                        );
+                    })
                     .ok()?;
-                let command = std::env::current_exe().ok()?;
+                let command = std::env::current_exe()
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} gets no endpoint (this program's path is unknown): {e}",
+                            l.id.as_str()
+                        );
+                    })
+                    .ok()?;
                 Some(agora_adapters::inject::Endpoint { command, socket })
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
@@ -3204,6 +3231,56 @@ mod announce_tests {
         assert!(!said(&s, mark)
             .iter()
             .any(|b| matches!(b, Body::AgentExited(_) | Body::TerminalClosed(_))));
+    }
+
+    /// ADR-0104 decision 2 (#930): `AgentStarted.same_process` is set where the node re-states a process it announced before under the
+    /// id (a take-up from the holder, an announcement of either kind) and never for a new start or a resume, whose counters start
+    /// again.
+    #[test]
+    fn only_a_restatement_of_the_same_process_says_so() {
+        let s = sink("same-process");
+        let starts = |mark: u64| -> Vec<(String, bool)> {
+            said(&s, mark)
+                .into_iter()
+                .filter_map(|b| match b {
+                    Body::AgentStarted(a) => Some((a.agent_id, a.same_process)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let views = [view("a", true, false), view("b", true, false)];
+        let mark = s.next_seq() - 1;
+        launched(&s, "a", false);
+        s.agent_started(&AgentId::new("b"), "p", "n1", "/wt/b", "probe");
+        s.supervisor_events(
+            &[
+                SupervisorEvent::Started {
+                    agent: AgentId::new("a"),
+                },
+                SupervisorEvent::Resumed {
+                    agent: AgentId::new("b"),
+                    native: true,
+                },
+            ],
+            &views,
+        );
+        assert!(
+            starts(mark).iter().all(|(_, same)| !same),
+            "{:?}",
+            starts(mark)
+        );
+
+        let mark = s.next_seq() - 1;
+        s.agent_taken_up(&views[0], None);
+        assert_eq!(starts(mark), [("a".to_string(), true)]);
+        for how in [Announce::Present, Announce::Restart] {
+            let mark = s.next_seq() - 1;
+            s.announce_present(&views, &[], how);
+            assert_eq!(
+                starts(mark),
+                [("a".to_string(), true), ("b".to_string(), true)]
+            );
+        }
     }
 
     /// #902: an adapter's agent the node gave up on is reported as exited without a `TerminalClosed` (it never had a terminal); a terminal

@@ -103,6 +103,16 @@ fn machine_labels(hosts: &BTreeMap<String, String>) -> BTreeMap<String, String> 
         .collect()
 }
 
+/// The folder a workspace stands for as its project's folder: its repository root, or its own folder when it is no repository (the
+/// window's choice too). `Scope` places a member's folder commands by the same folders (ADR-0049 Amendment A).
+pub fn workspace_root(w: &agora_protocol::v1::WorkspaceRegistered) -> &str {
+    if w.git_root.is_empty() {
+        &w.path
+    } else {
+        &w.git_root
+    }
+}
+
 /// Every folder of every project the hub knows, sorted by machine, name and path. A folder reported twice is listed once.
 pub fn folders(view: &View) -> Vec<Folder> {
     let hosts = hosts(view);
@@ -135,12 +145,7 @@ pub fn folders(view: &View) -> Vec<Folder> {
         add(node, project, path);
     }
     for w in view.workspaces.values() {
-        let root = if w.git_root.is_empty() {
-            &w.path
-        } else {
-            &w.git_root
-        };
-        add(&w.node_id, &w.project_id, root);
+        add(&w.node_id, &w.project_id, workspace_root(w));
     }
     out.sort();
     out

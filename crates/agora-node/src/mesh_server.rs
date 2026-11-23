@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +30,12 @@ const BOARD_WAIT: Duration = Duration::from_secs(10);
 /// How long "this project is not shared" is believed before the hub is asked again.
 const LOCAL_FOR: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
+/// #1093: how long an agent that joins again waits for its endpoint's lock while something else holds it. A process the node starts
+/// holds a copy of every open descriptor from its fork until it runs its program (under load, and with a sandbox set up in between,
+/// a while), so the lock of an endpoint that just closed can outlive it for a moment. Waited out under the supervisor's lock (a
+/// launch or resume joins the mesh), so short; only a lock that is held is waited for. The same bound covers waiting for a closing
+/// of the agent's previous endpoint that is still under way (`MeshServer::leaving`).
+const RELISTEN_WAIT: Duration = Duration::from_millis(500);
 /// A longer line is a broken or hostile client; the connection is closed.
 const MAX_LINE: usize = 1024 * 1024;
 
@@ -543,6 +549,15 @@ pub struct MeshServer {
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
     agents: Mutex<HashMap<AgentId, AgentServer>>,
+    /// #1093: agents whose endpoint is closing (an `unregister` between taking it out of `agents` and its broker `leave`), with how
+    /// many closings are under way. Taken before `agents` wherever both are held. A registration of the agent waits until none is
+    /// (`left` is told), so a closing that is still under way never removes the socket file or the broker entry of a newer endpoint.
+    leaving: Mutex<HashMap<AgentId, u32>>,
+    left: Condvar,
+    /// A test holds a closing here, after its endpoint thread ended and before it removes the socket file: it says it got there,
+    /// then waits to be let go.
+    #[cfg(test)]
+    pause_leaving: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
     /// Where this node reserves its broker's ids (#965); the ticker reserves again when a range nears its end or none was had.
@@ -641,6 +656,10 @@ impl MeshServer {
             mesh,
             dir: dir.to_path_buf(),
             agents: Mutex::new(HashMap::new()),
+            leaving: Mutex::new(HashMap::new()),
+            left: Condvar::new(),
+            #[cfg(test)]
+            pause_leaving: Mutex::new(None),
             stop,
             ticker: Some(ticker),
             ids_file,
@@ -937,7 +956,43 @@ impl MeshServer {
     ) -> io::Result<PathBuf> {
         let id = info.id.clone();
         let path = self.socket_path(&id);
-        let listener = local_listen_agent(&path, identity)?;
+        let until = Instant::now() + RELISTEN_WAIT;
+        // #1093: an endpoint of the agent that is still closing is waited for (within the same bound): its socket file and broker
+        // entry go at the end of the closing, and must not take this registration's with them.
+        let serving = {
+            let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
+            while leaving.contains_key(&id) {
+                let rest = until.saturating_duration_since(Instant::now());
+                if rest.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "the agent's previous endpoint is still closing",
+                    ));
+                }
+                leaving = self
+                    .left
+                    .wait_timeout(leaving, rest)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            // An endpoint this server still serves for the agent is in use for good; any other holder only for a moment.
+            self.agents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&id)
+        };
+        let listener = loop {
+            match local_listen_agent(&path, identity) {
+                Err(e)
+                    if e.kind() == io::ErrorKind::AddrInUse
+                        && !serving
+                        && Instant::now() < until =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => break other?,
+            }
+        };
         listener.set_nonblocking(true)?;
         self.mesh
             .lock()
@@ -1034,15 +1089,32 @@ impl MeshServer {
     /// [`Self::unregister`] saying why, for the `presence` notice the other agents of its project get: a fixed word (`finished`,
     /// `stopped`, `crashed`, `left`).
     pub fn unregister_because(&self, agent: &AgentId, reason: &'static str) {
-        let server = self
-            .agents
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(agent);
+        // #1093: marked as closing in the same step that takes it out of `agents`, so a registration that no longer finds it waits
+        // for the end of this closing.
+        let server = {
+            let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
+            *leaving.entry(agent.clone()).or_insert(0) += 1;
+            self.agents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(agent)
+        };
         if let Some(mut s) = server {
             s.stop.store(true, Ordering::Release);
             if let Some(t) = s.thread.take() {
                 let _ = t.join();
+            }
+            #[cfg(test)]
+            {
+                let pause = self
+                    .pause_leaving
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some((reached, go)) = pause {
+                    let _ = reached.send(());
+                    let _ = go.recv();
+                }
             }
             let _ = std::fs::remove_file(&s.path);
         }
@@ -1050,6 +1122,15 @@ impl MeshServer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .leave(agent, reason, now_ms());
+        let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
+        match leaving.get_mut(agent) {
+            Some(n) if *n > 1 => *n -= 1,
+            _ => {
+                leaving.remove(agent);
+            }
+        }
+        drop(leaving);
+        self.left.notify_all();
     }
 
     pub fn set_state(&self, agent: &AgentId, state: &str) {
@@ -2376,6 +2457,114 @@ mod tests {
         let _ = closer.shutdown();
         let _ = writer.join();
         assert!(closed, "the node kept reading a line without a newline");
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #1093: an agent that joins again right after it left (a stop, then a resume) gets its endpoint even while the lock of the one
+    /// it left is still held for a moment. A process the node starts in that moment (another agent, a `git` call) holds a copy of
+    /// every open descriptor from its fork until it runs its program, the lock's too; here a second holder of the lock stands in for
+    /// it.
+    #[cfg(unix)]
+    #[test]
+    fn joining_again_waits_for_a_moment_held_lock_of_the_endpoint_it_left() {
+        let dir = std::env::temp_dir().join(format!("agora-rj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let id = AgentId::new("a1");
+        let info = || AgentInfo {
+            id: id.clone(),
+            kind: "fixture".into(),
+            node: "n".into(),
+            project: "p".into(),
+            label: "a1".into(),
+            worktree: String::new(),
+            state: "idle".into(),
+        };
+        let sock = server.register(info()).unwrap();
+        server.unregister_because(&id, "stopped");
+        let mut name = sock.clone().into_os_string();
+        name.push(".lock");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+            .unwrap();
+        held.lock().unwrap();
+        // Let go after 25 ms, or at once when the registration returned first.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _ = rx.recv_timeout(Duration::from_millis(25));
+            drop(held);
+        });
+        let again = server.register(info());
+        drop(tx);
+        holder.join().unwrap();
+        assert_eq!(again.ok(), Some(sock.clone()));
+        assert!(server.is_registered(&id));
+        assert!(agora_platform::local_connect(&sock).is_ok());
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #1093: a registration made while an earlier endpoint of the same agent is still closing (taken out of the list, its thread
+    /// ended, its socket file not removed yet) waits for that closing to end, so the closing does not remove the new endpoint's
+    /// socket file or broker entry. Two windows can do this: a resume sent while a stop's closing is under way.
+    #[test]
+    fn a_registration_waits_for_a_closing_of_the_same_agent_under_way() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-rc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = Arc::new(MeshServer::new(&dir, Limits::default()).unwrap());
+        let id = AgentId::new("a1");
+        let info = AgentInfo {
+            id: id.clone(),
+            kind: "fixture".into(),
+            node: "n".into(),
+            project: "p".into(),
+            label: "a1".into(),
+            worktree: String::new(),
+            state: "idle".into(),
+        };
+        let sock = server.register(info.clone()).unwrap();
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        *server.pause_leaving.lock().unwrap() = Some((reached_tx, go_rx));
+        let closing = {
+            let (server, id) = (Arc::clone(&server), id.clone());
+            std::thread::spawn(move || server.unregister_because(&id, "stopped"))
+        };
+        reached.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!server.is_registered(&id));
+        // The registration, made while the closing is held; given up to 150 ms to finish (it does at once if it does not wait).
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let joining = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                let r = server.register(info);
+                let _ = done_tx.send(());
+                r
+            })
+        };
+        let _ = done.recv_timeout(Duration::from_millis(150));
+        go.send(()).unwrap();
+        closing.join().unwrap();
+        let again = joining.join().unwrap();
+        assert_eq!(again.ok(), Some(sock.clone()));
+        assert!(server.is_registered(&id));
+        assert!(
+            sock.exists(),
+            "the closing removed the new endpoint's socket file"
+        );
+        assert!(
+            server.mesh().lock().unwrap().agent_info(&id).is_some(),
+            "the closing removed the new endpoint's broker entry"
+        );
+        assert!(agora_platform::local_connect(&sock).is_ok());
         server.unregister(&id);
         drop(server);
         let _ = std::fs::remove_dir_all(dir);

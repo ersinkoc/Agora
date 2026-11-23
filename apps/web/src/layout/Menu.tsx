@@ -114,7 +114,7 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
   };
 
   return (
-    <span className="relative inline-flex">
+    <span className="relative inline-flex max-w-full">
       <button ref={button} type="button" className={className} aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label}
         onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={(e) => { if (e.key === 'ArrowDown' && !open) { e.preventDefault(); setOpen(true); } }}>

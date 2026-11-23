@@ -797,7 +797,7 @@ impl Hub {
             let online = g.view.nodes.get(node).is_some_and(|n| n.online);
             (node.to_string(), online)
         });
-        g.view.apply(&d.event);
+        g.view.apply_at(d.pos, &d.event);
         if let Some((node, true)) = presence {
             if !g.view.nodes.get(&node).is_some_and(|n| n.online) {
                 g.left.insert(node);
@@ -961,6 +961,7 @@ mod tests {
             kind: "codex".into(),
             level: 1,
             parent_agent_id: "a".into(),
+            same_process: false,
             launch_options: Vec::new(),
             skips_permissions: false,
         }));
@@ -989,6 +990,7 @@ mod tests {
                 kind: "codex".into(),
                 level: 1,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 skips_permissions: skips,
             }))
@@ -1067,6 +1069,7 @@ mod tests {
                 kind: "shell".into(),
                 level: 2,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             })),

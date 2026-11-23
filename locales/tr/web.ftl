@@ -624,7 +624,7 @@ start-identity-change = Bu klasörü değişen proje kimliğiyle eşleştir
 start-directory-unsupported = Seçilen klasörde ajan başlatmak için bu makineyi güncelleyin.
 start-directory-failed = Klasör seçilemedi. Yolu ve erişim izinlerini kontrol edin.
 start-directory-forbidden = Bu cihaz bu makinede başka projelerle sınırlı. Üzerinde çalıştığınız bir projenin klasörünü seçin ya da makinenin sahibine sorun.
-start-directory-role = Rolünüz bu makinede klasör seçmenize izin vermiyor. Sahibine sorun.
+start-directory-role = Rolünüz bu klasörü seçmenize izin vermiyor. Sahibine sorun.
 start-role = Rolünüz burada ajan başlatmanıza izin vermiyor. Gerekirse sahibine sorun.
 workspace-shared = Ortak klasör · değişiklikler çalışma alanına ait
 filter-project = Proje
@@ -1209,8 +1209,6 @@ attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildiri
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
-usage-empty = Bir ajan çalışınca kullanım burada görünür.
-usage-empty-title = Henüz gösterilecek bir şey yok
 usage-stat-tokens = Kullanılan token
 usage-stat-agents = Ajan
 usage-agents = { $count } ajan
@@ -1527,7 +1525,7 @@ kit-sample-notify-hint = Adlar yalnızca siz isterseniz görünür.
 kit-sample-ask = { $name } bir komut çalıştırmak istiyor
 kit-sample-offline = Bu makine çevrimdışı
 kit-sample-offline-line = Ajanları çalışmayı sürdürür ve makine dönünce durumlarını bildirir.
-kit-sample-joined = Makine katıldı. Makineleriniz listesinde görünüyor.
+kit-sample-joined = Makine katıldı. Makinelerim listesinde görünüyor.
 
 # Yeniden tasarımın giriş ekranları (ADR-0102): giriş kartı, boş Ana sayfa ve komut paleti.
 signin-or = ya da

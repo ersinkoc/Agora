@@ -5,7 +5,7 @@ import { approvalName } from '../net/approvalText';
 import { visible, type ApprovalModel } from '../net/view';
 import { kindOf } from './AgentTile';
 import type { RequestAgent } from './ApprovalCard';
-import { ApprovalRequest, ASK_ICON, useNarrowPane } from './ApprovalRequest';
+import { ApprovalRequest, ASK_ICON, useNarrowPane, usePinnedRow } from './ApprovalRequest';
 import { Icon } from './Icon';
 import { AgentAvatar, Button } from './kit';
 import { SkipApproval, SkipSummary, SkipUnknown, skipTitle, useSkipAnswer } from './SkipApproval';
@@ -46,6 +46,9 @@ export function ReviewableRequest(props: {
 function ReviewCard({ approval: x, agent, guard, busy, narrowable, alert, onOpen, onResolve }: Parameters<typeof ReviewableRequest>[0]) {
   const host = useRef<HTMLDivElement>(null);
   const narrow = useNarrowPane(host, narrowable, guard.restart);
+  // #1082: above a chat's composer in a short pane, one row: the title and Review, which opens the same dialog (the summary and Deny are
+  // read and answered there; Allow is only ever there).
+  const { row } = usePinnedRow(guard.restart);
   const [open, setOpen] = useState(false);
   const why = `review-stale-${useId()}`;
   const name = agent?.name || approvalName(x);
@@ -53,21 +56,21 @@ function ReviewCard({ approval: x, agent, guard, busy, narrowable, alert, onOpen
   const stale = !!onResolve && guard.stale;
   return (
     <div ref={host} className="approval-req-host">
-      <ApprovalRequest density={narrow ? 'row' : 'card'} stacked={narrow} alert={alert} icon={ASK_ICON[x.start ? 'start' : 'skip']}
-        attrs={{ 'data-review-card': x.start ? 'start' : 'skip' }}
+      <ApprovalRequest density={narrow || row ? 'row' : 'card'} stacked={narrow && !row} alert={alert} icon={ASK_ICON[x.start ? 'start' : 'skip']}
+        className={row ? 'approval-req--bar' : undefined} attrs={{ 'data-review-card': x.start ? 'start' : 'skip', ...(row ? { 'data-pinned-row': 'review' } : {}) }}
         avatar={agent ? <AgentAvatar accent={agent.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent.kind, name })} size="s" /> : undefined}
         title={x.start ? startTitle(x, x.start, false) : skipTitle(x)}
         where={x.machineName?.trim() ? <bdi>{visible(x.machineName)}</bdi> : undefined}
         titleEnd={onOpen && <button type="button" className="ide-iconbtn approval-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="rtl:rotate-180" /></button>}
         actions={<>
-          {onResolve && (x.start
+          {onResolve && !row && (x.start
             ? <Button size="sm" disabled={busy || guard.stale} aria-disabled={!guard.canAnswer(x.id) || undefined} aria-describedby={guard.stale ? why : undefined}
                 onClick={() => guard.answer(x.id, () => onResolve(false, { grant: 0, nested: false }))}>{t('approval-deny')}</Button>
             : <SkipDeny approval={x} busy={busy || guard.stale} onResolve={onResolve} />)}
           <Button size="sm" variant="primary" aria-haspopup="dialog" aria-label={t('approval-review-for', { name })} onClick={() => setOpen(true)}>{t('approval-review')}</Button>
         </>}>
-        {x.start ? <StartSummary start={x.start} /> : <SkipSummary approval={x} />}
-        {stale && <p id={why} className="m-0 text-xs text-muted">{t('fleet-stale-no-answer')}</p>}
+        {!row && (x.start ? <StartSummary start={x.start} /> : <SkipSummary approval={x} />)}
+        {stale && !row && <p id={why} className="m-0 text-xs text-muted">{t('fleet-stale-no-answer')}</p>}
         {onResolve && sent && <p role="status" className="m-0 text-xs text-muted">{t('approval-sent')}</p>}
       </ApprovalRequest>
       {open && <ReviewDialog approval={x} agent={agent} busy={busy} stale={guard.stale} onResolve={onResolve} onClose={() => setOpen(false)} />}

@@ -5,7 +5,7 @@ import { approvedHere, skipAnswerOf } from '../net/skipApproval';
 import { settingName } from './launchSettingsModel';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
-import { Pill, type Tone } from './kit';
+import { Pill, stateTone } from './kit';
 import { Mark } from './StateBadge';
 import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
@@ -24,7 +24,6 @@ const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] 
 // an approval card the owner signs (ADR-0090 Amendment A); until it is answered the control says it waits and shows no new value.
 // `state` and `tokens` belong to the header (`status`): the agent's state as the kit's status pill with its running time, and the tokens used so
 // far. This is the one place a chat agent's state and tokens are shown: the window's and the pane's headers leave them out for a chat agent.
-const PILL: Record<UiState, Tone> = { working: 'working', 'needs-you': 'needs', finished: 'finished', idle: 'idle', unknown: 'plain' };
 // A switch the machine holds until the owner signs the card: which control, the value asked for and the card (`<node>/<approval id>`).
 // `asking`: the card waits; `confirming`: this window approved it and the agent has not reported it yet; `late`: that took long, the control shows what the agent reports.
 interface Wait { control: string; value: string; approval: string; state: 'asking' | 'confirming' | 'late'; at: number }
@@ -188,7 +187,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   const status = <>
     {state && (
       <span className="inline-flex" title={elapsed !== undefined ? t('session-elapsed-hint') : undefined} data-state-pill={state}>
-        <Pill tone={PILL[state]} icon={<Mark state={state} />}>
+        <Pill tone={stateTone(state)} icon={<Mark state={state} />}>
           {elapsed !== undefined && elapsed >= 60000 ? t('chat-state-since', { state: word, time: elapsed < 3_600_000 ? `${Math.floor(elapsed / 60000)} min` : duration(Math.floor(elapsed / 60000) * 60000) }) : word}
         </Pill>
       </span>
