@@ -1403,14 +1403,31 @@ impl NodeApprovals {
         if is_reserved_action(action) {
             return None;
         }
-        let p = self
-            .q()
-            .request_offered(agent.as_str(), action, detail, now_ms, offer)?;
+        let p = self.raise_adapter(agent, action, detail, now_ms, offer)?;
+        self.route_adapter(&p, agent, adapter_approval_id);
+        Some(p)
+    }
+
+    /// The first half of [`Self::request_offered`]: the request is in the queue, without its route back to the adapter yet. Another
+    /// thread (a cancelled turn) can run between the halves; tests use them apart to make that interleaving.
+    fn raise_adapter(
+        &self,
+        agent: &agora_core::AgentId,
+        action: &str,
+        detail: &str,
+        now_ms: u64,
+        offer: Offer,
+    ) -> Option<Pending> {
+        self.q()
+            .request_offered(agent.as_str(), action, detail, now_ms, offer)
+    }
+
+    /// The second half of [`Self::request_offered`]: the route back to the adapter, which makes the request fully registered.
+    fn route_adapter(&self, p: &Pending, agent: &agora_core::AgentId, adapter_approval_id: &str) {
         self.r().insert(
             p.id.clone(),
             (agent.clone(), adapter_approval_id.to_string()),
         );
-        Some(p)
     }
 
     fn sk(&self) -> std::sync::MutexGuard<'_, SkipState> {
@@ -1541,10 +1558,6 @@ impl NodeApprovals {
         self.sk().asks.remove(id).is_some()
     }
 
-    fn is_skip(&self, id: &str) -> bool {
-        self.sk().asks.contains_key(id)
-    }
-
     /// A signed decision arrived. On success, the adapter's own approval id and agent to answer, and the verdict.
     pub fn resolve(
         &self,
@@ -1659,15 +1672,29 @@ impl NodeApprovals {
     /// adapter) are withdrawn and their ids returned. Requests of another kind (an `agent.start` the agent waits for) stay: the agent
     /// is still alive and still waits for them.
     pub fn cancel_adapter_requests(&self, agent: &agora_core::AgentId) -> Vec<String> {
-        // The routes are let go before the skip records are asked (their locks are taken the other way round elsewhere).
+        // Fully registered adapter requests only: routed back to this agent's adapter (a request whose route is not recorded yet is
+        // still being raised on another thread, and withdrawn now it would come back as an orphan route and an announced request that
+        // is gone), and never the node's own `agent.*` requests, which also have routes (`request_start`). The routes are let go
+        // before the queue is asked: neither lock is held inside the other.
         let routed: Vec<String> = self
             .r()
             .iter()
             .filter(|(_, (a, _))| a == agent)
             .map(|(id, _)| id.clone())
             .collect();
-        // A switch the user asked for is not a request of the turn that was cancelled: its card stays.
-        let ids: Vec<String> = routed.into_iter().filter(|id| !self.is_skip(id)).collect();
+        let ids: Vec<String> = {
+            let q = self.q();
+            routed
+                .into_iter()
+                .filter(|id| {
+                    q.pending().any(|p| {
+                        &p.id == id
+                            && p.agent_id == agent.as_str()
+                            && !is_reserved_action(&p.action)
+                    })
+                })
+                .collect()
+        };
         for id in &ids {
             self.withdraw(id);
         }
@@ -3430,5 +3457,42 @@ mod tests {
         );
         assert!(n.resolve(&msg(&web.id, "eda"), 1).is_ok());
         assert!(n.resolve(&msg(&api.id, "phone"), 1).is_ok());
+    }
+
+    /// Codex review of #1027: a turn cancelled between an adapter request entering the queue and its route being recorded (control and
+    /// the daemon run at once) leaves that request alone. Withdrawn there, the daemon would still record an orphan route and announce
+    /// a request that is gone. Only fully registered adapter requests are cancelled.
+    #[test]
+    fn a_turn_cancelled_before_a_request_is_routed_leaves_it_alone() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n
+            .raise_adapter(&agent, "run_command", "ls", 1_000, Offer::once_only())
+            .unwrap();
+        // The cancel runs between the two halves of the registration.
+        assert!(n.cancel_adapter_requests(&agent).is_empty());
+        n.route_adapter(&p, &agent, "ap-1");
+        assert_eq!(n.agent_of(&p.id), Some(agent.clone()));
+        let waiting: Vec<String> = n.waiting().into_iter().map(|w| w.id).collect();
+        assert_eq!(waiting, vec![p.id.clone()]);
+        // Once routed, the next cancelled turn withdraws it, route and all.
+        assert_eq!(n.cancel_adapter_requests(&agent), vec![p.id.clone()]);
+        assert!(n.waiting().is_empty());
+        assert_eq!(n.agent_of(&p.id), None);
+    }
+
+    #[test]
+    fn cancel_adapter_requests_leaves_agent_start_requests_waiting() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        let start = n
+            .request_start(&agent, r#"{"kind":"codex"}"#, 1_000)
+            .unwrap();
+        let adapter = n
+            .request(&agent, "ap-1", "run_command", "ls", 1_000)
+            .unwrap();
+        assert_eq!(n.cancel_adapter_requests(&agent), vec![adapter.id]);
+        let waiting: Vec<String> = n.waiting().into_iter().map(|p| p.id).collect();
+        assert_eq!(waiting, vec![start.id]);
     }
 }

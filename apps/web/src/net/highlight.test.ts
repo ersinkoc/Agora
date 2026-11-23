@@ -47,4 +47,9 @@ describe('a mark over highlighted text', () => {
     expect(marked.replace(/<[^>]+>/g, '')).toBe('abcdef');
     expect(markRanges(html, [])).toBe(html);
   });
+
+  it('terminates on an unclosed < without looping', () => {
+    expect(markRanges('<span', [{ start: 0, end: 1, cls: 'm' }])).toBe('<span');
+    expect(markRanges('a<span', [{ start: 0, end: 1, cls: 'm' }])).toBe('<mark class="m">a</mark><span');
+  });
 });
