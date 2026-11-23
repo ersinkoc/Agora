@@ -3247,7 +3247,8 @@ impl Supervisor {
             let session = hub.session()?;
             let (pid, master) = match session.start(&request) {
                 Ok(started) => started,
-                // It does not know how to start this (a program that is not there, an id in use): the node's own start says why.
+                // It does not know how to start this (a program that is not there, an id in use) or keeps all the agents it can
+                // (`MAX_HELD_AGENTS`, #983): the node's own start runs it or says why.
                 Err(LinkError::Refused(HolderRefusal::Failed | HolderRefusal::AgentExists, _)) => {
                     return None
                 }
@@ -4662,7 +4663,8 @@ fn launch_held_adapter(
         }
         let pid = match session.start_pipe(&request) {
             Ok(pid) => pid,
-            // It does not know how to start this (a program that is not there): the node's own start says why.
+            // It does not know how to start this (a program that is not there) or keeps all the agents it can (`MAX_HELD_AGENTS`,
+            // #983): the node's own start runs it or says why.
             Err(LinkError::Refused(HolderRefusal::Failed, _)) => return None,
             // An earlier run of this agent is still in the holder (its end was not collected): it is ended, then started again.
             Err(LinkError::Refused(HolderRefusal::AgentExists, _)) => {
