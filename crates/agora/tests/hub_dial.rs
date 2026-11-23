@@ -2371,7 +2371,7 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", name]);
     }
-    std::os::unix::fs::symlink(pick.join("other"), pick.join("app").join("out")).unwrap();
+    agora_platform::link_dir(&pick.join("other"), &pick.join("app").join("out")).unwrap();
     let (device, _) = agora_tui::device::Device::generate().unwrap();
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
