@@ -9,7 +9,7 @@ Origin: issue #895 (`needs-adr`). The maintainer chose on 2026-11-23 to draft a 
 it needs measurements on a Windows machine. Roadmap M2.3.
 
 Touches ADR-0050 (Windows agent confinement, Accepted, Amendment B), ADR-0047 (confinement and its `worktree` level), ADR-0045 (the
-job object), #897 (adapter and ACP agents refused at start on Windows; PR #1024), #898 (the documented limits) and
+job object), #897 (adapter and ACP agents refused at start on Windows; PR #1024), #898 (other documented Windows limits) and
 `docs/security/sandbox-recipes.md`. Code references are at main `96796b15`.
 
 ## Context
@@ -102,7 +102,7 @@ Notes on the table:
   pipes would be refused even if every grant above were made. Read from the code, not run: `uv__pipe_server` treats
   `ERROR_ACCESS_DENIED` as a name collision and retries with the next name, so in a container it would loop instead of failing.
 - **Git's `sh`.** It fails in every Low-integrity variant. msys reports `NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0…)`
-  refused (0xC0000022). This is the Git Bash limit already documented (#898). It comes from the Low integrity level, not from the
+  refused (0xC0000022). This is the Git Bash limit already documented under ADR-0050 Amendment B (`sandbox-recipes.md`). It comes from the Low integrity level, not from the
   restricting SIDs, and no option here changes it.
 - **Not reached.** The pseudo-console failure of git that ADR-0050 Amendment B recorded for AppContainer (0xC0000008) was not
   reached here, because git stopped earlier.
@@ -123,12 +123,14 @@ Notes on the table:
 2. **The fix belongs in libuv (d).** The stdio pipe pair should be created with an explicit security descriptor that carries the
    creating token's default DACL, instead of the pipe file system's default. Under the unchanged ADR-0050 token, the stand-in passes
    with that one change. The project reports this upstream with a minimal reproduction that does not need Agora: a restricted token,
-   a piped `spawnSync`, and `EPERM`. The maintainer decides who files the report. Agora's code does not change. No existing libuv or
+   a piped `spawnSync`, and `EPERM`. The project files it (the maintainer's decision at acceptance; filed as libuv/libuv#5464). Agora's code
+   does not change. No existing libuv or
    Node.js report of this was found on 2026-11-23. The nearest is nodejs/node#47086, which notes that libuv creates its pipes with
    `WRITE_DAC` and default security; it is about changing pipe permissions, not about restricted tokens.
-3. **Until a Node release carries the fix, the behaviour and the documentation stay as they are.**
-   - `docs/security/sandbox-recipes.md` keeps saying that a confined Node-based agent cannot start piped children on Windows.
-   - `docs/capabilities.md` keeps #895 open.
+3. **Until a Node release carries the fix, the behaviour stays as it is.**
+   - `docs/security/sandbox-recipes.md` keeps saying that a confined Node-based agent cannot start piped children on Windows; its
+     "another confinement mechanism" sentence now points to this ADR and the upstream fix instead.
+   - `docs/capabilities.md` keeps #895 open, waiting for the libuv fix.
    - Owners who need Node-based agents on Windows run them with `sandbox = off`. The sandbox level is set per node today (the
      per-project and per-kind choice of ADR-0047 decision 1 is not built), so this leaves every agent on that node unconfined.
 4. **When a fixed Node is released**, the Windows session re-runs these measurements with a confined Claude Code that runs a tool
@@ -140,7 +142,8 @@ Notes on the table:
   cost nothing. Options (a), (b) and (c) were measured in the throwaway harness only and not prototyped in `agora-platform`, so their
   cost to the existing confinement tests was not measured.
 - Node-based agents stay unusable confined on Windows until the libuv or Node fix ships, and that timing is outside the project.
-  Rust agents (Codex) and the shell kind keep working confined.
+  The shell kind keeps working confined; Rust agents such as Codex are expected to (a Rust stand-in passes; Codex itself was not
+  measured).
 - #897 (confining adapter and ACP agents on Windows) is not unblocked. Most adapters are Node programs: they would need this libuv
   fix and a platform `spawn_confined` for non-PTY processes, and the latter is still unbuilt.
 - Git's `sh` stays unsupported confined on Windows whatever is decided here (measured above).
@@ -160,6 +163,7 @@ Notes on the table:
 
 ## Open questions for the maintainer
 
-1. Who files the upstream report (libuv, or Node.js), and should the project offer the patch as well as the reproduction?
+1. ~~Who files the upstream report?~~ Answered at acceptance: the project files it (libuv/libuv#5464, with the reproduction and the
+   suggested fix; no Node.js issue, as the bug and the fix are in libuv).
 2. Should a start under `sandbox = worktree` on Windows warn when the agent is Node-based? The node cannot tell today. It would need
    a new manifest field such as `runtime = "node"`, which is a separate decision.
