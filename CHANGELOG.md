@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.36
+
 - Team chat shows the agents' recent messages (up to 50) in a window that opens, reloads or reconnects, instead of starting empty and showing only messages sent while it was open; a member or viewer sees the same messages they would have seen live (ADR-0103, #1020).
 - In team mode, the terminal client's start in a folder (`f`) now opens a member at their project's folder on that machine, or lists their projects there to choose from when they have several, and the way up stops at the project's folder; before, it opened at the home folder, which the hub refuses a member, so they could not reach their project's folders at all. The owner's still opens at the home folder (#1086).
 - In team mode, a member can now browse the folders of a project they were granted on its machine, choose one and start an agent there, in the window's Start an agent; a folder of another project or machine, a folder above the project (the way up stops at the project's folder) and a link that leads out of the project are refused with "Your role does not let you choose this folder", and a viewer stays read-only (#1049, ADR-0049 Amendment A).
