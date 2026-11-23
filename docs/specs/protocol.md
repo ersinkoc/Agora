@@ -307,6 +307,11 @@ Initial event families:
 Request/response with `request_id` and `idempotency_key`. Responses are `Ok { result }` or
 `Err { code, params }` (see `error-codes.md`).
 
+Team audit (ADR-0049) includes `project_id` and `agent_id` when the command or the hub's node-qualified view
+identifies those targets. Signed commands record `requested_device_id` from the request. A fresh, successful node
+reply establishes `signer_device_id`. Replies to requests with a caller-supplied idempotency key may be cached, so
+such replies leave the signer field empty. Earlier rows and commands without the corresponding identifier use empty strings.
+
 Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`, `agent.set_mode`,
 `terminal.open`, `terminal.input`, `terminal.resize`, `terminal.subscribe`, `files.list`, `files.read`,
 `files.write`, `files.watch`, `git.diff`, `git.status`, `worktree.create`, `worktree.remove`,

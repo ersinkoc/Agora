@@ -2219,6 +2219,120 @@ async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail
     assert_eq!(agent_list_outcome(&st, Duration::from_secs(10)).await, "ok");
 }
 
+#[tokio::test]
+async fn audit_records_the_routed_project_agent_and_device_outcome() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _task) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    for (i, body) in [
+        online("n1"),
+        Body::AgentStarted(v1::AgentStarted {
+            agent_id: "a1".into(),
+            node_id: "n1".into(),
+            project_id: "p1".into(),
+            ..Default::default()
+        }),
+        Body::ApprovalRequested(v1::ApprovalRequested {
+            approval_id: "ap1".into(),
+            agent_id: "a1".into(),
+            action: "review".into(),
+            ..Default::default()
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        node.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("n1", (i + 1) as u64, body),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut node).await;
+    }
+
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    for (i, accepted) in [false, true, true].into_iter().enumerate() {
+        let req = v1::CommandRequest {
+            request_id: format!("req-{i}"),
+            target_node: "n1".into(),
+            idempotency_key: if i == 2 {
+                "cached-key".into()
+            } else {
+                String::new()
+            },
+            command: Some(command_request::Command::ApprovalResolve(
+                v1::ApprovalResolve {
+                    approval_id: "ap1".into(),
+                    signer_device_id: format!("device-{i}"),
+                    ..Default::default()
+                },
+            )),
+        };
+        client
+            .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let msg = recv(&mut node).await;
+        let routed = v1::CommandRequest::decode(msg.payload.as_slice()).unwrap();
+        let result = if accepted {
+            command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::Empty(v1::Empty {})),
+            })
+        } else {
+            command_response::Result::Err(v1::ErrorInfo {
+                code: "approval.signature_invalid".into(),
+                ..Default::default()
+            })
+        };
+        let response = v1::CommandResponse {
+            request_id: routed.request_id,
+            result: Some(result),
+        };
+        node.send(&f(STREAM_COMMANDS, 1, response.encode_to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(self::response(&mut client).await.request_id, req.request_id);
+    }
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 10)
+        .unwrap();
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == "ApprovalResolve")
+        .map(agora_hub::audit::json_value)
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["outcome"], "approval.signature_invalid");
+    assert_eq!(rows[1]["outcome"], "ok");
+    assert_eq!(rows[2]["outcome"], "ok");
+    println!("CONTROL OK: the routed outcomes appear in the audit");
+    if rows[1]["project_id"].is_null() {
+        println!("PROBLEM CONFIRMED: project, agent and signing device missing from {rows:?}");
+    }
+    for row in &rows {
+        assert_eq!(row["project_id"], "p1");
+        assert_eq!(row["agent_id"], "a1");
+    }
+    assert_eq!(rows[0]["requested_device_id"], "device-0");
+    assert_eq!(rows[0]["signer_device_id"], "");
+    assert_eq!(rows[1]["requested_device_id"], "device-1");
+    assert_eq!(rows[1]["signer_device_id"], "device-1");
+    assert_eq!(rows[2]["requested_device_id"], "device-2");
+    assert_eq!(rows[2]["signer_device_id"], "");
+}
+
 /// ADR-0058: a mode or model switch is never sent to a node that cannot do it, and every switch, refused or sent, is in the audit
 /// trail.
 #[tokio::test]

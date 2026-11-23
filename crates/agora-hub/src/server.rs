@@ -948,15 +948,12 @@ async fn finish_unanswered(hub: &Hub, mut inflight: Vec<Inflight>) {
     inflight.sort_unstable_by_key(|item| item.deadline);
     for item in inflight {
         let Some(id) = item.audit else { continue };
-        let outcome = match tokio::time::timeout_at(item.deadline, item.reply).await {
-            Ok(Ok(r)) => match r.result {
-                Some(command_response::Result::Err(info)) => info.code,
-                _ => "ok".to_string(),
-            },
-            Ok(Err(_)) => ErrorCode::NodeOffline.as_str().to_string(),
-            Err(_) => ErrorCode::NodeTimeout.as_str().to_string(),
+        let audit = crate::audit::Audit::new(hub.store());
+        let _ = match tokio::time::timeout_at(item.deadline, item.reply).await {
+            Ok(Ok(r)) => audit.finish_response(id, &r, item.fresh_command),
+            Ok(Err(_)) => audit.finish(id, ErrorCode::NodeOffline.as_str()),
+            Err(_) => audit.finish(id, ErrorCode::NodeTimeout.as_str()),
         };
-        let _ = crate::audit::Audit::new(hub.store()).finish(id, &outcome);
     }
 }
 
@@ -1145,6 +1142,8 @@ struct Inflight {
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+    /// A cached reply to a caller-supplied idempotency key cannot vouch for the current request's signer.
+    fresh_command: bool,
     /// ADR-0049 Amendment A: a member's folder listing or folder details, by the command's schema name. The answer reaches them only
     /// when the folder the machine opened is inside their projects (`Scope::confine_answer`), otherwise `auth.forbidden` naming it.
     confined: Option<String>,
@@ -1216,7 +1215,7 @@ where
     let resp = match crate::dispatch::route(who, scope, &req) {
         crate::dispatch::Route::Forward => None,
         crate::dispatch::Route::Forbidden { action } => {
-            audit(hub, who, &action, &req.target_node, "auth.forbidden");
+            audit_command(hub, who, &req, &action, "auth.forbidden");
             Some(refuse(
                 Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
             ))
@@ -1282,13 +1281,7 @@ where
         hub.dispatches(),
         std::time::Instant::now(),
     ) {
-        audit(
-            hub,
-            who,
-            &audit_action(&req),
-            &req.target_node,
-            e.code.as_str(),
-        );
+        audit_command(hub, who, &req, &audit_action(&req), e.code.as_str());
         conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
             .await?;
         return Ok(());
@@ -1306,7 +1299,7 @@ where
                     t.rows = rows.into();
                 }
                 Resize::Unchanged => {
-                    audit(hub, who, &audit_action(&req), &req.target_node, "ok");
+                    audit_command(hub, who, &req, &audit_action(&req), "ok");
                     let resp = v1::CommandResponse {
                         request_id: client_request_id,
                         result: Some(command_response::Result::Ok(v1::CommandOk {
@@ -1321,9 +1314,11 @@ where
             }
         }
     }
+    // An answer may remove its approval from the hub projection. Capture the target before forwarding.
+    let (audit_target, known) = hub.audit_target(&req);
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
-        if !hub.node_known(&node) {
+        if !known {
             return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node.as_str()));
         }
         if inflight.len() >= MAX_INFLIGHT {
@@ -1378,6 +1373,7 @@ where
             answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
+            fresh_command: req.idempotency_key.is_empty(),
             confined: scope
                 .is_some()
                 .then_some(req.command.as_ref())
@@ -1388,16 +1384,26 @@ where
     })();
     match outcome {
         Ok(mut i) => {
-            i.audit = audit(hub, who, &audit_action(&req), &i.node, "sent");
+            i.audit = crate::audit::Audit::new(hub.store())
+                .record_target(
+                    &who.session,
+                    now_ms(),
+                    &who.user,
+                    &audit_action(&req),
+                    "sent",
+                    &audit_target,
+                )
+                .ok();
             inflight.push(i);
         }
         Err(e) => {
-            audit(
-                hub,
-                who,
+            let _ = crate::audit::Audit::new(hub.store()).record_target(
+                &who.session,
+                now_ms(),
+                &who.user,
                 &audit_action(&req),
-                &req.target_node,
                 e.code.as_str(),
+                &audit_target,
             );
             conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
                 .await?;
@@ -1456,11 +1462,11 @@ where
             Some(r) => {
                 let done = inflight.swap_remove(i);
                 if let Some(id) = done.audit {
-                    let outcome = match &r.result {
-                        Some(command_response::Result::Err(info)) => info.code.as_str(),
-                        _ => "ok",
-                    };
-                    let _ = crate::audit::Audit::new(hub.store()).finish(id, outcome);
+                    let _ = crate::audit::Audit::new(hub.store()).finish_response(
+                        id,
+                        &r,
+                        done.fresh_command,
+                    );
                 }
                 // A subscription the node refused (or never answered) leaves no relay behind.
                 if let (Some(stream), true) = (
@@ -2068,6 +2074,24 @@ fn audit(
     crate::audit::Audit::new(hub.store())
         .record_in(&who.session, now_ms(), &who.user, action, node, outcome)
         .ok()
+}
+
+fn audit_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+    action: &str,
+    outcome: &str,
+) {
+    let (target, _) = hub.audit_target(req);
+    let _ = crate::audit::Audit::new(hub.store()).record_target(
+        &who.session,
+        now_ms(),
+        &who.user,
+        action,
+        outcome,
+        &target,
+    );
 }
 
 /// The audit row's action: the command's schema name, with the launch options a start chose (ADR-0059: `AgentLaunch[skip-permissions]`).
@@ -3144,6 +3168,7 @@ mod audit_cleanup_tests {
             node: "n".into(),
             relay: None,
             audit: Some(audit),
+            fresh_command: true,
             reply,
             answered: None,
             deadline,
