@@ -2323,7 +2323,8 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
 /// chooses one and starts an agent there (the project the machine answers for the folder is the one the grant names). Another project's
 /// folder, the home folder and a link inside the project that leads to the other project are refused for the person's role (the link
 /// after the machine followed it); the way up stops at the project's folder. The terminal client's picker opens there, at the project's
-/// folder from the member's own snapshot (#1086).
+/// folder from the member's own snapshot (#1086), also when it does not know the role (the plain list, #1099), so nothing the member did
+/// before those refusals leaves a refused row in the owner's Activity.
 #[test]
 fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine() {
     use agora_hub::users::{Access, Role};
@@ -2434,10 +2435,16 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     };
     let roots = agora_tui::picker::project_roots(&snapshot, "laptop");
     assert_eq!(roots, [pick.join("app").to_string_lossy().into_owned()]);
-    let mut nav = agora_tui::picker::Nav::projects(roots);
+    let mut nav = agora_tui::picker::Nav::projects(roots.clone());
     let agora_tui::picker::At::Folder(start) = nav.start() else {
         panic!("one project opens in its folder")
     };
+    // #1099: the plain list does not know the role; its picker opens at the same folder, not at the home folder.
+    let mut unknown = agora_tui::picker::Nav::for_role(agora_tui::picker::Role::Unknown, roots);
+    assert_eq!(
+        unknown.start(),
+        agora_tui::picker::At::Folder(start.clone())
+    );
     let now = || {
         u64::try_from(
             std::time::SystemTime::now()
@@ -2458,7 +2465,16 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         .unwrap();
     assert_eq!(listed.path, app);
     assert_eq!(listed.parent, "", "no way up out of the project");
+    assert!(
+        !nav.answered(&listed),
+        "the hub's answer keeps a member's picker inside the project"
+    );
     assert_eq!(nav.up(&listed), None, "the picker goes no higher either");
+    assert_eq!(
+        unknown.up(&listed),
+        None,
+        "nor does it with the role not known: the hub named no way up"
+    );
     let names: Vec<&str> = listed.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["src"], "a link is never listed");
     let src = agora_tui::picker::child(&listed.path, "src");
@@ -2466,6 +2482,17 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         .list_folder("laptop", &src, sign("list", &src, "", ""))
         .unwrap();
     assert_eq!(inside.parent, app);
+    // Browsing as the picker does was never refused: no refused row for the member in the owner's Activity.
+    let refused_rows = || {
+        agora_hub::audit::Audit::new(hub.state.hub.store())
+            .list(0, Some("eda"), 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.outcome == "auth.forbidden")
+            .map(|e| e.action)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(refused_rows(), Vec::<String>::new());
     let refused =
         |r: Result<agora_protocol::v1::DirectoryEntries, agora_protocol::v1::ErrorInfo>| {
             let e = r.unwrap_err();
@@ -2492,6 +2519,12 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
             "{path:?}"
         );
     }
+    // A refusal does write one: the empty Activity above is not for want of rows.
+    assert!(
+        refused_rows().iter().any(|a| a == "DirectoryList"),
+        "{:?}",
+        refused_rows()
+    );
     // Chosen: the machine names the folder's project as the grant does, and the agent starts there.
     let info = session
         .inspect_folder("laptop", &src, sign("inspect", &src, "", ""))

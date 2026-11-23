@@ -177,13 +177,14 @@ PowerShell are not affected. Run such an agent with `sandbox = off` until this i
 
 **Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). Measured with Node 26:
 `child_process.spawnSync` fails with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the
-child starts. The asynchronous `spawn` creates its pipes the same way (not measured separately). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
+child starts. The asynchronous `spawn` creates its pipes the same way and fails the same way (measured for ADR-0105). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
 created without explicit security its own default permissions (full access for the owner, the system and administrators, read for
 `Everyone`), and a restricted token passes only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted,
 so that end cannot be opened for writing. **Consequence: a Node-based agent (Claude Code, Gemini CLI and others) that starts a tool or an MCP
 server with piped stdio, Node's default, cannot do so when confined on Windows.** Real agents were not measured. A Rust stand-in program
 (Rust's standard library, piped stdio included) and `cmd` start children confined, so Rust agents such as Codex are expected to work, but no
-real Codex run was measured. Fixing the Node case needs another confinement mechanism, a decision for ADR-0050.
+real Codex run was measured. ADR-0105 keeps this confinement and puts the fix in libuv (libuv/libuv#5464): its stdio pipes should carry
+the creating token's default permissions. Until a Node release carries it, run Node-based agents on Windows with `sandbox = off`.
 
 **Adapter and ACP (structured) agents cannot be confined on Windows** (#897). Windows confines terminal (PTY) agents only, so with any
 `sandbox` level other than `off` such an agent is refused before anything is created: `agent.sandbox_unavailable` with
