@@ -139,6 +139,21 @@ describe('the person\'s themes', () => {
     expect(s.update('user-1', { tokens: { 'state-idle': '#8b8b96' } })).not.toHaveProperty('warnings');
   });
 
+  it('keeps a stored theme that only the later checks warn about: the red on its surfaces, a badge, a control (#1054)', () => {
+    const files = [
+      { name: 'Light raised', tokens: { 'surface-2': '#3a3a40', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }, code: 'kit-contrast' },
+      { name: 'Dim text', tokens: { text: '#9c9ca4' }, code: 'kit-contrast' },
+      { name: 'Dim idle icon', tokens: { 'state-idle': '#66666e' }, code: 'control-contrast' },
+    ];
+    const kv = memory({ [USER_KEY]: JSON.stringify(files.map((f, i) => ({ id: `user-${i}`, file: { 'agora-theme': 1, name: f.name, scheme: 'dark', tokens: f.tokens } }))) });
+    expect(loadState(kv).user.map((u) => u.name)).toEqual(files.map((f) => f.name)); // never dropped
+    const s = createThemeStore({ kv });
+    files.forEach((f, i) => {
+      const u = s.update(`user-${i}`, { tokens: { ...f.tokens, 'radius-s': '9px' } });
+      expect(u.ok && u.warnings?.map((w) => w.code), f.name).toContain(f.code);
+    });
+  });
+
   it(`keeps at most ${MAX_USER_THEMES}`, () => {
     const s = createThemeStore({ kv: memory() });
     for (let i = 0; i < MAX_USER_THEMES; i++) expect(s.copy(slate, `n${i}`).ok).toBe(true);

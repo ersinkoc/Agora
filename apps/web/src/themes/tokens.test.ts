@@ -4,9 +4,9 @@ import { setLanguage, t } from '../i18n';
 import { issueText, themeName, tokenLabel } from './messages';
 import {
   AGENT_COLOURS, AGENT_COLOUR_NAMES, BUILT_IN, CONTRAST_PAIRS, agentColours, DERIVED, TOKEN_NAMES, type ParsedTheme, type ThemeIssue, applyTheme, baseTokens, contrast, contrastIssues,
-  TINT_PAIRS, cssVariables, deserialiseTheme, parseTheme, readValue, serialiseTheme, themeFile, tintIssues,
+  TINT_PAIRS, cssVariables, deserialiseTheme, parseTheme, readValue, serialiseTheme, themeFile, themeWarnings, tintIssues,
 } from './tokens';
-import { TINT_ROLES, tints } from './tints';
+import { CONTROLS, DANGER, INDICATORS, TINT_ROLES, kitPalette, tints, type KitColour } from './tints';
 
 const file = (tokens: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => ({ 'agora-theme': 1, name: 'Mine', scheme: 'dark', tokens, ...extra });
 const issues = (p: ParsedTheme): ThemeIssue[] => (p.ok ? [] : p.issues);
@@ -130,6 +130,7 @@ describe('theme tokens', () => {
     }));
     for (const b of BUILT_IN) {
       expect(tintIssues(b.tokens, b.scheme), b.id).toEqual([]);
+      expect(themeWarnings(b.tokens, b.scheme), b.id).toEqual([]); // nor any of the other warnings (#1054)
       const p = parseTheme(themeFile(b, 'x'));
       expect(p.ok && p.warnings, b.id).toBeUndefined();
     }
@@ -159,6 +160,50 @@ describe('theme tokens', () => {
     // Each scheme mixes at its own strength (app.css `--tint`): 14 % in Dark, 10 % in Light.
     expect(tints(baseTokens('dark'), 'dark').needs).toBe('#2c261d');
     expect(tints(baseTokens('light'), 'light').needs).toBe('#f7eee8');
+  });
+
+  it('warns about the fixed red as words on the theme\'s own surfaces (#1054)', () => {
+    // Raised surfaces a little lighter than Dark's: text, secondary text and the accent still read 4.5:1 there, the red 4.0:1.
+    const p = parseTheme(file({ 'surface-2': '#3a3a40', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }));
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    expect(tintIssues(p.tokens, 'dark')).toEqual([]); // what #1051 checked: nothing to say
+    expect(p.warnings).toEqual([{ code: 'kit-contrast', fg: 'danger', bg: 'surface-2', ratio: contrast(DANGER.dark, '#3a3a40'), min: 4.5 }]);
+    expect(issueText(p.warnings![0]!)).toBe('Red (errors) on Raised surfaces is 4.0:1; it needs at least 4.5:1 to be readable.');
+  });
+
+  it('warns about an agent\'s initial on its coloured badge (#1054)', () => {
+    // Dimmer text still reads 4.5:1 on every surface, but the badge is the agent colour mixed into the panels: 4.4:1 on Mint.
+    const p = parseTheme(file({ text: '#9c9ca4' }));
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    expect(contrastIssues(p.tokens)).toEqual([]);
+    expect(tintIssues(p.tokens, 'dark')).toEqual([]);
+    const badge = kitPalette(p.tokens, 'dark', agentColours(p.tokens))['avatar-mint'];
+    expect(p.warnings).toEqual([{ code: 'kit-contrast', fg: 'text', bg: 'avatar-mint', ratio: contrast('#9c9ca4', badge), min: 4.5 }]);
+    expect(issueText(p.warnings![0]!)).toBe('Text on Mint agent badge is 4.4:1; it needs at least 4.5:1 to be readable.');
+  });
+
+  it('warns about a control indicator below 3:1, naming the control (#1054)', () => {
+    // Idle at 3.2:1 on the surfaces (enough for a state colour) is 2.7:1 as an icon on its own chip.
+    const p = parseTheme(file({ 'state-idle': '#66666e' }));
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    const chip = kitPalette(p.tokens, 'dark', agentColours(p.tokens))['chip-idle'];
+    const control = { code: 'control-contrast', control: 'icon', fg: 'state-idle', bg: 'chip-idle', ratio: contrast('#66666e', chip), min: 3 };
+    expect(p.warnings).toContainEqual(control);
+    expect(tintIssues(p.tokens, 'dark').map((i) => `${i.fg}/${i.tint}`)).toEqual(['state-idle/idle']); // #1051 saw only the words
+    expect(issueText(control as ThemeIssue)).toBe('Icon: Idle on Idle icon background is 2.7:1; it needs at least 3:1 to be seen.');
+  });
+
+  it('checks every control indicator the widget kit draws, once, and leaves out pairs a stricter check already asks for', () => {
+    // Accent, secondary text and the label on the accent are refused below 4.5:1 on the surfaces: a 3:1 warning would only repeat it.
+    const p = parseTheme(file({ 'text-muted': '#3a3a40' }));
+    expect(p.ok).toBe(false);
+    const draft = { ...baseTokens('dark'), 'text-muted': '#3a3a40' };
+    expect(themeWarnings(draft, 'dark').filter((w) => w.code === 'control-contrast')).toEqual([]);
+    for (const row of INDICATORS) expect(CONTROLS).toContain(row.control);
+    expect(new Set(INDICATORS.map((r) => r.control))).toEqual(new Set(CONTROLS));
   });
 
   it('handles a white accent with a grey label (the #1018 review): accepted with nothing to warn about in Dark, refused in Light', () => {
@@ -207,9 +252,12 @@ describe('theme messages', () => {
         { code: 'bad-value', token: 'accent' }, { code: 'bad-value', token: 'font-ui' }, { code: 'bad-value', token: 'space-1' },
         { code: 'contrast', fg: 'text', bg: 'surface-0', ratio: 3.27, min: 4.5 },
         ...TINT_ROLES.map((tint): ThemeIssue => ({ code: 'tint-contrast', fg: tint === 'danger' ? 'danger' : 'text', tint, ratio: 3.27, min: 4.5 })),
+        // Every colour the kit draws, as either side of a pair, and every control.
+        ...(Object.keys(kitPalette(baseTokens('dark'), 'dark', AGENT_COLOURS.dark)) as KitColour[]).map((bg): ThemeIssue => ({ code: 'kit-contrast', fg: bg, bg, ratio: 3.27, min: 4.5 })),
+        ...INDICATORS.map((r): ThemeIssue => ({ code: 'control-contrast', control: r.control, fg: r.fg, bg: r.bg[0]!, ratio: 2.1, min: 3 })),
       ];
-      for (const i of all) expect(issueText(i), i.code).not.toMatch(/^theme-|\{\$|Unknown variable/);
-      for (const k of ['theme-for-light', 'theme-for-dark', 'theme-error-full', 'theme-contrast-tint-warning', 'theme-contrast-tint-also', 'theme-import-tint-warning']) expect(t(k, { max: 1 }), k).not.toBe(k);
+      for (const i of all) expect(issueText(i), JSON.stringify(i)).not.toMatch(/theme-|\{\$|Unknown variable/);
+      for (const k of ['theme-for-light', 'theme-for-dark', 'theme-error-full', 'theme-contrast-warning', 'theme-contrast-also', 'theme-import-warning']) expect(t(k, { max: 1 }), k).not.toBe(k);
     });
   }
   it('says the ratio rounded down, so a shown 4.5 always passes', () => {
