@@ -295,17 +295,37 @@ where
 }
 
 /// #996: retries the presence facts the store refused until they are written, waiting longer each time (up to 5 s), at most one
-/// task per hub. Once they are, the board's membership is worked out again, as when a connection's end is recorded at once.
+/// task per hub. Once they are, the board's membership is worked out again, as when a connection's end is recorded at once. The
+/// task holds the hub only during an attempt (a hub dropped meanwhile ends it), and however it ends, a panic included, it lets
+/// the next close start another.
 fn record_later(hub: &Arc<Hub>) {
     use std::sync::atomic::Ordering;
+    /// Clears `recording_later` when the task ends while it still owns it.
+    struct Owner {
+        hub: std::sync::Weak<Hub>,
+        owns: bool,
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if let (true, Some(hub)) = (self.owns, self.hub.upgrade()) {
+                hub.recording_later.store(false, Ordering::Release);
+            }
+        }
+    }
     if hub.recording_later.swap(true, Ordering::AcqRel) {
         return;
     }
-    let hub = Arc::clone(hub);
+    let mut owner = Owner {
+        hub: Arc::downgrade(hub),
+        owns: true,
+    };
     tokio::spawn(async move {
         let mut wait = Duration::from_millis(100);
         loop {
             tokio::time::sleep(wait).await;
+            let Some(hub) = owner.hub.upgrade() else {
+                return;
+            };
             let recorded = {
                 let hub = Arc::clone(&hub);
                 tokio::task::spawn_blocking(move || hub.record_unrecorded().is_ok())
@@ -316,12 +336,14 @@ fn record_later(hub: &Arc<Hub>) {
                 for (node, project) in hub.board_membership(now_ms()) {
                     ask_board_join(&hub, node, project);
                 }
+                owner.owns = false;
                 hub.recording_later.store(false, Ordering::Release);
                 // A connection that ended between the write and the line above found this task still running and left its
                 // facts to it.
                 if !hub.has_unrecorded() || hub.recording_later.swap(true, Ordering::AcqRel) {
                     return;
                 }
+                owner.owns = true;
                 wait = Duration::from_millis(100);
             } else {
                 wait = (wait * 2).min(Duration::from_secs(5));
@@ -2825,10 +2847,21 @@ mod event_writer_tests {
             }
         })
         .await;
+        // The retry task lets go once it is done, so a later close can start another.
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while hub
+                .recording_later
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
         let rebuilt = crate::projection::View::rebuild(hub.store()).unwrap().0;
         drop(hub);
         remove(&path);
         assert!(offline.is_ok(), "the machine that left stayed online");
+        assert!(released.is_ok(), "the retry task kept its claim");
         assert!(!rebuilt.nodes["n"].online);
     }
 }

@@ -584,9 +584,20 @@ impl Hub {
     }
 
     /// Writes the facts in `unrecorded` in order, stopping at the first the store refuses (it and the ones after it stay).
+    ///
+    /// A fact the store does not apply (its number is already taken, or is not the next: the hub's count of its own facts no longer
+    /// matches the store's) is an error too, never dropped: it stays, the count is read again from the store, and the next
+    /// attempt numbers it from there.
     fn write_unrecorded(&self, g: &mut Inner) -> Result<(), StoreError> {
         while let Some((body, at_ms)) = g.unrecorded.front().cloned() {
-            self.write(g, body, at_ms)?;
+            if !self.write(g, body, at_ms)? {
+                let seq = g.hub_seq + 1;
+                g.hub_seq = self.store.acked(RESERVED_HUB_ID)?;
+                return Err(StoreError(format!(
+                    "the hub's fact {seq} was not applied; the store holds {}",
+                    g.hub_seq
+                )));
+            }
             g.unrecorded.pop_front();
         }
         Ok(())
@@ -596,10 +607,11 @@ impl Hub {
     /// (#996), so the log keeps the order things happened in: a node's late `NodeOffline` can never land after its next `up`.
     fn emit(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<(), StoreError> {
         self.write_unrecorded(g)?;
-        self.write(g, body, now_ms)
+        self.write(g, body, now_ms).map(|_| ())
     }
 
-    fn write(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<(), StoreError> {
+    /// Appends one hub fact and publishes it. Returns whether the store applied it (not a duplicate or a gap).
+    fn write(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<bool, StoreError> {
         let seq = g.hub_seq + 1;
         let event = Event {
             producer_id: RESERVED_HUB_ID.to_string(),
@@ -613,8 +625,9 @@ impl Hub {
         {
             g.hub_seq = seq;
             Self::publish(g, Delivered { pos, event });
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// ADR-0039 amendment B: the `(node, project)` pairs that must hand over their local work now (see `Boards::membership`).
@@ -674,7 +687,21 @@ impl Hub {
         call: &agora_protocol::v1::BoardCall,
         now_ms: u64,
     ) -> crate::board::Answer {
+        let refused = || crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store"),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
         let mut g = self.lock();
+        // #996: a machine that left while the store refused the record is offline before the board decides anything (a handoff
+        // to it is refused), and the board's events come after that record in the log.
+        if self.write_unrecorded(&mut g).is_err() {
+            return refused();
+        }
         let key = self.restore_board(&call.project_id, now_ms);
         let project = call.project_id.as_str();
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
@@ -727,15 +754,7 @@ impl Hub {
                 if let Some(board) = before {
                     self.boards.restore(project, board);
                 }
-                crate::board::Answer {
-                    verdict: crate::board::Verdict::Invalid(
-                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
-                            .with("incident_id", "board.store"),
-                    ),
-                    events: Vec::new(),
-                    handoff: None,
-                    fanout: None,
-                }
+                refused()
             }
         }
     }
@@ -1933,6 +1952,63 @@ mod tests {
                 (false, NodeLinkReason::Closed as i32, 1),
             ]
         );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a board call writes the ends the store refused before it decides anything, so the board sees a machine that left as
+    /// offline (never hands work to it) and its events come after that record. While the store still refuses, the call is answered
+    /// `internal` (`board.store`) and the end stays waiting.
+    #[test]
+    fn a_board_call_records_a_waiting_end_first() {
+        let (hub, path) = hub_on_file("presence-end-board");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: "p".into(),
+            tool: "task_list".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        match hub.board_call("n2", &call, 7).verdict {
+            crate::board::Verdict::Invalid(e) => assert_eq!(
+                e,
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store")
+            ),
+            _ => panic!("a board call went ahead while a machine's end could not be recorded"),
+        }
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _ = hub.board_call("n2", &call, 8);
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a waiting end the store does not apply (the hub's count of its own facts no longer matches the store's) is not
+    /// dropped: the attempt fails, the count is read again, and the next attempt writes it.
+    #[test]
+    fn a_waiting_end_the_store_does_not_apply_is_kept_and_written_later() {
+        let (hub, path) = hub_on_file("presence-end-unapplied");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        other
+            .execute_batch("DROP TRIGGER no_events; UPDATE producers SET last_seq = last_seq + 1 WHERE producer = 'hub';")
+            .unwrap();
+        assert!(hub.record_unrecorded().is_err());
+        assert!(hub.has_unrecorded());
+        assert!(hub.view().0.nodes["n1"].online);
+        hub.record_unrecorded().unwrap();
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(!View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
         drop(hub);
         remove_db(&path);
     }
