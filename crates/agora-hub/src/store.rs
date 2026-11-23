@@ -426,10 +426,12 @@ impl SqliteStore {
             )
             .optional()?
             .unwrap_or(0);
-        let expected = last + 1;
         if seq_i <= last {
             return Ok(Append::Duplicate);
         }
+        let Some(expected) = last.checked_add(1) else {
+            return Ok(Append::Duplicate);
+        };
         if seq_i != expected && resync_at_ms.is_none() {
             return Ok(Append::Gap {
                 expected: to_u64(expected),
@@ -1161,5 +1163,16 @@ mod tests {
         drop(s);
         assert!(SqliteStore::open(&path).is_ok());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn append_after_i64_max_resync_returns_duplicate_without_overflow() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let resync = store
+            .append_resync("n1", i64::MAX as u64, 1000, b"a", 1000)
+            .unwrap();
+        assert!(matches!(resync, Append::Resynced { .. }));
+        let next = store.append("n1", 1, 1001, b"b").unwrap();
+        assert_eq!(next, Append::Duplicate);
     }
 }

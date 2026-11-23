@@ -45,7 +45,7 @@ export function ThemeEditor() {
 
       <ThemeFields key={theme.id} theme={theme} onSaved={report} />
 
-      {problems.length > 0 && <ul role="alert" className="m-0 grid list-none gap-1 rounded-s border border-needs-you p-3 text-xs">
+      {problems.length > 0 && <ul role="alert" className="m-0 grid list-none gap-1 rounded-s border border-danger p-3 text-xs">
         {problems.map((p, i) => <li key={i}>{p}</li>)}
       </ul>}
 
@@ -105,19 +105,19 @@ function ThemeFields({ theme, onSaved }: { theme: Theme; onSaved: (r: Saved) => 
 
       <div className="grid gap-1" aria-live="polite">
         <h3 className="ide-section m-0 px-0">{t('theme-readability')}</h3>
-        {!complete ? <p className="m-0 text-xs text-needs-you">{t('theme-incomplete')}</p>
+        {!complete ? <p className="m-0 text-xs text-danger">{t('theme-incomplete')}</p>
           : contrast.length === 0 && onTints.length === 0 ? <p className="state state--finished m-0">{t('theme-contrast-ok')}</p>
           : <>
             {contrast.length > 0 && <ul className="m-0 grid list-none gap-1 p-0 text-xs">
-              <li className="text-needs-you">{t('theme-contrast-not-applied')}</li>
+              <li className="text-danger">{t('theme-contrast-not-applied')}</li>
               {contrast.map((c) => <li key={`${c.fg}/${c.bg}`}>{issueText({ code: 'contrast', ...c })}</li>)}
             </ul>}
             {onTints.length > 0 && <ul className="m-0 grid list-none gap-1 p-0 text-xs">
-              <li className="text-needs-you">{t(contrast.length > 0 ? 'theme-contrast-tint-also' : 'theme-contrast-tint-warning')}</li>
+              <li className="text-danger">{t(contrast.length > 0 ? 'theme-contrast-tint-also' : 'theme-contrast-tint-warning')}</li>
               {onTints.map((c) => <li key={`${c.fg}/${c.tint}`}>{issueText({ code: 'tint-contrast', ...c })}</li>)}
             </ul>}
           </>}
-        {issues.map((i, k) => <p key={k} className="m-0 text-xs text-needs-you">{issueText(i)}</p>)}
+        {issues.map((i, k) => <p key={k} className="m-0 text-xs text-danger">{issueText(i)}</p>)}
       </div>
     </div>
   );

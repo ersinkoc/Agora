@@ -234,7 +234,7 @@ export function connectLive(o: LiveOptions): Live {
     // History whose snapshot never came belongs to a subscription that is over.
     for (const t of terminals.values()) t.pairing.reset();
     pending.clear();
-    if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
+    if (refusals >= 2 && !closed) { closed = true; unwake(); o.onRejected?.(); return; }
     if (closed) return;
     o.onState('offline');
     if (timer) clearTimeout(timer);

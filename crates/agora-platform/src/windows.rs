@@ -101,13 +101,31 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
+    let held = hold_dir(dir)?;
+    open_private_held(&held, path, append)
+}
+
+/// [`open_private`] for `name` in a folder already held open (`dir`, #1000, [`crate::ConfinedDir::open_lock`]). The file is opened at
+/// the path the handle has now (its final path) and then must really be inside the folder the handle holds, both final paths taken
+/// after the open: a folder renamed away and another put at its path in between is refused (`InvalidInput`), never used.
+pub(crate) fn open_private_in(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    let path = PathBuf::from(final_path(dir)?).join(name);
+    open_private_held(dir, &path, append)
+}
+
+/// The part of [`open_private`] after its folder is held (`held`): `path` is created private or opened, then checked through its own
+/// handle, including that it is inside `held`.
+fn open_private_held(held: &std::fs::File, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let held = hold_dir(dir)?;
     match create_private_new(path) {
         Ok(f) => drop(f),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -136,7 +154,7 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     if reparse || links > 1 || !file.metadata()?.is_file() {
         return Err(refuse());
     }
-    let (inside, folder) = (final_path(&file)?, final_path(&held)?);
+    let (inside, folder) = (final_path(&file)?, final_path(held)?);
     if !inside.to_lowercase().starts_with(&format!(
         "{}\\",
         folder.trim_end_matches('\\').to_lowercase()
@@ -148,7 +166,6 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     set_owner_only_handle(&file, false)?;
-    drop(held);
     Ok(file)
 }
 
@@ -1001,6 +1018,57 @@ pub(crate) fn flush_input() {
     unsafe {
         FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
     }
+}
+
+/// The characters of the keys pressed on the console within `wait` (`crate::read_confirmation_until`), as UTF-8: `None` when none
+/// came. The console's input records are read directly: a key press with a character gives that character (as often as it repeats,
+/// at most 256 times), and every other record (a key release, a key with no character, the mouse, focus, a resize) is consumed and
+/// gives nothing, so a wait never ends in a read that blocks. A console has no end of input, so the result is never empty.
+pub(crate) fn terminal_key(wait: Duration) -> io::Result<Option<Vec<u8>>> {
+    use windows_sys::Win32::System::Console::{
+        GetNumberOfConsoleInputEvents, ReadConsoleInputW, INPUT_RECORD, KEY_EVENT,
+    };
+    let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
+    let mut units: Vec<u16> = Vec::new();
+    // SAFETY: plain calls on the process's standard input handle; `records` is a valid buffer of the length passed, and only the
+    // records the call says it filled are read, each as the union member its `EventType` names.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        match WaitForSingleObject(stdin, ms) {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => return Ok(None),
+            _ => return Err(os_error(GetLastError())),
+        }
+        let mut waiting = 0u32;
+        if GetNumberOfConsoleInputEvents(stdin, &mut waiting) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        if waiting == 0 {
+            return Ok(None);
+        }
+        let mut records: [INPUT_RECORD; 16] = std::mem::zeroed();
+        let mut read = 0u32;
+        // At least one record is waiting, so this returns at once.
+        if ReadConsoleInputW(stdin, records.as_mut_ptr(), records.len() as u32, &mut read) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        for r in records.iter().take(read as usize) {
+            if u32::from(r.EventType) != KEY_EVENT {
+                continue;
+            }
+            let k = r.Event.KeyEvent;
+            let c = k.uChar.UnicodeChar;
+            if k.bKeyDown != 0 && c != 0 {
+                for _ in 0..k.wRepeatCount.clamp(1, 256) {
+                    units.push(c);
+                }
+            }
+        }
+    }
+    if units.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf16_lossy(&units).into_bytes()))
 }
 
 /// Size of the console window on stdout.

@@ -226,7 +226,8 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
   the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
-  saved"; the hub closes itself after one approval. The join by an address the certificate does not name says at once "The hub at … could
+  saved"; the hub closes itself after one approval, from the terminal or from the window (`agora pair status` says "Closed to new machines"), and a
+  `pair open` that was asking about a machine answered in the window stops asking and says "Answered in a window: …" (#942). The join by an address the certificate does not name says at once "The hub at … could
   not be verified, so nothing was saved." with no number, the owner gets no card, and a later join with that name is not offered
   "Replace the existing machine".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): terminal answer passed; after a window approval the hub stays open (#942); the join hint on a loopback hub (#943).
@@ -426,13 +427,13 @@ not built: nothing to check.
 
 ### RM-26 Team mode: people, roles, audit
 - **OS:** Linux, macOS, Windows (the hub). Partly built (P7-09).
-- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`; then grant a project: `agora hub user grant rm-viewer
-  NODE/PROJECT --hub-dir $RM/home/hub`, where PROJECT is the hub's project id, not the name the window shows: for a git folder with
-  no `.agent-project.json` it is `#` and the root commit's full hash (`git -C "$RM/proj" rev-list --max-parents=0 HEAD`), after
-  `agora project init` it is `id:<uuid>` (a wrong name is accepted silently, #904). Sign in with its code in browser B (a second
-  person: **human**; otherwise a second browser profile). As the viewer try to start an agent. As the owner open Activity.
-- **See:** without a grant the viewer sees no machine; with it, the project's agents, and a start is refused; Activity (Person
-  column) lists both people's actions, each row with "session <id>".
+- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`. Sign in with its code in browser B (a second
+  person: **human**; otherwise a second browser profile). Then `agora hub user projects --hub-dir $RM/home/hub` and grant a project
+  by the names the window shows: `agora hub user grant rm-viewer MACHINE/proj --hub-dir $RM/home/hub` (#904); also try
+  `MACHINE/nosuch`. As the viewer try to start an agent. As the owner open Activity.
+- **See:** without a grant the viewer sees no machine and is told no project is theirs yet (no "Connect your first machine");
+  `projects` lists `MACHINE/proj` with its folder; `MACHINE/nosuch` is refused with a reason (exit 1); with the grant, the project's
+  agents, and a start is refused; Activity (Person column) lists both people's actions in words, each row with "session <id>".
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)

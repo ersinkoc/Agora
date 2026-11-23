@@ -58,7 +58,7 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   for a deletion. A changed line says so by shape as well as colour: a `-` or `+` glyph and a 2 px bar on its left edge. The red
   reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. This documents a
   content-colour exception to "colour is reserved for state"; it does not change the state-colour rule.
-  The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`), for the sign of an agent that acts without asking
+  The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`, the same colour as `--danger` below), for the sign of an agent that acts without asking
   (ADR-0059, ADR-0090 Amendment A), a lightning bolt with no words whose meaning is its tooltip and accessible name. It is never amber, so
   it cannot be read as "needs you" or as the quota chip (an amber warning sign that always shows its percentage); shape (bolt against
   triangle) and the words in the tooltip carry the difference too, never the colour alone.
@@ -72,6 +72,15 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   asking (the risk sign, an Allow that lets an agent act without asking, a switch that turns it on). The accent is the brand: selection,
   primary actions, links. Green is finished and online; blue is working. Neutral facts (an OS, a version, a branch, a count of changed
   files) are grey tags, never a state colour.
+  On the screens (redesign PR 3): errors and refused actions are `text-danger`, and so are a failed tool group in the chat, the options
+  and notes of a start that would not ask, and the confirm box of a destructive or acts-freely choice (close a working agent, drop a
+  queued message, turn asking off); a deleted file's mark is red; change counts are grey tags or chips; an offline machine's dot is the
+  idle grey; a "run" step in the chat is the working blue; a list cut short or out of date is a neutral accent-tinted notice; a hint (two
+  machines change one project, a device that does not trust this browser) is plain text. The terminal's search matches are the theme's
+  accent mixed toward the terminal background (opaque, as xterm needs; recomputed on a theme change), the current one stronger with a
+  full accent border, and the terminal's text stays at 4.5:1 on both. Besides "needs you" and the quota sign, amber stays in two places: a
+  usage or context meter at 80 % or more (the quota sign's family) and the muted syntax colours mixed from it. A web test lists every
+  file that uses the amber token or its classes, with a count and a reason, so a new use has to be one of these.
 
 ### Agent state language
 | State | Color role | Shape | Motion |
@@ -84,14 +93,15 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Failed | danger red (ADR-0102) | cross in a ring | none |
 
 An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
-status pill draws Failed in red; the screens that still draw it in neutral ink (the tiles and Home's counts) switch over as they adopt
-the kit (redesign PRs 2 and 3).
+status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2) and the phone's lists (PR 13); the screens that still
+draw it in neutral ink (the agent list) switch over as they adopt the kit.
 
 ### Agent identity
 - Each agent kind shows its brand mark (provider logos used per their trademark guidelines; models.dev provides
   provider logos for model providers).
 - Each agent *instance* gets a stable generated accent and short name ("claude · amber", "codex · teal") so
-  several agents of the same kind are distinguishable at a glance.
+  several agents of the same kind are distinguishable at a glance. The accent is drawn as the agent's avatar (a soft square with a ring
+  and the kind's first letter) beside its name, never as a coloured edge of a tile or row.
 
 ### Signature visuals
 - **Live tiles:** fleet tiles show a miniature live preview of the agent's terminal or latest chat line,
@@ -110,8 +120,10 @@ the kit (redesign PRs 2 and 3).
   shadows. **One elevation** (ADR-0102): overlays only (dialogs, menus, the palette, toasts, tooltips) use the raised surface
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
-  reach them as they adopt the kit (the redesign plan's PRs 2–13): until then tiles keep their coloured edge and their shadow, existing
-  overlays use the older `--shadow`, errors and change counts are still amber in places, and the global `h2` is still an uppercase label.
+  reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
+  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Until the rest follow,
+  existing overlays use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label.
+  Amber means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.
