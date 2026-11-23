@@ -298,7 +298,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
   asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
   its last unwritten second is said dropped too). The transcript is
-  written in batches at most a second apart, so a kill loses at most the last batch: those entries were shown live, are not in the file,
+  written in batches at most a second apart (the newest pieces of a stream up to 5 s later while the node holds a secret value), so a
+  kill loses at most those (a clean stop writes them all first, below): they were shown live, are not in the file,
   and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines a killed node had read
   from the holder (the holder counts them given) and had not yet recorded are lost too, as before.
 - **A clean stop (ADR-0104 O2, Unix):** `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` (`agora down`, a service stop or restart, the

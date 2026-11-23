@@ -645,7 +645,69 @@ fn tool_output(u: &Value) -> Option<String> {
         (_, Some(r)) => r,
         _ => return None,
     };
-    Some(redact(&head_tail(&text, OUTPUT_MAX)))
+    Some(bounded_output(&text))
+}
+
+/// What the bridge sends of a tool's output: its escape sequences and control characters removed first (the node removes them
+/// anyway), then cut to `OUTPUT_MAX` (head and tail kept), then what looks like a secret replaced. Removed before the cut, so the
+/// node, which keeps less of it (16 KiB, head and tail), never keeps the place this cut joins: a value of the node's secrets cut
+/// there would otherwise leave a piece on each side that the node cannot place (review of #1103, N1).
+pub fn bounded_output(text: &str) -> String {
+    redact(&head_tail(&without_escapes(text), OUTPUT_MAX))
+}
+
+/// `text` without escape sequences (CSI, OSC, DCS, ... with their payload), control characters other than line breaks and tabs,
+/// and the characters that override a direction (U+202A to U+202E): what the node removes from a tool's output.
+fn without_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                let kind = match c {
+                    '\u{1b}' => chars.next(),
+                    '\u{9b}' => Some('['),
+                    '\u{9d}' => Some(']'),
+                    _ => Some('P'),
+                };
+                match kind {
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']' | 'P' | '_' | '^' | 'X') => {
+                        // As the node: a sequence never closed ends at a line break or after 4096 characters.
+                        let mut taken = 0;
+                        while let Some(&c) = chars.peek() {
+                            if c == '\n' || taken >= 4096 {
+                                break;
+                            }
+                            chars.next();
+                            taken += 1;
+                            if c == '\u{7}' || c == '\u{9c}' {
+                                break;
+                            }
+                            if c == '\u{1b}' {
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            '\n' | '\t' | '\r' => out.push(c),
+            c if c.is_control() => {}
+            '\u{202a}'..='\u{202e}' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A notice's parameters: a reason's parameters with every value as a string.

@@ -31,7 +31,7 @@ use agora_protocol::v1::{
     ToolLocation, ToolStatus,
 };
 
-use crate::transcript::{Batch, Line, Seed, Side, Store, Wake};
+use crate::transcript::{Batch, Cuts, Line, Run, Seed, Side, Store, Wake};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
 pub const MAX_ENTRIES: usize = 500;
@@ -96,6 +96,8 @@ struct Transcript {
     dirty: BTreeSet<u64>,
     /// ADR-0089, ADR-0104 C1: what is not on disk yet, on a board that saves (`None` otherwise).
     save: Option<Save>,
+    /// Review of #1103 (N1): where the node cut something out of an entry's texts, for the transcript writer (on a board that saves).
+    cuts: HashMap<u64, Cuts>,
 }
 
 /// The most bytes of changed entries that left the ring before a batch took them, kept for that batch (a flood between two batches);
@@ -210,6 +212,14 @@ fn cut(text: String) -> String {
     cut_to(text, MAX_ENTRY_BYTES)
 }
 
+/// [`cut`], and where the text was cut (its new end) when it was.
+fn cut_at(text: String) -> (String, Option<usize>) {
+    let long = text.len() > MAX_ENTRY_BYTES;
+    let text = cut(text);
+    let end = long.then_some(text.len());
+    (text, end)
+}
+
 fn cut_to(mut text: String, max: usize) -> String {
     if text.len() > max {
         let mut end = max;
@@ -221,11 +231,12 @@ fn cut_to(mut text: String, max: usize) -> String {
     text
 }
 
-/// `text` as is when it fits `max` bytes; otherwise its first and its last bytes (cut on character boundaries, `max` in all) and
-/// `true`. Tool output keeps its head (what ran) and its tail (how it ended).
-fn head_and_tail(text: String, max: usize) -> (String, bool) {
+/// `text` as is when it fits `max` bytes; otherwise its first and its last bytes (cut on character boundaries, `max` in all), with
+/// where the head ends (the place a value may be cut in two, in what is kept) and where the kept tail began
+/// in `text`; `None` when nothing was cut.
+fn head_and_tail_at(text: String, max: usize) -> (String, Option<(usize, usize)>) {
     if text.len() <= max {
-        return (text, false);
+        return (text, None);
     }
     let mut head = max / 2;
     while !text.is_char_boundary(head) {
@@ -235,11 +246,15 @@ fn head_and_tail(text: String, max: usize) -> (String, bool) {
     while !text.is_char_boundary(tail) {
         tail += 1;
     }
-    (format!("{}{}", &text[..head], &text[tail..]), true)
+    (
+        format!("{}{}", &text[..head], &text[tail..]),
+        Some((head, tail)),
+    )
 }
 
-/// The text of a tool call entry: the tool and its arguments as JSON (what an old client shows).
-fn tool_text(tool: &str, arguments_json: &str) -> String {
+/// The text of a tool call entry: the tool and its arguments as JSON (what an old client shows). The transcript writer makes it
+/// again from the redacted tool and arguments, so it is redacted exactly as they are.
+pub(crate) fn tool_text(tool: &str, arguments_json: &str) -> String {
     cut(format!(
         "{{\"tool\":{},\"arguments\":{}}}",
         json_string(tool),
@@ -378,6 +393,11 @@ const ESCAPE_PAYLOAD_MAX: usize = 4096;
 /// the ones that spoof). Other direction marks are kept or removed by the [`Style`]. A bare carriage return is a line break in
 /// multi-line text and a space otherwise; `\r\n` is one line break.
 fn strip_controls(s: &str, style: Style) -> String {
+    balanced(strip_core(s, style), style)
+}
+
+/// [`strip_controls`] without the isolates' balance (done once over a whole text that was stripped in parts).
+fn strip_core(s: &str, style: Style) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -437,8 +457,12 @@ fn strip_controls(s: &str, style: Style) -> String {
             c => out.push(c),
         }
     }
+    out
+}
+
+fn balanced(out: String, style: Style) -> String {
     if style.keeps_marks() && out.contains(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']) {
-        out = balance_isolates(&out);
+        return balance_isolates(&out);
     }
     out
 }
@@ -469,9 +493,41 @@ fn balance_isolates(s: &str) -> String {
 /// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
 /// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
 fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
-    let (bounded, cut_first) = head_and_tail(text.to_string(), PRE_BOUND);
-    let (out, cut_last) = head_and_tail(strip_controls(&bounded, style), max);
-    (out, cut_first || cut_last)
+    let (out, cut, _) = tidy_cuts(text, max, style);
+    (out, cut)
+}
+
+/// [`tidy`], and the places in the result where something was cut out (review of #1103, N1): the transcript writer looks for a
+/// piece of a secret on each side of them. The `PRE_BOUND` cut is made first and each side cleaned apart, so where it lands is
+/// known however much cleaning took away; then the `max` cut. A place the isolates' balance moved by a character or two is found
+/// by the writer, which looks a few bytes around each.
+fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>) {
+    let (bounded, first) = head_and_tail_at(text.to_string(), PRE_BOUND);
+    let (cleaned, mut seams) = match first {
+        Some((h, _)) => {
+            let head = strip_core(&bounded[..h], style);
+            let tail = strip_core(&bounded[h..], style);
+            let seam = head.len();
+            (balanced(head + &tail, style), vec![seam])
+        }
+        None => (strip_controls(&bounded, style), Vec::new()),
+    };
+    let (out, last) = head_and_tail_at(cleaned, max);
+    if let Some((h, dropped)) = last {
+        // A place in the dropped middle is gone; one in the kept tail moves with it.
+        seams = seams
+            .into_iter()
+            .filter_map(|s| match s {
+                s if s < h => Some(s),
+                s if s >= dropped => Some(s - dropped + h),
+                _ => None,
+            })
+            .chain(std::iter::once(h))
+            .collect();
+        seams.sort_unstable();
+        seams.dedup();
+    }
+    (out, first.is_some() || last.is_some(), seams)
 }
 
 /// ACP `ToolKind` as the protocol's; a word this build does not know is `UNSPECIFIED`.
@@ -564,6 +620,41 @@ impl Transcript {
                 .filter(|c| c.entry == e.entry_id)
                 .map(|c| (c.tool.clone(), c.args.clone())),
             plan: self.plan == Some(e.entry_id),
+            cuts: self.cuts.get(&e.entry_id).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Review of #1103 (N1): the entries of the agent's open stream of text and thoughts (the run at the end of the ring) that the
+    /// writer holds back at `now`: each with fewer than `span - 1` bytes after it in the run, where `span` is the longest value of
+    /// the node's secrets, so a value that starts in it is whole in the ring before any piece of it is written. Nothing is held once
+    /// another entry ends the run, or once its newest piece is [`HOLD_MS`] old (a kill loses at most that much more).
+    fn held(&self, now: u64, span: usize) -> BTreeSet<u64> {
+        let mut held = BTreeSet::new();
+        let Some(newest) = self.entries.back().filter(|e| in_run(e)) else {
+            return held;
+        };
+        if now.saturating_sub(newest.at_ms) >= HOLD_MS {
+            return held;
+        }
+        let mut after = 0usize;
+        for e in self.entries.iter().rev().take_while(|e| in_run(e)) {
+            if after + 1 >= span {
+                break;
+            }
+            held.insert(e.entry_id);
+            after += e.text.len();
+        }
+        held
+    }
+
+    /// Notes where the node cut an entry's texts (only on a board that saves; replaces what an update of a field sent again).
+    fn note_cuts(&mut self, id: u64, f: impl FnOnce(&mut Cuts)) {
+        if self.save.is_some() {
+            let c = self.cuts.entry(id).or_default();
+            f(c);
+            if c.text.is_empty() && c.output.is_empty() && c.args.is_empty() {
+                self.cuts.remove(&id);
+            }
         }
     }
 
@@ -716,6 +807,7 @@ impl Transcript {
         }
         self.sent_ms.remove(&e.entry_id);
         self.dirty.remove(&e.entry_id);
+        self.cuts.remove(&e.entry_id);
     }
 
     fn send(&mut self, entry: &ChatEntry) {
@@ -770,6 +862,90 @@ impl Transcript {
         self.evict();
         true
     }
+}
+
+/// Review of #1103 (N1): how long the newest piece of an agent's streamed text is held back from the file at most.
+pub const HOLD_MS: u64 = 5_000;
+
+/// An entry of the agent's streamed words: its text or its thinking, which an agent sends in pieces.
+fn in_run(e: &ChatEntry) -> bool {
+    e.role == ChatRole::Agent as i32
+        && (e.kind == ChatKind::Text as i32 || e.kind == ChatKind::Thought as i32)
+}
+
+/// One entry of a batch's sequence, for [`runs_of`]: its text, whether it is of a run, and its line in the batch when it is written.
+struct RunItem<'a> {
+    text: &'a str,
+    run: bool,
+    line: Option<usize>,
+}
+
+impl<'a> RunItem<'a> {
+    const BREAK: RunItem<'static> = RunItem {
+        text: "",
+        run: false,
+        line: None,
+    };
+
+    fn of(e: &'a ChatEntry, line: Option<usize>) -> Self {
+        Self {
+            text: &e.text,
+            run: in_run(e),
+            line,
+        }
+    }
+}
+
+/// The runs of streamed words a batch writes a piece of, each joined with up to `span - 1` bytes of the pieces before and after it
+/// (written already, or held back), so the writer finds a value split between pieces whole (review of #1103, N1).
+fn runs_of(items: &[RunItem<'_>], span: usize) -> Vec<Run> {
+    let reach = span.saturating_sub(1);
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        if !items[i].run {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < items.len() && items[i].run {
+            i += 1;
+        }
+        let group = &items[start..i];
+        let Some(first) = group.iter().position(|x| x.line.is_some()) else {
+            continue;
+        };
+        let last = group
+            .iter()
+            .rposition(|x| x.line.is_some())
+            .unwrap_or(first);
+        let offsets: Vec<usize> = group
+            .iter()
+            .scan(0, |at, x| {
+                let here = *at;
+                *at += x.text.len();
+                Some(here)
+            })
+            .collect();
+        let from = offsets[first].saturating_sub(reach);
+        let to = offsets[last] + group[last].text.len() + reach;
+        let mut run = Run::default();
+        for (k, x) in group.iter().enumerate() {
+            let (a, b) = (offsets[k], offsets[k] + x.text.len());
+            if b <= from || a >= to {
+                continue;
+            }
+            let at = run.text.len();
+            run.text.push_str(x.text);
+            run.parts.push(crate::transcript::RunPart {
+                line: x.line,
+                start: at,
+                end: run.text.len(),
+            });
+        }
+        runs.push(run);
+    }
+    runs
 }
 
 /// The highest entry id seeding takes from a file (2^52): ids stay exact in the window (a JavaScript number) and can never reach the
@@ -915,13 +1091,15 @@ impl ChatBoard {
     /// (no file is touched under the supervisor's lock), and moved by the writer before it writes anything of the new session, so a
     /// batch never lands in the file being moved (review of #1103, N5 and N8). A resume that is refused calls nothing.
     pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
-        let Some(seed) = seed else {
-            return;
-        };
-        let high = seed.high;
         let mut g = self.lock();
         let t = slot(&mut g, agent, self.wake.as_ref());
-        t.seed(seed, now_ms);
+        let high = seed.as_ref().map_or(0, |s| s.high);
+        if let Some(seed) = seed {
+            t.seed(seed, now_ms);
+        }
+        // Marked whether or not a file exists yet: what the earlier session said and was not written yet goes to its own file
+        // (review of #1103, probe 5).
+        let high = high.max(t.next_id);
         if fresh {
             if let Some(s) = &mut t.save {
                 s.fresh = Some(high);
@@ -946,13 +1124,27 @@ impl ChatBoard {
         true
     }
 
-    /// ADR-0089 decision 1: what changed since the last batch, per agent: the entries as they are now (each once), the changed ones
-    /// that left the ring meanwhile, and the ids taken out. Only marks are kept on the chat path: the clones are made here.
+    /// ADR-0089 decision 1: everything that changed since the last batch, per agent: the entries as they are now (each once), the
+    /// changed ones that left the ring meanwhile, and the ids taken out. Nothing is held back: what a node stopping writes, and what
+    /// tests write. Only marks are kept on the chat path: the clones are made here.
     pub fn take_unsaved(&self) -> Vec<Batch> {
+        self.take(None)
+    }
+
+    /// [`Self::take_unsaved`] as the writer takes it at `now_ms`: the newest of the agent's streamed text and thoughts is held back
+    /// while a value of the node's secrets could still continue in what comes next (review of #1103, N1; see `Transcript::held`).
+    pub fn take_due(&self, now_ms: u64) -> Vec<Batch> {
+        self.take(Some(now_ms))
+    }
+
+    fn take(&self, now: Option<u64>) -> Vec<Batch> {
+        // The longest value looked for, read before the lock (the store caches it): 0 when the node holds none, and then nothing is
+        // held back and no context gathered.
+        let span = self.store.as_ref().map_or(0, |s| s.longest_secret());
         let mut g = self.lock();
         let mut out = Vec::new();
         for (agent, t) in g.iter_mut() {
-            let Some(s) = &mut t.save else {
+            let Some(s) = &t.save else {
                 continue;
             };
             if s.dirty.is_empty()
@@ -962,30 +1154,82 @@ impl ChatBoard {
             {
                 continue;
             }
+            let held = match now {
+                Some(now) if span > 0 => t.held(now, span),
+                _ => BTreeSet::new(),
+            };
+            let Some(s) = &mut t.save else {
+                continue;
+            };
             let fresh = s.fresh.take();
             let dirty = std::mem::take(&mut s.dirty);
             let evicted = std::mem::take(&mut s.evicted);
             let removed = std::mem::take(&mut s.removed);
             (s.bytes, s.evicted_bytes, s.woken) = (0, 0, false);
-            let mut lines: Vec<Line> = evicted
+            // An entry of the session before a fresh start is never held: it goes to that session's file now.
+            let (back, dirty): (BTreeSet<u64>, BTreeSet<u64>) = dirty
                 .into_iter()
-                .map(|(e, side)| Line::Entry(Box::new(e), side))
-                .collect();
-            for id in dirty {
-                if let Some(i) = t.index(id) {
-                    let e = &t.entries[i];
-                    lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
+                .partition(|id| held.contains(id) && fresh.is_none_or(|h| *id > h));
+            s.dirty.extend(back);
+            // A fresh start splits what is taken by id: up to the earlier session's highest id goes to its file before it is moved
+            // aside, the rest to the new one (review of #1103, probe 5).
+            // Each part: which ids it takes, and the fresh start's mark it carries.
+            let parts: Vec<(std::ops::RangeInclusive<u64>, Option<u64>, u64)> = match fresh {
+                None => vec![(0..=u64::MAX, None, t.next_id)],
+                Some(h) => vec![
+                    (0..=h, None, h.min(t.next_id)),
+                    (h.saturating_add(1)..=u64::MAX, Some(h), t.next_id),
+                ],
+            };
+            for (ids, mark, high) in parts {
+                let mine = |id: u64| ids.contains(&id);
+                let mut lines: Vec<Line> = Vec::new();
+                // The sequence the runs are found in: only when the node holds a value to look for.
+                let mut items: Vec<RunItem> = Vec::new();
+                for (e, side) in evicted.iter().filter(|(e, _)| mine(e.entry_id)) {
+                    if span > 0 {
+                        items.push(RunItem::of(e, Some(lines.len())));
+                    }
+                    lines.push(Line::Entry(Box::new(e.clone()), side.clone()));
                 }
+                // The evicted ones and the ring are not one sequence (written entries may lie between).
+                if span > 0 {
+                    items.push(RunItem::BREAK);
+                    for e in t.entries.iter().filter(|e| mine(e.entry_id)) {
+                        let line = dirty.contains(&e.entry_id).then(|| {
+                            lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
+                            lines.len() - 1
+                        });
+                        items.push(RunItem::of(e, line));
+                    }
+                } else {
+                    for id in dirty.iter().filter(|id| mine(**id)) {
+                        if let Some(i) = t.index(*id) {
+                            let e = &t.entries[i];
+                            lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
+                        }
+                    }
+                }
+                let gone: Vec<u64> = removed.iter().copied().filter(|id| mine(*id)).collect();
+                if !gone.is_empty() {
+                    lines.push(Line::Removed(gone));
+                }
+                if lines.is_empty() && mark.is_none() {
+                    continue;
+                }
+                let runs = if span > 0 {
+                    runs_of(&items, span)
+                } else {
+                    Vec::new()
+                };
+                out.push(Batch {
+                    agent: agent.clone(),
+                    high,
+                    lines,
+                    fresh: mark,
+                    runs,
+                });
             }
-            if !removed.is_empty() {
-                lines.push(Line::Removed(removed));
-            }
-            out.push(Batch {
-                agent: agent.clone(),
-                high: t.next_id,
-                lines,
-                fresh,
-            });
         }
         out
     }
@@ -1020,16 +1264,19 @@ impl ChatBoard {
         path: String,
         at_ms: u64,
     ) {
-        let mut e = entry(role, kind, cut(text), at_ms);
+        let (text, end) = cut_at(text);
+        let mut e = entry(role, kind, text, at_ms);
         e.path = path;
-        self.insert(agent, e);
+        self.insert_cut(agent, e, end.into_iter().collect());
     }
 
     /// The user's own prompt as an entry. Returns its id, which [`Self::retract`] names if the prompt did not go out.
     pub fn push_user(&self, agent: &AgentId, text: String, at_ms: u64) -> u64 {
-        self.insert(
+        let (text, end) = cut_at(text);
+        self.insert_cut(
             agent,
-            entry(ChatRole::User, ChatKind::Text, cut(text), at_ms),
+            entry(ChatRole::User, ChatKind::Text, text, at_ms),
+            end.into_iter().collect(),
         )
     }
 
@@ -1046,16 +1293,27 @@ impl ChatBoard {
     /// ADR-0090: a prompt of the user's that waits behind the agent's turn (`queued`). Returns the id of its entry, which
     /// [`Self::unqueue`] or [`Self::drop_queued`] names later.
     pub fn push_queued(&self, agent: &AgentId, text: String, at_ms: u64) -> u64 {
-        let mut e = entry(ChatRole::User, ChatKind::Text, cut(text), at_ms);
+        let (text, end) = cut_at(text);
+        let mut e = entry(ChatRole::User, ChatKind::Text, text, at_ms);
         e.queued = true;
-        self.insert(agent, e)
+        self.insert_cut(agent, e, end.into_iter().collect())
     }
 
     /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower. Returns its id.
     fn insert(&self, agent: &AgentId, e: ChatEntry) -> u64 {
+        self.insert_cut(agent, e, Vec::new())
+    }
+
+    /// [`Self::insert`], noting where its text was cut (`cuts`).
+    fn insert_cut(&self, agent: &AgentId, e: ChatEntry, cuts: Vec<usize>) -> u64 {
         let at = e.at_ms;
         let mut g = self.lock();
-        slot(&mut g, agent, self.wake.as_ref()).add(e, at)
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        let id = t.add(e, at);
+        if !cuts.is_empty() {
+            t.note_cuts(id, |c| c.text = cuts);
+        }
+        id
     }
 
     /// What an adapter said. A notice whose code has the wrong shape is dropped (ADR-0058).
@@ -1076,10 +1334,11 @@ impl ChatBoard {
             }
             ChatItem::Thought(text) => {
                 // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
-                let (text, _) = tidy(text, MAX_THOUGHT_BYTES, Style::Prose);
-                self.insert(
+                let (text, _, cuts) = tidy_cuts(text, MAX_THOUGHT_BYTES, Style::Prose);
+                self.insert_cut(
                     agent,
                     entry(ChatRole::Agent, ChatKind::Thought, text, at_ms),
+                    cuts,
                 );
             }
             ChatItem::Tool(tool) => self.upsert_tool(agent, tool, at_ms),
@@ -1105,10 +1364,13 @@ impl ChatBoard {
             .tool
             .as_ref()
             .map(|x| tidy(x, MAX_PATH_BYTES, Style::Label).0);
-        let args_in = item
-            .arguments_json
-            .as_ref()
-            .map(|x| tidy(x, MAX_ENTRY_BYTES, Style::Code).0);
+        let (args_in, args_cuts) = match item.arguments_json.as_ref() {
+            Some(x) => {
+                let (a, _, c) = tidy_cuts(x, MAX_ENTRY_BYTES, Style::Code);
+                (Some(a), Some(c))
+            }
+            None => (None, None),
+        };
         let kind = tool_kind(&item.kind);
         let status = tool_status(&item.status);
         let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
@@ -1124,10 +1386,13 @@ impl ChatBoard {
             p.iter()
                 .any(|p| agora_core::secrets::is_secret_path(&p.path))
         });
-        let output = item
-            .output
-            .as_ref()
-            .map(|o| tidy(o, MAX_OUTPUT_BYTES, Style::Prose));
+        let (output, output_cuts) = match item.output.as_ref() {
+            Some(o) => {
+                let (o, truncated, c) = tidy_cuts(o, MAX_OUTPUT_BYTES, Style::Prose);
+                (Some((o, truncated)), Some(c))
+            }
+            None => (None, None),
+        };
         // The text of the entry when this item is the whole story (a new call, or one that names both), and when it is only part.
         let text_new = tool_text(
             tool_in.as_deref().unwrap_or("tool"),
@@ -1198,6 +1463,14 @@ impl ChatBoard {
                         c.tool = tool;
                         c.args = args;
                     }
+                    t.note_cuts(id, |c| {
+                        if let Some(a) = args_cuts {
+                            c.args = a;
+                        }
+                        if let Some(o) = output_cuts {
+                            c.output = o;
+                        }
+                    });
                 }
             }
             None => {
@@ -1206,6 +1479,10 @@ impl ChatBoard {
                 e.started_ms = now_ms;
                 apply(&mut e, true, text_new);
                 let id = t.add(e, now_ms);
+                t.note_cuts(id, |c| {
+                    c.args = args_cuts.unwrap_or_default();
+                    c.output = output_cuts.unwrap_or_default();
+                });
                 t.calls.insert(
                     call_id,
                     Call {
@@ -2800,6 +3077,7 @@ mod tests {
                     Side {
                         tool: Some(("t".into(), "a".into())),
                         plan: true,
+                        ..Side::default()
                     },
                 ),
             ],
@@ -2937,5 +3215,310 @@ mod tests {
         b.wake().unwrap().notify();
         writer.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Review of #1103, round 2: the reviewer's probes (secrets reaching the transcript file), as regression tests.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review2 {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store, REDACTED};
+
+    const SECRET: &str = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+
+    fn board(tag: &str, secret: &str) -> (std::path::PathBuf, Arc<Store>, ChatBoard) {
+        let dir = std::env::temp_dir().join(format!("agora-review2-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        SecretStore::in_data(&dir)
+            .set("TOKEN", &Secret::new(secret).unwrap())
+            .unwrap();
+        let s = Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        ));
+        (dir, Arc::clone(&s), ChatBoard::saving(s))
+    }
+
+    fn save(b: &ChatBoard) {
+        let store = b.store().unwrap();
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+    }
+
+    fn save_due(b: &ChatBoard, now: u64) {
+        let store = b.store().unwrap();
+        for batch in b.take_due(now) {
+            store.write(&batch).unwrap();
+        }
+    }
+
+    fn body(s: &Store, a: &str) -> String {
+        std::fs::read_to_string(s.path(a).unwrap()).unwrap_or_default()
+    }
+
+    fn text(t: &str) -> ChatItem {
+        ChatItem::Text(t.into())
+    }
+
+    /// Probe 1: a value streamed in three pieces; the middle one is neither the value's start nor its end.
+    #[test]
+    fn a_value_split_in_three_pieces_never_reaches_the_file() {
+        let (_d, s, b) = board("p1", SECRET);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text("my key is sk-ant-api03-AbCd"), 1);
+        b.push_item(&a, &text("EfGhIjKlMnOpQrSt"), 2);
+        b.push_item(&a, &text("UvWxYz0123456789 ok"), 3);
+        save(&b);
+        let f = body(&s, "a");
+        for piece in ["sk-ant-api03-AbCd", "EfGhIjKlMnOpQrSt", "UvWxYz0123456789"] {
+            assert!(!f.contains(piece), "{piece} on disk: {f}");
+        }
+        let texts: Vec<String> = s
+            .read("a")
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                format!("my key is {REDACTED}"),
+                REDACTED.to_string(),
+                format!("{REDACTED} ok")
+            ]
+        );
+    }
+
+    /// Probe 1b: edge pieces shorter than 4 bytes: every byte of the value is still kept off the disk.
+    #[test]
+    fn a_value_split_with_tiny_edge_pieces_never_reaches_the_file() {
+        let (_d, s, b) = board("p1b", SECRET);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text("my key is sk-"), 1);
+        b.push_item(&a, &text(&SECRET[3..SECRET.len() - 1]), 2);
+        b.push_item(&a, &text(&format!("{} ok", &SECRET[SECRET.len() - 1..])), 3);
+        save(&b);
+        let texts: Vec<String> = s
+            .read("a")
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                format!("my key is {REDACTED}"),
+                REDACTED.to_string(),
+                format!("{REDACTED} ok")
+            ]
+        );
+    }
+
+    /// The writer drains while the pieces still come (a slow model): the newest pieces are held back until the value is whole, so no
+    /// piece of it is written early; once the stream is quiet for `HOLD_MS` the last one goes too.
+    #[test]
+    fn pieces_written_while_a_value_still_streams_are_held_until_it_is_whole() {
+        let (_d, s, b) = board("hold", SECRET);
+        let a = AgentId::new("a");
+        let (p1, p2, p3) = (&SECRET[..20], &SECRET[20..40], &SECRET[40..]);
+        b.push_item(&a, &text(&format!("key: {p1}")), 1_000);
+        save_due(&b, 1_100);
+        b.push_item(&a, &text(p2), 1_200);
+        save_due(&b, 1_300);
+        assert!(
+            !body(&s, "a").contains(p1),
+            "the first piece was written before the value was whole"
+        );
+        b.push_item(&a, &text(&format!("{p3} and more words after it")), 1_400);
+        save_due(&b, 1_500);
+        // Not quiet yet: the pieces within a value's length of the stream's end wait (the last two); the first went, redacted.
+        let f = body(&s, "a");
+        assert!(!f.contains(p1) && !f.contains(p2), "{f}");
+        assert_eq!(s.read("a").entries.len(), 1);
+        save_due(&b, 1_400 + HOLD_MS);
+        let f = body(&s, "a");
+        assert!(!f.contains(p3) && !f.contains(p2) && !f.contains(p1), "{f}");
+        assert_eq!(s.read("a").entries.len(), 3);
+        // A board whose node holds no value holds nothing back.
+        let dir = std::env::temp_dir().join(format!("agora-review2-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let none = ChatBoard::saving(Arc::new(Store::new(&dir, Limits::default(), None)));
+        none.push_item(&a, &text("anything"), 1_000);
+        assert_eq!(none.take_due(1_001).len(), 1);
+    }
+
+    /// Probe 2 (and 2c, a value the bridge's own shape checks miss): an escape-heavy tool output the bridge cut. The bridge now
+    /// removes the escapes before its cut, so the node never keeps the place it joined.
+    #[test]
+    fn a_value_on_the_bridges_cut_never_reaches_the_file() {
+        for (tag, value) in [("p2", SECRET), ("p2c", "Tr0ub4dor&3-horse!battery#staple")] {
+            let (_d, s, b) = board(tag, value);
+            let a = AgentId::new("a");
+            let esc = "\u{1b}[0m";
+            // Raw output 6 bytes over the bridge's 64 KiB: a cut of the raw text keeps its first and last 32 KiB and drops 6 bytes
+            // from inside the value, so the head ends with the value's first 12 bytes and the tail starts with its rest.
+            let (n, d) = (12, 6);
+            let half = 32 * 1024;
+            // Spaces, not letters: the bridge replaces long runs of token characters by itself.
+            let head = format!(
+                "{}{}{}",
+                esc.repeat(8000),
+                " ".repeat(half - 32_000 - n),
+                &value[..n]
+            );
+            let rest = format!("{} ZZZZ", &value[n + d..]);
+            let tail = format!(
+                "{rest}{}{}",
+                " ".repeat(half - rest.len() - 32_000),
+                esc.repeat(8000)
+            );
+            let raw = format!("{head}{}{tail}", &value[n..n + d]);
+            assert_eq!((head.len(), tail.len()), (half, half));
+            let mut t = ToolItem {
+                call_id: "c1".into(),
+                ..ToolItem::default()
+            };
+            t.tool = Some("sh".into());
+            t.status = "completed".into();
+            t.output = Some(agora_adapters::acp::bounded_output(&raw));
+            b.push_item(&a, &ChatItem::Tool(t), 1);
+            save(&b);
+            let f = body(&s, "a");
+            assert!(
+                !f.contains(&value[..n]) && !f.contains(&value[n + d..]),
+                "{tag}: a piece of the value on disk"
+            );
+        }
+    }
+
+    /// Probe 2b: an output over 64 KiB reaching the node (an adapter that does not cut it), its escapes taken out after the node's
+    /// first cut: the place that cut joined is found.
+    #[test]
+    fn a_value_on_the_nodes_first_cut_never_reaches_the_file() {
+        let (_d, s, b) = board("p2b", SECRET);
+        let a = AgentId::new("a");
+        let esc = "\u{1b}[0m";
+        let head = format!("{}xx{}", esc.repeat(8184), &SECRET[..30]);
+        let tail = format!("ZZZZ{}", esc.repeat(8191));
+        let mut t = ToolItem {
+            call_id: "c1".into(),
+            ..ToolItem::default()
+        };
+        t.tool = Some("sh".into());
+        t.output = Some(format!("{head}{}{tail}", "M".repeat(1000)));
+        b.push_item(&a, &ChatItem::Tool(t), 1);
+        save(&b);
+        assert!(!body(&s, "a").contains(&SECRET[..30]));
+    }
+
+    /// Probe 3: arguments over 16 KiB are cut in their middle, and the call's text holds them too.
+    #[test]
+    fn a_value_on_the_cut_of_a_calls_arguments_is_out_of_its_text_too() {
+        let (_d, s, b) = board("p3", SECRET);
+        let a = AgentId::new("a");
+        let half = MAX_ENTRY_BYTES / 2;
+        let args = format!(
+            "{{\"content\":\"{}{}{}{}\"}}",
+            "a".repeat(half - 12 - 30),
+            &SECRET[..30],
+            "m".repeat(5000),
+            "b".repeat(half)
+        );
+        let mut t = ToolItem {
+            call_id: "c1".into(),
+            ..ToolItem::default()
+        };
+        t.tool = Some("write".into());
+        t.arguments_json = Some(args);
+        b.push_item(&a, &ChatItem::Tool(t), 1);
+        assert!(b.snapshot(&a)[0].text.contains(&SECRET[..30]));
+        save(&b);
+        assert_eq!(body(&s, "a").matches(&SECRET[..30]).count(), 0);
+    }
+
+    /// Probe 4: a word that only begins like a value is left (a value counts only whole, or as a piece at a place the node cut).
+    #[test]
+    fn a_word_that_begins_like_a_value_is_left() {
+        let (_d, s, b) = board("p4", "postgres");
+        let a = AgentId::new("a");
+        b.push_item(&a, &text("I will write the blog post"), 1);
+        b.push_item(&a, &text("ress the button"), 2);
+        save(&b);
+        let texts: Vec<String> = s
+            .read("a")
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.text)
+            .collect();
+        assert_eq!(texts, ["I will write the blog post", "ress the button"]);
+    }
+
+    /// Probe 5: Start again while the earlier session's last words are not written yet: they go to that session's file; and a Start
+    /// again before any file exists still begins a new one.
+    #[test]
+    fn a_fresh_start_writes_the_earlier_sessions_last_words_to_its_own_file() {
+        let (_d, s, b) = board("p5", "unused-secret-value");
+        let a = AgentId::new("a");
+        b.push_item(&a, &text("old one"), 1);
+        save(&b);
+        b.push_item(&a, &text("old two, not yet written"), 2);
+        let seed = b.read_seed(&a, true);
+        b.resumed(&a, seed, true, 3);
+        b.push_item(&a, &text("new one"), 4);
+        save(&b);
+        let new: Vec<String> = s
+            .read("a")
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.text)
+            .collect();
+        assert_eq!(new, ["new one"]);
+        let earlier = std::fs::read_to_string(s.dir().join("a.earlier.jsonl")).unwrap();
+        assert!(earlier.contains("old one") && earlier.contains("old two, not yet written"));
+        // No file yet: the earlier session's words still go to their own file.
+        let c = AgentId::new("c");
+        b.push_item(&c, &text("first session"), 1);
+        assert!(b.read_seed(&c, true).is_none());
+        b.resumed(&c, None, true, 2);
+        b.push_item(&c, &text("second session"), 3);
+        save(&b);
+        let new: Vec<String> = s
+            .read("c")
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.text)
+            .collect();
+        assert_eq!(new, ["second session"]);
+        assert!(std::fs::read_to_string(s.dir().join("c.earlier.jsonl"))
+            .unwrap()
+            .contains("first session"));
+    }
+
+    /// Probe 6: a value split between text and thinking, and a multibyte value split on a character boundary.
+    #[test]
+    fn a_value_split_between_text_and_thinking_or_in_multibyte_text_never_reaches_the_file() {
+        let (_d, s, b) = board("p6", SECRET);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("key {}", &SECRET[..20])), 1);
+        b.push_item(&a, &ChatItem::Thought(format!("{} hmm", &SECRET[20..])), 2);
+        save(&b);
+        let f = body(&s, "a");
+        assert!(
+            !f.contains(&SECRET[..20]) && !f.contains(&SECRET[20..]),
+            "{f}"
+        );
+        let mb = "çok-gizli-anahtar-ğüşİö";
+        let (_d2, s2, b2) = board("p6b", mb);
+        let cut = mb.char_indices().nth(10).unwrap().0;
+        b2.push_item(&a, &text(&format!("x {}", &mb[..cut])), 1);
+        b2.push_item(&a, &text(&format!("{} y", &mb[cut..])), 2);
+        save(&b2);
+        let f2 = body(&s2, "a");
+        assert!(!f2.contains(&mb[..cut]) && !f2.contains(&mb[cut..]), "{f2}");
     }
 }

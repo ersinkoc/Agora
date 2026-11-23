@@ -158,7 +158,8 @@ impl<'a> Users<'a> {
         Ok(out)
     }
 
-    /// Changes a role. Ends the user's sessions only when the role drops, so a demotion cannot wait for a session to expire.
+    /// Changes a role. Sessions are kept: the hub asks for the role on every command, and ends an open connection whose role or
+    /// grants changed when it next checks (once a second, `server::serve_client_as`), so a demotion cannot wait for a session to expire.
     pub fn set_role(&self, id: &str, role: Role) -> Result<bool, StoreError> {
         let conn = self.store.lock()?;
         let n = conn
