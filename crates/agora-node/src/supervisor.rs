@@ -6106,49 +6106,7 @@ mod adapter_option_tests {
     #[test]
     fn a_refused_switch_names_the_mode_id_or_the_config_id_when_asked_and_when_applied() {
         use crate::launch_options::SkipPermissions as S;
-        let mut sup = Supervisor::new(SupervisorConfig {
-            node: NodeId::new("n"),
-            restart: RestartPolicy::default(),
-            terminal: TerminalOptions::default(),
-            limits: NodeLimits::default(),
-        });
-        sup.register(
-            Manifest::parse(
-                "kind = \"acp\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"opencode\", \"acp\"] }\n",
-            )
-            .unwrap(),
-        );
-        let id = AgentId::new("agent-1");
-        sup.restore(Restore {
-            id: id.clone(),
-            kind: "acp".into(),
-            project: agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
-            folder: std::env::temp_dir(),
-            directory: true,
-            branch: String::new(),
-            session: None,
-            carry_on: false,
-            private_config: None,
-        })
-        .unwrap();
-        let opt = |id: &str, skips: bool| SessionOption {
-            id: id.into(),
-            name: id.into(),
-            skips_permissions: skips,
-            ..SessionOption::default()
-        };
-        let e = sup.adapters.get_mut(&id).unwrap();
-        e.running = true;
-        e.capabilities = vec![OptionKind::Mode.capability().into(), "config".into()];
-        e.options = SessionOptions {
-            modes: vec![opt("default", false), opt("bypass", true)],
-            current_mode: "default".into(),
-            ..SessionOptions::default()
-        };
-        e.rich.config = vec![ConfigOption {
-            choices: vec![opt("default", false), opt("turbo", true)],
-            ..config("approvals", "_custom", "default", &[])
-        }];
+        let (mut sup, id) = switch_rig();
         let option = |r: Result<Prepared, SupervisorError>| match r {
             Err(err) => {
                 let err = err.to_protocol();
