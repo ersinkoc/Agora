@@ -973,7 +973,7 @@ impl LocalStream {
 
     /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
     /// writability (an error or hang-up counts as ready, so the send itself reports it). Windows: pipe writes are not polled, so
-    /// this returns `Ok(true)` at once and the caller keeps its own bound on the send.
+    /// this returns `Ok(true)` at once and the send is bounded by its write timeout ([`Self::set_write_timeout`]).
     pub fn wait_writable(&self, timeout: std::time::Duration) -> io::Result<bool> {
         #[cfg(unix)]
         {
@@ -988,7 +988,9 @@ impl LocalStream {
     }
 
     /// How long a send may wait for the peer to take what it sent (`None`: for ever). Past it the send fails with `WouldBlock` or
-    /// `TimedOut`. Windows pipes have no such limit yet: the call does nothing there.
+    /// `TimedOut`, having sent nothing, so it can be tried again. A zero timeout is refused (`InvalidInput`). Windows: the pending
+    /// pipe write is cancelled at the timeout, and while a timeout is set one send writes at most 16 KiB, because only a write no
+    /// larger than the pipe's buffer is sure to have sent nothing when it is cancelled (measured, #1089).
     pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         #[cfg(unix)]
         {
@@ -996,8 +998,7 @@ impl LocalStream {
         }
         #[cfg(windows)]
         {
-            let _ = timeout;
-            Ok(())
+            self.inner.set_write_timeout(timeout)
         }
     }
 
