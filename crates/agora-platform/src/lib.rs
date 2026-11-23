@@ -1240,6 +1240,114 @@ pub fn read_confirmation(min_wait: std::time::Duration) -> io::Result<Option<Str
     line
 }
 
+/// What [`read_confirmation_until`] got.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Confirmation {
+    /// A line, ended with Enter.
+    Line(String),
+    /// The first key came sooner than the minimum wait: a held or scripted key, not an answer. Nothing more was read.
+    TooSoon,
+    /// The caller's check said the question is over (it was answered somewhere else) before a line was ended. Nothing typed counts.
+    Stopped,
+}
+
+/// How long [`read_confirmation_until`] waits for a key before it asks its caller again whether to go on.
+const KEY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// [`read_confirmation`] that can be ended from outside (#942): `stop` is called before each wait for a key, at least every
+/// [`KEY_WAIT`], and when it returns true the read ends with [`Confirmation::Stopped`], whatever was typed so far. The question
+/// itself is unchanged: the terminal only (a pipe or a file is `Unsupported`), what was typed before the call is discarded, a first
+/// key sooner than `min_wait` is [`Confirmation::TooSoon`], the line is at most 256 bytes, nothing is echoed and the terminal's
+/// settings are restored on every path. The keys are read from the terminal directly (not through the buffer of `std::io::stdin`),
+/// so nothing read here is left behind for a later read, and a key that arrives is never hidden from the wait.
+pub fn read_confirmation_until(
+    min_wait: std::time::Duration,
+    stop: &mut dyn FnMut() -> bool,
+) -> io::Result<Confirmation> {
+    #[cfg(unix)]
+    let mode = unix::secret_mode(true)?;
+    #[cfg(windows)]
+    let mode = {
+        let m = windows::secret_mode()?;
+        windows::flush_input();
+        m
+    };
+    #[cfg(not(any(unix, windows)))]
+    let mode: () = return Err(unsupported_io("reading an answer"));
+    let start = std::time::Instant::now();
+    #[cfg(unix)]
+    let mut key = unix::terminal_key;
+    #[cfg(windows)]
+    let mut key = windows::terminal_key;
+    let got = confirmation_from(&mut key, start, min_wait, stop);
+    drop(mode);
+    got
+}
+
+/// The keys of a terminal as a reader: waits for the next key in steps of [`KEY_WAIT`], asking `stop` before each step.
+struct Keys<'a> {
+    /// The bytes of the keys that came within the wait (`None` when none came; empty at the end of input).
+    key: &'a mut dyn FnMut(std::time::Duration) -> io::Result<Option<Vec<u8>>>,
+    stop: &'a mut dyn FnMut() -> bool,
+    stopped: bool,
+    held: std::collections::VecDeque<u8>,
+}
+
+impl io::Read for Keys<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(out) = buf.first_mut() else {
+            return Ok(0);
+        };
+        loop {
+            if let Some(b) = self.held.pop_front() {
+                *out = b;
+                return Ok(1);
+            }
+            if (self.stop)() {
+                self.stopped = true;
+                return Err(io::Error::other("the question was answered elsewhere"));
+            }
+            match (self.key)(KEY_WAIT)? {
+                None => {}
+                Some(k) if k.is_empty() => return Ok(0),
+                Some(k) => self.held.extend(k),
+            }
+        }
+    }
+}
+
+/// The rules of [`read_confirmation_until`] over any source of keys, so they are tested without a terminal. `start` is when the
+/// question was shown (after the typed-ahead input was discarded).
+fn confirmation_from(
+    key: &mut dyn FnMut(std::time::Duration) -> io::Result<Option<Vec<u8>>>,
+    start: std::time::Instant,
+    min_wait: std::time::Duration,
+    stop: &mut dyn FnMut() -> bool,
+) -> io::Result<Confirmation> {
+    use std::io::Read;
+    let mut keys = Keys {
+        key,
+        stop,
+        stopped: false,
+        held: Default::default(),
+    };
+    let got = (|| {
+        let mut first = [0u8; 1];
+        if keys.read(&mut first)? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        if start.elapsed() < min_wait {
+            return Ok(Confirmation::TooSoon);
+        }
+        let mut rest = io::Cursor::new(first).chain((&mut keys).take(255));
+        secret_from(&mut rest).map(Confirmation::Line)
+    })();
+    match got {
+        Err(_) if keys.stopped => Ok(Confirmation::Stopped),
+        other => other,
+    }
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]
@@ -3263,6 +3371,60 @@ mod secret_tests {
         assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    use super::{confirmation_from, Confirmation};
+    use std::time::{Duration, Instant};
+
+    /// A terminal that gives `keys` one wait after another (`None` is a wait in which no key came), then no more keys.
+    fn answer(
+        keys: Vec<Option<&'static [u8]>>,
+        min_wait: Duration,
+        stop_after: Option<usize>,
+    ) -> (std::io::Result<Confirmation>, usize) {
+        let mut keys = keys.into_iter();
+        let mut key = move |_: Duration| -> std::io::Result<Option<Vec<u8>>> {
+            Ok(keys.next().flatten().map(<[u8]>::to_vec))
+        };
+        let mut asked = 0;
+        let mut stop = || {
+            asked += 1;
+            stop_after.is_some_and(|n| asked > n)
+        };
+        let got = confirmation_from(&mut key, Instant::now(), min_wait, &mut stop);
+        (got, asked)
+    }
+
+    /// #942: the owner's question at `agora pair open` ends when it was answered in a window, before or while a line is typed; what
+    /// was typed then counts for nothing. Otherwise the rules of `read_confirmation` hold.
+    #[test]
+    fn a_confirmation_ends_when_the_caller_says_it_was_answered_elsewhere() {
+        let z = Duration::ZERO;
+        // A line, with waits in which nothing came; the caller is asked before every wait.
+        let (got, asked) = answer(vec![None, Some(b"y"), None, Some(b"\r")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("y".into()));
+        assert_eq!(asked, 4);
+        // Several keys in one read.
+        let (got, _) = answer(vec![Some(b"yes\rmore")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("yes".into()));
+        // Answered elsewhere before any key, and in the middle of a line.
+        let (got, asked) = answer(vec![None, None, Some(b"y\r")], z, Some(2));
+        assert_eq!(got.unwrap(), Confirmation::Stopped);
+        assert_eq!(asked, 3);
+        let (got, _) = answer(vec![Some(b"y"), None, Some(b"\r")], z, Some(2));
+        assert_eq!(got.unwrap(), Confirmation::Stopped);
+        // A first key before the minimum wait is not an answer, and nothing more is read.
+        let (got, asked) = answer(vec![Some(b"y\r")], Duration::from_secs(3600), None);
+        assert_eq!(got.unwrap(), Confirmation::TooSoon);
+        assert_eq!(asked, 1);
+        // The end of input and Ctrl-C are not answers, and a line stops at 256 bytes.
+        let (got, _) = answer(vec![Some(b"")], z, None);
+        assert_eq!(got.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        let (got, _) = answer(vec![Some(b"y\x03\r")], z, None);
+        assert_eq!(got.unwrap_err().kind(), ErrorKind::Interrupted);
+        let long: &'static [u8] = Box::leak(vec![b'y'; 300].into_boxed_slice());
+        let (got, _) = answer(vec![Some(long), Some(b"\r")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("y".repeat(256)));
     }
 }
 

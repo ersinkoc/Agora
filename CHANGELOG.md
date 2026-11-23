@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
 - A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
 - A machine that disconnects while the hub cannot write to its database and then reconnects is now asked to put its unfinished local tasks and file claims for a shared project on the project's board, as after any other reconnect, instead of keeping them to itself (#1036).
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
