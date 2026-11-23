@@ -25,6 +25,8 @@ const button = (text: string): HTMLButtonElement => {
   if (!b) throw new Error(`no button ${text}: ${host.textContent}`);
   return b as HTMLButtonElement;
 };
+// The first press ("Numbers match…"): it only asks the question; the yes is the second press.
+const APPROVE = 'Numbers match…';
 const click = (b: HTMLElement) => act(() => { b.click(); });
 const wait = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 const show = (over: { offline?: boolean; nameTaken?: boolean; onAnswer?: (a: boolean, r: boolean) => Promise<PairAnswer> } = {}) => {
@@ -37,7 +39,7 @@ const show = (over: { offline?: boolean; nameTaken?: boolean; onAnswer?: (a: boo
 describe('the two presses of Approve', () => {
   it('one press of Approve sends nothing: it asks "do the numbers match?"', async () => {
     const { answers } = show();
-    click(button('Approve'));
+    click(button(APPROVE));
     await wait(0);
     expect(answers).toEqual([]);
     expect(host.textContent).toContain('Do the two numbers match exactly?');
@@ -45,7 +47,7 @@ describe('the two presses of Approve', () => {
 
   it('the yes does nothing before the question has been up for half a second, and sends exactly one approval after', async () => {
     const { answers } = show();
-    click(button('Approve'));
+    click(button(APPROVE));
     // A click right away (a double-click on Approve) hits a disabled button and is ignored.
     expect(button('Yes, the numbers match').disabled).toBe(true);
     click(button('Yes, the numbers match'));
@@ -63,9 +65,9 @@ describe('the two presses of Approve', () => {
 
   it('Go back returns to the card and nothing was sent; Deny is one press', async () => {
     const { answers } = show();
-    click(button('Approve'));
+    click(button(APPROVE));
     click(button('Go back'));
-    expect(button('Approve')).toBeTruthy();
+    expect(button(APPROVE)).toBeTruthy();
     expect(answers).toEqual([]);
     click(button('Deny'));
     await wait(0);
@@ -74,7 +76,7 @@ describe('the two presses of Approve', () => {
 
   it('the yes does not work while the link is down', async () => {
     const { answers } = show();
-    click(button('Approve'));
+    click(button(APPROVE));
     await wait(MIN_THINK_MS + 10);
     // The link goes down while the question is up.
     show({ offline: true });
@@ -90,28 +92,28 @@ describe('the two presses of Approve', () => {
     // Not taken: there is no checkbox, and replace is false.
     let r = show();
     expect(host.querySelector('input[type=checkbox]')).toBeNull();
-    click(button('Approve')); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
+    click(button(APPROVE)); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
     expect(r.answers).toEqual([[true, false]]);
     // Taken, not ticked: false. Taken and ticked: true.
     act(() => root.unmount()); root = createRoot(host);
     r = show({ nameTaken: true });
     const box = host.querySelector('input[type=checkbox]') as HTMLInputElement;
     expect(box.checked).toBe(false);
-    click(button('Approve')); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
+    click(button(APPROVE)); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
     expect(r.answers).toEqual([[true, false]]);
     act(() => root.unmount()); root = createRoot(host);
     r = show({ nameTaken: true });
     click(host.querySelector('input[type=checkbox]') as HTMLElement);
-    click(button('Approve')); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
+    click(button(APPROVE)); await wait(MIN_THINK_MS + 10); click(button('Yes, the numbers match')); await wait(0);
     expect(r.answers).toEqual([[true, true]]);
   });
 
   it('ticking Replace starts the two presses over', async () => {
     show({ nameTaken: true });
-    click(button('Approve'));
+    click(button(APPROVE));
     click(host.querySelector('input[type=checkbox]') as HTMLElement);
     expect(host.textContent).not.toContain('Do the two numbers match exactly?');
-    expect(button('Approve')).toBeTruthy();
+    expect(button(APPROVE)).toBeTruthy();
   });
 });
 
@@ -172,5 +174,18 @@ describe('usePairing sends what the card says', () => {
     act(() => dispatch({ type: 'requested', card: card() }));
     await wait(0);
     expect(ui).toBeUndefined();
+  });
+
+  it('says a session is not the owner\'s once, and stops asking (each refusal is a row in the owner\'s Activity, #904)', async () => {
+    let asked = 0;
+    const api = { command: async () => { asked += 1; throw Object.assign(new Error('x'), { code: 'auth.forbidden', params: {} }); } } as unknown as Live;
+    let owner: string | undefined;
+    const Probe = () => { owner = usePairing(api, 'live').owner; return null; };
+    act(() => root.render(<Probe />));
+    expect(owner).toBe('unknown');
+    await wait(0);
+    expect(owner).toBe('no');
+    await wait(5 * 60_000);
+    expect(asked).toBe(1);
   });
 });

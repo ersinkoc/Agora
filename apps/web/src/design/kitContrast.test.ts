@@ -1,9 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { AGENT_COLOUR_NAMES, BUILT_IN, TOKEN_NAMES, agentColours, contrast, parseTheme, type Scheme, type Theme, type Tokens } from '../themes/tokens';
+import {
+  AVATAR_STRENGTH, CHIP_STRENGTH, DANGER, INDICATORS as EDITOR_INDICATORS, ON_DANGER as EDITOR_ON_DANGER, RAISED_STRENGTH, ROLE_KIT_COLOUR, TINT_ROLES, TINT_STRENGTH,
+  type KitColour, kitPalette, mix, roleColours, roleMix,
+} from '../themes/tints';
+import {
+  AGENT_COLOUR_NAMES, BUILT_IN, TOKEN_NAMES, agentColours, contrast, parseTheme, requiredContrast, themeWarnings, tintIssues, type Scheme, type Theme, type Tokens,
+} from '../themes/tokens';
 
-// The widget kit's derived colours (app.css, ADR-0102) computed the way the browser mixes them (`color-mix(in oklab, …)`), from the real
-// token values: the built-in themes (themes/tokens.ts), the fixed red (tokens.css) and the mix strengths in app.css. Text needs 4.5:1;
+// The widget kit's derived colours (app.css, ADR-0102) computed the way the browser mixes them (`color-mix(in oklab, …)`, themes/tints.ts,
+// the same math the theme editor's readability check uses), from the real token values: the built-in themes (themes/tokens.ts), the
+// fixed red (tokens.css) and the mix strengths in app.css. Text needs 4.5:1;
 // control indicators (a switch's track and thumb, a selected ring, the focus ring, a filled button) 3:1. The `--line-*` hairlines are
 // decoration around a tinted surface whose words carry the meaning: they only have to stay visible (a floor, not 3:1).
 const read = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
@@ -23,29 +30,12 @@ const RAISED = pct(/--surface-raised: color-mix\(in oklab, var\(--text\) (\d+%),
 const STRONG = pct(/--border-strong: color-mix\(in oklab, var\(--text\) (\d+%), var\(--border\)\)/.exec(appCss)?.[1] ?? '');
 const CHIP = pct(/\.kit-chip \{[^}]*--kit-fg\) (\d+%)/.exec(appCss)?.[1] ?? '');
 
-// sRGB hex ⇄ OKLab (Björn Ottosson's matrices, as CSS Color 4), mixed per channel like color-mix().
-const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-const delin = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
-function toLab(hex: string): number[] {
-  const [r, g, b] = [1, 3, 5].map((i) => lin(Number.parseInt(hex.slice(i, i + 2), 16) / 255)) as [number, number, number];
-  const [l, m, s] = [0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b, 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b, 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b].map(Math.cbrt) as [number, number, number];
-  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
-}
-function fromLab([L, a, b]: number[]): string {
-  const [l, m, s] = [L! + 0.3963377774 * a! + 0.2158037573 * b!, L! - 0.1055613458 * a! - 0.0638541728 * b!, L! - 0.0894841775 * a! - 1.291485548 * b!].map((x) => x ** 3) as [number, number, number];
-  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s];
-  return `#${rgb.map((c) => Math.round(Math.min(1, Math.max(0, delin(c))) * 255).toString(16).padStart(2, '0')).join('')}`;
-}
-const mix = (a: string, p: number, b: string) => { const A = toLab(a); const B = toLab(b); return fromLab(A.map((x, i) => x * p + (B[i] as number) * (1 - p))); };
-
-type Role = 'accent' | 'working' | 'needs' | 'finished' | 'danger' | 'idle';
-const ROLES: Role[] = ['accent', 'working', 'needs', 'finished', 'danger', 'idle'];
+const ROLES = TINT_ROLES;
 const SURFACES = ['surface-0', 'surface-1', 'surface-2'] as const;
+// The mix strengths and the red come from app.css and tokens.css themselves; the shared module is held equal to them below.
 function derived(tokens: Tokens, scheme: Scheme) {
-  const fg: Record<Role, string> = { accent: tokens.accent, working: tokens['state-working'], needs: tokens['state-needs-you'], finished: tokens['state-finished'], danger: RED[scheme], idle: tokens['state-idle'] };
-  const s1 = tokens['surface-1'];
-  const of = (p: number) => Object.fromEntries(ROLES.map((r) => [r, mix(fg[r], p, s1)])) as Record<Role, string>;
-  return { fg, tint: of(TINT[scheme]), line: of(LINE), chip: of(CHIP), danger: RED[scheme], onDanger: ON_DANGER[scheme] };
+  const of = (p: number) => roleMix(tokens, scheme, p);
+  return { fg: roleColours(tokens, scheme), tint: of(TINT[scheme]), line: of(LINE), chip: of(CHIP), danger: RED[scheme], onDanger: ON_DANGER[scheme] };
 }
 
 // Every colour a kit rule can name, resolved for one theme: its tokens, the fixed red and its label, and the derived roles.
@@ -88,12 +78,18 @@ describe('widget kit colours (ADR-0102)', () => {
 
   it('reads its strengths from app.css; Light keeps its tint at 10 % or less so amber text stays readable', () => {
     expect(RED).toEqual({ dark: '#f87171', light: '#a82117' });
+    // The theme editor's readability check (themes/tints.ts) mixes with the same strengths and the same red.
+    expect(TINT).toEqual(TINT_STRENGTH);
+    expect(RED).toEqual(DANGER);
     expect(TINT.light).toBeLessThanOrEqual(0.1);
     expect(TINT.dark).toBeLessThanOrEqual(0.16);
     // The system-light block says the same as the explicit Light one.
     expect(value(block(appCss, ':root:not([data-theme]) { --tint'), 'tint')).toBe(value(block(appCss, "[data-theme='light'] { --tint"), 'tint'));
     expect([LINE, AVATAR, CHIP, RAISED, STRONG]).toEqual([0.4, 0.22, 0.22, 0.04, 0.18]);
     expect(ON_DANGER).toEqual({ dark: '#0b0b14', light: '#ffffff' });
+    // The theme editor's check (themes/tints.ts) draws the badges, chips, chosen option and the label on the red the same way.
+    expect([AVATAR_STRENGTH, CHIP_STRENGTH, RAISED_STRENGTH]).toEqual([AVATAR, CHIP, RAISED]);
+    expect(EDITOR_ON_DANGER).toEqual(ON_DANGER);
     expect(value(block(tokensCss, ':root:not([data-theme])'), 'on-danger')).toBe(ON_DANGER.light);
   });
 
@@ -108,12 +104,42 @@ describe('widget kit colours (ADR-0102)', () => {
     expect(contrast(ON_DANGER.dark, RED.dark)).toBeGreaterThanOrEqual(4.5);
   });
 
+  it('the theme editor checks the indicators these rules draw, the same colours against the same backgrounds (#1054)', () => {
+    // The kit's rows above, read from app.css, are the editor's first rows; then the focus ring on every tint and each role's icon on its chip.
+    const name = (x: string | [string, string]) => (typeof x === 'string' ? x : uses(x[0], x[1]));
+    expect(EDITOR_INDICATORS.slice(0, INDICATORS.length).map((r) => [r.fg, [...r.bg]])).toEqual(INDICATORS.map(([, ind, against]) => [name(ind), against.map(name)]));
+    expect(EDITOR_INDICATORS.slice(INDICATORS.length)).toEqual([
+      { control: 'focus-ring', fg: 'accent', bg: ROLES.map((r) => `tint-${r}`) },
+      ...ROLES.map((r) => ({ control: 'icon', fg: ROLE_KIT_COLOUR[r], bg: [`chip-${r}`] })),
+    ]);
+    expect(rule('.kit-chip')).toMatch(/background: color-mix\(in oklab, var\(--kit-fg\) \d+%, var\(--surface-1\)\); color: var\(--kit-fg\)/);
+    for (const r of ROLES) expect(new RegExp(`\\.kit-tone-${r} \\{ --kit-fg: var\\(--${ROLE_KIT_COLOUR[r]}\\)`).test(appCss), `kit-tone-${r}`).toBe(true);
+    // Everything this test asks, the editor asks at least as strictly (a refusal, or a warning), so a custom theme cannot fail here unseen.
+    const asked: [KitColour, KitColour, number][] = [
+      ...ROLES.flatMap((r) => ([ROLE_KIT_COLOUR[r], 'text', 'text-muted'] as const).map((fg): [KitColour, KitColour, number] => [fg, `tint-${r}`, 4.5])),
+      ['on-danger', 'danger', 4.5], ['on-accent', 'accent', 4.5],
+      ...SURFACES.map((s): [KitColour, KitColour, number] => ['danger', s, 4.5]),
+      ...AGENT_COLOUR_NAMES.map((n): [KitColour, KitColour, number] => ['text', `avatar-${n}`, 4.5]),
+      ...EDITOR_INDICATORS.flatMap((r) => r.bg.map((bg): [KitColour, KitColour, number] => [r.fg, bg, 3])),
+    ];
+    for (const [fg, bg, min] of asked) expect(requiredContrast(fg, bg), `${fg} on ${bg}`).toBeGreaterThanOrEqual(min);
+  });
+
   for (const theme of [...BUILT_IN, ...(CUSTOM ? [CUSTOM] : [])]) {
     describe(theme.id, () => {
       const t = theme.tokens;
       const d = derived(t, theme.scheme);
       const at = (fgc: string, bg: string) => contrast(fgc, bg);
       it('text on every tint: the role colour, ink and muted text reach 4.5:1', () => {
+        expect(tintIssues(t, theme.scheme), `${theme.id}: the theme editor's check agrees`).toEqual([]);
+        expect(themeWarnings(t, theme.scheme), `${theme.id}: and so do its other warnings`).toEqual([]);
+        // The editor mixes every colour the kit draws as this test does.
+        const p = palette(t, theme.scheme);
+        const editor = kitPalette(t, theme.scheme, agentColours(t));
+        for (const [k, v] of Object.entries(editor)) {
+          const own = k.startsWith('chip-') ? d.chip[k.slice(5) as (typeof ROLES)[number]] : k.startsWith('avatar-') ? mix(agentColours(t)[k.slice(7) as (typeof AGENT_COLOUR_NAMES)[number]], AVATAR, t['surface-1']) : p[k];
+          expect(v, `${theme.id}: ${k}`).toBe(own);
+        }
         for (const r of ROLES) for (const [name, c] of [[r, d.fg[r]], ['text', t.text], ['text-muted', t['text-muted']]] as const) {
           expect(at(c, d.tint[r]), `${theme.id}: ${name} on tint-${r}`).toBeGreaterThanOrEqual(4.5);
         }

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { ROLE_REFUSAL } from './startRefusal';
+import { t } from '../i18n';
 import { approvalFailureKey, signApproval, signedMessage, thisDevice, toHex, type KeyStore } from './approval';
 
 function memoryStore(): KeyStore {
@@ -43,5 +45,10 @@ describe('why an answer did not go through', () => {
     expect(approvalFailureKey('approval.signature_invalid')).toBe('approval-not-trusted');
     expect(approvalFailureKey('hub.unreachable')).toBe('approval-failed');
     expect(approvalFailureKey(undefined)).toBe('approval-failed');
+  });
+  it('says the person\'s role when the hub refused the answer for it, not this device (#1044)', () => {
+    expect(approvalFailureKey(ROLE_REFUSAL)).toBe('approval-role');
+    expect(t('approval-role')).toContain('Your role');
+    expect(t('approval-role')).not.toContain('device');
   });
 });

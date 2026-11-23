@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatLine } from './chat';
-import { atBottom, grew, jumped, scrolled, start } from './follow';
+import { atBottom, grew, jumped, resized, scrolled, sizeOf, start } from './follow';
 import { changedFiles, stepsSummary, transcript, windowed } from './transcript';
 
 const at = (h: number, d = 5) => new Date(2026, 10, d, h, 0, 0).getTime();
@@ -75,5 +75,13 @@ describe('follow the tail', () => {
     expect(scrolled(f, true)).toEqual({ following: true, unseen: 0 }); // back at the bottom by hand
     expect(jumped()).toEqual({ following: true, unseen: 0 }); // or by the pill
     expect(grew(f, 0)).toBe(f);
+  });
+  it('tells a scroll that came with a size change from the reader scrolling (#1060)', () => {
+    const seen = sizeOf({ clientHeight: 500, scrollHeight: 2000 });
+    expect(resized(seen, { clientHeight: 500, scrollHeight: 2000 })).toBe(false); // the same sizes: the reader scrolled
+    expect(resized(seen, { clientHeight: 300, scrollHeight: 2000 })).toBe(true); // the log was resized
+    expect(resized(seen, { clientHeight: 500, scrollHeight: 2400 })).toBe(true); // its content was
+    expect(resized(undefined, { clientHeight: 500, scrollHeight: 2000 })).toBe(false); // nothing seen yet
+    expect(resized({ clientHeight: 0, scrollHeight: 0 }, { clientHeight: 500, scrollHeight: 2000 })).toBe(false); // seen before it was drawn
   });
 });

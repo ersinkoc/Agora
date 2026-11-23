@@ -53,7 +53,7 @@ export function DeviceRequest({ request, machines, onApprove, onLater, inline }:
         ))}
         <span className="text-xs text-muted">{all ? t('device-request-all') : t('device-request-some')}</span>
       </fieldset>
-      {state === 'failed' && <p role="alert" className="m-0 text-needs-you">{t('device-request-failed')}</p>}
+      {state === 'failed' && <p role="alert" className="m-0 text-danger">{t('device-request-failed')}</p>}
       <div className="flex justify-end gap-2">
         <button type="button" className="button" disabled={state === 'busy'} onClick={onLater}>{t('device-request-later')}</button>
         <button type="button" className="button button--primary" disabled={state === 'busy' || chosen.size === 0} onClick={() => void approve()}>{t('device-request-approve')}</button>

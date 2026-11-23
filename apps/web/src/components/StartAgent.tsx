@@ -5,6 +5,7 @@ import { t } from '../i18n';
 import { sharesName } from '../model';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
+import { ROLE_REFUSAL, refusalCode } from '../net/startRefusal';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, Callout, SegmentedControl } from './kit';
 import { KindCards, NO_COLOUR } from './StartKinds';
@@ -111,7 +112,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
-  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; reason?: string } | undefined>();
   const [canBrowse, setCanBrowse] = useState(!!list);
   const lookGen = useRef(0);
   const look = async (at: string) => {
@@ -126,7 +127,11 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
       if (lookGen.current !== gen) return;
       // A machine without the command: keep the typed path, and do not offer the picker again.
       if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
-      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
+      else {
+        // A lasting refusal (this device limited to other projects, or this person's role, #1044) says so; anything else says it failed.
+        const why = refusalCode(e, 'DirectoryList');
+        setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, reason: why === 'auth.forbidden' || why === ROLE_REFUSAL ? directoryReasonKey(why) : 'start-browse-failed' }));
+      }
     }
   };
   useEffect(() => { lookGen.current++; setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
@@ -159,7 +164,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
     setBusy(true); setError(undefined);
     // For a task the project is the task's: no new project identity is made for the folder (it would make it another project).
     try { setInfo(await inspect(node, at, forTask ? false : createIdentity)); }
-    catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
+    catch (e) { setError(directoryReasonKey(refusalCode(e, 'DirectoryInspect'))); }
     finally { setBusy(false); }
   };
   const go = async () => {
@@ -236,7 +241,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                   <Button variant="primary" size="sm" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</Button>
                   <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
                 </div>
-                {browse.failed && <p role="alert" className="m-0 text-caption text-danger">{t(browse.forbidden ? 'start-directory-forbidden' : 'start-browse-failed')}</p>}
+                {browse.failed && <p role="alert" className="m-0 text-caption text-danger">{t(browse.reason ?? 'start-browse-failed')}</p>}
                 <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
                   {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-caption">{t('start-browse-empty')}</li>}
                   {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="kit-row" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>

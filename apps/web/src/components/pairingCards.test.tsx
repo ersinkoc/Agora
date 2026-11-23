@@ -76,7 +76,7 @@ describe('the card an owner answers (ADR-0065)', () => {
     expect(asking).toContain('Yes, the numbers match');
     expect(asking).toContain('Go back');
     // A press of Approve does not exist on that screen: the only way on is the explicit yes.
-    expect(asking).not.toContain('>Approve<');
+    expect(asking).not.toContain('>Numbers match…<');
     // "Go back" returns to the start with nothing sent.
     expect(pairCardReducer(s, { type: 'back' }).step).toBe('idle');
     // The yes does nothing until the question has been up for MIN_THINK_MS (`armed`).
@@ -144,10 +144,11 @@ describe('a request to join in the fleet console', () => {
     expect(items[0]).toMatchObject({ kind: 'pair', key: 'pair:aa' });
     expect(fleetCounts([], [], [], 1).needs).toBe(1);
     const html = renderToStaticMarkup(<AttentionQueue items={items} machines={[]} now={NOW} onOpen={noop} onResolve={noop} pairing={ui()} />);
-    expect(html).toContain('<bdi>laptop</bdi>');
+    expect(html).toContain('<bdi class="fleet-ask__name">laptop</bdi>');
     expect(html).toContain('Review the request from \u2068laptop\u2069');
     expect(html).toContain('Compare its number with the one on its screen before you approve.');
     expect(html).not.toContain('Approve');
+    expect(html).not.toContain('Numbers match');
     expect(html).not.toContain('Allow');
     // The row does not show the number: the owner sees it in the card, next to the machine's own screen.
     expect(html).not.toContain('482');
@@ -166,7 +167,7 @@ describe('a request to join in the fleet console', () => {
     const items = attentionList([], [], [card({ id: 'late', expiresMs: NOW + 200_000 }), card({ id: 'soon', expiresMs: NOW + 50_000 })]);
     expect(items.map((i) => i.key)).toEqual(['pair:soon', 'pair:late']);
     const html = console_(ui({ cards: [card()] }), { machines: [{ id: 'n1', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: NOW }], fleet: [{ id: 'n1/a', name: 'claude · a', accent: '#fff', machine: 'laptop', machineId: 'n1', workspace: 'w', project: 'w', state: 'working', preview: '' }] });
-    expect(html).toContain('fleet-count__n">1</span><span class="fleet-count__word"');
+    expect(html).toMatch(/kit-stat--tinted kit-tone-needs"[^>]*><span class="kit-stat__n">1<\/span>/);
     expect(html).toContain('Review and decide');
   });
 
