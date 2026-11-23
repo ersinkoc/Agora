@@ -128,3 +128,12 @@ describe('command palette extras', () => {
     expect(machineOfHash(machinesHash('n/1 x'))).toBe('n/1 x');
   });
 });
+
+describe('Start an agent and New terminal on My machines', () => {
+  it('go to the window first, where the Start window is drawn, so it opens at once (#1116)', () => {
+    const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+    const page = app.slice(app.indexOf('<MachinesPage'), app.indexOf('/>', app.indexOf('<MachinesPage')));
+    expect(page).toContain('onStart={hub && api && live ? (node) => { toWindow(); openStart(node); }');
+    expect(page).toContain('onNewTerminal={hub && api && live ? (node) => { toWindow(); openStart(node, true); }');
+  });
+});
