@@ -1,10 +1,10 @@
 import { getLanguage, t } from '../i18n';
 
-/** "12 seconds ago", in the window's language. */
-export function ago(ms: number, now: number): string {
+/** "12 seconds ago", in the window's language; `short` ("12 sec. ago") for a dense row. */
+export function ago(ms: number, now: number, style: 'long' | 'short' = 'long'): string {
   if (!ms) return t('network-never');
   const s = Math.max(0, Math.round((now - ms) / 1000));
-  const rtf = new Intl.RelativeTimeFormat(getLanguage(), { numeric: 'auto' });
+  const rtf = new Intl.RelativeTimeFormat(getLanguage(), { numeric: 'auto', style });
   if (s < 60) return rtf.format(-s, 'second');
   if (s < 3600) return rtf.format(-Math.round(s / 60), 'minute');
   if (s < 86400) return rtf.format(-Math.round(s / 3600), 'hour');

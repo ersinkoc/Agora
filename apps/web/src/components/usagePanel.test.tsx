@@ -41,7 +41,7 @@ describe('usage (no money)', () => {
     expect(totals).not.toContain('kit-stat--tinted');
     expect(totals).toContain('Time since start');
     expect(totals).toMatch(/kit-stat__n">2<\/span><span class="kit-stat__label">Agents</);
-    expect(html).toMatch(/<h3 class="[^"]*normal-case[^"]*">By project<\/h3>/);
+    expect(html).toContain('<h3 class="panel-section-title">By project</h3>'); // sentence case, from the one panel title rule
     expect(html).not.toMatch(/<h3 class="[^"]*\buppercase\b/);
     expect(html).toContain('style="--avatar:#fff"');
   });
@@ -60,11 +60,19 @@ describe('usage (no money)', () => {
     expect(activeMs(agent({ startedMs: 1_000, closed: true, endedMs: 5_000 }), 999_999)).toBe(4_000);
     expect(activeMs(agent({ startedMs: 1_000 }), 6_000)).toBe(5_000);
   });
-  it('says plainly when there is nothing yet, and keeps the plan limits place', () => {
+  it('says plainly when there is nothing yet, in the empty state that also names the plan limits', () => {
     const html = renderToStaticMarkup(<UsagePanel fleet={[agent({})]} now={1} />);
-    expect(html).toContain('Nothing to show yet');
+    expect(html).toContain('kit-empty__title');
+    expect(html).toContain('No usage yet');
+    expect(html).toContain('plan limits appear here once an agent has worked');
+    expect(html).not.toContain('Plan limits appear here when'); // no second empty note under it
     expect(html).toContain('kit-empty'); // the kit's empty state, not a plain line
-    expect(html).toContain('Plan limits');
     expect(html).not.toContain('<details');
+  });
+  it('titles its groups in sentence case, not as a tiny uppercase label', () => {
+    const html = renderToStaticMarkup(<UsagePanel fleet={fleet} now={61_000} />);
+    expect(html).toContain('<h3 class="panel-section-title">By project</h3>');
+    expect(html).toContain('<h3 class="panel-section-title">Plan limits</h3>');
+    expect(html).not.toContain('uppercase');
   });
 });

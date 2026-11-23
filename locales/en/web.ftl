@@ -342,7 +342,6 @@ start-for-task-other-project = This folder is not part of { $project }. The task
 give-none-plain = No agent of { $project } is running on a connected machine that can take tasks.
 give-start-late = The agent has not appeared yet. Go back and choose it from the list once it shows up.
 give-machine-unsupported = That agent's machine cannot take tasks yet; it may need an update. Nothing was sent.
-messages-title = Recent messages
 message-cross = between machines
 # Only that machine says who sent this message; the sender's own machine has not confirmed it.
 message-via = reported by { $machine }
@@ -706,7 +705,7 @@ ide-agent-pick = Agent
 ide-options = Options
 ide-copy-address = Copy address
 ide-tab-changes = Changes
-ide-tab-messages = Messages
+ide-tab-messages = Team chat
 ide-more-tabs = More tabs
 ide-more-tabs-needs = a hidden tab needs you
 ide-more-tabs-failed = a hidden tab ended with an error
@@ -898,7 +897,6 @@ layout-error-invalid = This is not a layout this window can read.
 layout-error-newer = This layout was made by a newer version. Update to use it.
 layout-error-too-deep = This layout is nested too deeply (at most { $max } levels).
 layout-error-too-many = This layout has too many panes (at most { $max }).
-layout-board-empty = No shared tasks or files yet.
 
 ## Themes (ADR-0068 rung 2, docs/ux/themes.md)
 theme-editor-title = Theme
@@ -1323,6 +1321,14 @@ empty-changes-title = All clean
 empty-changes-hint = Files an agent changes and has not committed appear here.
 empty-messages-title = No messages yet
 empty-messages-hint = When agents write to each other, you can follow it here.
+# The team chat (the right panel): "codex · teal  to claude · plum  2 min ago", the text cut to two lines; a row opens the whole text.
+team-chat-to = to { $name }
+team-chat-show-all = Show all
+team-chat-close = Close
+empty-board-title = No shared tasks yet
+empty-board-hint = Tasks and files that agents share in a project appear here.
+empty-usage-title = No usage yet
+empty-usage-hint = Tokens, context, time and plan limits appear here once an agent has worked.
 loading-label = Loading
 chat-code = Code
 live-summary = Live summary
