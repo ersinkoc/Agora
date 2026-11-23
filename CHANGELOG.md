@@ -5,6 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 - `agora agent list` keeps listing the agents that ended (stopped, with their last state and folder) after the node restarts, for as long as the node keeps them (14 days), whatever folder they ran in; before, a restarted node said it had no agents although it still kept them (#1120).
+- `agora agent list` now also lists the agents a restarted node found interrupted (they were running when it stopped), with `interrupted` in the fourth column and what can be done in a fifth: `resume`, `start-again`, or `still-running` (its process outlived the node; `agora agent stop` ends it); before, they were missing from the list until resumed in the window or the terminal client, for up to 14 days. Lines of the other agents do not change (ADR-0107, #1121).
 
 ## 0.3.36
 

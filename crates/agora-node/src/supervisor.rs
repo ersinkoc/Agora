@@ -3579,6 +3579,12 @@ impl Supervisor {
         })
     }
 
+    /// ADR-0060: whether Resume is offered for an agent the ledger holds as interrupted: the node has the agent's own session id and
+    /// its kind can continue one. What `AgentInterrupted.resumable` says, wherever the node says it (ADR-0107: also `agent.list`).
+    pub fn offers_resume(&self, e: &crate::ledger::Entry) -> bool {
+        !e.session_id.is_empty() && self.resumable(&e.kind)
+    }
+
     /// ADR-0060: puts an agent the node's session ledger holds as interrupted back as a stopped agent, so [`resume`](Self::resume)
     /// starts it under the same id, in the same folder and project. Nothing runs yet. `session` is the agent's own session id to
     /// continue, `None` for a new session.

@@ -419,6 +419,94 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
     assert!(out.trim().ends_with("stopped"), "{out}");
 }
 
+/// The ledger entry of `id` as the node wrote it (`<home>/data/sessions/ledger.json`), `None` until it is there.
+fn ledger_entry(s: &Setup, id: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(s.home.join("data/sessions/ledger.json")).ok()?)
+            .ok()?;
+    v["entries"]
+        .as_array()?
+        .iter()
+        .find(|e| e["agent_id"] == id)
+        .cloned()
+}
+
+/// The lines of `agora agent list`, once the node answers (a restarted node's socket appears before it serves).
+fn agent_list_lines(s: &Setup) -> Vec<String> {
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (code, out, err) = cli(s, &["agent", "list"]);
+        if code == 0 {
+            return out.lines().map(str::to_string).collect();
+        }
+        assert!(Instant::now() < end, "agent list failed: {err}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// ADR-0107 (#1121): after the node was killed, `agora agent list` lists the agent it found interrupted with `interrupted` in the
+/// fourth column and what can be done in a fifth, in id order with the agent that ended, whose line is the four columns it always was.
+#[test]
+fn agent_list_shows_the_agents_a_restarted_node_found_interrupted() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("interrupted");
+    let node = start_node(&s);
+    for _ in 0..2 {
+        let (code, _, err) = cli(
+            &s,
+            &["agent", "start", "shell", "--project", "demo", "--worktree"],
+        );
+        assert_eq!(code, 0, "{err}");
+    }
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+    // The node records the end before it is killed, so agent-1 is an ended agent and only agent-2 was running.
+    let end = Instant::now() + Duration::from_secs(30);
+    while !ledger_entry(&s, "agent-1").is_some_and(|e| e["ended"] == true)
+        || ledger_entry(&s, "agent-2").is_none()
+    {
+        assert!(
+            Instant::now() < end,
+            "the ledger never recorded both agents"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Killed without stopping its agents; a new node starts on the same home.
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    let _node = start_node(&s);
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let ended: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(ended.len(), 4, "{lines:?}");
+    assert_eq!(
+        (ended[0], ended[1], ended[3]),
+        ("agent-1", "shell", "stopped"),
+        "{lines:?}"
+    );
+    let cols: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(cols.len(), 5, "{lines:?}");
+    assert_eq!(
+        (cols[0], cols[1], cols[3]),
+        ("agent-2", "shell", "interrupted"),
+        "{lines:?}"
+    );
+    // A shell has no session to continue: Start again, once its process is gone. Where it outlived the node, stop ends it.
+    if cols[4] == "still-running" {
+        let (code, _, err) = cli(&s, &["agent", "stop", "agent-2"]);
+        assert_eq!(code, 0, "{err}");
+        let lines = agent_list_lines(&s);
+        assert!(
+            lines[1].ends_with("\tinterrupted\tstart-again"),
+            "{lines:?}"
+        );
+    } else {
+        assert_eq!(cols[4], "start-again", "{lines:?}");
+    }
+}
+
 /// RM-19 (#903): `agora agent start` for a kind whose program this machine cannot find says so in words, with the program, for a
 /// terminal kind and for an ACP kind (started through the bridge, which ends at once), as `agora agent kinds` already marks it missing.
 #[test]
