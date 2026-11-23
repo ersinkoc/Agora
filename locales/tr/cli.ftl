@@ -501,6 +501,8 @@ pair-status-waiting = { $count ->
 }
 pair-closed-now = Hub'ınız yeni makinelere kapalı.
 pair-closed-after = Hub'ınız yeni makinelere yeniden kapalı. Bir tane daha eklemek için `agora pair open` çalıştırın.
+pair-reopened-elsewhere = Hub'ınız başka bir yerde yeni makinelere yeniden açıldı ({ $minutes } dakika sonra kapanır), bu yüzden bu ekran onu açık bırakıyor. Kapatmak için `agora pair close` çalıştırın.
+pair-status-unknown = Hub'ınızın yeni makinelere hâlâ açık olup olmadığı anlaşılamadı ({ $reason }), bu yüzden buradan hiçbir şey kapatılmadı. Görmek için `agora pair status`, kapatmak için `agora pair close` çalıştırın.
 pair-time-up = Verdiğiniz süre doldu. Hub'ınız yeni makinelere kapalı.
 pair-needs-terminal = Bir makineyi onaylamak için bir terminalin başında olmanız gerekir: `agora pair open` yanıtınızı yalnızca klavyeden okur, hiçbir zaman bir boru hattından ya da betikten değil. Bir terminal penceresinde çalıştırın. Hiçbir şey açılmadı.
 pair-too-fast = Bu tuş, soruyu gördükten çok kısa süre sonra geldi, yanıt sayılmaz. İki sayıya da bakın, sonra yanıtlayın.

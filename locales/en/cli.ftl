@@ -513,6 +513,8 @@ pair-status-waiting = { $count ->
 }
 pair-closed-now = Your hub is closed to new machines.
 pair-closed-after = Your hub is closed to new machines again. Run `agora pair open` to add another.
+pair-reopened-elsewhere = Your hub was opened for new machines again somewhere else (it closes in { $minutes } minutes), so this screen leaves it open. Run `agora pair close` to close it.
+pair-status-unknown = Could not tell whether your hub is still open to new machines ({ $reason }), so nothing was closed from here. Run `agora pair status` to see, and `agora pair close` to close it.
 pair-time-up = The time you gave is up. Your hub is closed to new machines.
 pair-needs-terminal = Approving a machine needs you at a terminal: `agora pair open` reads your answer from the keyboard only, never from a pipe or a script. Run it in a terminal window. Nothing was opened.
 pair-too-fast = That key came too soon after the question to be an answer. Look at both numbers, then answer.

@@ -334,8 +334,13 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   question is discarded when the read starts (`tcflush` on Unix, `FlushConsoleInputBuffer` on Windows), a first key that arrives sooner than 700 ms after that is ignored (three
   such tries, then the request is denied), the line is at most 256 bytes, and nothing is echoed. Only `y` (or the locale's yes word) then Enter approves; any other line,
   including an empty one, denies. A taken name (`pair.state`, `name_in_use`) asks once more whether to replace. After one approval the hub has closed the switch itself
-  ("one machine per opening", section 2): the command asks `PairStatus`, says the hub is closed again and exits (a hub that is still open, one
-  from before #942, is closed with `PairClose`); when the terminal goes away it leaves the switch open for its time and exits. **An owner's window
+  ("one machine per opening", section 2): the command asks `PairStatus`, says the hub is closed again and exits, sending no `PairClose` at all. It never closes an
+  opening that is not its own: it keeps the `closes_at_ms` its `PairOpen` was answered with (each opening has its own deadline), and only a
+  hub that still shows **that** opening open after an approval, which only a hub from before #942 does, is closed with `PairClose` (the legacy
+  fallback; reading the status and closing are two commands, so on such an old hub an opening made between them would be closed too: a known
+  limit). An opening a window made meanwhile (the owner approved there and opened a new round while this command fell behind) is left open
+  and the screen says so; a status that cannot be read closes nothing and says to run `agora pair status`. The `--minutes` deadline closes
+  only this command's own opening by the same rule (Codex review of #1042); when the terminal goes away it leaves the switch open for its time and exits. **An owner's window
   may answer first** (#942): while it asks, the command keeps reading the hub's notices (`agora_platform::read_confirmation_until`, the same
   terminal-only discipline, read straight from the terminal and checked every 50 ms), and when the request it asks about ends anywhere else the
   question ends, nothing typed counts, and it says how: approved in a window (then it says the hub is closed again and exits, as after its own

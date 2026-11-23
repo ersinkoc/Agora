@@ -908,6 +908,78 @@ fn two_waiting(root: &Path) -> TwoWaiting {
     }
 }
 
+/// #942 Codex review: an `agora pair open` that falls behind (paused here) while the owner approves its machine in a window and then
+/// opens a new round from that window must not close the new round when it catches up: it closes only the opening it made itself, and
+/// on a hub that closed itself at the approval it closes nothing. It says the hub was opened again elsewhere and leaves it so.
+#[cfg(unix)]
+#[test]
+fn a_terminal_that_falls_behind_never_closes_a_round_opened_again_in_a_window() {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    let root = tmp("behind");
+    let TwoWaiting {
+        _hub,
+        screen,
+        _a,
+        b: _b,
+        window: mut w,
+        card_a,
+        ..
+    } = two_waiting(&root);
+    let wait = Duration::from_secs(5);
+    let pid = screen.pty.pid().to_string();
+    let signal = |sig: &str| {
+        assert!(Command::new("kill")
+            .args([sig, pid.as_str()])
+            .status()
+            .unwrap()
+            .success());
+    };
+    let status = |w: &mut agora_tui::client::Session| match w
+        .command_info("", Cmd::PairStatus(v1::PairStatus {}), wait)
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::PairStatus(s)) => s,
+        other => panic!("{other:?}"),
+    };
+    let first = status(&mut w);
+    assert!(first.open);
+    // The terminal stops while it asks about "rm-a"; meanwhile the window approves "rm-a" and opens a new round.
+    signal("-STOP");
+    w.command_info(
+        "",
+        Cmd::PairApprove(v1::PairApprove {
+            pair_id: card_a.pair_id.clone(),
+            replace: false,
+        }),
+        wait,
+    )
+    .unwrap();
+    assert!(!status(&mut w).open, "the approval did not close the hub");
+    std::thread::sleep(Duration::from_millis(20));
+    w.command_info("", Cmd::PairOpen(v1::PairOpen {}), wait)
+        .unwrap();
+    let round = status(&mut w);
+    assert!(round.open && round.closes_at_ms != first.closes_at_ms);
+    signal("-CONT");
+    let (ok, text) = screen.finish();
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("Answered in a window: \"rm-a\" was approved"),
+        "{text}"
+    );
+    let after = status(&mut w);
+    assert!(
+        after.open && after.closes_at_ms == round.closes_at_ms,
+        "the terminal closed the round the window opened: {after:?}"
+    );
+    assert!(
+        text.contains("opened for new machines again somewhere else"),
+        "{text}"
+    );
+    assert!(!text.contains("closed to new machines again"), "{text}");
+}
+
 fn deny_in_window(w: &mut agora_tui::client::Session, card: &agora_protocol::v1::PairRequested) {
     use agora_protocol::v1::{self, command_request::Command as Cmd};
     w.command_info(

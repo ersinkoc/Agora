@@ -439,7 +439,7 @@ fn open(
     say.out(key!("pair-open-waiting"), &[]);
     let _ = std::io::stdout().flush();
     let until = minutes.map(|m| Instant::now() + Duration::from_secs(m * 60));
-    watch(say, &mut session, until)
+    watch(say, &mut session, until, status.closes_at_ms)
 }
 
 /// What the owner answered to a question.
@@ -608,7 +608,10 @@ impl Board<'_> {
 
 /// The owner's screen: cards in, answers out, until a machine was approved (here or in a window), the time given ended, the switch
 /// closed or the terminal went.
-fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
+///
+/// `opened_until` is the `closes_at_ms` the hub answered to this command's `PairOpen`: it names the opening this command made (any
+/// other opening has another deadline), so the command never closes an opening that is not its own.
+fn watch(say: &Say, session: &mut Session, until: Option<Instant>, opened_until: u64) -> ExitCode {
     let mut board = Board {
         session,
         waiting: Default::default(),
@@ -622,7 +625,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
             return fail_hub(say, "client.unreachable");
         }
         if until.is_some_and(|t| Instant::now() >= t) {
-            return close_and_say(say, board.session, key!("pair-time-up"));
+            return time_up(say, board.session, opened_until);
         }
         // The switch may have been closed from somewhere else, or ran out.
         if last_status.elapsed() >= STATUS_EVERY {
@@ -696,7 +699,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                         key!("pair-approved"),
                         &[("name", card.name.as_str().into())],
                     );
-                    return closed_after_approval(say, board.session);
+                    return closed_after_approval(say, board.session, opened_until);
                 }
                 Approval::Elsewhere(outcome) => {
                     // The next question comes without a keystroke.
@@ -705,7 +708,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                     match v1::PairOutcome::try_from(outcome) {
                         Ok(v1::PairOutcome::Approved) => {
                             say.out(key!("pair-card-approved-elsewhere"), &name);
-                            return closed_after_approval(say, board.session);
+                            return closed_after_approval(say, board.session, opened_until);
                         }
                         Ok(v1::PairOutcome::Denied) => {
                             say.out(key!("pair-card-denied-elsewhere"), &name);
@@ -795,20 +798,89 @@ fn refused(say: &Say, board: &mut Board<'_>, pair_id: &[u8], e: &v1::ErrorInfo) 
     Approval::Refused
 }
 
-/// After an approval, here or in a window: one machine per opening. The hub closed itself to new machines when it took the approval
-/// (#942), so this only says so; a hub from before that change (or one whose answer did not come) is closed from here. Never a
-/// `PairClose` to a hub that already closed: closing ends what is still undecided, and there is nothing to gain from racing it.
-fn closed_after_approval(say: &Say, session: &mut Session) -> ExitCode {
-    let open = session
+/// Where the hub's switch is, measured against the opening this command made.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// Closed: by an approval (a hub with #942 closes itself when it takes one), by a window, or by its time.
+    Closed,
+    /// Still the opening this command made (the same deadline `PairOpen` answered).
+    Ours,
+    /// Open, but by another opening (a window or another `agora pair open` opened it again): never this command's to close.
+    Other { closes_at_ms: u64 },
+    /// The hub's answer did not come or could not be read: nothing is closed on a guess.
+    Unknown(String),
+}
+
+/// Reads a `PairStatus` answer against `opened_until`, the `closes_at_ms` of this command's own `PairOpen`. Every opening has its
+/// own deadline (the hub's clock in milliseconds, set again by each `PairOpen`), so the same deadline means the same opening.
+fn opening_of(status: Result<v1::PairStatusResult, String>, opened_until: u64) -> Opening {
+    match status {
+        Err(e) => Opening::Unknown(e),
+        Ok(s) if !s.open => Opening::Closed,
+        Ok(s) if s.closes_at_ms == opened_until => Opening::Ours,
+        Ok(s) => Opening::Other {
+            closes_at_ms: s.closes_at_ms,
+        },
+    }
+}
+
+fn opening_now(session: &mut Session, opened_until: u64) -> Opening {
+    let status = session
         .command_info("", Command::PairStatus(v1::PairStatus {}), WAIT)
         .map_err(|e| e.code)
-        .and_then(|ok| status_of(Ok(ok)))
-        .map_or(true, |s| s.open);
-    if open {
-        return close_and_say(say, session, key!("pair-closed-after"));
+        .and_then(|ok| status_of(Ok(ok)));
+    opening_of(status, opened_until)
+}
+
+fn say_other_or_unknown(say: &Say, opening: &Opening) -> ExitCode {
+    match opening {
+        Opening::Other { closes_at_ms } => {
+            say.out(
+                key!("pair-reopened-elsewhere"),
+                &[("minutes", minutes_left(*closes_at_ms).into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Opening::Unknown(reason) => {
+            say.err(
+                key!("pair-status-unknown"),
+                &[("reason", reason.as_str().into())],
+            );
+            ExitCode::from(1)
+        }
+        Opening::Closed | Opening::Ours => ExitCode::SUCCESS,
     }
-    say.out(key!("pair-closed-after"), &[]);
-    ExitCode::SUCCESS
+}
+
+/// After an approval, here or in a window: one machine per opening, which the hub keeps itself since #942 (it closes the switch when
+/// it takes the approval). So on such a hub this sends no `PairClose` at all: it reads the status and says the hub is closed.
+/// - A hub that still has **this command's own opening** open after an approval is one from before #942, the only kind that leaves
+///   it open: that opening is closed from here (the legacy fallback). Known limit: reading the status and then closing are two
+///   commands, so an opening made between them (within that round trip, on such an old hub only) would be closed too.
+/// - An opening that is **not this command's** (the owner opened a new round in a window meanwhile) is left alone and the screen says
+///   so; and when the status cannot be read nothing is closed and the owner is told to look (#942, Codex review).
+fn closed_after_approval(say: &Say, session: &mut Session, opened_until: u64) -> ExitCode {
+    match opening_now(session, opened_until) {
+        Opening::Closed => {
+            say.out(key!("pair-closed-after"), &[]);
+            ExitCode::SUCCESS
+        }
+        Opening::Ours => close_and_say(say, session, key!("pair-closed-after")),
+        other => say_other_or_unknown(say, &other),
+    }
+}
+
+/// The time given with `--minutes` is up: this command closes its own opening, and only that (the same status-then-close limit as the
+/// legacy fallback above). One that is already closed, or that a window opened again, is not this command's to close.
+fn time_up(say: &Say, session: &mut Session, opened_until: u64) -> ExitCode {
+    match opening_now(session, opened_until) {
+        Opening::Closed => {
+            say.out(key!("pair-closed-now"), &[]);
+            ExitCode::SUCCESS
+        }
+        Opening::Ours => close_and_say(say, session, key!("pair-time-up")),
+        other => say_other_or_unknown(say, &other),
+    }
 }
 
 fn state_is(e: &v1::ErrorInfo, state: &str) -> bool {
@@ -835,6 +907,31 @@ fn close_and_say(say: &Say, session: &mut Session, why: &'static str) -> ExitCod
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// #942 Codex review: only the opening this command made is ever its to close; a closed hub, another opening, and a status that
+    /// did not come are told apart.
+    #[test]
+    fn only_this_commands_own_opening_is_its_to_close() {
+        let st = |open: bool, closes_at_ms: u64| {
+            Ok(v1::PairStatusResult {
+                open,
+                closes_at_ms,
+                pending: 0,
+            })
+        };
+        assert_eq!(opening_of(st(false, 0), 5_000), Opening::Closed);
+        assert_eq!(opening_of(st(true, 5_000), 5_000), Opening::Ours);
+        assert_eq!(
+            opening_of(st(true, 9_000), 5_000),
+            Opening::Other {
+                closes_at_ms: 9_000
+            }
+        );
+        assert_eq!(
+            opening_of(Err("client.unreachable".into()), 5_000),
+            Opening::Unknown("client.unreachable".into())
+        );
+    }
 
     #[test]
     fn a_number_is_shown_in_two_groups() {
