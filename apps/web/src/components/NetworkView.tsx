@@ -131,7 +131,7 @@ function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewT
     </div>
 
     {m.online ? <>
-      {agents.length > 0 && <ul className="m-0 grid list-none gap-0.5 p-0">
+      {agents.length > 0 && <ul className="m-0 grid list-none grid-cols-1 gap-0.5 p-0">
         {agents.map((a) => <li key={a.id}><ListRow href={`#/agent/${encodeURIComponent(a.id)}`} label={a.name}
           leading={<AgentAvatar accent={a.accent} kind={a.kind ?? a.name} size="s" />}
           meta={<>{!a.closed && <NoAskBadge agent={a} nested />}<StatusPill state={a.state} failed={endedWithError(a)} /></>} /></li>)}

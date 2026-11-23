@@ -11,7 +11,7 @@ or a local response timeout has a localized retry message.
 | Code | Params | Meaning |
 | --- | --- | --- |
 | `auth.unauthenticated` | — | No or invalid credentials |
-| `auth.forbidden` | `action` | Authenticated but not allowed. The hub's refusal of a command for a person's role or projects (ADR-0049: a viewer, or a member outside their projects) names the refused command by its schema name (`AgentLaunch`, `AgentResume`, `DirectoryInspect`); a node's refusal for a device its policy limits to some projects names its own lowercase action (`directory`, `grant.create`, `approval.resolve`). Clients word the first for the person's role and the second for the device (#1044) |
+| `auth.forbidden` | `action` | Authenticated but not allowed. The hub's refusal of a command for a person's role or projects (ADR-0049: a viewer, or a member outside their projects) names the refused command by its schema name (`AgentLaunch`, `AgentResume`, `DirectoryInspect`; also in place of a node's answer to a member's `DirectoryList` or `DirectoryInspect` whose folder, links followed, is outside their projects, ADR-0049 Amendment A); a node's refusal for a device its policy limits to some projects names its own lowercase action (`directory`, `grant.create`, `approval.resolve`). Clients word the first for the person's role and the second for the device (#1044) |
 | `auth.device_revoked` | `device_id` | Device certificate revoked |
 | `protocol.unsupported_generation` | `offered`, `supported` | No common protocol generation |
 | `protocol.capability_missing` | `capability` | Peer lacks a required capability |
