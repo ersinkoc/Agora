@@ -254,6 +254,22 @@ describe('the phone bar keeps T44 with the shared guard (#1048 item 4)', () => {
   });
 });
 
+describe('what a phone card draws restarts its dwell', () => {
+  it('the machine the card names comes from the agent: when it changes, Allow waits again', () => {
+    const on = vi.fn();
+    const draw = (machine: string) => act(() => root.render(<PhoneHome agents={[{ ...agent, machine }]} machines={machines} approvals={[ask('r1', 'a.rs')]} onResolve={on} link="live" onOpen={() => {}} />));
+    draw('laptop');
+    dwell();
+    draw('server');
+    expect(cardOf('a.rs')?.textContent).toContain('server');
+    act(() => btn('a.rs', 'Allow').click());
+    expect(on).not.toHaveBeenCalled();
+    dwell();
+    act(() => btn('a.rs', 'Allow').click());
+    expect(on).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('one answer per request across the phone\'s screens (the window\'s holds)', () => {
   it('an answer on its way from the list\'s bar holds the request on the agent\'s screen', () => {
     const on = vi.fn(() => new Promise(() => {}));
@@ -307,6 +323,16 @@ describe('the phone\'s requests are the one request component, in the row densit
     expect([...(cardOf('a.rs')?.querySelectorAll('.kit-callout__actions button') ?? [])].map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
     // No amber outline per card any more, no repeated trust warning.
     expect(host.querySelector('.phone-card--needs')).toBeNull();
+  });
+
+  it('draws the bar\'s request in the row density too, stacked, with Deny then Allow', () => {
+    act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={[plain('r1', 'a.rs')]} onResolve={() => {}} link="live" onOpen={() => {}} />));
+    const req = host.querySelector('.phone-dock section.approval-req')!;
+    expect(req.getAttribute('data-density')).toBe('row');
+    expect(req.classList.contains('approval-req--stacked')).toBe(true);
+    expect(req.querySelector('.kit-avatar')).not.toBeNull();
+    expect(req.querySelector('.approval-req__cmd')?.textContent).toBe('Edit · a.rs');
+    expect([...req.querySelectorAll('.kit-callout__actions button')].map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
   });
 
   it('names every machine that does not trust this device once, at the top, with Settings', () => {

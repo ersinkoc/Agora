@@ -13,7 +13,7 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 
 | Size | Where | Shape |
 |---|---|---|
-| **row** | Home's queue; the phone's list (stacked: the buttons under the text, each as wide as it can be) | who, where and how long on one line, the ask under it, the buttons at the end |
+| **row** | Home's queue; the phone's list and its bar (stacked: the buttons under the text, each as wide as it can be) | who, where and how long on one line, the ask under it, the buttons at the end |
 | **card** | the side panel, above a terminal, above a chat's composer | the ask whole under the title, the buttons under it (at the end of the first line when the card is wide) |
 | **full** | the attention dialog | larger; the title is the ask, the machine a tag; Later before the answers |
 
@@ -47,7 +47,7 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner
   banner is hidden while a Needs you list is on screen.
 - **The phone (redesign PR 13, #1048):** no longer the exception. Its list draws each plain request in the row size, stacked, with the
-  whole detail; its bar is a surface of its own under the same guard, and it still answers one request at a time (while its answer
+  whole detail; its bar draws the request it answers the same way and is a surface of its own under the same guard, and it still answers one request at a time (while its answer
   goes, the next request it shows waits). A machine that does not trust this device is named once, at the top of the list, not on
   every card.
 - **Not yet:** the start and switch cards' bodies (they keep their layout; only their buttons follow the order and the danger rule).

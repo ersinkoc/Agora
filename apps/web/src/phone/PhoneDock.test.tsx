@@ -242,7 +242,7 @@ describe('the phone bar for what needs you', () => {
   });
   it('writes the agent and machine names in the bar with hidden characters visible, and the machine the agent header names', () => {
     home([ask('p1')], { agents: [{ ...agent, name: 'claude\u202e amber', machine: 'Laptop' }] });
-    const head = dock()!.querySelector('.phone-dock__head')!.textContent!;
+    const head = dock()!.textContent!;
     expect(head).toContain('claude\\u{202e} amber');
     expect(head).toContain('Laptop');
     expect(head).not.toContain('n1');
