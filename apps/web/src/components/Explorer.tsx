@@ -11,8 +11,12 @@ import { Icon } from './Icon';
 import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
 import { AgentAvatar, Button, StatusMark } from './kit';
 import { GroupByControl, groupTitle } from './GroupByControl';
+import { ExplorerRows } from './ExplorerRows';
 import { ProjectChip, ProjectHint } from './ProjectMark';
 import { groupFleet, sharedAcross, sortByUrgency, type GroupBy, type ProjectSpread } from '../net/fleet';
+
+const LARGE_FLEET = 120;
+const agentId = (agent: AgentTileModel) => agent.id;
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
 export function Explorer({ by, onBy, spread, fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError }: {
@@ -40,6 +44,9 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   resumeError?: { id: string; code: string };
 }) {
   const [filter, setFilter] = useState('');
+  const [viewport, setViewport] = useState<HTMLElement | null>(null);
+  const windowed = fleet.length >= LARGE_FLEET && typeof IntersectionObserver === 'function' && typeof ResizeObserver === 'function';
+  const rowWindow = { viewport, current, windowed };
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
   const fold = (key: string) => setFolded(cur => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
   const tree = useMemo(() => {
@@ -142,7 +149,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select>
     </label>}
     <div className="@container flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
-    <nav className="min-h-0 flex-1 overflow-y-auto px-1 pb-3">
+    <nav ref={setViewport} data-agent-count={fleet.length} className="min-h-0 flex-1 overflow-y-auto px-1 pb-3 [--explorer-row-size:2rem] [@media(pointer:coarse)]:[--explorer-row-size:var(--tap)]">
       {machines.length === 0 && fleet.length === 0 && <p className="muted px-3 py-2">{t('machines-empty')}</p>}
       {by !== 'machine' && flat.map((g) => {
         const key = `~${by}:${g.key}`;
@@ -157,10 +164,10 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           </button>
           {!folded.has(key) && <div className="ms-3 border-s border-line ps-1">
             {sp && <div className="px-2 pb-0.5"><ProjectHint spread={sp} /></div>}
-            <ul className="m-0 list-none p-0">{g.agents.filter((a) => !a.closed).map((a) => agentRow(a, 0, true))}</ul>
+            <ExplorerRows {...rowWindow} items={g.agents.filter((a) => !a.closed)} idOf={agentId} renderRow={a => agentRow(a, 0, true)} />
             {g.agents.some((a) => a.closed) && <div role="group" aria-label={t('interrupted-section')}>
               <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={`${t('interrupted-section')}\n${t('interrupted-hint')}`}>{t('interrupted-section-short')}</div>
-              <ul className="m-0 list-none p-0">{g.agents.filter((a) => a.closed).map(stoppedRow)}</ul>
+              <ExplorerRows {...rowWindow} items={g.agents.filter((a) => a.closed)} idOf={agentId} renderRow={stoppedRow} />
             </div>}
           </div>}
         </section>;
@@ -188,15 +195,12 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           </div>
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
             <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span>{(() => { const sp = list[0]?.projectId ? spread.get(list[0].projectId) : undefined; return sharedAcross(sp) ? <ProjectChip spread={sp} compact /> : null; })()}</div>
-            <ul className="m-0 list-none p-0">
-              {helperTree(list).map(({ agent: a, depth }) => agentRow(a, depth, false))}
-            </ul>
+            <ExplorerRows {...rowWindow} items={helperTree(list)} idOf={row => row.agent.id}
+              renderRow={({ agent: a, depth }) => agentRow(a, depth, false)} />
           </div>)}
           {!closed && stopped.length > 0 && <div className="ms-3 border-s border-line ps-1" role="group" aria-label={t('interrupted-section')}>
             <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={`${t('interrupted-section')}\n${t('interrupted-hint')}`}>{t('interrupted-section-short')}</div>
-            <ul className="m-0 list-none p-0">
-              {stopped.map(stoppedRow)}
-            </ul>
+            <ExplorerRows {...rowWindow} items={stopped} idOf={agentId} renderRow={stoppedRow} />
           </div>}
         </section>;
       })}
@@ -209,8 +213,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           <Button variant="ghost" size="sm" className="me-1" onClick={() => onDismiss(closed.map((a) => a.id))} aria-label={t('closed-clear')} title={everyone ? t('closed-clear-everyone') : undefined}>{t('closed-clear-short')}</Button>
         </div>
         {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-danger">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
-        {!folded.has('~closed') && <ul className="m-0 list-none p-0">
-          {closed.map((a) => <li key={a.id} className="group flex items-center">
+        {!folded.has('~closed') && <ExplorerRows {...rowWindow} items={closed} idOf={agentId} renderRow={a => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
               <span className="opacity-60"><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span>
               <span className="min-w-0 flex-1 truncate text-muted">{a.name}</span>
@@ -218,8 +221,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
               <StatusMark state="finished" failed={endedWithError(a)} />
             </button>
             <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100" onClick={() => onDismiss([a.id])} aria-label={t(everyone ? 'closed-forget' : 'closed-dismiss')} title={t(everyone ? 'closed-forget' : 'closed-dismiss')}><Icon name="close" className="size-3.5" /></button>
-          </li>)}
-        </ul>}
+          </li>} />}
       </section>}
       {fleet.length > 0 && (by === 'machine' ? tree.size === 0 : flat.length === 0) && closed.length === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
       {fleet.length === 0 && machines.length > 0 && <p className="muted px-3 py-2">{t('fleet-empty')}</p>}

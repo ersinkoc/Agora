@@ -227,19 +227,20 @@ reads keys every 2 ms; idle, it sleeps as before.
 
 `node scripts/perf-tree.mjs` starts a hub on a throw-away home, seeds it with `scripts/perf-seed-agents.py` (machines x projects x
 agents; `AGORA_PERF_FLEET`) and measures the tree in headless Chromium (software rendering, 1440x900). No node connects and no
-terminal streams: the seeded machines are offline after the hub opens. Every tree row is in the DOM. Existing artifacts can be
-supplied with `AGORA_PERF_BIN` and `AGORA_PERF_WEB_DIR` instead of building another target.
+terminal streams: the seeded machines are offline after the hub opens. Existing artifacts can be supplied with
+`AGORA_PERF_BIN` and `AGORA_PERF_WEB_DIR` instead of building another target.
 `PYTHON` selects the Python executable (default `python3`); Windows can set it to `python`, with `AGORA_PERF_BIN` pointing to
 `agora.exe` and `CHROME` to the Chromium executable. `PW_DIR` names the directory containing `node_modules/playwright-core`.
 Repository and executable paths may contain spaces. Cleanup waits for the temporary hub to exit before removing its files.
 
-The load endpoint is a warm reload until all rows exist in the DOM (`domRowsReadyMs`), not a paint measurement. Picking is a
-programmatic row click to the next frame. Filtering changes only Explorer's local state (`filterToFrameMs`); it does not measure
-App's view-to-model work or a complete live-view update.
+The warm reload timing (`domRowsReadyMs`) ends when the fleet is loaded and its first rows reach the DOM. With an older build
+it waits for every row. Picking measures from a programmatic click on a visible row to the next frame after scrolling to it.
+Filtering measures Explorer's local state (`filterToFrameMs`).
 
 Re-measured after #557 separated the Long Tasks observer by phase. Each entry belongs to the phase in which its task started;
-scroll includes returning to the top and one settling frame. Pending observer records are drained after the final phase. The
-script reports scroll, pick, filter and outside-phase counts separately, with their total. Evidence and the post-scroll control:
+the original scroll phase included returning to the top and a settling frame. The current phase checks that scrolling reaches
+rows at the bottom. Pending observer records are drained after the final phase. The script reports scroll, pick, filter and
+outside-phase counts separately, with their total. Evidence and the original post-scroll control:
 [measurement record](../reviews/0557-perf-phases.md).
 
 | Static fleet | Reload → DOM rows ready | Scroll frame gap, p50 / p95 | Pick → frame, p50 / p95 | Filter → frame, p50 / p95 | Long tasks: scroll / pick / filter | Tree DOM / heap |
@@ -251,6 +252,22 @@ The 500-agent static case stays below the 50 ms selection budget and has no long
 60 Hz interval. The 2 000-agent case clearly misses both scroll and selection budgets. These runs do not certify the budget for
 busy live fleets or change any budget; larger-tree work still needs measurements of those workloads and windowing where required.
 The old scroll long-task count included later picks and filters and is superseded by these phase-specific results.
+
+**Explorer windowing (#1126).** At 120 agents, Explorer renders agent rows in batches near its scroll area. Group headings remain
+available, and the focused and selected batches stay mounted. Browsers without the visibility or size observers render the
+whole list. The table records two paired Chromium runs with the same 500-agent fixture and benchmark script.
+
+| Metric | Before windowing | With windowing |
+| --- | --- | --- |
+| Initially mounted agent rows | 500 | 36 |
+| Explorer DOM nodes | 7 960 | 773 |
+| Scroll frame gap, p50 | 36.4–38.4 ms | 16.6 ms |
+| Scroll frame gap, p95 | 44.4–49.0 ms | 17.1–17.2 ms |
+| Pick → frame, p95 | 62.5–62.9 ms | 19.0–20.4 ms |
+| Long tasks while scrolling | 0–1 | 0 |
+
+The median reaches one 60 Hz interval in this fixture. The p95 remains just above 16.7 ms. Both builds reached the end of the
+tree and visited 20 agent rows with 40 consecutive Tab presses.
 
 **A diff of 10 000 changed lines** is drawn as a window since #511, in the review screen and in `DiffDialog` (it uses the same
 `ChangesView`): `scripts/e2e-changes-large.mjs` opens a file rewritten whole (20 000 rows), Show all and side by side with **no

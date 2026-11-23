@@ -4,7 +4,7 @@
 // measures the real rows in Chromium.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { Explorer } from './Explorer';
@@ -50,6 +50,58 @@ describe('an Agents-list row (#945)', () => {
       expect(badge.className).toContain('flex-none');
       expect(badge.hasAttribute('tabindex')).toBe(false); // inside the row's button, which stays the one stop
       expect(row.title).toContain('Runs without asking');
+    }
+  });
+});
+
+describe('large agent lists', () => {
+  it('mounts nearby rows and retains a focused row as its chunk leaves the viewport', () => {
+    type Visibility = (entries: { isIntersecting: boolean }[]) => void;
+    const observations = new Map<Element, Visibility>();
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(private readonly callback: Visibility) {}
+      observe(element: Element) { observations.set(element, this.callback); }
+      disconnect() {
+        for (const [element, callback] of observations) {
+          if (callback === this.callback) observations.delete(element);
+        }
+      }
+    });
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+
+    try {
+      const many = Array.from({ length: 500 }, (_, i) => ({ ...base, id: `laptop/a-${i}`, name: `Agent ${i}` }));
+      const render = (current?: string) => act(() => root.render(<Explorer by="machine" onBy={() => {}} spread={new Map()} fleet={many}
+        machines={[]} open={[]} current={current} projects={[]} project="" onProject={() => {}} onToggle={() => {}}
+        onCollapse={() => {}} onDismiss={() => {}} />));
+      const rows = () => host.querySelectorAll<HTMLButtonElement>('[data-agent-row]');
+      render();
+      expect(host.querySelectorAll('[data-machine-id]')).toHaveLength(1);
+      expect(rows().length).toBe(0);
+
+      const [first, second] = [...observations.values()];
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+      act(() => first?.([{ isIntersecting: true }]));
+      const row = rows()[0] as HTMLButtonElement;
+      expect(row.dataset.agentRow).toBe('laptop/a-0');
+      expect(rows().length).toBeLessThan(50);
+
+      act(() => row.focus());
+      act(() => first?.([{ isIntersecting: false }]));
+      expect(document.activeElement).toBe(row);
+      expect(row.isConnected).toBe(true);
+
+      act(() => row.blur());
+      expect(row.isConnected).toBe(false);
+      act(() => second?.([{ isIntersecting: true }]));
+      expect(rows().length).toBeGreaterThan(0);
+      expect(rows().length).toBeLessThan(50);
+
+      render('laptop/a-499');
+      expect(host.querySelector('[data-agent-row="laptop/a-499"]')?.getAttribute('aria-current')).toBe('true');
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });
