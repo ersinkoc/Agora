@@ -61,7 +61,7 @@ export function ApprovalRequest({ density, icon, avatar, title, where, children,
 }) {
   const id = useId();
   // Under `titleWrap` the wrapper gives the title its id (an `id` key here, even undefined, would replace it).
-  const head = <p {...(titleWrap ? {} : { id })} className="kit-callout__title approval-req__title">{avatar}<span className="approval-req__ask">{title}</span>{where ? <span className="approval-req__where">{where}</span> : null}</p>;
+  const head = <p {...(titleWrap ? {} : { id })} className="kit-callout__title approval-req__title">{avatar}<span className="approval-req__text"><span className="approval-req__ask">{title}</span>{where ? <span className="approval-req__where">{where}</span> : null}</span></p>;
   const cls = ['kit-callout kit-tone-needs approval-req', `approval-req--${density}`, stacked && 'approval-req--stacked', className].filter(Boolean).join(' ');
   return (
     <section className={cls} data-density={stacked ? 'row' : density} aria-labelledby={titleWrap ? undefined : id} role={alert ? 'alert' : undefined}>

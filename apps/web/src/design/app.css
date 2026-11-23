@@ -180,7 +180,6 @@
   .pair-recent { @apply m-0 grid list-none gap-1 p-0 text-xs text-muted; }
   .pair-window { @apply grid max-w-[24rem] gap-2 rounded-m border border-line bg-surface-1 p-3; }
   .fleet-ask { @apply m-0 min-w-0; }
-  .fleet-ask .kit-callout__title { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
   .fleet-ask__name { @apply min-w-0 break-words; }
   .fleet-ask__where, .fleet-ask__time { @apply min-w-0 font-normal text-muted; font-size: var(--text-caption); }
   /* How long ago it asked changes with the clock: a box of its own width (tabular digits, no wrapping inside) so "15 seconds" becoming
@@ -480,7 +479,9 @@
   /* Redesign PR 4: one approval request in three densities (row, card, full), on the callout: the same tint, icon chip and button
      order everywhere. The ask is never cut where it can be answered: one mono chip that wraps. */
   .approval-req-host { container-type: inline-size; }
-  .approval-req__title { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
+  .approval-req__title { @apply flex min-w-0 items-start gap-2; }
+  .approval-req__title > .kit-avatar { margin-block-start: 0.0625rem; }
+  .approval-req__text { @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5; }
   .approval-req__ask { @apply min-w-0 break-words; }
   .approval-req__where { @apply inline-flex min-w-0 flex-wrap items-center gap-1.5 font-normal text-muted; font-size: var(--text-caption); }
   .approval-req__open { @apply size-6; }
@@ -489,6 +490,8 @@
   .approval-req__foot { @apply col-start-2 col-end-4 min-w-0; }
   /* Card and full: the buttons under the ask, at the end. */
   .approval-req--card .kit-callout__actions, .approval-req--full .kit-callout__actions { @apply col-start-2 col-end-4 row-span-1 row-start-auto mt-1 justify-end; }
+  /* A wide card (above a terminal) keeps its buttons at the end of the first line, as the row does. */
+  @container (min-width: 36rem) { .approval-req--card .kit-callout__actions { @apply col-start-3 col-end-4 row-span-2 row-start-1 mt-0 self-center; } }
   .approval-req--full { @apply gap-y-1.5; padding: 1rem 1.125rem; }
   .approval-req--full .approval-req__title { font-size: var(--text-title); }
   .approval-req--full .approval-req__cmd { font-size: var(--text-body); }

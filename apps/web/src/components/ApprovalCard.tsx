@@ -27,20 +27,21 @@ export type RequestAgent = Pick<AgentTileModel, 'accent' | 'kind' | 'name'>;
 
 // A plain request where it can be answered (the side panel, above a terminal, above a chat's composer): the ask whole, as one mono chip
 // that wraps and is never cut, the agent's full text one click away when the short form leaves something out, then Deny, "Allow always"
-// where offered, and Allow. A narrow pane draws it in the row density with the buttons under the text; nothing of the ask is cut there
-// either (the pane is where Review leads).
-export function PlainRequest({ approval: x, density, surface, agent, alert, busy, onAnswer, onOpen }: {
+// where offered, and Allow. In a pane (`narrowable`), below 360 px it is drawn in the row density with the buttons under the text; nothing
+// of the ask is cut there either (the pane is where Review leads).
+export function PlainRequest({ approval: x, density, surface, agent, alert, busy, narrowable, onAnswer, onOpen }: {
   approval: ApprovalModel;
   density: ApprovalDensity;
   surface: AlwaysSurface;
   agent?: RequestAgent;
   alert?: boolean;
   busy?: boolean;
+  narrowable?: boolean;
   onAnswer?: (approved: boolean, always?: boolean) => void;
   onOpen?: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const narrow = useNarrow(host);
+  const narrow = useNarrow(host) && !!narrowable;
   const name = agent?.name || approvalName(x);
   const d = x.detail ? detailText(x.detail) : '';
   const ask = visible(d ? `${x.action} · ${d}` : x.action);

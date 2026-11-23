@@ -6,6 +6,40 @@
 - Actions: Allow, **Allow always** when the agent offers it (below), Deny, Deny and stop agent. Every decision is signed by
   the device key (ADR-0020).
 
+## One request, three sizes
+
+Redesign PR 4: every request that waits on the person is one component (`ApprovalRequest`), with the same needs tint, an icon chip
+for the kind of ask, the agent's avatar and the same order of buttons everywhere. Only its size changes:
+
+| Size | Where | Shape |
+|---|---|---|
+| **row** | Home's queue | who, where and how long on one line, the ask under it, the buttons at the end |
+| **card** | the side panel, above a terminal, above a chat's composer | the ask whole under the title, the buttons under it (at the end of the first line when the card is wide) |
+| **full** | the attention dialog | larger; the title is the ask, the machine a tag; Later before the answers |
+
+- **Buttons:** **Deny** (secondary), then **Allow always** where ADR-0101 offers it beside a single answer (secondary), then **Allow**
+  (primary, last). A request that offers only "always" has it in the place of Allow.
+- **Danger:** an Allow that lets an agent act without asking is the red danger button (ADR-0102): a request to start a helper with a
+  permission-skipping option, and a switch to a mode or setting that skips asking. The start still asks for the confirmation first
+  ("Keep asking" is the primary, focused answer); the switch keeps its dwell and "Read it first".
+- **Title:** the ask in the window's words, "codex · teal wants to run a command" (change a file, read a file, open a web address, delete
+  something, start another agent). It is chosen from a closed set of well-known action words, matched exactly; anything else reads
+  "… asks permission". The words come from the agent, so the action and detail stay on the line under the title, whole, and that line is
+  what is decided on.
+- **Never decided on cut text:** where Allow is offered the ask is one mono chip that wraps, never truncated; the agent's whole request is
+  one click away when the short form leaves something out. The row and the dialog offer Allow and Deny only for what `decidableInline`
+  shows whole; anything else has **Review**.
+- **Each surface keeps its own guards:** Home's queue its dwell and per-request holds (one answer per request, "Answer sent"), the dialog
+  its dwell, answered-once and Later, the switch card its dwell and one-click lock. The component only draws what the surface decided.
+- **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
+  as it can be; nothing of the ask is cut.
+- **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner
+  banner is hidden while a Needs you list is on screen.
+- **Not yet:** the phone's own cards and bar, and the start and switch cards' bodies (they keep their layout; only their buttons follow
+  the order and the danger rule).
+- Screens: `docs/ux/screens/approval-row-*.png`, `approval-panel-*.png`, `approval-terminal-*.png`, `approval-card-narrow-*.png`,
+  `approval-narrow-pane-*.png`, `approval-dialog-*.png`, `approval-skip-danger-*.png`, `approval-start-noask-danger-*.png` (dark and light).
+
 ## Allow always (ADR-0101)
 
 A structured agent can offer an answer it remembers (ACP `allow_always`); the window shows it only when the request says so
@@ -13,10 +47,11 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
 
 - **Where:** the approval card (Inspector), the attention dialog, the banner over a pane and above a chat's composer, and the phone's
   card. The fleet console's one-line rows and the phone's bar keep Allow and Deny; the full card has the third button.
-- **Shape:** a secondary button after Allow and Deny (in the attention dialog, between Deny and the primary Allow, which stays last), under
-  the same rules as Allow (disabled while the link is down, during the dwell, while an answer goes). Under it one muted line in the
+- **Shape:** a secondary button between Deny and the primary Allow, which stays last, on every surface (the one order of
+  [One request, three sizes](#one-request-three-sizes)), under the same rules as Allow on that surface (disabled while the link is down,
+  during the dwell where the surface has one, while an answer goes). Under it one muted line in the
   window's words and, when the agent named its option, "In its own words: “…”" as plain text; that label is never the button's name.
-- **Only "always":** a request that offers no single answer shows **Allow always** in the place of Allow, as the primary button, with
+- **Only "always":** a request that offers no single answer shows **Allow always** in the place of Allow (after Deny), as the primary button, with
   a line saying the agent offers no single answer. It is never answered from a one-line row (the fleet console, the phone's bar, the
   attention dialog): those send the person to the full card. Deny is a single answer on every card.
 - **Words:** ACP lets the agent decide what the answer covers and how long it keeps it, so "for this session" and "until it ends" are

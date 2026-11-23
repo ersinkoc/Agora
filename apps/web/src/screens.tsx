@@ -150,6 +150,11 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
         <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
       </div>
+      {/* Redesign PR 4: the one request component as a card, and in a pane narrower than 360 px (the row density, the buttons under the text). */}
+      <div data-approval-sizes className="gallery__row items-start">
+        <div className="w-full max-w-[22rem]"><ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} /></div>
+        <div data-approval-narrow className="w-[12.5rem]"><ApprovalBanner approval={{ ...demoAlwaysApproval, machineName: 'laptop' }} agent={demoAsksLess} onResolve={() => {}} pinned /></div>
+      </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
       <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
