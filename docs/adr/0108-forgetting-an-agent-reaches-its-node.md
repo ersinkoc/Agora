@@ -1,8 +1,8 @@
 # 0108. Forgetting an agent in the window reaches its node, which deletes its saved conversation
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat: "Accept as proposed" for ADR-0108, unsigned forget).
 
 Origin: issue #1104. ADR-0089 decision 3 (Accepted) says "forgetting an agent forgets its history (ADR-0053): the file is removed with
 the closed agent's other traces". #1103 (ADR-0104 step 4, C1) builds that file, `<data>/transcripts/<agent id>.jsonl` and a fresh
@@ -53,7 +53,7 @@ protocol means and ADR-0053's node clause, which needs this ADR. Two more facts 
    decision 3 to say a forget at the hub leaves the file to retention (at most 30 days, policy can lower it to 0: "once the agent
    ended").
 
-## Decision (proposed)
+## Decision
 
 Option 1.
 
