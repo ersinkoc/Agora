@@ -1390,6 +1390,20 @@ fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the
     assert_eq!(logged_usage(&node, &id), (10, 7), "the usage of the turn");
 }
 
+/// A turn whose answer is shown and not yet in the conversation's file (the writer, once a second, may have run just after it: then
+/// another turn). Its word.
+fn an_answer_not_yet_written(rig: &Rig, node: &Node, id: &str) -> String {
+    for n in 0..20 {
+        let word = format!("last-{n}");
+        prompt(node, id, &word);
+        wait_for("the answer", || agent_said(node, id, &word));
+        if !on_disk(rig, id, &word) {
+            return word;
+        }
+    }
+    panic!("every answer was on disk before the stop");
+}
+
 /// ADR-0104 O2: a clean stop writes what the conversation's writer (once a second) and the usage merge (5 s) still held: an answer
 /// shown a moment before the stop is in the file after it, and its usage is in the log.
 #[test]
@@ -1398,18 +1412,7 @@ fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
     let rig = Rig::new("flush");
     let node = rig.node();
     let id = started(&rig, &node);
-    // A turn whose answer is shown and not yet written (the writer may have run just after it: then another turn).
-    let mut caught = None;
-    for n in 0..20 {
-        let word = format!("last-{n}");
-        prompt(&node, &id, &word);
-        wait_for("the answer", || agent_said(&node, &id, &word));
-        if !on_disk(&rig, &id, &word) {
-            caught = Some(word);
-            break;
-        }
-    }
-    let word = caught.expect("every answer was on disk before the stop");
+    let word = an_answer_not_yet_written(&rig, &node, &id);
     let gathered = logged_usage(&node, &id);
     drop(node);
     assert!(
@@ -1427,6 +1430,71 @@ fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
         .filter(|e| e.role == v1::ChatRole::Agent as i32 && e.text.starts_with("last-"))
         .count() as u64;
     assert_eq!(logged.0, 10 * turns, "one usage report per turn");
+}
+
+/// Review of #1108 (#1119 item 2): a start or a resume launches its adapter under the supervisor's lock (an `initialize` may take 30 s).
+/// A stop that comes meanwhile still writes, within its deadline, what does not need that lock: the answer shown and not yet in the
+/// file, and the usage still being gathered. Then, once the lock is free, it lets the adapter go, which keeps running.
+///
+/// The test holds the supervisor as such a launch does, until the stop has written both (or for 10 s: before, the stop waited for the
+/// lock and wrote nothing until then).
+#[test]
+fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_the_usage() {
+    let _serial = serial();
+    let rig = Rig::new("busy");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    let word = an_answer_not_yet_written(&rig, &node, &id);
+    let gathered = logged_usage(&node, &id);
+    let (sup, events, file) = (
+        std::sync::Arc::clone(&node.supervisor),
+        std::sync::Arc::clone(&node.events),
+        transcript_file(&rig, &id),
+    );
+    let agent = id.clone();
+    let (locked, is_locked) = std::sync::mpsc::channel();
+    let launch = std::thread::spawn(move || {
+        let guard = sup.lock().unwrap();
+        locked.send(()).unwrap();
+        let usage = || {
+            events
+                .events_after(0)
+                .iter()
+                .filter_map(|e| match &e.body {
+                    Some(v1::event::Body::AgentUsageReported(u)) if u.agent_id == agent => {
+                        Some(u.input_tokens)
+                    }
+                    _ => None,
+                })
+                .sum::<u64>()
+        };
+        let written = || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t.contains(&word)) && usage() > gathered.0
+        };
+        let held_since = Instant::now();
+        while !written() && held_since.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let took = held_since.elapsed();
+        drop(guard);
+        (written(), took)
+    });
+    is_locked.recv().unwrap();
+    drop(node);
+    let (written, took) = launch.join().unwrap();
+    assert!(
+        written,
+        "the stop wrote nothing while the supervisor was held ({took:?})"
+    );
+    assert!(took < Duration::from_secs(4), "it took {took:?}");
+    assert!(alive(pid), "the adapter ended with its node");
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    prompt(&node, &id, "after");
+    wait_for("the answer after the restart", || {
+        agent_said(&node, &id, "after")
+    });
 }
 
 /// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);

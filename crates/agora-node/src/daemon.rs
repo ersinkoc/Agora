@@ -2456,21 +2456,29 @@ impl Node {
         };
         // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
         let transcript_writer = {
-            let (sup, ledger) = (Arc::clone(&supervisor), Arc::clone(&ledger));
+            let (sup, ledger, stopping) = (
+                Arc::clone(&supervisor),
+                Arc::clone(&ledger),
+                Arc::clone(&stop),
+            );
             crate::transcript::spawn_writer(
                 Arc::clone(&chat),
                 // ADR-0089 decision 2 (review of #1103, N6): a running agent's file and one offered for Resume are kept; an ended one
                 // ages from when it ended (the ledger's last write for it), one the ledger no longer knows from its file.
                 Box::new(move |names: &[String]| {
                     use crate::transcript::Kept;
+                    // #1119 item 2: a launch holds the supervisor for up to 30 s, and the stop joins this writer: once the node is
+                    // stopping the lock is not waited for, and every file is kept (this sweep removes nothing).
+                    let Some(sup) = lock_unless(&sup, &stopping) else {
+                        return names.iter().map(|n| (n.clone(), Kept::Keep)).collect();
+                    };
                     let running: std::collections::HashSet<String> = sup
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
                         .list()
                         .into_iter()
                         .filter(|v| v.running)
                         .map(|v| v.id.as_str().to_string())
                         .collect();
+                    drop(sup);
                     names
                         .iter()
                         .filter_map(|n| {
@@ -2707,61 +2715,76 @@ impl Drop for Node {
     /// loop is waited for, and what the node had read from those adapters and not recorded yet is recorded as the loop would (states,
     /// options, usage and conversation; a request for the person is asked again by the next node from the holder's replay, ADR-0093).
     /// Then the conversation's last batch, the usage still being gathered and the ledger's kept files are written. Waiting for the
-    /// readers is bounded by [`DRAIN_WAIT`] and for the loop by [`LOOP_WAIT`]; the rest is local work. Agents the holder runs keep
-    /// running. With [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`) that is all, and no other thread is waited for;
-    /// otherwise the node's other threads are joined and its own agents end with it.
+    /// supervisor's lock is bounded by [`LOCK_WAIT`], for the readers by [`DRAIN_WAIT`] and for the loop by [`LOOP_WAIT`]; the rest is
+    /// local work. Agents the holder runs keep running. With [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`) that
+    /// is all, and no other thread is waited for; otherwise the node's other threads are joined and its own agents end with it.
+    ///
+    /// #1119 item 2: a start or a resume launches its adapter under the supervisor's lock (its `initialize` may take 30 s). When the
+    /// lock cannot be had within [`LOCK_WAIT`], what does not need it is written at once (the conversation, the usage, the ledger as it
+    /// stands), and the lock is tried again until [`LOCK_RETRY_UNTIL`] after the stop began. Still busy then: `agora node`'s stop lets
+    /// nothing go (its held adapters see the link close, as at a kill, and what their readers had not handed over is the holder's to
+    /// keep); a node dropped in-process waits for the lock, as its agents must end.
     fn drop(&mut self) {
-        drop(self.server.take());
+        // Before the control server ends (it can take up to its poll time): a command that comes meanwhile is refused, not run.
         self.stop.store(true, Ordering::Release);
+        drop(self.server.take());
         if self.crashed {
             self.join_threads();
             // Nothing is said, recorded or stopped: the supervisor, which owns the agents' processes, is never dropped.
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
-        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (it never ticks once the stop is set).
-        let (drained, views) = {
-            let mut s = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
-            let drained = s.let_go_held(Instant::now() + DRAIN_WAIT);
+        let began = Instant::now();
+        let supervisor = Arc::clone(&self.supervisor);
+        let mut sup = lock_by(&supervisor, began + LOCK_WAIT);
+        let missed = sup.is_none();
+        if missed {
+            self.write_held();
+            sup = lock_by(&supervisor, began + LOCK_RETRY_UNTIL);
+        }
+        if sup.is_none() && !self.keep_agents {
+            sup = Some(supervisor.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (it never ticks once the stop is set). The
+        // readers get DRAIN_WAIT from when the lock was had, within LOCK_WAIT + DRAIN_WAIT of the stop's start.
+        let drain = sup.map(|mut s| {
+            let until = (Instant::now() + DRAIN_WAIT).min(began + LOCK_WAIT + DRAIN_WAIT);
+            let drained = s.let_go_held(until);
             (drained, s.list())
-        };
+        });
         // The loop's own last round and the commands already running go first: their events are older than the drained ones, and a
         // call they waited on a held adapter for has just come back as given. Either may wait on an adapter the node runs itself (a
-        // call of up to 10 s), so the stop waits for them only so long.
-        let until = Instant::now() + LOOP_WAIT;
-        while Instant::now() < until
-            && (self.commands.commands_running() > 0
-                || self.ticker.as_ref().is_some_and(|t| !t.is_finished()))
-        {
-            std::thread::sleep(Duration::from_millis(5));
+        // call of up to 10 s), so the stop waits for them only so long; not at all when the lock was never had (they wait for it).
+        if drain.is_some() {
+            let until = Instant::now() + LOOP_WAIT;
+            while Instant::now() < until
+                && (self.commands.commands_running() > 0
+                    || self.ticker.as_ref().is_some_and(|t| !t.is_finished()))
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
         if let Some(t) = self.ticker.take() {
             if t.is_finished() || !self.keep_agents {
                 let _ = t.join();
             }
         }
-        if !drained.is_empty() {
-            self.events.supervisor_events(&drained, &views);
-            let now = now_ms();
-            for e in &drained {
-                chat_event(&self.chat, &self.mesh, e, now);
+        if let Some((drained, views)) = &drain {
+            if !drained.is_empty() {
+                self.events.supervisor_events(drained, views);
+                let now = now_ms();
+                for e in drained {
+                    chat_event(&self.chat, &self.mesh, e, now);
+                }
             }
+            // Before anything that could take long, as a stop has a deadline (written once already when the lock was busy: again, with
+            // what came since).
+            self.write_held();
         }
-        // The conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
-        // gathered, then the ledger and the kept session files: before anything that could take long, as a stop has a deadline.
-        if let Some(t) = self.transcript_writer.take() {
-            if let Some(w) = self.chat.wake() {
-                w.notify();
-            }
-            let _ = t.join();
-        }
-        crate::transcript::flush(&self.chat);
-        self.events.flush_all_usage();
-        let _ = self.ledger.flush_all();
         if self.keep_agents {
             // The process ends right after: the other threads (a Git or device watcher may wait on a slow command) are not waited for,
             // and as with `crash` the supervisor, which owns the agents' processes, is never dropped, so none is ended.
-            std::mem::forget(Arc::clone(&self.supervisor));
+            std::mem::forget(supervisor);
             return;
         }
         self.join_threads();
@@ -2781,6 +2804,21 @@ impl Drop for Node {
 }
 
 impl Node {
+    /// ADR-0104 O2: the conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
+    /// gathered, then the ledger and the kept session files: none needs the supervisor's lock, and each is quick local work. Can be
+    /// called again (with what came since).
+    fn write_held(&mut self) {
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
+            let _ = t.join();
+        }
+        crate::transcript::flush(&self.chat);
+        self.events.flush_all_usage();
+        let _ = self.ledger.flush_all();
+    }
+
     /// Joins the node's threads (each ends on the stop flag); the transcript writer is woken first.
     fn join_threads(&mut self) {
         for t in [
@@ -2802,6 +2840,44 @@ impl Node {
         }
     }
 }
+
+/// `m` locked, waiting until `until` at most (`None` when it is still held then). A lock poisoned by a panic is taken as it is, as
+/// everywhere in the node.
+fn lock_by<T>(m: &Mutex<T>, until: Instant) -> Option<std::sync::MutexGuard<'_, T>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// `m` locked, waiting for it as long as `stop` is not set (`None` once it is and the lock is still held).
+fn lock_unless<'a, T>(m: &'a Mutex<T>, stop: &AtomicBool) -> Option<std::sync::MutexGuard<'a, T>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if !stop.load(Ordering::Acquire) => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// #1119 item 2: how long a node that stops waits at first for the supervisor's lock, which a start or a resume holds while it launches
+/// an adapter (up to 30 s). Past it, what does not need the lock is written at once.
+pub const LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// #1119 item 2: until when, from the start of a stop, the supervisor's lock is tried again after [`LOCK_WAIT`] (and what does not need
+/// it was written). The readers then still get at least `LOCK_WAIT + DRAIN_WAIT - LOCK_RETRY_UNTIL` (1 s), and the loop [`LOOP_WAIT`]:
+/// 4 s in all at most, under `agora node`'s 5 s stop deadline.
+pub const LOCK_RETRY_UNTIL: Duration = Duration::from_secs(2);
 
 /// ADR-0104 O2: how long a node that stops waits at most for its supervision loop's last round, after it let the held adapters go.
 pub const LOOP_WAIT: Duration = Duration::from_secs(1);
