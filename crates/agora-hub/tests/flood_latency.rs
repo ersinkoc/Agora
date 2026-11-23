@@ -42,12 +42,22 @@ fn f(stream: u32, kind: u8, payload: Vec<u8>) -> Frame {
     }
 }
 
+/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
+/// `Welcome` read it with `c.recv()`.
 async fn recv(c: &mut Conn<TcpStream>) -> Frame {
-    tokio::time::timeout(Duration::from_secs(10), c.recv())
-        .await
-        .expect("timeout")
-        .unwrap()
-        .expect("closed")
+    loop {
+        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+            .await
+            .expect("timeout")
+            .unwrap()
+            .expect("closed");
+        let welcome = (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
+            && v1::Welcome::decode(f.payload.as_slice())
+                .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified);
+        if !welcome {
+            return f;
+        }
+    }
 }
 
 /// A connected machine `node`, announced online.

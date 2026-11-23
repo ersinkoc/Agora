@@ -91,12 +91,26 @@ fn agent(node: &str, id: &str) -> Body {
     })
 }
 
+/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
+/// `Welcome` read it with `c.recv()`.
 async fn recv(c: &mut Conn<TcpStream>) -> Frame {
-    tokio::time::timeout(Duration::from_secs(10), c.recv())
-        .await
-        .expect("timeout")
-        .unwrap()
-        .expect("closed")
+    loop {
+        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+            .await
+            .expect("timeout")
+            .unwrap()
+            .expect("closed");
+        if !client_welcome(&f) {
+            return f;
+        }
+    }
+}
+
+/// A `Welcome` that names the person's role: the one a window gets first (ADR-0106).
+fn client_welcome(f: &Frame) -> bool {
+    (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
+        && v1::Welcome::decode(f.payload.as_slice())
+            .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified)
 }
 
 /// A hub on a loopback port without TLS (the token and enrollment paths).
@@ -594,12 +608,19 @@ async fn dial_tls(addr: std::net::SocketAddr, connector: tokio_rustls::TlsConnec
         .unwrap()
 }
 
+/// The next frame, past the `Welcome` a window gets first (ADR-0106: a client's names a role, a node's does not); the tests of that
+/// `Welcome` read it with `c.recv()`.
 async fn recv_tls(c: &mut TlsConn) -> Frame {
-    tokio::time::timeout(Duration::from_secs(10), c.recv())
-        .await
-        .expect("timeout")
-        .unwrap()
-        .expect("closed")
+    loop {
+        let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+            .await
+            .expect("timeout")
+            .unwrap()
+            .expect("closed");
+        if !client_welcome(&f) {
+            return f;
+        }
+    }
 }
 
 #[tokio::test]
@@ -1459,6 +1480,108 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
             ("AgentList", "n1", "sent"),
             ("AgentStop", "n1", "sent"),
         ]
+    );
+}
+
+/// ADR-0106: subscribes as a window and reads what the hub sends first, which must be the `Welcome` naming the person's role; the
+/// snapshot follows it.
+async fn welcomed(c: &mut Conn<TcpStream>) -> v1::PersonRole {
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert_eq!(
+        (first.stream_id, first.kind),
+        (STREAM_CONTROL, kinds::WELCOME),
+        "the Welcome comes first"
+    );
+    let w = v1::Welcome::decode(first.payload.as_slice()).unwrap();
+    // Nothing was negotiated: a window sends no Hello.
+    assert_eq!(
+        (
+            w.chosen_generation,
+            w.capabilities.len(),
+            w.peer_id.as_str()
+        ),
+        (1, 0, "")
+    );
+    assert!(w.server_time_ms > 0);
+    assert_eq!(recv(c).await.kind, kinds::SNAPSHOT);
+    w.person_role()
+}
+
+#[tokio::test]
+async fn a_window_is_told_its_persons_role_first_and_a_role_change_reconnects_with_the_new_one() {
+    use agora_hub::users::Role;
+    let role = Arc::new(std::sync::Mutex::new(Role::Owner));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Demotable(Arc::clone(&role))),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    // One connection per role, each told its own.
+    for (r, want) in [
+        (Role::Owner, v1::PersonRole::Owner),
+        (Role::Member, v1::PersonRole::Member),
+        (Role::Viewer, v1::PersonRole::Viewer),
+    ] {
+        *role.lock().unwrap() = r;
+        let mut c = dial(addr, Some("good-token")).await;
+        assert_eq!(welcomed(&mut c).await, want, "{r:?}");
+    }
+    // A member made a viewer while connected: the hub ends the connection (checked once a second, with no command sent), and the
+    // next one says viewer. Then made the owner: the same, and owner.
+    *role.lock().unwrap() = Role::Member;
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Member);
+    *role.lock().unwrap() = Role::Viewer;
+    assert!(closed(&mut c).await);
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Viewer);
+    *role.lock().unwrap() = Role::Owner;
+    assert!(closed(&mut c).await);
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Owner);
+}
+
+#[tokio::test]
+async fn a_hub_not_in_team_mode_tells_its_window_owner_and_a_node_is_told_no_role() {
+    // `Tokens` answers `access` with the trait's default: the one person of a hub not in team mode.
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Owner);
+
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: vec![],
+        build: "t".into(),
+        locale: None,
+    };
+    node.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    let w = recv(&mut node).await;
+    assert_eq!((w.stream_id, w.kind), (STREAM_CONTROL, kinds::WELCOME));
+    let w = v1::Welcome::decode(w.payload.as_slice()).unwrap();
+    assert_eq!(
+        (w.person_role(), w.peer_id.as_str()),
+        (v1::PersonRole::Unspecified, "n1")
     );
 }
 

@@ -12,6 +12,15 @@ enum Role {
   ROLE_ADAPTER = 3;
 }
 
+// ADR-0049: the role of the person a client connection signed in as (ADR-0106). Not `Role`, which is the connection kind.
+enum PersonRole {
+  // An older hub, or a node's connection: the client keeps the behaviour it had before ADR-0106.
+  PERSON_ROLE_UNSPECIFIED = 0;
+  PERSON_ROLE_OWNER = 1;
+  PERSON_ROLE_MEMBER = 2;
+  PERSON_ROLE_VIEWER = 3;
+}
+
 // First message from the connecting side.
 message Hello {
   Role role = 1;
@@ -33,6 +42,8 @@ message Welcome {
   string peer_id = 3;
   // Milliseconds since the Unix epoch on the sender's clock.
   uint64 server_time_ms = 4;
+  // ADR-0106: the role of the person this client connection signed in as, when the connection opened. Unspecified for a node.
+  PersonRole person_role = 5;
 }
 
 // Sent by a reconnecting node or client after Welcome.
