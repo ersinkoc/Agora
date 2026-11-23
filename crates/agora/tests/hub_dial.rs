@@ -859,6 +859,7 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     );
     // Codex review of #796: a focus report or pointer motion the console passes on by itself is refused too, but asks nothing.
     session.terminal_report("laptop", &terminal, b"\x1b[I");
+    session.terminal_resize("laptop", &terminal, 100, 30);
     session.terminal_report("laptop", &terminal, b"\x1b[<35;3;4M");
     let end = Instant::now() + D::from_secs(10);
     while session.typing_unanswered() > 0 {
@@ -2334,14 +2335,14 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
-    struct Member(Arc<Mutex<BTreeSet<String>>>);
+    struct Member(Arc<Mutex<BTreeSet<String>>>, Arc<Mutex<Role>>);
     impl ClientAuth for Member {
         fn check(&self, token: &str) -> bool {
             token == "client-token"
         }
         fn access(&self, token: &str) -> Option<Access> {
             self.check(token).then(|| Access {
-                role: Role::Member,
+                role: *self.1.lock().unwrap(),
                 user: "eda".into(),
                 projects: Some(self.0.lock().unwrap().clone()),
                 session: String::new(),
@@ -2349,8 +2350,10 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         }
     }
     let granted = Arc::new(Mutex::new(BTreeSet::new()));
+    let person = Arc::new(Mutex::new(Role::Member));
     let mut hub = hubside("laptop");
-    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Member(Arc::clone(&granted)));
+    Arc::get_mut(&mut hub.state).unwrap().auth =
+        Box::new(Member(Arc::clone(&granted), Arc::clone(&person)));
     let addr = hub.listen("127.0.0.1:0");
     let dir = tmp("member-folder");
     let manifests = dir.join("manifests");
@@ -2433,6 +2436,20 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
             _ => assert!(Instant::now() < end, "no snapshot"),
         }
     };
+    // ADR-0106: the hub named the role in its first frame, so the console learns it without asking `PairStatus` (which the hub
+    // would refuse and write down): the projects picker, and no pairing cards.
+    assert_eq!(
+        session.person_role(),
+        agora_protocol::v1::PersonRole::Member
+    );
+    assert_eq!(
+        agora_tui::role::learn_on(
+            &mut session,
+            agora_tui::pair::Owner::Unknown,
+            agora_tui::picker::Role::Unknown
+        ),
+        Some((agora_tui::pair::Owner::No, agora_tui::picker::Role::Limited))
+    );
     let roots = agora_tui::picker::project_roots(&snapshot, "laptop");
     assert_eq!(roots, [pick.join("app").to_string_lossy().into_owned()]);
     let mut nav = agora_tui::picker::Nav::projects(roots.clone());
@@ -2555,6 +2572,57 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     wait("the agent to appear in the hub", || {
         hub.state.hub.view().0.agents.contains_key(&agent)
     });
+    // ADR-0106: made a viewer, the person's connection ends and the next one says so. Their console learns it without asking, hides
+    // the keys that change something (`f` among them) and sends no typing, focus report or size for a terminal it watches: nothing it
+    // does in the normal course is refused, so the owner's Activity gets no row from it.
+    let refused_before = refused_rows();
+    *person.lock().unwrap() = Role::Viewer;
+    let end = Instant::now() + Duration::from_secs(20);
+    while !matches!(session.next(Duration::from_millis(200)), Update::Closed) {
+        assert!(Instant::now() < end, "the hub kept the demoted connection");
+    }
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    assert_eq!(
+        session.person_role(),
+        agora_protocol::v1::PersonRole::Viewer
+    );
+    assert_eq!(
+        agora_tui::role::learn_on(
+            &mut session,
+            agora_tui::pair::Owner::No,
+            agora_tui::picker::Role::Limited
+        ),
+        Some((agora_tui::pair::Owner::No, agora_tui::picker::Role::Limited))
+    );
+    assert!(agora_tui::role::changes('f') && agora_tui::role::changes('s'));
+    let shell = |agent_id: &str| agent_id == agent || agent.ends_with(&format!("/{agent_id}"));
+    wait("the agent's terminal in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .terminals
+            .values()
+            .any(|t| shell(&t.agent_id))
+    });
+    let terminal = hub
+        .state
+        .hub
+        .view()
+        .0
+        .terminals
+        .iter()
+        .find(|(_, t)| shell(&t.agent_id))
+        .map(|(id, _)| id.rsplit('/').next().unwrap_or(id).to_string())
+        .unwrap();
+    session.terminal_input("laptop", &terminal, b"echo hi\r");
+    session.terminal_report("laptop", &terminal, b"\x1b[I");
+    // Anything the hub would answer has had time to arrive.
+    let end = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < end {
+        let _ = session.next(Duration::from_millis(100));
+    }
+    assert_eq!(refused_rows(), refused_before);
     drop(node);
     let _ = std::fs::remove_dir_all(&pick);
     let _ = std::fs::remove_dir_all(&dir);

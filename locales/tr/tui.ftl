@@ -146,6 +146,7 @@ tui-split-pick = Soldan bir ajan seç
 tui-split-no-screen = Terminali açılıyor…
 tui-split-status = { $online }/{ $total } makine · { $agents } ajan · { $waiting } seni bekliyor
 tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · u devam et · d kaldır · a onay iste · v cihazlar · q çık
+tui-split-keys-viewer = ↑↓ seç · Enter aç · a onay iste · v cihazlar · q çık
 tui-split-chat = Terminali yok: Enter konuşmasını açar
 tui-folder-title = { $machine } üzerinde bir klasörde ajan başlat
 tui-folder-keys = ↑↓ seç · Enter aç · ⌫ yukarı · Boşluk burada başlat · m makine · Esc vazgeç
@@ -157,6 +158,7 @@ tui-folder-more = … gösterilenden fazla klasör var (ilk { $n })
 tui-folder-unsupported = Bu makine klasörlerini henüz listeleyemiyor (güncelleyin).
 tui-folder-failed = O klasör açılamadı ({ $code }).
 tui-folder-role = Rolünüz bu klasörü seçmenize izin vermiyor. Sahibine sorun.
+tui-viewer-watching = Burada izleyebilirsin. Başlatmak, durdurmak ve istekleri cevaplamak için üye rolü gerekir. Sahibine sor.
 tui-folder-identity = Bu klasörün projesi son ajandan beri değişti. Yine de başlatmak için y, vazgeçmek için başka bir tuş.
 tui-forgot = Listeden kaldırıldı.
 tui-forget-running = Hâlâ çalışıyor: önce durdur (x).
@@ -203,7 +205,9 @@ tui-tool-other = Adım
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · r değişiklikler · o dosyalar · b pano · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
+tui-app-keys-tree-viewer = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · r değişiklikler · o dosyalar · b pano · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
 tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
+tui-app-keys-terminal-viewer = Ctrl-] ya da F12 listeye dön · İzliyorsun: tuşların gönderilmez · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
 tui-app-keys-terminal-waiting = Seni bekliyor: Alt+Y izin verir · Alt+N reddeder · Ctrl-] ya da F12 listeye dön · Alt+K komutlar
 tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
 tui-app-keys-palette = Süzmek için yaz · ↑↓ seç · Enter çalıştır · Esc kapat

@@ -1353,8 +1353,12 @@ impl Session {
         .map(|_| ())
     }
 
-    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
+    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget. Never sent
+    /// for a viewer (ADR-0106): their window watches, and the hub would refuse and write down every key.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1366,8 +1370,11 @@ impl Session {
     }
 
     /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
-    /// a machine's refusal of it asks for no grant.
+    /// a machine's refusal of it asks for no grant. Never sent for a viewer, as typing is not.
     pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1399,7 +1406,12 @@ impl Session {
         self.typing.sent.len()
     }
 
+    /// Asks for the terminal's size (the hub keeps the smallest its watchers asked for). Never sent for a viewer (ADR-0106): the hub
+    /// refuses it, writes the refusal down, and a viewer's window does not size the agent's terminal.
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         self.send_nowait(
             node,
             command_request::Command::TerminalResize(agora_protocol::v1::TerminalResize {

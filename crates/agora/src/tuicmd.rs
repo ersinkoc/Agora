@@ -331,18 +331,6 @@ fn approve_device(
 /// How long the owner has to read a card and answer it before the box closes by itself (the request stays pending on the hub).
 const PAIR_ASK_FOR: Duration = Duration::from_secs(120);
 
-/// Asks the hub whether this session is the owner's: `PairStatus` is answered to the owner only, and says the role for the folder
-/// picker too (#1086, [`agora_tui::pair::status_role`]). `None` when it could not tell (the link failed): it is asked again at the next
-/// connection.
-fn pair_owner(session: &mut Session) -> Option<(agora_tui::pair::Owner, agora_tui::picker::Role)> {
-    let answer = session.command_info(
-        "",
-        WireCommand::PairStatus(agora_protocol::v1::PairStatus {}),
-        Duration::from_secs(3),
-    );
-    agora_tui::pair::status_role(answer.as_ref().err().map(|e| e.code.as_str()))
-}
-
 fn pair_asked_line(say: &Say, count: usize) -> String {
     if count > 1 {
         say.text(
@@ -559,6 +547,7 @@ fn start_unread(
         cols,
         rows,
         now_ms: now_ms(),
+        viewer: false,
     };
     match start_card_fit(&view, text) {
         Some((a, false)) if !read_whole.contains(&a.approval_id) => Some(a.clone()),
@@ -1985,8 +1974,17 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             }
         }
         let mut dirty_since: Option<Instant> = None;
-        // #1086, #1099: the plain list does not ask the hub for the role; it is learnt from a folder the hub refuses for it.
-        let mut role = agora_tui::picker::Role::Unknown;
+        // #1086, #1099: the plain list does not ask the hub for the role; it is learnt from a folder the hub refuses for it. ADR-0106: a
+        // hub that names the role in its `Welcome` says it at once.
+        let person = session.person_role();
+        let mut role = match person {
+            agora_protocol::v1::PersonRole::Owner => agora_tui::picker::Role::Owner,
+            agora_protocol::v1::PersonRole::Member | agora_protocol::v1::PersonRole::Viewer => {
+                agora_tui::picker::Role::Limited
+            }
+            agora_protocol::v1::PersonRole::Unspecified => agora_tui::picker::Role::Unknown,
+        };
+        let viewer = person == agora_protocol::v1::PersonRole::Viewer;
         // ADR-0057: the `agent.start` requests read whole in the reader, which y may then allow even where the panel cannot show them.
         let mut read_whole: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_refresh = Instant::now();
@@ -2010,6 +2008,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         cols,
                         rows,
                         now_ms: now_ms(),
+                        viewer,
                     };
                     let _ = out.write_all(frame(&view, &text).as_bytes());
                 } else {
@@ -2118,6 +2117,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         }
                     }
                     3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
+                    // ADR-0106: a viewer's list watches; nothing that changes something is sent (the hub would refuse it, written down).
+                    _ if viewer && agora_tui::role::changes(char::from(k)) => {
+                        notice = say.text(key!("tui-viewer-watching"), &[]);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    }
                     b'y' | b'n' => {
                         if let Some(s) = &snapshot {
                             // A start request is allowed only once all of it was in view: in the panel, or in the reader.
@@ -2597,13 +2601,16 @@ fn console(
         &mut c.typing_allowed,
         &mut c.typing_taken,
     );
-    // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
-    if c.pair.owner == agora_tui::pair::Owner::Unknown {
-        if let Some((owner, role)) = pair_owner(session) {
+    // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only). ADR-0106: a hub
+    // that says the role in its `Welcome` is asked only for the owner, whose pairing may be switched off; a member's or viewer's
+    // console asks nothing, so it leaves no refused row in the owner's Activity. An older hub is asked as before (#1099).
+    if let Some((owner, role)) = agora_tui::role::learn_on(session, c.pair.owner, c.role) {
+        if owner != c.pair.owner {
             c.pair.set_owner(owner);
-            c.role = role;
         }
+        c.role = role;
     }
+    c.app.viewer = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
     let mut pair_seen = c.pair.shown().len();
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
@@ -2972,6 +2979,10 @@ fn console(
                                 note_rows,
                             )
                             .then(|| approval.clone());
+                        }
+                        if c.app.viewer {
+                            c.notice = say.text(key!("tui-viewer-watching"), &[]);
+                            continue;
                         }
                         let target = Target::Tab { agent, approval };
                         if answer_command(say, session, rx, c, area, &target, answer)
@@ -4217,6 +4228,11 @@ fn command(
         return false;
     };
     let selected = c.selected.clone();
+    // ADR-0106: a viewer's window watches. The hub would refuse each of these and write the refusal down; nothing is sent.
+    if c.app.viewer && agora_tui::role::changes(k) {
+        c.notice = say.text(key!("tui-viewer-watching"), &[]);
+        return false;
+    }
     match k {
         'y' | 'n' | ALLOW_ALWAYS => {
             let reply = match k {
@@ -5987,6 +6003,7 @@ mod forget_tests {
             cols: 100,
             rows: 10,
             now_ms: 0,
+            viewer: false,
         };
         let frame = frame(&view, &text);
         assert!(
