@@ -456,6 +456,22 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
+`<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
+secret values replaced). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
+before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
+shows: ids never start again at 1. A tool call or a plan from before the restart is changed in place under its id. A permission entry
+still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
+there is dropped with an `adapter.queue_dropped` notice. A fresh start ("Start again") begins a new file and numbers on after the
+earlier session's ids. A node killed loses at most the last batch (up to a second): those entries were shown live and are not in the
+file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
+memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
+`chat.history_max_bytes = N` (per agent; default 32 MiB, at most 256 MiB, 0 writes nothing) and `chat.history_days = N` (default and
+at most 30) bound it: over its size a file keeps its newest half, and the file of an agent that does not run is removed once it was not
+written for that many days (2 GiB per node in all). `agora history purge` removes every transcript. Reading older entries in pages
+(`chat.history`) is ADR-0089's later schema step.
+
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared

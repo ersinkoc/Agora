@@ -323,4 +323,18 @@ references are at main `9760e901`.
   (`view.ts`) keep the tokens, model, context level and own cost (and in the window the start time) when it is set and the agent is
   listed from that producer. The terminal client needed no code change: it draws the hub's snapshot (a client test pins that a take-up asks for a fresh one). Tested with a view rebuilt from a log
   with a kept take-up, a resync re-statement, a new start of a reused id that still resets, the window's fold, and a node restart in
-  `hold_node_pipes` whose hub view and terminal client header still count what the agent used before. Steps 4 and 5 are not built.
+  `hold_node_pipes` whose hub view and terminal client header still count what the agent used before.
+- Step 4 (C1, #931) is built: `crates/agora-node/src/transcript.rs` writes each structured agent's transcript as ADR-0089 decides
+  (`<data>/transcripts/<id>.jsonl`, `0600` in a `0700` folder, a header line with the format version, one line per version of an entry with
+  the call's tool and arguments and the plan mark beside it, a line for entries taken back out; every line carries the highest id given).
+  The chat path only marks changed ids; a writer thread takes the batch under the board's lock at most once a second or per 64 KiB, and
+  encodes, replaces the node's own secret values and appends after letting it go. A failed write drops the batch, keeps the ring and says
+  `chat.history_not_saved` once in that conversation. Bounds: `chat.history_max_bytes` (32 MiB, at most 256 MiB; the newest half kept in a new
+  file that says it was cut), `chat.history_days` (30, only lowered; files of agents that do not run, checked at start and hourly), 2 GiB
+  per node, `agora history purge`. The node seeds the ring from the file's end (at most 4 MiB) on take-up, before the ticker reads the
+  holder, and on resume; a fresh start moves the file aside as `<id>.earlier.jsonl` and numbers on after it. Tested with a kill then take-up
+  (earlier turns with their ids, ids after them), a node that cannot write (one notice, the agent unaffected), and a tool call that
+  finishes after the restart (one entry, updated in place), in `hold_node_pipes`, plus node unit tests and `agora-bench transcript`.
+  Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
+  file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop does
+  not flush the last batch (step 5). Step 5 is not built.
