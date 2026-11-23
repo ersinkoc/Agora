@@ -945,18 +945,7 @@ impl EventSink {
     /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
     /// id and its kind can continue one.
     pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
-        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
-            agent_id: e.agent_id.clone(),
-            kind: e.kind.clone(),
-            project_id: e.project_id.clone(),
-            folder: e.folder.clone(),
-            parent_agent_id: e.parent_agent_id.clone(),
-            resumable,
-            started_at_ms: e.started_at_ms,
-            interrupted_at_ms: e.interrupted_at_ms,
-            last_state: crate::ledger::proto_state(&e.last_state) as i32,
-            still_running: e.still_running(),
-        }));
+        self.record(Body::AgentInterrupted(e.interrupted_event(resumable)));
     }
 
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
@@ -1836,7 +1825,7 @@ impl Node {
         }
         // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
         for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+            events.agent_interrupted(&e, sup.offers_resume(&e));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1926,7 +1915,7 @@ impl Node {
                     found
                         .into_iter()
                         .map(|e| {
-                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            let resumable = s.offers_resume(&e);
                             (e, resumable)
                         })
                         .collect()
