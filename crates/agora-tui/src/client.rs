@@ -939,8 +939,15 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
-    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
+    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033). The hub
+    /// answers it to the owner only, so a member's or viewer's session (ADR-0106) does not ask: `auth.forbidden` without a request,
+    /// where the hub would refuse it and write the refusal down. An older hub's session asks as before.
     pub fn usage_total(&mut self) -> Result<u64, String> {
+        if matches!(self.person_role, PersonRole::Member | PersonRole::Viewer) {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
         let ok = self.command_ok(
             "",
             command_request::Command::UsageReport(agora_protocol::v1::UsageReport {}),
@@ -1353,8 +1360,12 @@ impl Session {
         .map(|_| ())
     }
 
-    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
+    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget. Never sent
+    /// for a viewer (ADR-0106): their window watches, and the hub would refuse and write down every key.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1366,8 +1377,11 @@ impl Session {
     }
 
     /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
-    /// a machine's refusal of it asks for no grant.
+    /// a machine's refusal of it asks for no grant. Never sent for a viewer, as typing is not.
     pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1399,7 +1413,12 @@ impl Session {
         self.typing.sent.len()
     }
 
+    /// Asks for the terminal's size (the hub keeps the smallest its watchers asked for). Never sent for a viewer (ADR-0106): the hub
+    /// refuses it, writes the refusal down, and a viewer's window does not size the agent's terminal.
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         self.send_nowait(
             node,
             command_request::Command::TerminalResize(agora_protocol::v1::TerminalResize {

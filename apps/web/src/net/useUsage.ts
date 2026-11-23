@@ -10,7 +10,8 @@ export const USAGE_POLL_MS = 30_000;
 /**
  * The hub's cost report for this connection. The hub answers `UsageReport` to the owner only, and every refusal is a row in the owner's
  * Activity (ADR-0049), so the window asks only once `owner` (the hub's `PairStatus` answer) says this session is the owner's, or that the
- * hub predates pairing (`unavailable`, where it asks as it always did). A member's or viewer's window (`no`) never asks (#1044).
+ * hub predates pairing (`unavailable`, where it asks as it always did). A member's or viewer's window (`no`) never asks (#1044); with a
+ * hub that names the role (ADR-0106) it is `no` at once, without asking `PairStatus` either.
  */
 export function useUsageReport(api: Live | undefined, live: boolean, owner: PairOwner): UsageSummary | undefined {
   const [usage, setUsage] = useState<UsageSummary | undefined>();

@@ -579,6 +579,7 @@ describe('refused sessions', () => {
 });
 
 describe('shared terminal size', () => {
+  // ADR-0106: once the connection has said the role (here an older hub's first frame, the snapshot), never before it.
   it('says the window\'s size again right behind every subscription, after a reconnect too', async () => {
     const sockets: FakeSocket[] = [];
     const live = connectLive({
@@ -588,6 +589,7 @@ describe('shared terminal size', () => {
     });
     const first = sockets[0] as FakeSocket;
     first.onopen?.();
+    first.deliver(EVENT_KIND.SNAPSHOT, v1.Snapshot.encode({ pos: 1 }).finish());
     const session = live.terminal('laptop', 't-1').connect(() => {});
     session.resize(120, 40);
     const commands = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.kind === 0 && (f.streamId === STREAM_COMMANDS || f.streamId >= 3))
@@ -598,6 +600,8 @@ describe('shared terminal size', () => {
     await new Promise((r) => setTimeout(r, 10));
     const second = sockets[1] as FakeSocket;
     second.onopen?.();
+    expect(shape(second)).toEqual(['subscribe']);
+    second.deliver(EVENT_KIND.SNAPSHOT, v1.Snapshot.encode({ pos: 1 }).finish());
     expect(shape(second)).toEqual(['subscribe', '120x40']);
     live.close();
   });

@@ -94,6 +94,21 @@ impl Screen<CrosstermBackend<Stdout>> {
     }
 }
 
+impl Screen<CrosstermBackend<Stdout>> {
+    /// The real terminal's screen type, `cols` x `rows`, without entering the alternate screen or asking the terminal its size: for
+    /// tests of the console's state that never draw (drawing on it would write to stdout).
+    pub fn offscreen(cols: u16, rows: u16) -> io::Result<Self> {
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, cols, rows)),
+        };
+        Ok(Self {
+            term: Terminal::with_options(CrosstermBackend::new(io::stdout()), options)?,
+            restore: false,
+            sink: None,
+        })
+    }
+}
+
 impl Screen<TestBackend> {
     /// An in-memory screen of `cols` x `rows` for tests; nothing is written to the real terminal.
     pub fn test(cols: u16, rows: u16) -> io::Result<Self> {
