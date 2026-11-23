@@ -121,3 +121,4 @@ Date: YYYY-MM-DD
 | 0102 | Red is the one danger colour; amber means only "needs you" | Accepted |
 | 0103 | A window gets recent Team chat history | Accepted |
 | 0104 | A kept agent keeps its conversation, usage and options across a node restart | Accepted |
+| 0105 | Confined Node.js agents on Windows: keep the restricted token, fix the stdio pipe in libuv | Accepted |

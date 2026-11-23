@@ -130,16 +130,24 @@ pub struct LocalStream {
 pub enum ReadTimeout {
     /// The read timeout is set.
     Set,
-    /// The system refused a new timeout because the peer has shut the connection (macOS answers `EINVAL` then). A receive on it
-    /// returns what is buffered or the end at once, so it cannot wait; the timeout is not set.
+    /// The system refused a new timeout because the connection is shut (macOS answers `EINVAL` once the peer has closed it), and the
+    /// stream is seen to be hung up. A receive on it returns what is buffered or the end at once, so it cannot wait; the timeout is
+    /// not set.
     PeerClosed,
 }
 
-/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure.
-fn read_timeout_result(r: io::Result<()>) -> io::Result<ReadTimeout> {
+/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure: an `InvalidInput` answer is the peer having
+/// closed only when `hung_up` confirms the connection is shut; otherwise (or when the check fails) it is returned as it came.
+fn read_timeout_result(
+    r: io::Result<()>,
+    hung_up: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<ReadTimeout> {
     match r {
         Ok(()) => Ok(ReadTimeout::Set),
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(ReadTimeout::PeerClosed),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => match hung_up() {
+            Ok(true) => Ok(ReadTimeout::PeerClosed),
+            Ok(false) | Err(_) => Err(e),
+        },
         Err(e) => Err(e),
     }
 }
@@ -937,7 +945,8 @@ impl LocalStream {
     }
 
     /// [`Self::set_read_timeout`] for a caller that can go on without the timeout once the peer has shut the connection: that case
-    /// (an `InvalidInput` answer, macOS) is `Ok(ReadTimeout::PeerClosed)`; every other failure is returned.
+    /// (an `InvalidInput` answer, macOS, on a stream that is seen to be hung up: `poll(2)` on Unix) is `Ok(ReadTimeout::PeerClosed)`;
+    /// every other failure is returned, an `InvalidInput` on a stream still open too. Windows never refuses a read timeout.
     pub fn set_read_timeout_or_closed(
         &self,
         timeout: Option<std::time::Duration>,
@@ -946,7 +955,20 @@ impl LocalStream {
         if timeout.is_some_and(|t| t.is_zero()) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
-        read_timeout_result(self.set_read_timeout(timeout))
+        read_timeout_result(self.set_read_timeout(timeout), || self.hung_up())
+    }
+
+    /// Whether the connection is shut in both directions (see [`Self::set_read_timeout_or_closed`]).
+    fn hung_up(&self) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unixhold::hung_up(self.inner.as_raw_fd())
+        }
+        #[cfg(windows)]
+        {
+            Ok(false)
+        }
     }
 
     /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
@@ -3552,19 +3574,39 @@ mod atomic_replace_tests {
 mod read_timeout_tests {
     use super::*;
 
+    fn never_asked() -> io::Result<bool> {
+        panic!("the hang-up is checked only for an InvalidInput answer")
+    }
+
     #[test]
-    fn invalid_input_is_the_peer_closed_answer_and_others_are_errors() {
-        assert_eq!(read_timeout_result(Ok(())).unwrap(), ReadTimeout::Set);
-        let closed = read_timeout_result(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+    fn invalid_input_on_a_hung_up_stream_is_the_peer_closed_answer_and_others_are_errors() {
+        assert_eq!(
+            read_timeout_result(Ok(()), never_asked).unwrap(),
+            ReadTimeout::Set
+        );
+        let invalid = || Err(io::Error::from(io::ErrorKind::InvalidInput));
+        let closed = read_timeout_result(invalid(), || Ok(true));
         assert_eq!(closed.unwrap(), ReadTimeout::PeerClosed);
         for kind in [
             io::ErrorKind::PermissionDenied,
             io::ErrorKind::BrokenPipe,
             io::ErrorKind::Other,
         ] {
-            let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
+            let e = read_timeout_result(Err(io::Error::from(kind)), never_asked).unwrap_err();
             assert_eq!(e.kind(), kind);
         }
+    }
+
+    /// Issue #830: an `InvalidInput` answer on a stream that is still open (or whose state cannot be read) is a failure, not a
+    /// closed peer.
+    #[test]
+    fn invalid_input_on_an_open_stream_is_an_error() {
+        let invalid = || Err(io::Error::from(io::ErrorKind::InvalidInput));
+        let open = read_timeout_result(invalid(), || Ok(false)).unwrap_err();
+        assert_eq!(open.kind(), io::ErrorKind::InvalidInput);
+        let unknown = read_timeout_result(invalid(), || Err(io::Error::from(io::ErrorKind::Other)))
+            .unwrap_err();
+        assert_eq!(unknown.kind(), io::ErrorKind::InvalidInput);
     }
 }
 

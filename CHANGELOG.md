@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.36
+
 - Team chat shows the agents' recent messages (up to 50) in a window that opens, reloads or reconnects, instead of starting empty and showing only messages sent while it was open; a member or viewer sees the same messages they would have seen live (ADR-0103, #1020).
 - In team mode, the terminal client's start in a folder (`f`) now opens a member at their project's folder on that machine, or lists their projects there to choose from when they have several, and the way up stops at the project's folder; before, it opened at the home folder, which the hub refuses a member, so they could not reach their project's folders at all. In the console, the owner's still opens at the home folder (#1086).
 - In team mode, the terminal client's plain list (no console) now opens start in a folder (`f`) at the machine's project folder, as the window does, so a member is no longer refused the home folder on their first `f` of each connection (which left a refused row in the owner's Activity); the owner goes up from there, and a machine with no project folder, or a project folder that cannot be listed (gone, protected; not when the machine or the link failed), opens at the home folder. In the console, a member made the owner can go up from their project's folder without restarting the client, and gets the owner's picker (and the pairing cards) once the client has noticed the change: on a quiet hub, or after a restart, since a busy hub's routine refreshes can hide the reconnection (ADR-0106, if accepted, removes this; #1109). A viewer with several projects on a machine is told at once that their role does not let them choose a folder, instead of after choosing a project (#1099).

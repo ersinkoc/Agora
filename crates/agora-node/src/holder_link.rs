@@ -779,7 +779,8 @@ impl Reply {
 
 // ----- frames -----
 
-/// Sends one frame (`payload` is a tag and body), with `terminal` attached to its first bytes when given.
+/// Sends one frame (`payload` is a tag and body), with `terminal` attached to its first bytes when given. It ends within
+/// [`FRAME_TIMEOUT`] whatever the stream's write timeout was, and leaves that at [`WRITE_SLICE`].
 pub fn write_frame(
     stream: &mut LocalStream,
     payload: &[u8],
@@ -792,7 +793,10 @@ pub fn write_frame(
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
     let began = Instant::now();
-    // In the frame's last slice each send waits only for what is left of its time (and the stream's own slice is put back after).
+    // Each blocked send waits at most a slice, whatever the stream's own write timeout was: with none, or a longer one, a send begun
+    // before the frame's last slices could block past its deadline. Not failed for this, as below.
+    let _ = stream.set_write_timeout(Some(WRITE_SLICE));
+    // In the frame's last slice each send waits only for what is left of its time (and the slice is put back after).
     let mut capped = false;
     let result = send_frame(stream, &frame, terminal, began, &mut capped);
     if capped {
@@ -858,28 +862,38 @@ fn piece(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(SEND_PIECE)]
 }
 
-/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream
-/// is waited on for writability for what is left (exact, by `poll`), and the stream's write timeout is cut to that as a bound where
-/// the wait cannot be done (Windows). `Ok(false)`: not writable yet, so no send now (the caller asks again, which ends the frame
-/// when its time is spent).
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent. In the frame's last two [`WRITE_SLICE`]s the stream
+/// is first waited on for writability (`LocalStream::wait_writable`, `poll` on Unix) for at most a slice and what is left: a timed
+/// `poll` ends on time, where a socket's own write timeout fires late (a 1 s one by 24-27 ms, measured on Linux, so a send begun with just
+/// over a slice left could end past the deadline), and a send of one [`SEND_PIECE`] into room does not wait. In the last slice the stream's
+/// write timeout is also cut to what is left after the wait, as a bound where a send waits still (room for less than a piece, or
+/// Windows, where the pipe is not polled). Earlier sends are not polled: `poll` reports room only once three quarters of a Unix
+/// socket's buffer are free, which halves the rate of a large frame to a reader that keeps up (measured). `Ok(false)`: not writable
+/// yet, so no send now (the caller asks again, which ends the frame when its time is spent).
 fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<bool, LinkError> {
-    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
-    if left.is_zero() {
-        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    let left = frame_left(began)?;
+    if left >= 2 * WRITE_SLICE {
+        return Ok(true);
     }
+    if !stream.wait_writable(left.min(WRITE_SLICE))? {
+        return Ok(false);
+    }
+    // What is left after the wait: the send's own bound is that, not what was left before it.
+    let left = frame_left(began)?;
     if left < WRITE_SLICE {
-        if !stream.wait_writable(left)? {
-            return Ok(false);
-        }
-        // What is left after the wait: the send's own bound is that, not what was left before it.
-        let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
-        if left.is_zero() {
-            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-        }
         stream.set_write_timeout(Some(left))?;
         *capped = true;
     }
     Ok(true)
+}
+
+/// What is left of the [`FRAME_TIMEOUT`] of a frame that began at `began`; a timeout error when nothing is.
+fn frame_left(began: Instant) -> Result<Duration, LinkError> {
+    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+    if left.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    Ok(left)
 }
 
 fn timed_out(e: &io::Error) -> bool {
