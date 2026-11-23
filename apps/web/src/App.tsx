@@ -33,7 +33,7 @@ import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
 import type { WorkspaceFiles } from './net/files';
 import { demoSource } from './terminal/source';
-import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage, type MyDevice } from './screens';
+import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SettingsDemo, SignInPage, type MyDevice } from './screens';
 import { browserName, canBeApprovedOn, deviceLabel, fingerprint, fromHex, registrationVerifies, signAsk, signEndorsement, signRegistration, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
 import { DeviceRequest } from './components/DeviceRequest';
 import { num } from './net/view';
@@ -516,7 +516,8 @@ export function App() {
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
   // Home is what Console / PhoneHome draw (the chain below); any other page gets the first request as a floating card.
-  const showsHome = current === undefined && hash !== '#/gallery' && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
+  const settingsDemo = hash === '#/gallery/settings' || hash.startsWith('#/gallery/settings/');
+  const showsHome = current === undefined && hash !== '#/gallery' && !settingsDemo && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
   // "Allow a new machine to join": back to Home, where the window for new machines is; its own button asks, this only brings it into view.
   const showPairing = useCallback(() => {
     go('#/');
@@ -567,7 +568,7 @@ export function App() {
     askApproval={device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined;
 
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
-  if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
+  if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo' && !settingsDemo) {
     return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} key={linkCode ?? ''} initialCode={linkCode} />;
   }
 
@@ -576,7 +577,7 @@ export function App() {
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
     <GiveContext.Provider value={giveApi}>
-      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
+      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
@@ -599,7 +600,8 @@ export function App() {
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
-      <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
+      {/* The demo Settings page shows Settings only: no demo requests over it. */}
+      <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
       {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}

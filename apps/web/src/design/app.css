@@ -506,6 +506,89 @@
   .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }
   .kit-gallery__group { @apply grid gap-2; }
   .kit-gallery__row { @apply flex flex-wrap items-center gap-3; }
+
+  /* A dialog (an overlay: the raised surface and the one shadow, ADR-0102): an icon chip, a 16 px title, a muted line, the answers at the end. */
+  .kit-overlay { @apply fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm; }
+  .kit-dialog { @apply fixed left-1/2 top-1/2 z-50 grid -translate-x-1/2 -translate-y-1/2 items-start gap-x-3 gap-y-1 overflow-auto rounded-l border border-line p-5 text-ink;
+    grid-template-columns: auto minmax(0, 1fr); width: min(28rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+  .kit-dialog > .kit-chip { grid-row: span 2; }
+  .kit-dialog__title { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
+  .kit-dialog__body { @apply col-start-2 m-0 text-muted; }
+  .kit-dialog__actions { @apply col-span-2 mt-4 flex flex-wrap justify-end gap-2; }
+}
+
+/* Settings (redesign PR 8): a side index, then each section as a card with setting rows. Built from the kit; these are its layout only. */
+@layer components {
+  .set-page { @apply grid items-start gap-6 md:grid-cols-[13.5rem_minmax(0,1fr)] md:gap-9; }
+  .set-nav { @apply sticky top-10 z-[5] -mx-4 flex gap-x-1 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-0.5 md:overflow-visible md:border-b-0 md:p-0; }
+  .set-nav__group { @apply flex flex-none items-center gap-1 md:grid md:items-stretch md:gap-0.5; }
+  /* The one uppercase label on the page (sidebar group labels, visual-language.md §2). */
+  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold uppercase tracking-wider text-muted md:block; font-size: 0.6875rem; }
+  .set-nav__row { @apply w-auto flex-none whitespace-nowrap text-muted hover:text-ink md:w-full; font-size: var(--text-body); }
+  .set-nav__row[aria-current='true'] { @apply text-ink; }
+  .set-nav__row[aria-current='true'] .set-nav__icon { @apply text-accent; }
+  .set-nav__icon { @apply hidden text-muted md:block; }
+  .set-nav__count { @apply ms-auto inline-grid h-4.5 min-w-4.5 place-items-center rounded-full bg-surface-2 px-1 text-muted; font-size: 0.6875rem; }
+  .set-content { @apply grid min-w-0 max-w-[50rem] gap-7; }
+  .set-head { @apply grid gap-1; }
+  .set-head__title { @apply m-0 font-semibold tracking-tight; font-size: var(--text-page); }
+  .set-head__line { @apply m-0 text-muted; }
+  .set-group { @apply grid gap-3; }
+  .set-group__head { @apply flex flex-wrap items-center justify-between gap-2; }
+  .set-group__title { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
+  .set-card, .set-anchor { scroll-margin-top: 6rem; }
+  .set-card { @apply min-w-0 overflow-hidden rounded-m border border-line bg-surface-1; container-type: inline-size; }
+  .set-card > * + * { @apply border-t border-line; }
+  .set-card__head { @apply flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3.5; }
+  .set-card__icon { @apply size-8; background: var(--kit-tint); }
+  .set-card__title { @apply grid min-w-0 flex-1 gap-px; flex-basis: 12rem; }
+  .set-card__h { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-strong); }
+  .set-card__desc { @apply m-0 text-muted; font-size: var(--text-caption); }
+  .set-card__end { @apply ms-auto flex max-w-full min-w-0 flex-wrap items-center gap-2; }
+  .set-card__block { @apply grid gap-2 px-4 py-3; }
+  .set-card .codebox { @apply font-mono; font-size: var(--text-caption); }
+  .set-value { @apply rounded-s border border-line bg-surface-0 px-2.5 py-1; font-size: var(--text-body); }
+  .set-print { @apply tracking-wide; font-size: var(--text-title); }
+  /* A form with its labels in one column and its fields in the next, lined up; one column on a narrow card. */
+  .set-form { @apply m-0 grid; }
+  .set-form__row { @apply grid items-center gap-x-4 gap-y-1.5 px-4 py-2.5; grid-template-columns: minmax(8rem, 12.5rem) minmax(0, 20rem); }
+  .set-form__row + .set-form__row { @apply border-t border-line; }
+  .set-form__label { font-weight: 550; }
+  .set-form__row input { @apply w-full min-w-0 bg-surface-0 py-1.5; }
+  .set-form__actions { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5; }
+  @container (max-width: 32rem) { .set-form__row { grid-template-columns: minmax(0, 1fr); } .set-form__row > span.set-form__label { @apply hidden; } }
+  .set-card .kit-setting__control select { @apply bg-surface-0 py-1.5; }
+  /* A list inside a card: a system tile, a name with a caption, its facts and actions at the end. */
+  .set-list { @apply m-0 grid list-none p-0; }
+  .set-list > li + li { @apply border-t border-line; }
+  .set-item { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-ink; }
+  a.set-item { @apply no-underline transition-colors duration-150 hover:bg-surface-2; }
+  .set-item__main { @apply grid min-w-0 flex-1 gap-0.5; flex-basis: 10rem; }
+  .set-item__name { @apply truncate font-semibold; }
+  .set-item__meta { @apply flex min-w-0 flex-wrap gap-x-1.5 text-muted; font-size: var(--text-caption); }
+  .set-item__meta > * + *::before { content: '·'; @apply me-1.5; }
+  .set-item__flag { @apply font-medium text-ink; }
+  .set-item__end { @apply ms-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2; }
+  .set-item__end .kit-pill { @apply max-w-full overflow-hidden text-ellipsis; }
+  .set-item__alert { @apply m-0 basis-full text-danger; font-size: var(--text-caption); }
+  .set-os { @apply grid size-8 flex-none place-items-center rounded-s bg-surface-2 text-ink; }
+  .set-fp { @apply font-mono tracking-wide; overflow-wrap: anywhere; }
+  .set-dot { @apply inline-block size-1.5 flex-none rounded-full; background: currentColor; }
+  /* Agents: a grid of kind cards; one that is not installed is dashed and quieter (its words stay readable). */
+  .set-kinds-wrap { @apply grid gap-3 px-4 pb-4 pt-3; }
+  .set-kinds { @apply m-0 grid list-none items-start gap-2 p-0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); }
+  .set-kind { @apply min-w-0 rounded-s border border-line bg-surface-0; }
+  .set-kind--missing { @apply border-dashed bg-transparent; }
+  .set-kind--missing .kit-avatar { @apply opacity-60; }
+  .set-kind__face { @apply flex min-w-0 cursor-pointer list-none items-center gap-2.5 rounded-s p-2.5; }
+  .set-kind__face::-webkit-details-marker { display: none; }
+  .set-kind__name { @apply grid min-w-0 flex-1; }
+  .set-kind__title { @apply truncate font-semibold; }
+  .set-kind__caption { @apply truncate text-muted; font-size: var(--text-caption); }
+  .set-kind__chev { @apply text-muted transition-transform duration-150 rtl:-scale-x-100; }
+  .set-kind details[open] .set-kind__chev { @apply rotate-90; }
+  .set-kind__more { @apply grid gap-2 border-t border-line px-2.5 pb-2.5 pt-2; }
+  .set-risk { @apply inline-grid size-5 flex-none place-items-center rounded-xs; color: var(--danger); background: var(--tint-danger); }
 }
 @media (prefers-reduced-motion: no-preference) {
   .kit-pill.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
