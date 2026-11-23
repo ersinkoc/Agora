@@ -40,7 +40,8 @@ Owns everything that touches the machine:
 - **Terminals:** PTY (Unix) / ConPTY (Windows) via `agora-platform`; one I/O actor per terminal.
 - **Terminal emulation:** `agora-vt` exposes a trait; the backend is replaceable (see open questions).
 - **Process inspection:** foreground process, process tree, cwd.
-- **Files:** lazy directory listing, watch, read, write (writes go through lease checks).
+- **Files:** lazy directory listing and read through the protocol. The node's file module has watch and lease-checked
+  write helpers for node-mediated access.
 - **Git:** checkouts, worktree create/remove, status, diff, branch info.
 - **Agent supervision:** start, stop, resume, restart policy.
 
@@ -86,8 +87,8 @@ Initial tools exposed to agents:
 | `agents.list(project)` | Discover peers, their kind, node, and state |
 
 Messages are routed by the hub; agents on different machines communicate transparently.
-Delivery to an agent that does not poll MCP falls back to the integration level's input path (ACP
-prompt, or PTY input as a last resort) and is marked as such in the audit log.
+Agents read messages from the mesh inbox through MCP. The input-path fallback in ADR-0008 is still open.
+The approved first prompt for a helper has its own delivery rules (ADR-0057).
 
 ## 3. Domain model (agora-core)
 
@@ -132,7 +133,11 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
 
 ## 4. Protocol
 
-Schema-first, defined in `schema/`, generated into Rust, TypeScript, Go, and Python. (ADR-0006)
+`schema/` is the source of truth (ADR-0006). The build generates Rust and TypeScript bindings.
+Go and Python generation remain open. The L3 Python adapter example uses JSON-RPC over stdio.
+
+The node-local control socket carries protobuf commands in the same binary frames used for the network links.
+See [the local socket specification](specs/protocol.md#node-local-control-socket).
 
 Three protocol surfaces, one schema:
 
@@ -164,7 +169,7 @@ is named in the schema, and the node refuses it as `protocol.capability_missing`
 - **Web (primary)**, embedded in the hub binary; **desktop** is the same app in Tauri. (ADR-0005)
 - **TUI (secondary)** for SSH-only access; supports projects, agents, terminals, approvals; file explorer
   and diff are simplified.
-- **CLI** for scripting; every CLI command maps 1:1 to a protocol command.
+- **CLI** for scripting. It sends protocol commands and runs local workflows such as setup, service management and updates.
 
 Main window layout: see `ux/main-window.md`.
 
@@ -175,7 +180,9 @@ Main window layout: see `ux/main-window.md`.
 - Approvals queue: permission requests from L2/L3 agents (and detected blocked prompts from L1) appear
   centrally and can be answered from any client, including mobile.
 - Secrets stay on nodes. The hub stores references only.
-- Append-only audit log: who/what/where/approved-by for every command, write, approval, and message.
+- Team audit records the acting user and session, action, machine and outcome for routed commands, sign-ins and team changes.
+  The event log carries coordination events separately. Device, project and agent attribution in the audit export is tracked in
+  [#1127](https://github.com/ersinkoc/Agora/issues/1127).
 - Optional end-to-end encryption of terminal streams between node and client (required for cloud mode).
 
 ## 7. Internationalization
