@@ -125,6 +125,20 @@ describe('the person\'s themes', () => {
     expect(loadState(kv).user).toEqual([]);
   });
 
+  it('keeps a theme whose text is hard to read only on a coloured background: it loads, changes and imports, with the warning', () => {
+    // Idle reads 3:1 on the surfaces (enough before #1021) but not 4.5:1 as words on its own background.
+    const file = { 'agora-theme': 1, name: 'Dim idle', scheme: 'dark', tokens: { 'state-idle': '#707078' } } as const;
+    const kv = memory({ [USER_KEY]: JSON.stringify([{ id: 'user-1', file }]) });
+    expect(loadState(kv).user.map((u) => u.name)).toEqual(['Dim idle']); // stored before: never dropped
+    const s = createThemeStore({ kv });
+    const u = s.update('user-1', { tokens: { accent: '#9aa0ff' } });
+    expect(u.ok && u.warnings?.map((w) => w.code)).toEqual(['tint-contrast']);
+    expect(loadState(kv).user[0]?.tokens.accent).toBe('#9aa0ff');
+    const i = s.import(serialiseTheme(file));
+    expect(i.ok && i.warnings?.map((w) => (w.code === 'tint-contrast' ? `${w.fg}/${w.tint}` : w.code))).toEqual(['state-idle/idle']);
+    expect(s.update('user-1', { tokens: { 'state-idle': '#8b8b96' } })).not.toHaveProperty('warnings');
+  });
+
   it(`keeps at most ${MAX_USER_THEMES}`, () => {
     const s = createThemeStore({ kv: memory() });
     for (let i = 0; i < MAX_USER_THEMES; i++) expect(s.copy(slate, `n${i}`).ok).toBe(true);

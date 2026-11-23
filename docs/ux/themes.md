@@ -80,9 +80,18 @@ never throws and reports **every** problem at once, each with a message from `lo
    (non-text contrast, 1.4.11: states are always colour + shape + word). A failing pair is reported as
    "Secondary text on Panels is 1.6:1; it needs at least 4.5:1 to be readable" (`theme-error-contrast`; the ratio is rounded
    down, so a shown 4.5 always passes).
+5. **Text on coloured backgrounds** (#1021), once the theme is otherwise accepted: the widget kit's soft backgrounds for
+   accent, working, needs you, finished, the red and idle (`--tint-*`, ADR-0102) are mixed from the theme's own colours
+   (`color-mix(in oklab)`, 14 % into `surface-1` in a dark theme, 10 % in a light one; the red is the fixed one). The check mixes
+   them the same way (`themes/tints.ts`, the math the kit's contrast test uses) and asks **4.5:1** of the role's own colour,
+   `text` and `text-muted` on each. A failing pair is reported in the same sentence, naming the background: "Idle on Idle
+   background is 3.4:1; it needs at least 4.5:1 to be readable" (`theme-error-contrast` with `theme-tint-*`, the red as
+   `theme-colour-danger`).
 
-A theme with any problem is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in), an
-edit is not applied.
+A theme with any problem in 1–4 is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in),
+an edit is not applied. A problem in 5 is a **warning**: the theme is accepted, saved and shown, and the warning is listed.
+These pairs came after people had saved themes under 1–4 alone (a state colour needs only 3:1 on a surface but 4.5:1 as words
+on its own background), and refusing would drop such a stored theme on the next load.
 
 ## Built-in themes
 
@@ -126,7 +135,15 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
   that is valid is saved and shown on the whole window at once; a value still being typed is kept in the field while the window
   keeps the last good one.
 - **Readability** lists every pair below its minimum; while any is listed the change is **not applied**, so the window never
-  becomes unreadable while it is being edited.
+  becomes unreadable while it is being edited. Text that is hard to read only on a coloured background is listed under
+  "Applied, but some text would be hard to read on coloured backgrounds" (`theme-contrast-tint-warning`): the change is
+  applied. When surface pairs fail too (not applied), they follow under "Also hard to read on coloured backgrounds"
+  (`theme-contrast-tint-also`). An imported theme with such warnings is added; when it is the theme of the scheme not on
+  screen, its warnings are listed under the buttons after "Added. When it is shown, some text would be hard to read on
+  coloured backgrounds" (`theme-import-tint-warning`), since its Readability is not shown.
+
+  ![Applied, with a warning about Idle on its own background (Dark)](../screenshots/theme-tint-warning-dark.png)
+  ![The same in Light](../screenshots/theme-tint-warning-light.png)
 - **Import…** reads a theme file (refused with its reasons, or added and selected), **Export** saves the theme on screen as
   `theme.json`, **Delete theme** removes one of yours (its scheme falls back to Light or Dark), **Reset to defaults** as above.
 
