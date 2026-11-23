@@ -71,7 +71,7 @@ next frame's.
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
   most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
   has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
-  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
+  refused (tested, also when the receive that completes the frame returns after the deadline: the read's clock is given, #1089); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - **Agent ids** are at most `MAX_AGENT_ID` (256 bytes; the node's own are `agent-<n>`, at most 26), refused on `Start` and `StartPipe`
   (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
   larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and

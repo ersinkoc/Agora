@@ -77,14 +77,32 @@ fn a_zero_write_timeout_is_refused() {
 }
 
 /// A writer that keeps timing out against a slow reader and tries each timed-out send again, as `holder_link::write_frame` does,
-/// delivers every byte once and in order. Each send offers 256 KiB, more than a Windows pipe holds, so a cancelled pipe write that
-/// had been partly taken would make the retry send those bytes twice (seen with the time limit and no size cap).
+/// delivers every byte once and in order, from the end that connected and from the end that accepted. Each send offers 256 KiB, more
+/// than a Windows pipe holds, so a cancelled pipe write that had been partly taken would make the retry send those bytes twice (seen
+/// with the time limit and no size cap).
 #[test]
 fn sends_that_time_out_and_are_tried_again_deliver_every_byte_once() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return;
     }
-    let (mut w, mut r, dir, _l) = pair("retry");
+    sends_tried_again("retry-client", false);
+}
+
+#[test]
+fn sends_from_the_accepting_end_that_time_out_and_are_tried_again_deliver_every_byte_once() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    sends_tried_again("retry-server", true);
+}
+
+fn sends_tried_again(tag: &str, from_accepting_end: bool) {
+    let (connected, accepted, dir, _l) = pair(tag);
+    let (mut w, mut r) = if from_accepting_end {
+        (accepted, connected)
+    } else {
+        (connected, accepted)
+    };
     let data: Vec<u8> = (0..(1usize << 20))
         .map(|i| (i % 251) as u8 ^ (i >> 16) as u8)
         .collect();
@@ -150,9 +168,9 @@ fn sends_that_time_out_and_are_tried_again_deliver_every_byte_once() {
         "bytes after the end: {extra:?}"
     );
     assert_eq!(sent, total, "the writer did not finish");
-    // The retry after a timed-out pipe write is what this test is for on Windows, so there it must have happened. On Unix a send that
-    // can move any bytes returns their count instead of timing out, and on Linux (WSL2) no send timed out here with these pauses, so
-    // there only the whole, unduplicated stream is checked.
+    // The retry after a timed-out pipe write is what this test is for on Windows, so there it must have happened. On Linux (WSL2) no
+    // send timed out here: a blocked send with its 5 ms timeout took 24-36 ms and returned the bytes it had moved (it waits afresh for
+    // each kernel buffer it allocates, as `holder_link`'s `SEND_PIECE` notes), so there only the whole, unduplicated stream is checked.
     assert!(
         timeouts > 0 || !cfg!(windows),
         "no send timed out, so the retry was not exercised"
