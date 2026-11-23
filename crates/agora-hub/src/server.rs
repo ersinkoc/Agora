@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agora_protocol::frame::{
-    kinds, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS,
+    kinds, DEFAULT_MAX_PAYLOAD, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS,
+    STREAM_CONTROL, STREAM_EVENTS,
 };
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::{self, command_ok, command_request, command_response};
@@ -707,21 +708,17 @@ pub trait ClientAuth {
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
-    // ADR-0103: chosen before the forgotten machines are cut, which needs their agents to know what to leave out. Copied here, outside
-    // the hub lock: the view holds the messages shared.
-    let recent_messages = view
-        .recent_messages()
-        .iter()
-        .map(|m| v1::PositionedEvent {
-            pos: m.pos,
-            event: Some(m.event.clone()),
-        })
-        .collect();
+    snapshot_for_client(view, pos, true)
+}
+
+fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
+    // ADR-0103: keep the original view for the history filter, which needs to see forgotten machines and agents.
+    let recent_messages = view.recent_messages();
     // ADR-0073: forgotten machines and what they ran are not shown.
     let shown = view.shown();
     let view: &View = &shown;
-    v1::Snapshot {
-        recent_messages,
+    let mut snapshot = v1::Snapshot {
+        recent_messages: Vec::new(),
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
             .agent_workspaces
@@ -746,7 +743,11 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
                 trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
-                binary: n.binary.clone(),
+                binary: if owner {
+                    n.binary.clone()
+                } else {
+                    crate::scope::short_binary(&n.binary)
+                },
             })
             .collect(),
         checkouts: view
@@ -861,7 +862,23 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 expires_at_ms: *exp,
             })
             .collect(),
+    };
+    if !recent_messages.is_empty() {
+        let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
+        // Each size includes the repeated field's tag and length. Keep the newest messages that fit, then send them oldest first.
+        for message in recent_messages.iter().rev() {
+            if message.size > remaining {
+                break;
+            }
+            remaining -= message.size;
+            snapshot.recent_messages.push(v1::PositionedEvent {
+                pos: message.pos,
+                event: Some(message.event.clone()),
+            });
+        }
+        snapshot.recent_messages.reverse();
     }
+    snapshot
 }
 
 /// A signed-in client: waits for `Subscribe`, answers with a snapshot or the backlog, then pushes live events until
@@ -972,15 +989,7 @@ where
                 scope = Some(s);
                 snapshot_of(&cut, *pos)
             }
-            None => {
-                let mut snap = snapshot_of(view, *pos);
-                if !owner {
-                    for n in &mut snap.nodes {
-                        n.binary = crate::scope::short_binary(&n.binary);
-                    }
-                }
-                snap
-            }
+            None => snapshot_for_client(view, *pos, owner),
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
