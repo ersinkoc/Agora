@@ -85,6 +85,7 @@ fn agent(node: &str, id: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
     })
@@ -1487,6 +1488,7 @@ fn started(id: &str, project: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
     })
@@ -1620,6 +1622,245 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
         }
     };
     assert_eq!(binary, "agora.exe");
+}
+
+/// A request on the command stream, as a window sends it.
+fn command_frame(id: &str, target: &str, command: command_request::Command) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+/// Sends `command` from the window, answers it on the node with `answer`, and returns what the window then gets.
+async fn answered(
+    client: &mut Conn<TcpStream>,
+    node: &mut Conn<TcpStream>,
+    id: &str,
+    command: command_request::Command,
+    answer: command_ok::Result,
+) -> v1::CommandResponse {
+    client
+        .send(&command_frame(id, "n1", command))
+        .await
+        .unwrap();
+    let got = recv(node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    node.send(&f(
+        STREAM_COMMANDS,
+        1,
+        v1::CommandResponse {
+            request_id: forwarded.request_id,
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(answer),
+            })),
+        }
+        .encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    response(client).await
+}
+
+/// ADR-0049 Amendment A (#1049), through a real hub: a member granted `n1/mine` (`/srv/mine`) browses, chooses and starts in it; another
+/// project's folder, a folder above it and an escape by `..` stop at the hub; a folder the machine really opened elsewhere (a link
+/// inside the project) is refused in place of the machine's answer; the way up from the project's folder is left out.
+#[tokio::test]
+async fn a_member_browses_and_starts_only_inside_a_project_granted_on_that_machine() {
+    let caps = || {
+        vec![
+            "directory.list".to_string(),
+            "workspace.directory".to_string(),
+        ]
+    };
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: caps(),
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Scoped),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: caps(),
+        build: "t".into(),
+        locale: None,
+    };
+    node.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut node).await.kind, kinds::WELCOME);
+    node.send(&f(
+        STREAM_CONTROL,
+        kinds::RESUME,
+        v1::Resume::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut node).await.kind, kinds::RESUME_OK);
+    let checkout = |id: &str, project: &str, path: &str| {
+        Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+            checkout_id: id.into(),
+            node_id: "n1".into(),
+            project_id: project.into(),
+            path: path.into(),
+        })
+    };
+    for (seq, body) in [
+        (1, online("n1")),
+        (2, checkout("c1", "mine", "/srv/mine")),
+        (3, checkout("c2", "theirs", "/srv/theirs")),
+    ] {
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, body)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    let list = |path: &str| {
+        command_request::Command::DirectoryList(v1::DirectoryList {
+            path: path.into(),
+            authorization: None,
+        })
+    };
+    let launch = |path: &str| {
+        command_request::Command::AgentLaunch(v1::AgentLaunch {
+            path: path.into(),
+            project_id: "mine".into(),
+            kind: "shell".into(),
+            ..Default::default()
+        })
+    };
+    // Refused at the hub, named by the command (#1044's role wording): the node hears nothing.
+    for (id, command) in [
+        ("x1", list("/srv/theirs")),
+        ("x2", list("/srv")),
+        ("x3", list("/srv/mine/../theirs")),
+        ("x4", list("")),
+        ("x5", launch("/srv/theirs")),
+    ] {
+        client
+            .send(&command_frame(id, "n1", command))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        assert_eq!(
+            (r.request_id.as_str(), err_code(&r)),
+            (id, "auth.forbidden")
+        );
+        let Some(command_response::Result::Err(info)) = &r.result else {
+            panic!("expected an error");
+        };
+        let action = if id == "x5" {
+            "AgentLaunch"
+        } else {
+            "DirectoryList"
+        };
+        assert_eq!(
+            info.params.get("action").and_then(|v| v.value.clone()),
+            Some(v1::param_value::Value::Str(action.into())),
+            "{info:?}"
+        );
+    }
+    // Inside the project: forwarded, and the machine's answer is checked on its way back.
+    let entries = |path: &str, parent: &str| {
+        command_ok::Result::DirectoryEntries(v1::DirectoryEntries {
+            path: path.into(),
+            parent: parent.into(),
+            entries: vec![v1::DirectoryEntry {
+                name: "api".into(),
+                is_git: false,
+            }],
+            truncated: false,
+        })
+    };
+    let r = answered(
+        &mut client,
+        &mut node,
+        "in",
+        list("/srv/mine"),
+        entries("/srv/mine", "/srv"),
+    )
+    .await;
+    let Some(command_response::Result::Ok(v1::CommandOk {
+        result: Some(command_ok::Result::DirectoryEntries(e)),
+    })) = r.result
+    else {
+        panic!("expected the listing: {r:?}");
+    };
+    assert_eq!((e.path.as_str(), e.parent.as_str()), ("/srv/mine", ""));
+    assert_eq!(e.entries.len(), 1);
+    // `/srv/mine/out` is a link the machine followed to `/etc`: the member gets a refusal, not `/etc`'s folders.
+    let r = answered(
+        &mut client,
+        &mut node,
+        "link",
+        list("/srv/mine/out"),
+        entries("/etc", "/"),
+    )
+    .await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("link", "auth.forbidden")
+    );
+    let r = answered(
+        &mut client,
+        &mut node,
+        "go",
+        launch("/srv/mine/api"),
+        command_ok::Result::AgentLaunch(v1::AgentLaunchResult {
+            agent_id: "a1".into(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert!(
+        matches!(r.result, Some(command_response::Result::Ok(_))),
+        "{r:?}"
+    );
+
+    // The audit trail says how each ended, the refused answer too.
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some("eda"), 100)
+        .unwrap();
+    let seen: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|e| (e.action.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("AgentLaunch", "auth.forbidden"),
+            ("DirectoryList", "ok"),
+            ("DirectoryList", "auth.forbidden"),
+            ("AgentLaunch", "ok"),
+        ]
+    );
 }
 
 async fn get_audit(addr: std::net::SocketAddr, token: Option<&str>, query: &str) -> (u16, String) {

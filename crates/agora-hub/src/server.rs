@@ -1013,7 +1013,7 @@ where
         pair_feed = Some(feed);
     }
     loop {
-        answer_ready(&mut conn, inflight, hub).await?;
+        answer_ready(&mut conn, inflight, hub, scope.as_ref()).await?;
         if let Some(feed) = pair_feed.as_mut() {
             for f in feed.poll(hub) {
                 conn.send(&f).await?;
@@ -1114,6 +1114,9 @@ struct Inflight {
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+    /// ADR-0049 Amendment A: a member's folder listing or folder details, by the command's schema name. The answer reaches them only
+    /// when the folder the machine opened is inside their projects (`Scope::confine_answer`), otherwise `auth.forbidden` naming it.
+    confined: Option<String>,
 }
 
 /// Resolves when a command on its way has its answer (or lost its node), keeping it in [`Inflight::answered`]: a client gets an
@@ -1344,6 +1347,12 @@ where
             answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
+            confined: scope
+                .is_some()
+                .then_some(req.command.as_ref())
+                .flatten()
+                .filter(|c| crate::scope::Scope::answers_confined(c))
+                .map(|_| command_name(&req)),
         })
     })();
     match outcome {
@@ -1371,6 +1380,7 @@ async fn answer_ready<S>(
     conn: &mut Conn<S>,
     inflight: &mut Vec<Inflight>,
     hub: &Hub,
+    scope: Option<&crate::scope::Scope>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1387,6 +1397,15 @@ where
         let resp = match got {
             Ok(mut r) => {
                 r.request_id.clone_from(&item.client_request_id);
+                // A member's folder answer: only a folder inside their projects (a scope is always there when this is set).
+                if let Some(action) = &item.confined {
+                    if !scope.is_some_and(|s| s.confine_answer(&item.node, &mut r)) {
+                        r = error_response(
+                            &item.client_request_id,
+                            &Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
+                        );
+                    }
+                }
                 Some(r)
             }
             // The node's connection ended before it answered.
@@ -3097,6 +3116,7 @@ mod audit_cleanup_tests {
             reply,
             answered: None,
             deadline,
+            confined: None,
         };
         // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.
         let inflight = vec![

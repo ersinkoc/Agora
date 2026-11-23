@@ -4,13 +4,19 @@
 //!
 //! Anything it cannot place in a granted project is hidden and refused: a terminal that belongs to no agent, the shared board of a
 //! project that spans machines, a command about a whole machine. The owner has no scope and sees everything.
+//!
+//! A member may also browse, choose and start in folders of a granted project on its machine (ADR-0049 Amendment A, #1049). The hub
+//! cannot look at another machine's disk, so a folder is placed by its spelling against the folders the machines reported for each
+//! project ([`Scope::command_allowed`]), and the folder the machine then really opened, links followed, is checked again in its answer
+//! ([`Scope::confine_answer`]); a start needs no second look, since the machine starts only in the exact real folder it was asked for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use agora_protocol::v1::command_request::Command as C;
 use agora_protocol::v1::event::Body;
-use agora_protocol::v1::Event;
+use agora_protocol::v1::{self, Event};
 
+use crate::project_names::workspace_root;
 use crate::projection::{qualified, split_key, View};
 
 /// ADR-0069: what anyone but the owner is shown of a machine's own executable (`NodeOnline.binary`): its file name only. No folder is
@@ -48,6 +54,55 @@ pub struct Scope {
     agents: BTreeMap<String, String>,
     terminals: BTreeMap<String, String>,
     approvals: BTreeMap<String, String>,
+    /// The folder each checkout (`checkout:<key>`) and workspace (`workspace:<key>`) was reported in, with its machine and project.
+    folders: BTreeMap<String, Folder>,
+}
+
+/// A project's folder on one machine, as that machine reported it (ADR-0049 Amendment A).
+#[derive(Debug, Clone)]
+struct Folder {
+    node: String,
+    path: String,
+    /// `node/project`.
+    project: String,
+}
+
+/// The parts of an absolute folder path, spelled as `unix` or Windows paths are: split on `/` alone on Unix (where `\` is an
+/// ordinary character of a name), on `/` and `\` on Windows, empty parts dropped (`/a//b/` is `/a/b`). `None` for a relative path or
+/// one with a `.` or `..` part, so a path names a folder only by going down from the root; on Windows also for a part that ends in a
+/// dot or a space (which Windows drops, so `mine.` would be `mine`) and for a `:` anywhere but a drive (an alternate data stream).
+fn path_parts(path: &str, unix: bool) -> Option<Vec<&str>> {
+    if path.contains('\0') {
+        return None;
+    }
+    let b = path.as_bytes();
+    let absolute = if unix {
+        path.starts_with('/')
+    } else {
+        path.starts_with(r"\\")
+            || path.starts_with("//")
+            || (b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && (b[2] == b'\\' || b[2] == b'/'))
+    };
+    if !absolute {
+        return None;
+    }
+    let parts: Vec<&str> = if unix {
+        path.split('/').filter(|p| !p.is_empty()).collect()
+    } else {
+        path.split(['/', '\\']).filter(|p| !p.is_empty()).collect()
+    };
+    // `C:` first, or second after `\\?\`.
+    let drive = |i: usize, p: &str| {
+        i <= 1 && p.len() == 2 && p.as_bytes()[0].is_ascii_alphabetic() && p.ends_with(':')
+    };
+    let fine = |(i, p): (usize, &&str)| {
+        !matches!(*p, "." | "..")
+            && (unix || drive(i, p) || !(p.ends_with(['.', ' ']) || p.contains(':')))
+    };
+    parts.iter().enumerate().all(fine).then_some(parts)
 }
 
 impl Scope {
@@ -58,9 +113,10 @@ impl Scope {
             ..Self::default()
         };
         // The machine is the one that reported it (the key's producer), never the node id inside the event.
-        for (k, (_, project, _)) in &view.checkouts {
+        for (k, (_, project, path)) in &view.checkouts {
             if let Some((node, _)) = split_key(k) {
                 s.checkouts.insert(k.clone(), qualified(node, project));
+                s.add_folder(format!("checkout:{k}"), node, project, path);
             }
         }
         for (k, w) in &view.worktrees {
@@ -71,6 +127,12 @@ impl Scope {
         for (k, w) in &view.workspaces {
             s.workspaces
                 .insert(k.clone(), qualified(&w.node_id, &w.project_id));
+            s.add_folder(
+                format!("workspace:{k}"),
+                &w.node_id,
+                &w.project_id,
+                workspace_root(w),
+            );
         }
         for (k, a) in &view.agents {
             if let Some((node, _)) = split_key(k) {
@@ -88,6 +150,50 @@ impl Scope {
             }
         }
         s
+    }
+
+    /// Remembers (or, for a known key, replaces) where a checkout or workspace is.
+    fn add_folder(&mut self, key: String, node: &str, project: &str, path: &str) {
+        self.folders.insert(
+            key,
+            Folder {
+                node: node.into(),
+                path: path.into(),
+                project: qualified(node, project),
+            },
+        );
+    }
+
+    /// The project `path` on `node` belongs to by the folders the machine reported: the project of the nearest reported folder that is
+    /// `path` or holds it, as the machine itself places a folder for a device limited to some projects (`known_project`). `None` when
+    /// no reported folder holds it, when two projects were reported in that nearest folder, or when the path is no plain absolute path
+    /// in that machine's spelling ([`path_parts`]).
+    fn project_of_folder(&self, node: &str, path: &str) -> Option<&str> {
+        let holding: Vec<(usize, &str)> = self
+            .folders
+            .values()
+            .filter(|f| f.node == node)
+            .filter_map(|f| {
+                let unix = f.path.starts_with('/');
+                let root = path_parts(&f.path, unix)?;
+                let at = path_parts(path, unix)?;
+                (!root.is_empty() && at.starts_with(&root))
+                    .then_some((root.len(), f.project.as_str()))
+            })
+            .collect();
+        let nearest = holding.iter().map(|(depth, _)| *depth).max()?;
+        let mut projects = holding
+            .into_iter()
+            .filter(|(depth, _)| *depth == nearest)
+            .map(|(_, p)| p);
+        let project = projects.next()?;
+        projects.all(|other| other == project).then_some(project)
+    }
+
+    /// The granted project (`node/project`) that holds the folder `path` on `node`, if one does.
+    fn granted_folder(&self, node: &str, path: &str) -> Option<&str> {
+        self.project_of_folder(node, path)
+            .filter(|p| self.projects.contains(*p))
     }
 
     fn granted(&self, project: Option<&String>) -> bool {
@@ -175,6 +281,12 @@ impl Scope {
             Body::WorkspaceRegistered(e) => {
                 let p = qualified(node, &e.project_id);
                 self.workspaces.insert(q(&e.workspace_id), p.clone());
+                self.add_folder(
+                    format!("workspace:{}", q(&e.workspace_id)),
+                    node,
+                    &e.project_id,
+                    workspace_root(e),
+                );
                 self.projects.contains(&p)
             }
             Body::AgentWorkspaceBound(e) => self.granted(self.workspaces.get(&q(&e.workspace_id))),
@@ -192,6 +304,12 @@ impl Scope {
             Body::CheckoutDiscovered(e) => {
                 let p = qualified(node, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());
+                self.add_folder(
+                    format!("checkout:{}", q(&e.checkout_id)),
+                    node,
+                    &e.project_id,
+                    &e.path,
+                );
                 self.projects.contains(&p)
             }
             Body::WorktreeCreated(e) => {
@@ -281,6 +399,38 @@ impl Scope {
         }
     }
 
+    /// ADR-0049 Amendment A: may this member see the machine's answer to a folder listing or a folder's details (the commands
+    /// [`Self::answers_confined`] names)? The machine answers with the folder it really opened, links followed, so a link inside the
+    /// project that leads out of it is refused here (false: the caller sends `auth.forbidden` instead). A listing whose way up leads
+    /// out of the project keeps no way up. A refusal from the machine passes; an answer of any other kind is no folder of theirs.
+    pub fn confine_answer(&self, node: &str, resp: &mut v1::CommandResponse) -> bool {
+        use v1::command_ok::Result as Ok_;
+        use v1::command_response::Result as R;
+        match &mut resp.result {
+            Some(R::Ok(v1::CommandOk {
+                result: Some(Ok_::DirectoryEntries(e)),
+            })) => {
+                if self.granted_folder(node, &e.path).is_none() {
+                    return false;
+                }
+                if self.granted_folder(node, &e.parent).is_none() {
+                    e.parent.clear();
+                }
+                true
+            }
+            Some(R::Ok(v1::CommandOk {
+                result: Some(Ok_::DirectoryInfo(i)),
+            })) => self.granted_folder(node, &i.path).is_some(),
+            Some(R::Err(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// The commands whose answer a member gets only through [`Self::confine_answer`].
+    pub fn answers_confined(command: &C) -> bool {
+        matches!(command, C::DirectoryList(_) | C::DirectoryInspect(_))
+    }
+
     fn lease_visible(&self, producer: &str, agent: &str) -> bool {
         let key = if producer == crate::ca::RESERVED_HUB_ID {
             agent.to_string()
@@ -334,6 +484,20 @@ impl Scope {
             }
             // What agents a machine can start is not private to a project, but only for machines the person works on.
             C::AgentKinds(_) => self.node_visible(node),
+            // ADR-0049 Amendment A (#1049): folders of a project granted on this machine, and below them; never the home folder (an
+            // empty path), a new project identity or a changed one (what a machine also refuses to a device limited to projects). The
+            // machine answers with the folder it really opened, which `confine_answer` checks again.
+            C::DirectoryList(c) => self.granted_folder(node, &c.path).is_some(),
+            C::DirectoryInspect(c) => {
+                !c.create_project_id && self.granted_folder(node, &c.path).is_some()
+            }
+            // A start names the project of its folder: the machine starts only in the exact real folder named (a path through a link
+            // is refused there) and only when that folder is of the project named.
+            C::AgentLaunch(c) => {
+                !c.accept_identity_change
+                    && self.granted_folder(node, &c.path)
+                        == Some(qualified(node, &c.project_id).as_str())
+            }
             _ => false,
         }
     }
@@ -372,7 +536,7 @@ mod tests {
     }
 
     use super::*;
-    use agora_protocol::v1::{self, command_request::Command};
+    use agora_protocol::v1::{self, command_ok, command_request::Command, command_response};
 
     fn ev(node: &str, body: Body) -> Event {
         Event {
@@ -406,6 +570,7 @@ mod tests {
                 kind: "k".into(),
                 level: 0,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             }),
@@ -1018,5 +1183,261 @@ mod tests {
                 ..Default::default()
             }),
         )));
+    }
+
+    fn checkout_at(node: &str, id: &str, project: &str, path: &str) -> Event {
+        ev(
+            node,
+            Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                checkout_id: id.into(),
+                node_id: node.into(),
+                project_id: project.into(),
+                path: path.into(),
+            }),
+        )
+    }
+
+    fn workspace_at(node: &str, id: &str, project: &str, path: &str, git_root: &str) -> Event {
+        ev(
+            node,
+            Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                workspace_id: id.into(),
+                node_id: node.into(),
+                project_id: project.into(),
+                path: path.into(),
+                git_root: git_root.into(),
+                ..Default::default()
+            }),
+        )
+    }
+
+    fn list(path: &str) -> Command {
+        Command::DirectoryList(v1::DirectoryList {
+            path: path.into(),
+            authorization: None,
+        })
+    }
+
+    fn inspect(path: &str, create: bool) -> Command {
+        Command::DirectoryInspect(v1::DirectoryInspect {
+            path: path.into(),
+            create_project_id: create,
+            authorization: None,
+        })
+    }
+
+    fn launch(path: &str, project: &str) -> Command {
+        Command::AgentLaunch(v1::AgentLaunch {
+            path: path.into(),
+            project_id: project.into(),
+            kind: "shell".into(),
+            ..Default::default()
+        })
+    }
+
+    /// A member of `n1/mine` (`/srv/mine`, and a repository `/home/eda/web` the hub knows from a start in its `src`) on a hub that also
+    /// knows `n1/theirs` (`/srv/theirs`, and `/srv/mine/vendor` inside `mine`) and `n2/mine` (`/srv/mine` on another machine). Built
+    /// from the stream and from the view, which must agree.
+    fn folder_scopes() -> [Scope; 2] {
+        let mut full = View::default();
+        let mut s = scope(&["n1/mine"]);
+        for e in [
+            checkout_at("n1", "c1", "mine", "/srv/mine"),
+            checkout_at("n1", "c2", "theirs", "/srv/theirs"),
+            checkout_at("n1", "c3", "theirs", "/srv/mine/vendor/"),
+            checkout_at("n2", "c1", "mine", "/srv/mine"),
+            workspace_at("n1", "w1", "mine", "/home/eda/web/src", "/home/eda/web"),
+        ] {
+            full.apply(&e);
+            s.admit(&e);
+        }
+        [s, Scope::from_view(["n1/mine".to_string()].into(), &full)]
+    }
+
+    #[test]
+    fn a_member_chooses_folders_and_starts_agents_inside_a_project_granted_on_that_machine() {
+        // ADR-0049 Amendment A (#1049): the project's folders, and any folder below them, on the machine the grant names.
+        for s in folder_scopes() {
+            for path in [
+                "/srv/mine",
+                "/srv/mine/",
+                "/srv/mine/api",
+                "/srv/mine//api/v2",
+                "/home/eda/web",
+                "/home/eda/web/docs",
+            ] {
+                assert!(s.command_allowed("n1", &list(path)), "{path}");
+                assert!(s.command_allowed("n1", &inspect(path, false)), "{path}");
+                assert!(s.command_allowed("n1", &launch(path, "mine")), "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_member_is_refused_folders_of_another_project_machine_or_outside_any_project() {
+        for s in folder_scopes() {
+            for (node, path) in [
+                // Another project, beside theirs or inside it (the nearest project folder decides, as the node does).
+                ("n1", "/srv/theirs"),
+                ("n1", "/srv/theirs/src"),
+                ("n1", "/srv/mine/vendor"),
+                ("n1", "/srv/mine/vendor/lib"),
+                // Outside every project: above it, beside it with a longer name, the home folder (an empty path).
+                ("n1", "/srv"),
+                ("n1", "/"),
+                ("n1", "/srv/mine-old"),
+                ("n1", "/home/eda"),
+                ("n1", ""),
+                // The same folder on another machine, where the grant is not.
+                ("n2", "/srv/mine"),
+                ("n2", "/srv/mine/api"),
+                ("n3", "/srv/mine"),
+            ] {
+                assert!(!s.command_allowed(node, &list(path)), "{node} {path}");
+                assert!(
+                    !s.command_allowed(node, &inspect(path, false)),
+                    "{node} {path}"
+                );
+                assert!(
+                    !s.command_allowed(node, &launch(path, "mine")),
+                    "{node} {path}"
+                );
+            }
+            // A start in their folder names their project, never another one.
+            assert!(!s.command_allowed("n1", &launch("/srv/mine/api", "theirs")));
+            assert!(!s.command_allowed("n1", &launch("/srv/mine/api", "")));
+        }
+    }
+
+    #[test]
+    fn a_member_cannot_leave_the_project_folder_by_dots_relative_names_or_another_separator() {
+        for s in folder_scopes() {
+            for path in [
+                "/srv/mine/..",
+                "/srv/mine/../theirs",
+                "/srv/mine/./../theirs",
+                "/srv/mine/api/../../theirs",
+                "/srv/mine/.",
+                "srv/mine",
+                "mine",
+                "./srv/mine",
+                // On Linux `\` is a character of a name: `/srv/mine\..` is a sibling folder of `/srv/mine`, not inside it.
+                r"/srv/mine\..\theirs",
+                r"/srv/mine\api",
+                "/srv/mine/a\0b",
+            ] {
+                assert!(!s.command_allowed("n1", &list(path)), "{path:?}");
+                assert!(!s.command_allowed("n1", &inspect(path, false)), "{path:?}");
+                assert!(!s.command_allowed("n1", &launch(path, "mine")), "{path:?}");
+            }
+            // As a machine's own limits refuse them to a limited device: a new project identity, or one the folder changed.
+            assert!(!s.command_allowed("n1", &inspect("/srv/mine", true)));
+            assert!(!s.command_allowed(
+                "n1",
+                &Command::AgentLaunch(v1::AgentLaunch {
+                    accept_identity_change: true,
+                    ..match launch("/srv/mine", "mine") {
+                        Command::AgentLaunch(a) => a,
+                        _ => unreachable!(),
+                    }
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_windows_project_folder_is_matched_by_either_separator_and_never_by_dots() {
+        let mut s = scope(&["w1/mine"]);
+        s.admit(&checkout_at("w1", "c1", "mine", r"C:\Users\eda\mine"));
+        for path in [
+            r"C:\Users\eda\mine",
+            r"C:\Users\eda\mine\api",
+            "C:/Users/eda/mine/api",
+        ] {
+            assert!(s.command_allowed("w1", &list(path)), "{path}");
+        }
+        for path in [
+            r"C:\Users\eda",
+            r"C:\Users\eda\mine\..",
+            r"C:\Users\eda\mine\..\other",
+            r"C:\Users\eda\mine\...",
+            r"C:\Users\eda\mine\api.",
+            r"C:\Users\eda\mine\api ",
+            r"C:\Users\eda\mine\a:stream",
+            r"Users\eda\mine",
+            r"\Users\eda\mine",
+            r"D:\Users\eda\mine",
+        ] {
+            assert!(!s.command_allowed("w1", &list(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_folder_two_projects_were_reported_in_belongs_to_neither() {
+        // The node cannot say which project such a folder is (its identity changed), so neither can the hub.
+        let mut s = scope(&["n1/mine"]);
+        s.admit(&checkout_at("n1", "c1", "mine", "/srv/app"));
+        s.admit(&checkout_at("n1", "c2", "renamed", "/srv/app"));
+        assert!(!s.command_allowed("n1", &list("/srv/app/src")));
+    }
+
+    #[test]
+    fn a_folder_answer_reaches_a_member_only_when_the_folder_the_machine_opened_is_theirs() {
+        let ok = |r: command_ok::Result| v1::CommandResponse {
+            request_id: "r".into(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(r),
+            })),
+        };
+        let entries = |path: &str, parent: &str| {
+            ok(command_ok::Result::DirectoryEntries(v1::DirectoryEntries {
+                path: path.into(),
+                parent: parent.into(),
+                entries: vec![v1::DirectoryEntry {
+                    name: "x".into(),
+                    is_git: false,
+                }],
+                truncated: false,
+            }))
+        };
+        let info = |path: &str| {
+            ok(command_ok::Result::DirectoryInfo(v1::DirectoryInfo {
+                path: path.into(),
+                project_id: "mine".into(),
+                ..Default::default()
+            }))
+        };
+        for s in folder_scopes() {
+            // Inside: as answered, with the way up while it stays inside.
+            let mut r = entries("/srv/mine/api", "/srv/mine");
+            assert!(s.confine_answer("n1", &mut r));
+            assert_eq!(r, entries("/srv/mine/api", "/srv/mine"));
+            // At the project's own folder the way up leads out of it, so it is left out.
+            let mut r = entries("/srv/mine", "/srv");
+            assert!(s.confine_answer("n1", &mut r));
+            assert_eq!(r, entries("/srv/mine", ""));
+            // A link inside the project that led the machine elsewhere: refused, whatever was asked.
+            for mut r in [
+                entries("/etc", "/"),
+                entries("/srv/theirs", "/srv"),
+                entries("/srv/mine/vendor", "/srv/mine"),
+                info("/home/eda"),
+            ] {
+                assert!(!s.confine_answer("n1", &mut r), "{r:?}");
+            }
+            assert!(!s.confine_answer("n2", &mut entries("/srv/mine", "/srv")));
+            let mut r = info("/srv/mine/api");
+            assert!(s.confine_answer("n1", &mut r));
+            // A refusal from the machine passes as it is; an answer of another kind is not a folder the member may see.
+            let mut refused = v1::CommandResponse {
+                request_id: "r".into(),
+                result: Some(command_response::Result::Err(v1::ErrorInfo {
+                    code: "protocol.invalid_message".into(),
+                    ..Default::default()
+                })),
+            };
+            assert!(s.confine_answer("n1", &mut refused));
+            assert!(!s.confine_answer("n1", &mut ok(command_ok::Result::Empty(v1::Empty {}))));
+        }
     }
 }

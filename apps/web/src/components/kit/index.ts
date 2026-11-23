@@ -5,7 +5,7 @@ export { Callout, EmptyState, type CalloutTone } from './Callout';
 export { Card, KeyValue, ListRow, SettingRow } from './Card';
 export { ConfirmDialog } from './ConfirmDialog';
 export { CopyChip } from './CopyChip';
-export { Pill, StatusMark, StatusPill, Tag, type Tone } from './Pill';
+export { Pill, StatusMark, StatusPill, Tag, stateTone, type Tone } from './Pill';
 export { SegmentedControl, type Segment } from './SegmentedControl';
 export { StatTile } from './StatTile';
 export { Toggle } from './Toggle';
