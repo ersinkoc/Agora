@@ -69,12 +69,27 @@ async function settle(page) {
   }
 }
 
-// A full-page capture lays the page out beyond the viewport, which resizes the window under it (innerHeight jumps and comes back): the
-// attention dialog unmounts and remounts with its dwell restarted, and each chat log, whose pinned approvals are sized in vh, loses its
-// place and shows "Jump to latest". Whether the page reacts before the frame is taken depends on how busy the machine is, so page script
-// is held for the capture: the frame is the settled page, every time. The caret is hidden and motion is off as well.
+// A full-page capture lays the page out beyond the viewport, which resizes the window under it (innerHeight goes 900 → 1 → 900). Two
+// things then move, and whether the frame shows them depends on how busy the machine is:
+// - page script reacts: the attention dialog unmounts and remounts with its dwell restarted, and each chat log, seeing a scroll away from
+//   its bottom, stops following and shows "Jump to latest". Page script is held for the capture.
+// - layout itself: a scrolled box (a chat log at its bottom) is shorter and its content taller for that moment, so its offset is clamped
+//   and stays clamped (about 66 px up) after the window comes back. Each scrolled box is drawn at its offset by a transform instead, with
+//   its own offset 0, which nothing can clamp; it looks the same. Its scroll events are swallowed so the page does not take it for the
+//   reader scrolling.
+// The caret is hidden and motion is off as well.
 async function capture(page, cdp) {
   await page.addStyleTag({ content: '*, *::before, *::after { caret-color: transparent !important; }' });
+  await page.evaluate(() => {
+    window.addEventListener('scroll', (e) => e.stopImmediatePropagation(), true);
+    for (const el of document.querySelectorAll('*')) {
+      const y = el.scrollTop;
+      if (y <= 0 || el === document.scrollingElement) continue;
+      el.style.overflowAnchor = 'none';
+      el.scrollTop = 0;
+      for (const child of el.children) child.style.transform = `translateY(${-y}px)`;
+    }
+  });
   await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
   try {
     return await page.screenshot({ fullPage: true, animations: 'disabled', caret: 'hide' });
