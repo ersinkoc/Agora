@@ -2253,6 +2253,20 @@ pub fn catch_stop_requests() -> io::Result<()> {
     }
 }
 
+/// [`catch_stop_requests`] for a process that stops cleanly on the first request (ADR-0104 O2: `agora node`): a signal that was ignored
+/// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
+/// have without the catch. Windows: nothing, as [`catch_stop_requests`].
+pub fn catch_stop_requests_once() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::catch_stop_requests_once()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
 /// The process a stop request caught by [`catch_stop_requests`] is passed on to (`None`: no one, between children).
 pub fn forward_stop_to(pid: Option<u32>) {
     #[cfg(unix)]

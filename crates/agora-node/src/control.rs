@@ -92,6 +92,20 @@ pub struct ControlContext {
     seen: Mutex<IdempotencyCache>,
     /// Signalled when an attempt claimed in `seen.running` ends (F1360).
     settled: Condvar,
+    /// ADR-0104 O2: set when the node is stopping; from then on no command is run (its connections, local and the hub's, outlive the
+    /// accept loop for a moment), so nothing new reaches an adapter the stop is letting go.
+    stopping: Option<Arc<AtomicBool>>,
+    /// ADR-0104 O2: commands being run now, so a node that stops can let them record what they did first ([`Self::commands_running`]).
+    running: AtomicU64,
+}
+
+/// Counts one command as running while it lives.
+struct Running<'a>(&'a AtomicU64);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 #[derive(Default)]
@@ -148,6 +162,8 @@ impl ControlContext {
             ledger: None,
             show_secret: false,
             control_token: None,
+            stopping: None,
+            running: AtomicU64::new(0),
             seen: Mutex::new(IdempotencyCache::default()),
             settled: Condvar::new(),
         }
@@ -191,6 +207,18 @@ impl ControlContext {
     #[must_use]
     pub fn with_show_secret(mut self, shown: bool) -> Self {
         self.show_secret = shown;
+        self
+    }
+
+    /// ADR-0104 O2: how many commands are being run now (one that began before the node's stop flag was set runs to its end).
+    pub fn commands_running(&self) -> u64 {
+        self.running.load(Ordering::Acquire)
+    }
+
+    /// ADR-0104 O2: the node's stop flag; once it is set every command is refused with `node.offline`.
+    #[must_use]
+    pub fn with_stopping(mut self, stopping: Arc<AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
         self
     }
 
@@ -616,6 +644,17 @@ pub(crate) fn record_always_answer(
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
+    // ADR-0104 O2: counted before the stop flag is read, so a stop that waits for the running commands never misses one that began.
+    ctx.running.fetch_add(1, Ordering::AcqRel);
+    let _running = Running(&ctx.running);
+    // A node that is stopping runs nothing more; it is going offline.
+    if ctx
+        .stopping
+        .as_ref()
+        .is_some_and(|s| s.load(Ordering::Acquire))
+    {
+        return Err(Error::new(ErrorCode::NodeOffline).with("node_id", ctx.node_id.as_str()));
+    }
     if matches!(
         cmd,
         Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_) | Cmd::AgentResume(_)

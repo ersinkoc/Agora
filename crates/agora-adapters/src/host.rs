@@ -228,6 +228,10 @@ pub enum HostError {
     Timeout,
     /// The adapter exited (or its output ended) before answering.
     Exited,
+    /// ADR-0104 O2: the node let the adapter go (it is stopping; the holder keeps the process) while this call waited. Its line had
+    /// been handed to the writer, which still writes it; the answer is not read here. Callers count the request as given, never as
+    /// failed (no prompt taken back, no queued one dropped, no decision recorded as not delivered).
+    Detached,
     /// The adapter answered with a JSON-RPC error; `data` is its `{code, params}` if it sent one.
     Rpc {
         code: i64,
@@ -243,6 +247,7 @@ impl std::fmt::Display for HostError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Timeout => write!(f, "the adapter did not answer in time"),
             Self::Exited => write!(f, "the adapter exited"),
+            Self::Detached => write!(f, "the node let the adapter go before it answered"),
             Self::Rpc { code, .. } => match self.reason() {
                 Some((reason, _)) => write!(f, "the adapter returned error {code} ({reason})"),
                 None => write!(f, "the adapter returned error {code}"),
@@ -290,6 +295,9 @@ pub struct Initialized {
 struct PendingState {
     map: HashMap<u64, Sender<Result<Value, HostError>>>,
     closed: bool,
+    /// ADR-0104 O2: set by [`Adapter::let_go`] before the reader is stopped, so the end of output that follows is the node's own
+    /// stop: the waiting calls are answered [`HostError::Detached`], and the lines already queued are still written.
+    detached: bool,
 }
 
 type Pending = Arc<Mutex<PendingState>>;
@@ -912,6 +920,12 @@ impl Adapter {
             return false;
         };
         *detached = true;
+        // Before the reader stops: the end of output it then reaches is this let-go, not the adapter's (the waiting calls are
+        // answered `Detached`).
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .detached = true;
         stop.store(true, Ordering::Release);
         self.writer = None;
         true
@@ -1437,11 +1451,18 @@ fn read_loop<R: Read>(
             }
         }
     }
-    // Output ended: fail everyone still waiting, then say so.
+    // Output ended: fail everyone still waiting, then say so. When the node let the adapter go, the calls were given and only their
+    // answers will not be read (ADR-0104 O2).
     {
         let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
         p.closed = true;
-        p.map.clear();
+        if p.detached {
+            for (_, waiter) in p.map.drain() {
+                let _ = waiter.send(Err(HostError::Detached));
+            }
+        } else {
+            p.map.clear();
+        }
     }
     let _ = events.send(AdapterEvent::Exited);
 }
@@ -1450,12 +1471,12 @@ fn read_loop<R: Read>(
 /// it fail at once (as the old in-line write did) instead of waiting for their timeouts.
 fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: &Pending) {
     while let Ok((id, line)) = lines.recv() {
-        // A caller can time out while its line is still queued. Never hold this lock during I/O.
-        let active = pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map
-            .contains_key(&id);
+        // A caller can time out while its line is still queued. Never hold this lock during I/O. A line queued before the node let
+        // the adapter go was given (ADR-0104 O2): it is written although nobody waits for its answer any more.
+        let active = {
+            let p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.detached || p.map.contains_key(&id)
+        };
         if !active {
             continue;
         }
@@ -1673,6 +1694,60 @@ mod tests {
             }
         ));
         assert!(a.poll().is_empty());
+    }
+
+    /// ADR-0104 O2: a call still waiting for its answer when the node lets the adapter go was given (its line is written) and is
+    /// answered `Detached`, never `Exited`, which callers read as not delivered.
+    #[test]
+    fn a_call_waiting_when_the_node_lets_go_is_answered_detached_and_its_line_is_written() {
+        #[derive(Clone, Default)]
+        struct Input(Arc<Mutex<Vec<u8>>>);
+        impl Write for Input {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let input = Input::default();
+        let mut a = Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(input.clone()),
+                output: Box::new(Lines(Cursor::new(Vec::new()), Arc::clone(&stop))),
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let caller = a.caller();
+        let waiting = std::thread::spawn(move || {
+            caller.call(
+                "session/prompt",
+                json!({"text": "x"}),
+                Duration::from_secs(10),
+            )
+        });
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !String::from_utf8_lossy(&input.0.lock().unwrap()).contains("session/prompt") {
+            assert!(std::time::Instant::now() < end, "the line was not written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.detach());
+        assert!(matches!(waiting.join().unwrap(), Err(HostError::Detached)));
+        // A call made after the let-go is not given.
+        assert!(matches!(
+            a.caller()
+                .call("session/cancel", json!({}), Duration::from_secs(1)),
+            Err(HostError::Exited)
+        ));
     }
 
     /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a

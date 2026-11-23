@@ -23,6 +23,7 @@
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
 //!
+//! With `--turns` it declares `turns` (it reports its turns), so the node queues a prompt sent while one runs.
 //! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
 //! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
 //! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
@@ -109,6 +110,10 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
         match method {
             "initialize" => {
                 let mut caps = vec!["chat", "approvals", "usage", "cancel", "resume"];
+                // `--turns`: it reports its turns, so the node queues a prompt behind the turn that runs (ADR-0090).
+                if std::env::args().any(|a| a == "--turns") {
+                    caps.push("turns");
+                }
                 if modes {
                     caps.extend(["set_mode", "config"]);
                 }

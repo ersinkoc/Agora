@@ -1665,6 +1665,8 @@ pub struct Node {
     crashed: bool,
     /// See [`Node::stop_keeping_agents`].
     keep_agents: bool,
+    /// The control commands' context, for the stop to wait for the commands it lets finish (ADR-0104 O2).
+    commands: Arc<ControlContext>,
 }
 
 impl Node {
@@ -1978,6 +1980,8 @@ impl Node {
             .with_git_wake(Arc::clone(&git_wake)),
         );
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
+        // The node's stop flag: its threads end on it, and its control commands are refused once it is set (ADR-0104 O2).
+        let stop = Arc::new(AtomicBool::new(false));
         let mut ctx = ControlContext::new(
             Arc::clone(&supervisor),
             projects,
@@ -1992,7 +1996,8 @@ impl Node {
         .with_git_wake(Arc::clone(&git_wake))
         .with_spawner(Arc::clone(&spawner))
         .with_ledger(Arc::clone(&ledger))
-        .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret);
+        .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret)
+        .with_stopping(Arc::clone(&stop));
         if let Some((token, file)) = control_token {
             ctx = ctx.with_control_token(token, file);
         }
@@ -2026,8 +2031,8 @@ impl Node {
             .collect();
         resume_round(&ctx, &ledger, &mut waiting, carry_on);
         let resume_ctx = Arc::clone(&ctx);
+        let commands = Arc::clone(&ctx);
         let server = ControlServer::start(&cfg.socket, ctx)?;
-        let stop = Arc::new(AtomicBool::new(false));
 
         let ticker = {
             let (sup, ev, stop, node_id, mesh, approvals, chat, spawner) = (
@@ -2517,6 +2522,7 @@ impl Node {
             ledger,
             crashed: false,
             keep_agents: false,
+            commands,
         })
     }
 
@@ -2676,25 +2682,96 @@ fn resume_round(
 }
 
 impl Drop for Node {
-    /// A clean stop (ADR-0104 O2): the threads stop, then every adapter the holder runs is let go and what the node had read from it
-    /// and not recorded yet is recorded as the supervision loop would (its states, options, usage and conversation; a request for the
-    /// person is asked again by the next node from the holder's replay, ADR-0093), then the conversation's last batch, the usage still
-    /// being gathered and the ledger's kept files are written. Waiting for the adapters' readers is bounded by [`DRAIN_WAIT`]; the rest
-    /// is local work. Agents the holder runs keep running; the node's own end with it, unless it stops with
-    /// [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`).
+    /// A clean stop (ADR-0104 O2). Control commands are refused from the first step on. Every adapter the holder runs is let go first
+    /// (a call still waiting on one, in the supervision loop or a command, returns at once and counts as given), then the supervision
+    /// loop is waited for, and what the node had read from those adapters and not recorded yet is recorded as the loop would (states,
+    /// options, usage and conversation; a request for the person is asked again by the next node from the holder's replay, ADR-0093).
+    /// Then the conversation's last batch, the usage still being gathered and the ledger's kept files are written. Waiting for the
+    /// readers is bounded by [`DRAIN_WAIT`] and for the loop by [`LOOP_WAIT`]; the rest is local work. Agents the holder runs keep
+    /// running. With [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`) that is all, and no other thread is waited for;
+    /// otherwise the node's other threads are joined and its own agents end with it.
     fn drop(&mut self) {
         drop(self.server.take());
         self.stop.store(true, Ordering::Release);
+        if self.crashed {
+            self.join_threads();
+            // Nothing is said, recorded or stopped: the supervisor, which owns the agents' processes, is never dropped.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
+        }
+        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (it never ticks once the stop is set).
+        let (drained, views) = {
+            let mut s = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
+            let drained = s.let_go_held(Instant::now() + DRAIN_WAIT);
+            (drained, s.list())
+        };
+        // The loop's own last round and the commands already running go first: their events are older than the drained ones, and a
+        // call they waited on a held adapter for has just come back as given. Either may wait on an adapter the node runs itself (a
+        // call of up to 10 s), so the stop waits for them only so long.
+        let until = Instant::now() + LOOP_WAIT;
+        while Instant::now() < until
+            && (self.commands.commands_running() > 0
+                || self.ticker.as_ref().is_some_and(|t| !t.is_finished()))
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         if let Some(t) = self.ticker.take() {
+            if t.is_finished() || !self.keep_agents {
+                let _ = t.join();
+            }
+        }
+        if !drained.is_empty() {
+            self.events.supervisor_events(&drained, &views);
+            let now = now_ms();
+            for e in &drained {
+                chat_event(&self.chat, &self.mesh, e, now);
+            }
+        }
+        // The conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
+        // gathered, then the ledger and the kept session files: before anything that could take long, as a stop has a deadline.
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
             let _ = t.join();
         }
-        if let Some(t) = self.resume_wait.take() {
-            let _ = t.join();
+        crate::transcript::flush(&self.chat);
+        self.events.flush_all_usage();
+        let _ = self.ledger.flush_all();
+        if self.keep_agents {
+            // The process ends right after: the other threads (a Git or device watcher may wait on a slow command) are not waited for,
+            // and as with `crash` the supervisor, which owns the agents' processes, is never dropped, so none is ended.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
         }
-        if let Some(t) = self.git_watch.take() {
-            let _ = t.join();
+        self.join_threads();
+        self.events.node_offline(&self.node_id);
+        // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
+        // Its hooks go too: they hold the mesh, which (through the helpers) holds the supervisor, so in a process that goes on the
+        // agents' mesh endpoints would stay locked and a next node there could not serve them.
+        {
+            let mut sup = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
+            sup.shutdown();
+            sup.clear_hooks();
         }
-        if let Some(t) = self.devices_watch.take() {
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
+        // what the kept agents last reported of their session (#932).
+        let _ = self.ledger.flush_all();
+    }
+}
+
+impl Node {
+    /// Joins the node's threads (each ends on the stop flag); the transcript writer is woken first.
+    fn join_threads(&mut self) {
+        for t in [
+            self.ticker.take(),
+            self.resume_wait.take(),
+            self.git_watch.take(),
+            self.devices_watch.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let _ = t.join();
         }
         if let Some(t) = self.transcript_writer.take() {
@@ -2703,49 +2780,16 @@ impl Drop for Node {
             }
             let _ = t.join();
         }
-        if self.crashed {
-            // Nothing is said, recorded or stopped: the supervisor, which owns the agents' processes, is never dropped.
-            std::mem::forget(Arc::clone(&self.supervisor));
-            return;
-        }
-        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (the ticker stopped without a last tick).
-        let (drained, views) = {
-            let mut s = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
-            let drained = s.let_go_held(Instant::now() + DRAIN_WAIT);
-            (drained, s.list())
-        };
-        if !drained.is_empty() {
-            self.events.supervisor_events(&drained, &views);
-            let now = now_ms();
-            for e in &drained {
-                chat_event(&self.chat, &self.mesh, e, now);
-            }
-        }
-        // The conversation's last batch (the writer has stopped), then the usage still being gathered, then the ledger and the kept
-        // session files (before anything that could take long: a stop has a deadline).
-        crate::transcript::flush(&self.chat);
-        self.events.flush_all_usage();
-        let _ = self.ledger.flush_all();
-        if self.keep_agents {
-            // As `crash`: the supervisor, which owns the agents' processes, is never dropped, so none is ended.
-            std::mem::forget(Arc::clone(&self.supervisor));
-            return;
-        }
-        self.events.node_offline(&self.node_id);
-        // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
-        self.supervisor
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .shutdown();
-        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
-        // what the kept agents last reported of their session (#932).
-        let _ = self.ledger.flush_all();
     }
 }
 
+/// ADR-0104 O2: how long a node that stops waits at most for its supervision loop's last round, after it let the held adapters go.
+pub const LOOP_WAIT: Duration = Duration::from_secs(1);
+
 /// ADR-0104 O2: how long a node that stops waits at most for the readers of the adapters the holder runs to hand over what they read.
-/// A read of a holder that does not answer waits up to the link's frame time (5 s); the stop does not, and the lines a reader never
-/// handed over stay the holder's (it counts only lines it gave). Under `agora node`'s whole stop deadline (`crates/agora/src/main.rs`).
+/// A read of a holder that does not answer waits up to the link's frame time (5 s); the stop does not. Lines the holder hands such a
+/// reader after the wait count as given there and are lost, as with a kill. Under `agora node`'s whole stop deadline
+/// (`crates/agora/src/main.rs`).
 pub const DRAIN_WAIT: Duration = Duration::from_secs(2);
 
 /// What an adapter's event changes in its conversation (and the mesh's view of it), as the supervision loop and a clean stop's drain

@@ -356,3 +356,12 @@ references are at main `9760e901`.
   (`hold_node_pipes`); with `agora down` twice, once with a stopped holder (`front_door`); and with a detach whose read hangs (`agora-adapters`).
   Still lost: on a kill, as before; on a clean stop, lines a reader still waiting on a holder that does not answer is handed after the wait (the
   holder counts them given), and a waiting request is asked again rather than recorded.
+  Review of #1108: a call waiting on a held adapter for its answer when the stop lets it go was given (its line is written): it is answered
+  `HostError::Detached` and recorded as sent or decided (a prompt stays in the conversation, a queued prompt being sent is shown sent, a
+  delivered decision is recorded as decided), never as not delivered. Control commands are refused with `node.offline` once the stop
+  begins, and those already running and the loop's last round are waited for at most 1 s (`LOOP_WAIT`) before the flushes, which come
+  before anything else is waited for. A request before the node is up and a second request end the process at once, and a signal the node
+  was started ignoring stays ignored (`catch_stop_requests_once`). A node dropped in a process that goes on lets go of its supervisor's
+  hooks, which held the mesh in a cycle, so the next node there serves the agents' mesh endpoints. Tested in `hold_node_pipes` (a prompt,
+  a queued prompt and a decision in flight; the next node on the mesh), `front_door` (a stop while starting, an ignored hangup) and
+  `agora-adapters` (a waiting call answered `Detached`).

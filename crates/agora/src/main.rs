@@ -754,10 +754,11 @@ const NODE_STOP_DEADLINE: Duration = Duration::from_secs(5);
 /// How often the stop watch looks for a caught stop request (the handler itself may only set a flag).
 const STOP_POLL: Duration = Duration::from_millis(100);
 
-/// ADR-0104 O2: from now on a stop request does not end `agora node` at once: what this returns says it arrived, so the node stops
-/// cleanly, and the process ends anyway [`NODE_STOP_DEADLINE`] after it. `None` where stop requests are not caught (Windows) or the
-/// watch could not start: a request then ends the process at once, as before.
-fn node_stop_watch() -> Option<std::sync::mpsc::Receiver<()>> {
+/// ADR-0104 O2: from now on a stop request does not end `agora node` at once once its node is up (`up` set): what this returns says
+/// it arrived, so the node stops cleanly, and the process ends anyway [`NODE_STOP_DEADLINE`] after it. Before the node is up there is
+/// nothing to keep, and a request ends the process at once, as a second request always does. `None` where stop requests are not
+/// caught (Windows) or the watch could not start: a request then ends the process at once, as before.
+fn node_stop_watch(up: Arc<AtomicBool>) -> Option<std::sync::mpsc::Receiver<()>> {
     if !agora_platform::STOP_REQUESTS_CAUGHT {
         return None;
     }
@@ -767,10 +768,14 @@ fn node_stop_watch() -> Option<std::sync::mpsc::Receiver<()>> {
         .name("agora-stop-watch".into())
         .spawn(move || loop {
             if agora_platform::stop_requested() {
+                if !up.load(Ordering::Acquire) {
+                    agora_platform::end_as_stopped();
+                }
                 let _ = tx.send(());
                 std::thread::sleep(NODE_STOP_DEADLINE);
-                // Operational log, not UI text.
-                eprintln!(
+                // Operational log, not UI text. Never a panic (a closed or hung-up stderr): the end below must come.
+                let _ = writeln!(
+                    std::io::stderr(),
                     "node: not stopped {} s after the stop request; ending now",
                     NODE_STOP_DEADLINE.as_secs()
                 );
@@ -779,7 +784,7 @@ fn node_stop_watch() -> Option<std::sync::mpsc::Receiver<()>> {
             std::thread::sleep(STOP_POLL);
         })
         .ok()?;
-    agora_platform::catch_stop_requests().ok()?;
+    agora_platform::catch_stop_requests_once().ok()?;
     Some(rx)
 }
 
@@ -791,8 +796,10 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     }
     let h = home();
-    // ADR-0104 O2: a stop request from here on ends the node cleanly (its agents in the holder keep running), within the deadline.
-    let stop = node_stop_watch();
+    // ADR-0104 O2: a stop request from here on ends the node cleanly (its agents in the holder keep running), within the deadline, once
+    // the node is up; before, at once.
+    let up = Arc::new(AtomicBool::new(false));
+    let stop = node_stop_watch(Arc::clone(&up));
     // A machine enrolled with a hub reports under the id the hub's certificate names. A link folder another command held past every
     // working hold is not read (it may be half saved) and the node does not start with no link or half of one: it ends, and its
     // supervisor starts it again later (Codex review of F1031). A folder that cannot be read yet (a volume still being mounted) is tried
@@ -851,6 +858,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // ADR-0104 O2: from here a stop request is a clean stop.
+    up.store(true, Ordering::Release);
     // An earlier run's link state is never read as this run's; a node without a hub has none.
     agora_node::link_state::LinkState::clear(&cfg.data_dir);
     for (path, reason) in &node.manifest_problems {
@@ -913,7 +922,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         }
     };
     let _ = stop.recv();
-    node.stop_keeping_agents();
+    // Whatever happens in the stop (a panic included), the process ends as the request would have ended it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| node.stop_keeping_agents()));
     agora_platform::end_as_stopped()
 }
 

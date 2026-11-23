@@ -961,3 +961,95 @@ fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
     assert_eq!(code, 0, "{out}{err}");
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// Sends `signal` (a `kill` name such as `TERM`) to a process this test started.
+#[cfg(unix)]
+fn signal(pid: u32, signal: &str) {
+    assert!(Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// Waits up to `limit` for `child` to end; how it ended and how long that took.
+#[cfg(unix)]
+fn ended_within(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<(std::process::ExitStatus, Duration)> {
+    let began = Instant::now();
+    while began.elapsed() < limit {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some((status, began.elapsed()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// ADR-0104 O2 (review of #1108): a stop request while the node is still starting (here it waits for a link folder it cannot read
+/// yet, which it tries again for 15 s) ends it at once, as before the clean stop: there is nothing to keep yet.
+#[cfg(unix)]
+#[test]
+fn a_node_stopped_while_it_starts_ends_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp("o2-start");
+    let link = home.join("link");
+    std::fs::create_dir_all(&link).unwrap();
+    std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&link).is_ok() {
+        // A user who can read it anyway (root): there is no slow start to stop here.
+        let _ = std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700));
+        return;
+    }
+    let mut node = agora(&home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(node.try_wait().unwrap().is_none(), "the node did not wait");
+    signal(node.id(), "TERM");
+    let ended = ended_within(&mut node, Duration::from_secs(10));
+    let _ = node.kill();
+    let _ = std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700));
+    let (status, took) = ended.expect("the node did not end");
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    assert!(took < Duration::from_secs(2), "it took {took:?}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// ADR-0104 O2 (review of #1108): a stop request the node was started ignoring (`nohup`, a background job) stays ignored, as before
+/// the clean stop; the others still stop it cleanly, and it ends as that signal ends it.
+#[cfg(unix)]
+#[test]
+fn a_node_started_ignoring_hangups_keeps_ignoring_them() {
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp("o2-nohup");
+    let mut node = Command::new("sh")
+        .args(["-c", "trap '' HUP; exec \"$0\" node run", AGORA])
+        .env("AGORA_HOME", &home)
+        .env("AGORA_LANG", "en")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the node's socket", Duration::from_secs(60), || {
+        home.join("node.sock").exists()
+    });
+    signal(node.id(), "HUP");
+    std::thread::sleep(Duration::from_secs(1));
+    let still = node.try_wait().unwrap();
+    if still.is_none() {
+        signal(node.id(), "TERM");
+    }
+    let ended = ended_within(&mut node, Duration::from_secs(10));
+    let _ = node.kill();
+    assert!(still.is_none(), "a hangup it ignored stopped it: {still:?}");
+    let (status, _) = ended.expect("the node did not end");
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    let _ = std::fs::remove_dir_all(home);
+}

@@ -305,32 +305,37 @@ impl AdapterCall {
         self.epoch
     }
 
-    /// Makes the request and waits for the answer.
+    /// Makes the request and waits for the answer. A request whose answer the node will not read because it let the adapter go while
+    /// waiting (it is stopping, ADR-0104 O2: [`HostError::Detached`]) was given to the adapter and counts as made: the caller records
+    /// it as sent, as it would after an answer, and never as failed.
     pub fn run(self) -> Result<(), SupervisorError> {
         const WAIT: Duration = Duration::from_secs(10);
+        let given = |r: Result<(), HostError>| match r {
+            Err(HostError::Detached) => Ok(()),
+            other => other,
+        };
         let session = self.session.as_str();
         match &self.op {
-            CallOp::Prompt { text, from_mesh } => self
-                .caller
-                .prompt(session, text, *from_mesh, WAIT)
-                .map_err(|e| SupervisorError::Spawn(e.to_string())),
-            CallOp::Cancel => self.caller.cancel(session, WAIT).map_err(adapter_error),
-            CallOp::SetConfig { id, value } => self
-                .caller
-                .set_config(session, id, value, WAIT)
-                .map_err(adapter_error),
-            CallOp::SetOption { kind, value } => self
-                .caller
-                .set_option(session, *kind, value, WAIT)
-                .map_err(adapter_error),
+            CallOp::Prompt { text, from_mesh } => {
+                given(self.caller.prompt(session, text, *from_mesh, WAIT))
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))
+            }
+            CallOp::Cancel => given(self.caller.cancel(session, WAIT)).map_err(adapter_error),
+            CallOp::SetConfig { id, value } => {
+                given(self.caller.set_config(session, id, value, WAIT)).map_err(adapter_error)
+            }
+            CallOp::SetOption { kind, value } => {
+                given(self.caller.set_option(session, *kind, value, WAIT)).map_err(adapter_error)
+            }
             CallOp::Resolve {
                 approval,
                 approved,
                 scope,
-            } => self
-                .caller
-                .resolve_approval_scoped(session, approval, *approved, *scope, WAIT)
-                .map_err(|e| SupervisorError::Spawn(e.to_string())),
+            } => given(
+                self.caller
+                    .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
+            )
+            .map_err(|e| SupervisorError::Spawn(e.to_string())),
         }
     }
 }
@@ -1572,6 +1577,14 @@ impl Supervisor {
     /// Installs the hook that undoes the launch hook when a start fails after it ran.
     pub fn set_abort_hook(&mut self, hook: AbortHook) {
         self.abort_hook = Some(hook);
+    }
+
+    /// Lets go of the launch and abort hooks, for a node that has stopped: they hold the node's mesh, which holds what holds this
+    /// supervisor, so in a process that goes on (a test, an embedding) the mesh, and the agents' endpoints it locks, would never be
+    /// let go otherwise.
+    pub fn clear_hooks(&mut self) {
+        self.hook = None;
+        self.abort_hook = None;
     }
 
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
@@ -3321,6 +3334,11 @@ impl Supervisor {
             if let Some(a) = e.adapter.as_mut().filter(|a| a.is_held()) {
                 a.reader_ended_by(until);
             }
+        }
+        // A queued prompt whose send was waiting for its answer has just been told it was given (`HostError::Detached`): its result
+        // is taken below with the rest. Each send's thread holds a handle on the results until it has put its own there.
+        while Arc::strong_count(&self.sent) > 1 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
         }
         let mut events = Vec::new();
         self.poll_adapters(Instant::now(), &mut events, true);

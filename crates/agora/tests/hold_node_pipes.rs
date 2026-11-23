@@ -1364,6 +1364,11 @@ fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the
 
     let node = rig.node();
     assert!(held(&node, &id), "the agent was not taken up again");
+    // The stopped node let go of the agent's mesh endpoint, so this one serves it (in a process that goes on, too).
+    assert!(
+        node.mesh.is_registered(&agent),
+        "the agent is not on the mesh"
+    );
     assert!(
         agent_said(&node, &id, "drained"),
         "the answer the old node read is not in the conversation"
@@ -1438,4 +1443,183 @@ fn a_node_stops_in_time_while_its_holder_does_not_answer() {
     wait_for("the answer after the restart", || {
         agent_said(&node, &id, "after")
     });
+}
+
+/// A command through the node's control socket at `socket`, as a window's would come (`Err` only when the socket failed).
+fn command(socket: &Path, cmd: Cmd) -> std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>> {
+    Client::connect(socket)?.call(cmd)
+}
+
+fn prompt_command(id: &str, text: &str) -> Cmd {
+    Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.to_string(),
+        text: text.to_string(),
+    })
+}
+
+/// The person's own entry `text` in the conversation, if there is one.
+fn user_entry(node: &Node, id: &str, text: &str) -> Option<v1::ChatEntry> {
+    chat(node, id)
+        .into_iter()
+        .find(|e| e.text == text && e.role == v1::ChatRole::User as i32)
+}
+
+/// ADR-0104 O2, review of #1108: a prompt the node had sent and whose answer it was still waiting for when it stopped was given to the
+/// agent. The command is answered as sent and the prompt stays in the conversation (it was taken back, as if never sent, while the
+/// agent worked on it).
+#[test]
+fn a_prompt_waiting_for_its_answer_when_the_node_stops_stays_in_the_conversation() {
+    let _serial = serial();
+    let rig = Rig::new("given-prompt");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let socket = node.socket().unwrap().to_path_buf();
+    // `hang`: the adapter takes the prompt and answers only after 30 s.
+    let asking = {
+        let (socket, id) = (socket.clone(), id.clone());
+        std::thread::spawn(move || command(&socket, prompt_command(&id, "hang")))
+    };
+    wait_for("the person's entry", || {
+        user_entry(&node, &id, "hang").is_some()
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    drop(node);
+    let answer = asking.join().unwrap();
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert!(
+        user_entry(&node, &id, "hang").is_some(),
+        "the prompt the agent was given is gone from the conversation"
+    );
+    assert!(matches!(answer, Ok(Ok(_))), "{answer:?}");
+}
+
+/// ADR-0104 O2, review of #1108: a queued prompt that had become the turn and was being sent when the node stopped was given. It is
+/// shown as sent, never dropped as if it had not gone out.
+#[test]
+fn a_queued_prompt_being_sent_when_the_node_stops_is_shown_sent() {
+    let _serial = serial();
+    let rig = Rig::with_args("given-queued", &["--turns"]);
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let socket = node.socket().unwrap().to_path_buf();
+    // A turn that runs a moment (its answer comes 300 ms after its words), and a prompt queued behind it that is then sent and not
+    // answered for 30 s.
+    let first = {
+        let (socket, id) = (socket.clone(), id.clone());
+        std::thread::spawn(move || command(&socket, prompt_command(&id, "first:one")))
+    };
+    wait_for("the first turn's words", || agent_said(&node, &id, "one"));
+    let queued = command(&socket, prompt_command(&id, "hang")).unwrap();
+    assert!(
+        matches!(
+            &queued,
+            Ok(v1::CommandOk {
+                result: Some(Ok_::AgentPrompt(v1::AgentPromptResult { queued: true, .. })),
+            })
+        ),
+        "{queued:?}"
+    );
+    assert!(matches!(first.join().unwrap(), Ok(Ok(_))));
+    // The first turn ends; the queued prompt becomes the turn and its send waits.
+    wait_for("the first turn to end", || {
+        agent_said(&node, &id, "first:one")
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(user_entry(&node, &id, "hang").is_some_and(|e| e.queued));
+    drop(node);
+    let node = rig.node();
+    let entry = user_entry(&node, &id, "hang");
+    assert!(
+        entry.as_ref().is_some_and(|e| !e.queued),
+        "the prompt the agent was given is dropped or still waiting: {entry:?}"
+    );
+    assert!(
+        !chat(&node, &id)
+            .iter()
+            .any(|e| e.code == "adapter.queue_dropped"),
+        "{:#?}",
+        chat(&node, &id)
+    );
+}
+
+/// ADR-0104 O2, review of #1108: a decision the person signed, which the node verified and was delivering when it stopped, was given to
+/// the agent. It is recorded as decided, never as a request that ended unanswered.
+#[test]
+fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+    let _serial = serial();
+    let rig = Rig::new("given-decision");
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let key =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let hex: String = key
+        .public_key()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    agora_node::approvals::trust_device(&rig.root.join("data/trusted-devices"), "phone", &hex)
+        .unwrap();
+    let node = rig.node();
+    let id = started(&rig, &node);
+    prompt(&node, &id, "ask");
+    let requested = |node: &Node| {
+        node.events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(v1::event::Body::ApprovalRequested(r)) if r.agent_id == id => Some(r),
+                _ => None,
+            })
+    };
+    wait_for("the request", || requested(&node).is_some());
+    let approval = requested(&node).unwrap().approval_id;
+    // The adapter cannot answer while it is stopped: the decision's delivery waits for it.
+    let paused = Paused::new(pid_of(&node, &id));
+    let socket = node.socket().unwrap().to_path_buf();
+    let signature = key
+        .sign(
+            &rng,
+            &agora_node::approvals::signed_message("hold-node", &approval, true),
+        )
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let deciding = {
+        let approval = approval.clone();
+        std::thread::spawn(move || {
+            command(
+                &socket,
+                Cmd::ApprovalResolve(v1::ApprovalResolve {
+                    approval_id: approval,
+                    approved: true,
+                    signer_device_id: "phone".into(),
+                    signature,
+                    ..Default::default()
+                }),
+            )
+        })
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    drop(node);
+    drop(paused);
+    let answer = deciding.join().unwrap();
+    let node = rig.node();
+    let resolved: Vec<v1::ApprovalResolved> = node
+        .events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::ApprovalResolved(r)) if r.approval_id == approval => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resolved.len(), 1, "{resolved:#?}");
+    assert!(
+        resolved[0].approved && resolved[0].signer_device_id == "phone",
+        "the delivered decision is recorded as not approved: {resolved:#?}"
+    );
+    assert!(matches!(answer, Ok(Ok(_))), "{answer:?}");
 }
