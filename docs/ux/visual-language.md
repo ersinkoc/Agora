@@ -110,7 +110,7 @@ the kit (redesign PRs 2 and 3).
   shadows. **One elevation** (ADR-0102): overlays only (dialogs, menus, the palette, toasts, tooltips) use the raised surface
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
-  reach them as they adopt the kit (the redesign plan's PRs 2–13): until then tiles keep their coloured edge and their shadow, existing
+  reach them as they adopt the kit (the redesign plan's PRs 2–13; Settings does since PR 8): until then tiles keep their coloured edge and their shadow, existing
   overlays use the older `--shadow`, errors and change counts are still amber in places, and the global `h2` is still an uppercase label.
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
@@ -128,7 +128,8 @@ the kit (redesign PRs 2 and 3).
   the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
   SettingRow, SegmentedControl (a radio group: arrows move and choose), Toggle (a switch; red when it lets an agent act without asking),
   StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
-  (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
+  (icon, title, one line, at most one action), Tooltip, KeyValue and ConfirmDialog (a question before something destructive: an overlay with
+  a red icon chip, the safe answer first and focused, the destructive answer as a red button). They use tokens only and logical properties, grow to the 44 px
   touch target on a touch screen, and respect reduced motion.
 - **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
   (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed

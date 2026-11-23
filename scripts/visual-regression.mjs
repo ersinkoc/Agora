@@ -1,4 +1,4 @@
-// Visual regression: the component gallery and the sign-in page, in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -35,6 +35,8 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const pages = [
   { name: 'gallery', hash: '#/gallery', ready: '.gallery' },
   { name: 'signin', hash: '', ready: 'form' },
+  // Its dates are written in the browser's zone and language, so both are fixed; notifications are allowed so the switch is enabled.
+  { name: 'settings', hash: '#/gallery/settings', ready: '[data-settings] .set-kind', context: { locale: 'en-US', timezoneId: 'UTC', permissions: ['notifications'] } },
 ];
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
 
@@ -63,7 +65,7 @@ for (const p of pages) {
   for (const [vname, viewport] of viewports) {
     for (const scheme of ['dark', 'light']) {
       const name = `${p.name}-${vname}-${scheme}`;
-      const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce' });
+      const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce', ...p.context });
       const page = await ctx.newPage();
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);

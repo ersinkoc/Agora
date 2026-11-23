@@ -566,7 +566,7 @@
   .set-item__main { @apply grid min-w-0 flex-1 gap-0.5; flex-basis: 10rem; }
   .set-item__name { @apply truncate font-semibold; }
   .set-item__meta { @apply flex min-w-0 flex-wrap gap-x-1.5 text-muted; font-size: var(--text-caption); }
-  .set-item__meta > * + *::before { content: '·'; @apply me-1.5; }
+  .set-item__meta > :not(:last-child)::after { content: '·'; @apply ms-1.5; }
   .set-item__flag { @apply font-medium text-ink; }
   .set-item__end { @apply ms-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2; }
   .set-item__end .kit-pill { @apply max-w-full overflow-hidden text-ellipsis; }
