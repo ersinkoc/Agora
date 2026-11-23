@@ -185,18 +185,22 @@ pub fn pair(say: &Say, o: &Opts, op: &str) -> ExitCode {
 #[derive(Debug, PartialEq, Eq)]
 enum JoinHint {
     /// Another machine can dial `addresses` (`ip:port`, the first is the one to type); `names` are the certificate's DNS names, which
-    /// may lead to the hub if the network resolves them to this computer (never promised). At least one of the two is not empty.
+    /// may lead to the hub if the network resolves them to this computer (never promised); `elsewhere` are addresses the certificate
+    /// names that no interface of this computer that is up has now (#993: an old address, or one that leads here through the network),
+    /// also never promised. At least one of the three is not empty.
     Network {
         addresses: Vec<String>,
         names: Vec<String>,
+        elsewhere: Vec<String>,
     },
     /// The hub listens on a loopback address only, so no other machine can reach it. `local` is what a second Agora on this same
-    /// computer dials, when the certificate names one; `lan` is this computer's address on its network, the one to listen on instead.
+    /// computer dials, when the certificate names one; `lan` are this computer's addresses on its networks, to listen on one of
+    /// instead (#993: all of them, since only the owner knows which network the other machine is on).
     ThisComputerOnly {
         listen: String,
         port: u16,
         local: Option<String>,
-        lan: Option<std::net::IpAddr>,
+        lan: Vec<std::net::IpAddr>,
     },
     /// The hub listens beyond this computer, but its certificate names no address another machine could dial. `local` as above.
     NoAddress { local: Option<String> },
@@ -212,11 +216,12 @@ fn host_port(host: &str, port: u16) -> String {
 }
 
 /// The hint for a hub that listens on `listen` and whose certificate carries `names` (`agora_hub::ca::cert_names`: DNS names as
-/// written, addresses in their shortest text). `lan` is this computer's address on its network, if one is known. No I/O.
+/// written, addresses in their shortest text). `ifaces` are this computer's interface addresses (`agora_platform::interface_addresses`),
+/// `None` when they could not be listed or were not looked up. No I/O.
 fn join_hint(
     listen: std::net::SocketAddr,
     names: &[String],
-    lan: Option<std::net::IpAddr>,
+    ifaces: Option<&[agora_platform::InterfaceAddr]>,
 ) -> JoinHint {
     use std::net::IpAddr;
     let port = listen.port();
@@ -240,7 +245,7 @@ fn join_hint(
             listen: listen.to_string(),
             port,
             local: local(Some(listen_ip)),
-            lan,
+            lan: ifaces.map(network_addresses).unwrap_or_default(),
         };
     }
     // An address only when the hub surely listens on it: a specific listen address is the only one; `0.0.0.0` is every IPv4 address;
@@ -255,10 +260,20 @@ fn join_hint(
                 _ => ip == listen_ip,
             }
     };
-    let (mut addresses, mut dns) = (Vec::<String>::new(), Vec::<String>::new());
+    // For a wildcard listen address the certificate may still name an address this computer no longer has (#993): the hub keeps its
+    // certificate while the names it wants now are in it. Such an address is still offered, but never as one the hub surely answers
+    // at. Unknown interfaces (`None`) count every address as present.
+    let present = |ip: IpAddr| {
+        !listen_ip.is_unspecified()
+            || ifaces.is_none_or(|i| i.iter().any(|a| a.up && a.ip.to_canonical() == ip))
+    };
+    let (mut addresses, mut dns, mut elsewhere) = (Vec::new(), Vec::new(), Vec::new());
     for n in names {
         let (list, candidate) = match ip_of(n) {
-            Some(ip) if dialable_ip(ip) => (&mut addresses, host_port(&ip.to_string(), port)),
+            Some(ip) if dialable_ip(ip) && present(ip) => {
+                (&mut addresses, host_port(&ip.to_string(), port))
+            }
+            Some(ip) if dialable_ip(ip) => (&mut elsewhere, host_port(&ip.to_string(), port)),
             Some(_) => continue,
             None if n.eq_ignore_ascii_case("localhost") || n.is_empty() => continue,
             None => (&mut dns, host_port(n, port)),
@@ -267,7 +282,7 @@ fn join_hint(
             list.push(candidate);
         }
     }
-    if addresses.is_empty() && dns.is_empty() {
+    if addresses.is_empty() && dns.is_empty() && elsewhere.is_empty() {
         // A wildcard listen address also serves loopback; a specific one does not.
         let loopback_too = listen_ip.is_unspecified();
         return JoinHint::NoAddress {
@@ -277,23 +292,27 @@ fn join_hint(
     JoinHint::Network {
         addresses,
         names: dns,
+        elsewhere,
     }
 }
 
-/// This computer's address on its network, to suggest listening on instead of every address: the first private IPv4 address
-/// (10/8, 172.16/12, 192.168/16) or shared one (100.64/10, a VPN such as a tailnet) of an interface that is up.
-fn network_address(ifaces: &[agora_platform::InterfaceAddr]) -> Option<std::net::IpAddr> {
-    ifaces
+/// This computer's addresses on its networks, to suggest listening on instead of every address: each private IPv4 address
+/// (10/8, 172.16/12, 192.168/16) or shared one (100.64/10, a VPN such as a tailnet) of an interface that is up, once, in the
+/// system's order.
+fn network_addresses(ifaces: &[agora_platform::InterfaceAddr]) -> Vec<std::net::IpAddr> {
+    let mut found = Vec::new();
+    for a in ifaces
         .iter()
         .filter(|a| a.up && !a.loopback && !a.transient)
-        .find_map(|a| match a.ip {
-            std::net::IpAddr::V4(v4)
-                if v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64) =>
-            {
-                Some(a.ip)
+    {
+        if let std::net::IpAddr::V4(v4) = a.ip {
+            let shared = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
+            if (v4.is_private() || shared) && !found.contains(&a.ip) {
+                found.push(a.ip);
             }
-            _ => None,
-        })
+        }
+    }
+    found
 }
 
 /// The sentences of a [`JoinHint`], in order.
@@ -307,9 +326,14 @@ fn hint_lines(say: &Say, hint: &JoinHint) -> Vec<String> {
         })
     };
     match hint {
-        JoinHint::Network { addresses, names } => {
+        JoinHint::Network {
+            addresses,
+            names,
+            elsewhere,
+        } => {
             let mut lines = Vec::new();
             let mut names = names.as_slice();
+            let mut elsewhere = elsewhere.as_slice();
             if let Some((first, rest)) = addresses.split_first() {
                 lines.push(say.text(
                     key!("pair-open-next"),
@@ -327,11 +351,23 @@ fn hint_lines(say: &Say, hint: &JoinHint) -> Vec<String> {
                     &[("address", first.as_str().into())],
                 ));
                 names = rest;
+            } else if let Some((first, rest)) = elsewhere.split_first() {
+                lines.push(say.text(
+                    key!("pair-open-next-elsewhere"),
+                    &[("address", first.as_str().into())],
+                ));
+                elsewhere = rest;
             }
             if !names.is_empty() {
                 lines.push(say.text(
                     key!("pair-open-names"),
                     &[("names", names.join(", ").into())],
+                ));
+            }
+            if !elsewhere.is_empty() {
+                lines.push(say.text(
+                    key!("pair-open-elsewhere"),
+                    &[("addresses", elsewhere.join(", ").into())],
                 ));
             }
             if lines.is_empty() {
@@ -345,16 +381,32 @@ fn hint_lines(say: &Say, hint: &JoinHint) -> Vec<String> {
             local,
             lan,
         } => {
-            let mut lines = vec![match lan {
-                Some(ip) => say.text(
+            let with_port = |ip: &std::net::IpAddr| host_port(&ip.to_string(), *port);
+            let mut lines = vec![match lan.as_slice() {
+                [ip] => say.text(
                     key!("pair-open-local-only"),
                     &[
                         ("listen", listen.as_str().into()),
-                        ("lan", host_port(&ip.to_string(), *port).into()),
+                        ("lan", with_port(ip).into()),
                         ("port", port.to_string().into()),
                     ],
                 ),
-                None => say.text(
+                [_, _, ..] => say.text(
+                    key!("pair-open-local-only-several"),
+                    &[
+                        ("listen", listen.as_str().into()),
+                        (
+                            "lans",
+                            lan.iter()
+                                .map(with_port)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .into(),
+                        ),
+                        ("port", port.to_string().into()),
+                    ],
+                ),
+                [] => say.text(
                     key!("pair-open-local-only-no-lan"),
                     &[
                         ("listen", listen.as_str().into()),
@@ -415,15 +467,11 @@ fn open(
     say.out(key!("pair-opened"), &[("minutes", opened.into())]);
     // After `PairOpen`: it has made the certificate name every address the hub can be reached at now.
     let hint = listen_of(dir, addr).map_or(JoinHint::NoAddress { local: None }, |listen| {
-        // This computer's network address is only looked up for a hub that other machines cannot reach yet.
-        let lan = if listen.ip().is_loopback() {
-            agora_platform::interface_addresses()
-                .ok()
-                .and_then(|i| network_address(&i))
-        } else {
-            None
-        };
-        join_hint(listen, &served_names(dir), lan)
+        // This computer's interfaces are only listed for a hub that other machines cannot reach yet, or that listens on every address.
+        let ifaces = (listen.ip().is_loopback() || listen.ip().is_unspecified())
+            .then(agora_platform::interface_addresses)
+            .and_then(Result::ok);
+        join_hint(listen, &served_names(dir), ifaces.as_deref())
     });
     for line in hint_lines(say, &hint) {
         let _ = writeln!(std::io::stdout(), "{line}");
@@ -670,10 +718,23 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// An interface address that is not loopback and not transient, up or down.
+    fn iface(addr: &str, up: bool) -> agora_platform::InterfaceAddr {
+        agora_platform::InterfaceAddr {
+            name: "x".into(),
+            ip: addr.parse().unwrap(),
+            prefix_len: 24,
+            up,
+            loopback: false,
+            transient: false,
+        }
+    }
+
     fn network(addresses: &[&str], dns: &[&str]) -> JoinHint {
         JoinHint::Network {
             addresses: names(addresses),
             names: names(dns),
+            elsewhere: vec![],
         }
     }
 
@@ -685,7 +746,7 @@ mod tests {
         let hint = join_hint(
             "127.0.0.1:7443".parse().unwrap(),
             &names(&["localhost", "white", "127.0.0.1"]),
-            Some(ip("192.168.1.246")),
+            Some(&[iface("192.168.1.246", true)]),
         );
         assert_eq!(
             hint,
@@ -693,7 +754,7 @@ mod tests {
                 listen: "127.0.0.1:7443".into(),
                 port: 7443,
                 local: Some("127.0.0.1:7443".into()),
-                lan: Some(ip("192.168.1.246")),
+                lan: vec![ip("192.168.1.246")],
             }
         );
         let text = hint_lines(&say(), &hint).join("\n");
@@ -722,7 +783,7 @@ mod tests {
                 listen: "127.0.0.1:7443".into(),
                 port: 7443,
                 local: Some("localhost:7443".into()),
-                lan: None,
+                lan: vec![],
             }
         );
         let text = hint_lines(&say(), &no_lan).join("\n");
@@ -735,7 +796,7 @@ mod tests {
                 listen: "[::1]:7443".into(),
                 port: 7443,
                 local: Some("[::1]:7443".into()),
-                lan: None,
+                lan: vec![],
             }
         );
         let none = join_hint("127.0.0.1:7443".parse().unwrap(), &[], None);
@@ -828,8 +889,137 @@ mod tests {
         );
     }
 
+    /// #993: for a wildcard listen address, the certificate can still name an address no interface of this computer has any more (the
+    /// hub keeps the names of its certificate while the current ones are covered, so an old DHCP lease stays). The address to type is
+    /// one an interface that is up has now; one that is not on an interface (gone, or one that leads here through the network, such
+    /// as a public address in front of a NAT) is still offered, but never as an address the hub surely answers at.
     #[test]
-    fn the_network_address_is_a_private_or_shared_ipv4_address_of_an_interface_that_is_up() {
+    fn a_hub_on_every_address_prefers_an_address_this_computer_has_now() {
+        let cert = names(&["localhost", "white", "10.0.0.5", "192.168.1.20", "10.9.9.9"]);
+        let ifaces = [
+            iface("192.168.1.20", true),
+            // Down: not an address the hub answers at now.
+            iface("10.9.9.9", false),
+        ];
+        let text = hint_lines(
+            &say(),
+            &join_hint("0.0.0.0:7443".parse().unwrap(), &cert, Some(&ifaces)),
+        )
+        .join("\n");
+        assert!(text.contains("`agora join 192.168.1.20:7443`"), "{text}");
+        assert!(!text.contains("also answers at"), "{text}");
+        assert!(
+            text.contains("not on this computer's interfaces now: 10.0.0.5:7443, 10.9.9.9:7443"),
+            "{text}"
+        );
+        // Not one of them on an interface now: the first is offered only as an address that may lead here; a name the network may
+        // resolve here comes first.
+        let gone = [iface("192.168.7.7", true)];
+        let text = hint_lines(
+            &say(),
+            &join_hint(
+                "0.0.0.0:7443".parse().unwrap(),
+                &names(&["10.0.0.5", "203.0.113.7"]),
+                Some(&gone),
+            ),
+        )
+        .join("\n");
+        assert!(
+            text.contains("`agora join 10.0.0.5:7443`, if that address leads to this computer"),
+            "{text}"
+        );
+        assert!(
+            text.contains("not on this computer's interfaces now: 203.0.113.7:7443"),
+            "{text}"
+        );
+        assert!(!text.contains("also answers at"), "{text}");
+        let text = hint_lines(
+            &say(),
+            &join_hint(
+                "0.0.0.0:7443".parse().unwrap(),
+                &names(&["10.0.0.5", "white"]),
+                Some(&gone),
+            ),
+        )
+        .join("\n");
+        assert!(
+            text.contains("`agora join white:7443`, if that name leads"),
+            "{text}"
+        );
+        assert!(
+            text.contains("not on this computer's interfaces now: 10.0.0.5:7443"),
+            "{text}"
+        );
+        // `::`: the same with IPv6 addresses.
+        let text = hint_lines(
+            &say(),
+            &join_hint(
+                "[::]:7443".parse().unwrap(),
+                &names(&["fd00::9", "fd00::5"]),
+                Some(&[iface("fd00::5", true)]),
+            ),
+        )
+        .join("\n");
+        assert!(text.contains("`agora join [fd00::5]:7443`"), "{text}");
+        assert!(
+            text.contains("not on this computer's interfaces now: [fd00::9]:7443"),
+            "{text}"
+        );
+        // Interfaces that could not be listed: nothing is known, so every address is offered as before.
+        assert_eq!(
+            join_hint("0.0.0.0:7443".parse().unwrap(), &cert, None),
+            network(
+                &["10.0.0.5:7443", "192.168.1.20:7443", "10.9.9.9:7443"],
+                &["white:7443"]
+            )
+        );
+    }
+
+    /// #993: a hub on loopback only, on a computer with several private networks: each is listed for the owner to choose the one the
+    /// other machine is on, instead of picking the first. With one, that one is suggested.
+    #[test]
+    fn a_loopback_only_hub_lists_every_network_address() {
+        let ifaces = [
+            iface("192.168.1.246", true),
+            iface("10.0.0.4", true),
+            iface("192.168.1.246", true),
+            iface("172.16.5.5", false),
+        ];
+        let text = hint_lines(
+            &say(),
+            &join_hint(
+                "127.0.0.1:7443".parse().unwrap(),
+                &names(&["localhost"]),
+                Some(&ifaces),
+            ),
+        )
+        .join("\n");
+        assert!(
+            text.contains("several addresses: 192.168.1.246:7443, 10.0.0.4:7443."),
+            "{text}"
+        );
+        assert!(text.contains("`agora --listen ADDRESS:7443`"), "{text}");
+        assert!(
+            !text.contains("`agora --listen 192.168.1.246:7443`"),
+            "{text}"
+        );
+        assert!(!text.contains("172.16.5.5"), "{text}");
+        assert!(text.contains("`0.0.0.0:7443`"), "{text}");
+        let one = hint_lines(
+            &say(),
+            &join_hint(
+                "127.0.0.1:7443".parse().unwrap(),
+                &names(&["localhost"]),
+                Some(&ifaces[..1]),
+            ),
+        )
+        .join("\n");
+        assert!(one.contains("`agora --listen 192.168.1.246:7443`"), "{one}");
+        assert!(!one.contains("several addresses"), "{one}");
+    }
+
+    #[test]
+    fn the_network_addresses_are_the_private_or_shared_ipv4_addresses_of_interfaces_that_are_up() {
         let iface = |ip: &str, up: bool, loopback: bool| agora_platform::InterfaceAddr {
             name: "x".into(),
             ip: ip.parse().unwrap(),
@@ -839,16 +1029,17 @@ mod tests {
             transient: false,
         };
         assert_eq!(
-            network_address(&[
+            network_addresses(&[
                 iface("127.0.0.1", true, true),
                 iface("192.168.1.9", false, false),
                 iface("203.0.113.7", true, false),
                 iface("fd00::5", true, false),
                 iface("100.101.102.103", true, false),
                 iface("10.0.0.4", true, false),
+                iface("100.101.102.103", true, false),
             ]),
-            Some(ip("100.101.102.103"))
+            vec![ip("100.101.102.103"), ip("10.0.0.4")]
         );
-        assert_eq!(network_address(&[iface("203.0.113.7", true, false)]), None);
+        assert!(network_addresses(&[iface("203.0.113.7", true, false)]).is_empty());
     }
 }
