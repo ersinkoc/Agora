@@ -103,6 +103,14 @@ start-approval-options-once = Yalnızca bu başlatmaya izin verilebilir: yanıt�
 start-approval-does-not-ask = İzin verirseniz bu yardımcı, çalıştığı sürece size sormadan komut çalıştırır ve dosyaları değiştirir.
 start-approval-more = { $name } çalıştığı sürece bu klasörde, yeniden sormadan en fazla { $count } { $kind } ajanı
 start-approval-nested = Yardımcıları da yardımcı başlatmak isteyebilir (her birini siz yanıtlarsınız)
+approval-review = İncele
+approval-review-for = { $name } isteğinin tamamını oku
+approval-review-close = Kapat
+start-summary-outside = kendi klasörünün dışında
+start-summary-more = { $count ->
+    [one] 1 satır daha
+   *[other] { $count } satır daha
+}
 helper-started-by = { $name } tarafından başlatıldı
 helper-grants = Yardımcı izinleri
 helper-grant-line = Sormadan hâlâ { $count } { $kind } başlatabilir, klasör:

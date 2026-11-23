@@ -506,6 +506,21 @@
   .attention-card > .approval-req { @apply min-h-0 flex-1 rounded-m; grid-template-rows: auto minmax(0, 1fr) auto; }
   .approval-req--full > .kit-chip { grid-row: auto; }
   .attention-card .kit-callout__body { @apply flex min-h-0 flex-col gap-2; }
+  /* Redesign PR 5: a start or a switch in short (two lines, each cut at its end: Review shows it whole), and Review's dialog, whose body
+     scrolls inside the window so the answers stay in view. */
+  .approval-req__summary { @apply grid min-w-0 gap-0.5 text-muted; font-size: var(--text-caption); }
+  .approval-req__line { @apply m-0 flex min-w-0 items-baseline gap-x-1.5; }
+  .approval-req__line > * + *::before { content: '·'; @apply me-1.5; }
+  .approval-req__line > * { @apply min-w-0 truncate; flex: 0 1 auto; }
+  .approval-req__line > .approval-req__clip { flex-shrink: 1000; } /* the quote gives way first */
+  /* A start's red flags are never cut: the folder takes what is left (to nothing), and only flags too wide for the card wrap. */
+  .approval-req__line--facts { flex-wrap: wrap; }
+  .approval-req__line--facts > * { flex: none; max-width: 100%; }
+  .approval-req__line--facts > .approval-req__clip { flex: 1 1 0; }
+  .approval-req__quote { @apply text-ink; }
+  .approval-req__quote::before { content: '“'; }
+  .approval-req__quote::after { content: '”'; }
+  .review-card .kit-callout__body { @apply self-stretch overflow-y-auto; overscroll-behavior: contain; }
 
   .kit-empty { @apply grid justify-items-center gap-1.5 px-4 py-7 text-center; }
   .kit-empty > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }

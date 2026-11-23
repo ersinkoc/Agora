@@ -145,7 +145,7 @@ body {
   background: var(--surface-1);
 }
 .phone-card--needs { border-color: var(--state-needs-you); }
-.phone-card > .start { border: 0; padding: 0; background: transparent; }
+.phone-card > .start, .phone-card > .approval-req { border: 0; padding: 0; background: transparent; }
 .phone-card__head {
   display: flex;
   align-items: center;
