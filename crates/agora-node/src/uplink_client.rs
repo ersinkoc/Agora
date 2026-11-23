@@ -857,6 +857,9 @@ where
                     // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
                     // a refused subscription included (the grant is judged on the relay's own thread, off this loop).
                     let alive = Arc::new(AtomicBool::new(true));
+                    // Streams whose relay ended (refused, exited, closed by the node) are not closed by the hub; drop them here so the
+                    // map stays as small as the relays that run (#1144 review).
+                    relays.0.retain(|_, a| a.load(Ordering::Acquire));
                     relays.0.insert(stream, Arc::clone(&alive));
                     let (socket, answers, out, grants) = (
                         commands.map(std::path::Path::to_path_buf),
@@ -952,7 +955,10 @@ fn relay_terminal(
     out: &tokio::sync::mpsc::Sender<Frame>,
 ) {
     use agora_protocol::{Error, ErrorCode};
+    // The stream is let go before the answer is sent, so a request the hub sends on it after reading the refusal is not
+    // taken for a second one on a stream still open (#1144 review).
     let refuse = |e: Error| {
+        alive.store(false, Ordering::Release);
         let _ = answers.send(CommandResponse {
             request_id: req.request_id.clone(),
             result: Some(command_response::Result::Err(e.to_info())),
@@ -978,6 +984,9 @@ fn relay_terminal(
         return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
     };
     let accepted = matches!(resp.result, Some(command_response::Result::Ok(_)));
+    if !accepted {
+        alive.store(false, Ordering::Release);
+    }
     let _ = answers.send(resp);
     while accepted && alive.load(Ordering::Acquire) {
         match local.read_frame(Some(Duration::from_millis(200))) {
