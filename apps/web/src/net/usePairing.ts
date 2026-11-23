@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { PairAnswer } from '../components/PairRequest';
 import type { PairingUi } from '../components/Pairing';
 import type { Live, LinkState } from './live';
-import { applyPairNote, emptyPairState, shownCards, shownRecent, type PairCard, type PairNote, type PairWindow } from './pairing';
+import { applyPairNote, emptyPairState, shownCards, shownRecent, type PairCard, type PairNote, type PairOwner, type PairWindow } from './pairing';
 
 const code = (e: unknown): string => (e as { code?: string }).code ?? '';
 const windowOf = (s: { open?: boolean | null; closesAtMs?: unknown; pending?: number | null } | null | undefined): PairWindow | undefined =>
@@ -13,7 +13,7 @@ const windowOf = (s: { open?: boolean | null; closesAtMs?: unknown; pending?: nu
 /** How often the switch's state is read again while the owner has the window open (the hub closes it by itself after 10 minutes). */
 export const WINDOW_POLL_MS = 20_000;
 
-export function usePairing(api: Live | undefined, link: LinkState): { ui: PairingUi | undefined; dispatch: (n: PairNote) => void } {
+export function usePairing(api: Live | undefined, link: LinkState): { ui: PairingUi | undefined; owner: PairOwner; dispatch: (n: PairNote) => void } {
   const [state, setState] = useState(emptyPairState);
   const dispatch = useCallback((n: PairNote) => setState((s) => applyPairNote(s, n)), []);
   // A new hub connection starts from nothing: what the last session knew is not carried over.
@@ -62,5 +62,5 @@ export function usePairing(api: Live | undefined, link: LinkState): { ui: Pairin
   const ui = useMemo<PairingUi | undefined>(() => (state.owner === 'yes' ? {
     cards: shownCards(state), recent: shownRecent(state, Date.now()), window: state.window, offline: !live, onAnswer, onOpen, onClose,
   } : undefined), [state, live, onAnswer, onOpen, onClose]);
-  return { ui, dispatch };
+  return { ui, owner: state.owner, dispatch };
 }

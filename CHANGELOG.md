@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- In team mode, a member's or viewer's refused start, folder, Start again or answer now says their role does not allow it (in the window and the terminal client) instead of "This device is limited to other projects", and their window no longer asks the hub for the cost on each connection, so it leaves no refused request in the owner's Activity.
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
 - A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
 - When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.

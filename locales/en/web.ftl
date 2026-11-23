@@ -53,6 +53,7 @@ approval-deny = Deny
 approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
 approval-failed = The answer did not go through. Try again.
 approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
+approval-role = Your role does not let you answer for this project. Ask the owner, or someone who works on it.
 approval-no-longer-valid = This request is no longer valid. The agent it was about has ended or restarted.
 approval-ran-out = This request ran out of time. Ask again from the agent's controls.
 # ADR-0101: "Allow always", an answer the agent remembers. The session words are the ADR's, for a kind known to drop the answer when its
@@ -612,6 +613,8 @@ start-identity-change = Associate this folder with its changed project identity
 start-directory-unsupported = This machine needs an update to start agents in selected folders.
 start-directory-failed = The folder could not be selected. Check its path and permissions.
 start-directory-forbidden = This device is limited to other projects on this machine. Choose a folder of a project you work in, or ask the machine's owner.
+start-directory-role = Your role does not let you choose folders on this machine. Ask the owner.
+start-role = Your role does not let you start agents here. Ask the owner if you need to.
 workspace-shared = Shared folder · changes belong to the workspace
 filter-project = Project
 filter-all-projects = All projects
@@ -772,6 +775,7 @@ resume-failed-unsupported = That machine cannot resume agents yet. Update it.
 resume-failed-still-running = Its process from before the restart is still running. Stop it first.
 resume-failed-offline = That machine is offline.
 resume-failed-forbidden = This device is limited to other projects on this machine, so it cannot start this agent.
+resume-failed-role = Your role does not let you start this agent again. Ask the owner.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask
