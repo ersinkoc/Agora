@@ -707,10 +707,21 @@ pub trait ClientAuth {
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
+    // ADR-0103: chosen before the forgotten machines are cut, which needs their agents to know what to leave out. Copied here, outside
+    // the hub lock: the view holds the messages shared.
+    let recent_messages = view
+        .recent_messages()
+        .iter()
+        .map(|m| v1::PositionedEvent {
+            pos: m.pos,
+            event: Some(m.event.clone()),
+        })
+        .collect();
     // ADR-0073: forgotten machines and what they ran are not shown.
     let shown = view.shown();
     let view: &View = &shown;
     v1::Snapshot {
+        recent_messages,
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
             .agent_workspaces

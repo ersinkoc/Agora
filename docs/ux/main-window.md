@@ -34,7 +34,9 @@ More sizes and themes: `screens/panels-redesign-*` (desktop and narrow, dark and
   between machines and "reported by" for a copy only another machine recorded, as tags. The whole row is one button: a click, Enter or
   Space opens the message in full in a reading view (sender, recipient, time, tags and the whole text with its line breaks); Esc or Close
   goes back to the row, and the panel stays open. Agent text is untrusted data: it is drawn as plain text only (never HTML or markdown,
-  no clickable links), without control or bidirectional characters, in the rows and in the reading view.
+  no clickable links), without control or bidirectional characters, in the rows and in the reading view. A window that opens, reloads
+  or reconnects shows the recent messages from the hub (ADR-0103: up to 50); a person given a project sees its recent messages from
+  before the grant too, as they see its board and agents, and only the messages an agent of a project they were given sent.
 - **Empty lists** (Changes, Team chat, Shared tasks and files, Usage, and the layout's panels that show them) all use the kit's empty
   state: an icon in a tinted chip, a short title, one line on what will appear. Usage's own empty state names the plan limits, so no
   second note sits under it; plan limits a tool did report still show.

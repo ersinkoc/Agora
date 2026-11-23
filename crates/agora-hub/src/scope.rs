@@ -157,6 +157,9 @@ impl Scope {
                 out.leases.insert(k.clone(), l.clone());
             }
         }
+        // ADR-0103: the messages a member would have got live (`admit`): placed by their sender, in a granted project. A recipient's
+        // copy and the messages placed in no project stay the owner's.
+        out.messages = std::sync::Arc::new(view.messages.cut(|p| self.projects.contains(p)));
         out
     }
 
@@ -666,6 +669,82 @@ mod tests {
         }
         assert!(!r.admit(&posted("n1", "a1", "n2/b1")));
         assert!(!r.admit(&posted("n2", "n1/a1", "b1")));
+    }
+
+    /// ADR-0103 decision 3: a member's snapshot holds exactly the messages the live stream gave them (`admit`), and the owner's every
+    /// copy. Run one sequence both ways, for members of either project, and compare.
+    #[test]
+    fn a_members_recent_messages_are_the_ones_they_would_have_got_live() {
+        let posted = |node: &str, from: &str, to: &str, body: &str| {
+            ev(
+                node,
+                Body::MessagePosted(v1::MessagePosted {
+                    message_id: "m-1".into(),
+                    from_agent_id: from.into(),
+                    to: to.into(),
+                    body: body.into(),
+                }),
+            )
+        };
+        let events = [
+            checkout("n1", "c1", "mine"),
+            agent("n1", "a1", "mine"),
+            agent("n1", "a2", "mine"),
+            agent("n1", "x1", "other"),
+            checkout("n2", "c2", "theirs"),
+            agent("n2", "b1", "theirs"),
+            // Within a granted project.
+            posted("n1", "a1", "a2", "next door"),
+            // Between machines: the sender's copy and the receiver's.
+            posted("n1", "a1", "n2/b1", "to theirs"),
+            posted("n2", "n1/a1", "b1", "to theirs"),
+            posted("n2", "b1", "n1/a1", "to mine"),
+            posted("n1", "n2/b1", "a1", "to mine"),
+            // A channel message: the sender's local copy, and a copy the hub delivered to the other machine.
+            posted("n1", "a1", "#dev", "hello all"),
+            posted("n2", "n1/a1", "b1", "[#dev] hello all"),
+            // Another project on the same machine, and a sender nobody knows.
+            posted("n1", "x1", "a1", "from other"),
+            posted("n3", "z", "a1", "stranger"),
+        ];
+        let mut full = View::default();
+        let mut live: BTreeMap<&str, (Scope, Vec<String>)> = ["n1/mine", "n2/theirs", "n1/other"]
+            .into_iter()
+            .map(|p| (p, (scope(&[p]), Vec::new())))
+            .collect();
+        for (i, e) in events.iter().enumerate() {
+            full.apply_at(i as u64 + 1, e);
+            for (s, got) in live.values_mut() {
+                if s.admit(e) {
+                    if let Some(Body::MessagePosted(m)) = &e.body {
+                        got.push(m.body.clone());
+                    }
+                }
+            }
+        }
+        let bodies = |v: &View| -> Vec<String> {
+            crate::server::snapshot_of(v, events.len() as u64)
+                .recent_messages
+                .into_iter()
+                .filter_map(|p| match p.event?.body? {
+                    Body::MessagePosted(m) => Some(m.body),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (project, (_, got_live)) in &live {
+            let cut = Scope::from_view([project.to_string()].into(), &full).filter_view(&full);
+            assert_eq!(&bodies(&cut), got_live, "{project}");
+        }
+        assert_eq!(
+            live["n1/mine"].1,
+            ["next door", "to theirs", "hello all"],
+            "the sender's own copies in the granted project"
+        );
+        assert_eq!(live["n2/theirs"].1, ["to mine"]);
+        assert_eq!(live["n1/other"].1, ["from other"]);
+        // The owner is sent every copy, the receivers' and the stranger's too.
+        assert_eq!(bodies(&full).len(), 9);
     }
 
     #[test]

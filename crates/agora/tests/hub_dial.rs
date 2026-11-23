@@ -3049,3 +3049,132 @@ fn a_message_between_agents_on_one_machine_reaches_the_hub_and_a_window_on_its_o
     });
     assert!(seen, "the window did not get the message live within 2 s");
 }
+
+/// #1020, ADR-0103: a message sent before a window opens is in the window's snapshot. Agents message each other with no window open;
+/// a window that opens afterwards gets the stored message, with its position, producer and time, in `Snapshot.recent_messages`.
+#[test]
+fn a_window_that_opens_after_agents_messaged_each_other_gets_the_message_in_its_snapshot() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_hub::store::EventStore;
+    use agora_mesh::broker::AgentInfo;
+    use agora_protocol::frame::{kinds, STREAM_EVENTS};
+    use agora_protocol::v1::event::Body;
+    use prost::Message as _;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("history-message");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "alpha".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _up = spawn(Arc::clone(&node.events), link).unwrap();
+    let register = |id: &str| {
+        node.mesh
+            .register(AgentInfo {
+                id: AgentId::new(id),
+                kind: "shell".into(),
+                node: "alpha".into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap()
+    };
+    let a_sock = register("a1");
+    let _b_sock = register("a2");
+    wait("the node to be online", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("alpha")
+            .is_some_and(|x| x.online)
+    });
+    let mut conn = agora_platform::local_connect(&a_sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let sent = mcp(
+        &mut conn,
+        2,
+        "tools/call",
+        serde_json::json!({"name": "send_message", "arguments": {"to": "a2", "body": "before you came"}}),
+    );
+    assert_ne!(sent["isError"], true, "{sent}");
+    // Stored by the hub before any window is open.
+    let stored = || {
+        hub.state
+            .hub
+            .store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .into_iter()
+            .find_map(|e| {
+                let ev = agora_protocol::v1::Event::decode(e.payload.as_slice()).ok()?;
+                matches!(&ev.body, Some(Body::MessagePosted(m)) if m.body == "before you came")
+                    .then_some(e.pos)
+            })
+    };
+    wait("the hub to store the message", || stored().is_some());
+    let at = stored().unwrap();
+    // Now a window opens.
+    let mut window = hub.client(addr);
+    let snapshot = hub.rt.block_on(async {
+        window
+            .send(&agora_protocol::Frame {
+                stream_id: STREAM_EVENTS,
+                kind: kinds::SUBSCRIBE,
+                seq: None,
+                payload: agora_protocol::v1::Subscribe::default().encode_to_vec(),
+            })
+            .await
+            .unwrap();
+        loop {
+            let f = next_frame(&mut window).await;
+            if f.kind == kinds::SNAPSHOT {
+                break agora_protocol::v1::Snapshot::decode(f.payload.as_slice()).unwrap();
+            }
+        }
+    });
+    let got: Vec<_> = snapshot
+        .recent_messages
+        .iter()
+        .filter_map(|p| {
+            let e = p.event.as_ref()?;
+            match &e.body {
+                Some(Body::MessagePosted(m)) => Some((
+                    p.pos,
+                    e.producer_id.as_str(),
+                    m.from_agent_id.as_str(),
+                    m.to.as_str(),
+                    m.body.as_str(),
+                    e.at_ms > 0,
+                )),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [(at, "alpha", "a1", "a2", "before you came", true)],
+        "the window's snapshot holds the message sent before it opened"
+    );
+    assert!(at <= snapshot.pos);
+}

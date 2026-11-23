@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- Team chat shows the agents' recent messages (up to 50) in a window that opens, reloads or reconnects, instead of starting empty and showing only messages sent while it was open; a member or viewer sees the same messages they would have seen live (ADR-0103, #1020).
 - Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
 - A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
 - In team mode, a member's or viewer's refused start, folder, Start again or answer now says their role does not allow it (in the window and the terminal client) instead of "This device is limited to other projects", and their window no longer asks the hub for the cost on each connection, so it leaves no refused request in the owner's Activity.
