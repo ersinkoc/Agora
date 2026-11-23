@@ -6,6 +6,8 @@
 
 #[path = "private_home/mod.rs"]
 mod private_home;
+#[path = "short_socket/mod.rs"]
+mod short_socket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -389,10 +391,12 @@ fn the_value_is_in_no_file_of_the_node() {
         ),
     )
     .unwrap();
+    // #926: the socket's folder fits whatever the checkout's depth, and its control token is out of the agent's reach.
+    let sockets = short_socket::SocketDir::new(&s.root, "cred-nofile");
     let node = Node::start(&NodeConfig {
         resume_all: false,
         node_id: "node-nofile".into(),
-        socket: s.root.join("node.sock"),
+        socket: sockets.socket("node.sock"),
         data_dir: s.data(),
         worktree_root: s.root.join("worktrees"),
         manifests_dir: s.root.join("manifests"),

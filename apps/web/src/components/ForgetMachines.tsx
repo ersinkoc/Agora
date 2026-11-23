@@ -46,7 +46,7 @@ export function ForgetMachines({ machines, now, cleanup, onForget, onClose }: {
                       {t('network-last-seen', { when: ago(m.lastSeenMs, now) })}
                       {m.agentsRunning > 0 ? ` · ${t('forget-machine-agents', { count: m.agentsRunning })}` : ''}
                     </span>
-                    {failed.has(m.id) && <span role="alert" className="text-xs text-needs-you">{t(forgetMachineReasonKey(failed.get(m.id) ?? ''))}</span>}
+                    {failed.has(m.id) && <span role="alert" className="text-xs text-danger">{t(forgetMachineReasonKey(failed.get(m.id) ?? ''))}</span>}
                   </span>
                 </label>
               </li>

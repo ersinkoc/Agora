@@ -173,7 +173,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
     {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session cause={freeCause} approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />}
     {waits.some((w) => w.state === 'asking') && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
-    {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
+    {failed && <span role="status" className="text-xs text-danger">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';
   const status = <>

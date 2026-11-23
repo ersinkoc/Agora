@@ -20,6 +20,7 @@ dependencies = [
  "getrandom",
  "prost",
  "ring",
+ "rusqlite",
  "rustls",
  "serde_json",
  "tokio",

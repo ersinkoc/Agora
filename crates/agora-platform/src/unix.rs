@@ -307,6 +307,25 @@ pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
     Ok(SecretMode(saved))
 }
 
+/// The bytes of the keys that arrive on the terminal on stdin within `wait` (`crate::read_confirmation_until`): `None` when none came
+/// or a signal interrupted the wait, empty at the end of input. Read from fd 0 directly, never through `std::io::stdin`'s buffer.
+pub(crate) fn terminal_key(wait: std::time::Duration) -> io::Result<Option<Vec<u8>>> {
+    if !wait_readable(&io::stdin(), wait)? {
+        return Ok(None);
+    }
+    let mut buf = [0u8; 64];
+    // SAFETY: fd 0 is stdin; `buf` is valid for writes of its length.
+    let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        let e = io::Error::last_os_error();
+        return match e.kind() {
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => Ok(None),
+            _ => Err(e),
+        };
+    }
+    Ok(Some(buf[..n.unsigned_abs()].to_vec()))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -864,19 +883,8 @@ pub(crate) fn open_private(
     append: bool,
 ) -> io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let link_error = |e: io::Error| match e.raw_os_error() {
-        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
-        _ => e,
-    };
     let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let cname = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if name.as_bytes().contains(&b'/') {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
     // SAFETY: a NUL-terminated path; the descriptor is owned below.
     let dfd = cvt(unsafe {
         libc::open(
@@ -884,9 +892,36 @@ pub(crate) fn open_private(
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     })
-    .map_err(link_error)?;
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+            io::Error::new(io::ErrorKind::InvalidInput, "a link")
+        }
+        _ => e,
+    })?;
     // SAFETY: a descriptor this call just opened and nothing else owns.
     let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
+    open_private_at(&dir_fd, name, append)
+}
+
+/// [`open_private`] relative to a folder already held open (`dir`, a directory descriptor): the same checks on `name`, no path looked
+/// up (#1000, [`crate::ConfinedDir::open_lock`]).
+pub(crate) fn open_private_at(
+    dir_fd: &impl AsRawFd,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let link_error = |e: io::Error| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    };
+    let cname = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     let access = if append {
         libc::O_WRONLY | libc::O_APPEND
     } else {
