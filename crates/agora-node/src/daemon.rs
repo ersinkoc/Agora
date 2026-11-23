@@ -3580,26 +3580,29 @@ mod announce_tests {
     /// ADR-0089 decision 7: the transcripts folder is among what a confined agent may not reach.
     #[test]
     fn a_confined_agent_cannot_reach_the_transcripts() {
-        for data in ["/tmp/agora-home/data", "/srv/elsewhere/data"] {
+        // Built from the (absolute) temporary folder, so the same on every OS: a data folder in the node's own home, and one elsewhere.
+        let tmp = std::env::temp_dir().join(format!("agora-test-private-{}", std::process::id()));
+        let home = tmp.join("agora-home");
+        for data in [home.join("data"), tmp.join("elsewhere").join("data")] {
             let cfg = NodeConfig {
                 resume_all: false,
                 node_id: "n".into(),
-                socket: "/tmp/agora-home/run/n.sock".into(),
-                data_dir: data.into(),
-                worktree_root: "/tmp/agora-home/worktrees".into(),
-                manifests_dir: "/tmp/agora-home/manifests".into(),
+                socket: home.join("run").join("n.sock"),
+                data_dir: data.clone(),
+                worktree_root: home.join("worktrees"),
+                manifests_dir: home.join("manifests"),
                 projects: vec![],
                 limits: crate::supervisor::NodeLimits::default(),
             };
-            // `node_private_paths` makes every path absolute (on Windows `/tmp/...` becomes `C:\tmp\...`), so compare the same way.
+            // `node_private_paths` makes every path absolute, so compare the same way.
             let transcripts =
-                std::path::absolute(Path::new(data).join(crate::transcript::TRANSCRIPTS_DIR))
-                    .unwrap();
+                std::path::absolute(data.join(crate::transcript::TRANSCRIPTS_DIR)).unwrap();
             assert!(
                 node_private_paths(&cfg)
                     .iter()
                     .any(|p| transcripts.starts_with(p)),
-                "{data}"
+                "{}",
+                data.display()
             );
         }
     }

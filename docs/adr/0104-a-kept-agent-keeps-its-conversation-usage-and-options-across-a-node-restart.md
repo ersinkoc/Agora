@@ -326,7 +326,8 @@ references are at main `9760e901`.
   `hold_node_pipes` whose hub view and terminal client header still count what the agent used before.
 - Step 4 (C1, #931) is built: `crates/agora-node/src/transcript.rs` writes each structured agent's transcript as ADR-0089 decides
   (`<data>/transcripts/<id>.jsonl`, `0600` in a `0700` folder, a header line with the format version, one line per version of an entry with
-  the call's tool and arguments and the plan mark beside it, a line for entries taken back out; every line carries the highest id given).
+  the call's tool and arguments and the plan mark beside it, a line for entries taken back out; every line carries the highest id given,
+  and a rotated file or a fresh start's new file begins with a line holding only that, so the ids go on when no entry is left).
   The chat path only marks changed ids; a writer thread takes the batch under the board's lock at most once a second or per 64 KiB, and
   encodes, replaces the node's own secret values and appends after letting it go. A failed write drops the batch, keeps the ring and says
   `chat.history_not_saved` once in that conversation. Bounds: `chat.history_max_bytes` (32 MiB, at most 256 MiB; the newest half kept in a new

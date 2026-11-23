@@ -829,7 +829,7 @@ impl ChatBoard {
     pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
         if fresh {
             if let Some(store) = &self.store {
-                store.move_aside(agent.as_str());
+                store.move_aside(agent.as_str(), seed.as_ref().map_or(0, |s| s.high));
             }
         }
         if let Some(seed) = seed {

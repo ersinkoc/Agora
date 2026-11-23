@@ -19,8 +19,11 @@
 //! call's line also keeps its tool name and arguments (`tool`, `args`; the entry's text joins them and may be cut), and the plan's
 //! line `"plan":true`, so a call that finishes after a restart updates its one entry in place. `n` is the highest entry id the
 //! node had given the agent when the line was written: ids continue from the highest `n` (ADR-0089 decision 4), also past entries
-//! that were given an id and never written. An entry that changes in place (ADR-0090) is written again with the same id; the last
-//! line of an id is the entry (ADR-0090 open question 3), and a reader skips a line it cannot parse (a torn last line).
+//! that were given an id and never written. A rotated file, and the new file of a fresh start, begin with a line that holds only that
+//! (`{"n":H,"removed":[]}`), so the ids go on even when no entry is left in it. A file purged or removed by retention takes its
+//! numbering with it: a later resume numbers from 1 again, and every client then holds that node's snapshot. An entry that changes
+//! in place (ADR-0090) is written again with the same id; the last line of an id is the entry (ADR-0090 open question 3), and a
+//! reader skips a line it cannot parse (a torn last line).
 //!
 //! **Writes.** Off every agent's path: the chat path only marks which entries changed (an id in a set); the writer thread
 //! ([`spawn_writer`]) takes the changed entries under the board's lock once a second, or as soon as 64 KiB of them wait, and encodes,
@@ -33,8 +36,8 @@
 //! `chat.history_max_bytes` (0 writes nothing); over it, the newest half is written to a new file that replaces the old one (whole
 //! lines, a header that says `truncated`). The file of an agent that does not run is removed once it was not written for
 //! `chat.history_days` (30 by default, never more); a fresh start ("Start again") that went through moves the earlier file aside as
-//! `<id>.earlier.jsonl` (replacing an older one), which ages the same way. Over 2 GiB in all, the files of agents that do not run go, oldest first. Checked when the node starts and
-//! every hour. `agora history purge` removes the folder.
+//! `<id>.earlier.jsonl` (replacing an older one), which ages the same way. Over 2 GiB in all, the files of agents that do not run
+//! go, oldest first. Checked when the node starts and every hour. `agora history purge` removes the folder.
 //!
 //! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, and the environment variables its
 //! policy passes to agents, ADR-0084) are replaced by
@@ -175,6 +178,11 @@ fn header(truncated: bool) -> Vec<u8> {
     let mut out = v.to_string().into_bytes();
     out.push(b'\n');
     out
+}
+
+/// A line that only says the highest id given (`{"n":high,"removed":[]}`): what a rotated or a new file starts with.
+fn mark(high: u64) -> Vec<u8> {
+    encode_line(high, &Line::Removed(Vec::new()))
 }
 
 fn put_str(m: &mut Map<String, Value>, k: &str, v: &str) {
@@ -543,13 +551,15 @@ impl Store {
         f.flush()?;
         if len + out.len() as u64 > self.limits.max_bytes {
             drop(f);
-            self.rotate(&path)?;
+            self.rotate(&path, batch.high)?;
         }
         Ok(())
     }
 
     /// ADR-0089 decision 2: the newest half of the bound, whole lines, in a new file that replaces the old one and says it was cut.
-    fn rotate(&self, path: &Path) -> io::Result<()> {
+    /// The line after the header holds `high`, the highest id given, so the ids go on past it even when no whole entry fits (review
+    /// of #1103: one entry larger than the half kept left a file with no `n` at all).
+    fn rotate(&self, path: &Path, high: u64) -> io::Result<()> {
         let mut f = agora_platform::open_read_no_follow(path)?;
         let len = f.metadata()?.len();
         let keep = self.limits.max_bytes / 2;
@@ -565,6 +575,7 @@ impl Store {
                 .map_or(tail.len(), |i| i + 1)
         };
         let mut out = header(true);
+        out.extend(mark(high));
         out.extend_from_slice(&tail[from..]);
         agora_platform::write_private(path, &out)
     }
@@ -578,17 +589,26 @@ impl Store {
 
     /// ADR-0089 decision 5: a fresh start of the agent ("Start again") that went through: its file is moved aside as the earlier
     /// session's (`<id>.earlier.jsonl`, replacing an older one), so the new session begins a file of its own. Only after the start
-    /// succeeded: a refused one leaves the conversation where a later Resume finds it.
-    pub fn move_aside(&self, agent: &str) {
+    /// succeeded: a refused one leaves the conversation where a later Resume finds it. The new file starts with `high`, the earlier
+    /// session's highest id, so a node that takes the new session up before it wrote anything still numbers on after it.
+    pub fn move_aside(&self, agent: &str, high: u64) {
         let (Some(path), Some(earlier)) = (self.path(agent), self.earlier_path(agent)) else {
             return;
         };
-        match std::fs::rename(&path, &earlier) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+        if let Err(e) = std::fs::rename(&path, &earlier) {
+            if e.kind() != io::ErrorKind::NotFound {
                 // Operational log, not UI text. The new session is written after the earlier one in the same file then.
                 eprintln!("transcripts: {agent}: the earlier session was not moved aside: {e}");
+                return;
             }
-            _ => {}
+        }
+        if high > 0 && self.limits.max_bytes > 0 {
+            let mut out = header(false);
+            out.extend(mark(high));
+            if let Err(e) = agora_platform::write_private(&path, &out) {
+                // Operational log, not UI text. The ids still go on in this node's memory; the first batch writes them.
+                eprintln!("transcripts: {agent}: the new session's file was not started: {e}");
+            }
         }
     }
 
@@ -955,7 +975,11 @@ mod tests {
 
     #[test]
     fn an_id_that_is_not_a_plain_name_has_no_file() {
-        let store = Store::new(Path::new("/nonexistent"), Limits::default(), None);
+        let store = Store::new(
+            &std::env::temp_dir().join("agora-tr-names"),
+            Limits::default(),
+            None,
+        );
         for bad in ["", "../x", "a/b", ".hidden", "a\\b"] {
             assert!(store.path(bad).is_none(), "{bad}");
         }
@@ -1009,6 +1033,50 @@ mod tests {
         assert!(!none.path("b").unwrap().exists());
     }
 
+    /// Review of #1103: a rotation that keeps no whole entry (one entry larger than the half it keeps) still says the highest id given,
+    /// so a node that takes the agent up after it never gives an id again.
+    #[test]
+    fn a_rotation_that_keeps_no_entry_keeps_the_highest_id() {
+        let dir = temp("rotate-empty");
+        let limits = Limits {
+            max_bytes: 1024,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        store
+            .write(&batch("a", 41, vec![text(41, &"s".repeat(32))]))
+            .unwrap();
+        assert_eq!(store.read("a").high, 41);
+        store
+            .write(&batch("a", 42, vec![text(42, &"l".repeat(1500))]))
+            .unwrap();
+        let seed = Store::new(&dir, limits, None).read("a");
+        assert!(seed.entries.is_empty());
+        assert_eq!(seed.high, 42);
+        // And the next rotation after it, from a file that holds only the mark.
+        store
+            .write(&batch("a", 43, vec![text(43, &"m".repeat(1500))]))
+            .unwrap();
+        assert_eq!(Store::new(&dir, limits, None).read("a").high, 43);
+    }
+
+    /// "Start again" moves the file aside; the new session's file starts with the earlier session's highest id, so a node that takes
+    /// up or resumes the new session before it wrote anything still numbers on after it.
+    #[test]
+    fn a_file_moved_aside_leaves_the_highest_id_behind() {
+        let dir = temp("aside-mark");
+        let store = Store::new(&dir, Limits::default(), None);
+        store.write(&batch("a", 9, vec![text(9, "x")])).unwrap();
+        store.move_aside("a", 9);
+        let seed = store.read("a");
+        assert!(seed.entries.is_empty());
+        assert_eq!(seed.high, 9);
+        assert_eq!(store.read("a.earlier").entries.len(), 1);
+        // A new entry is appended after the mark, and the file stays private.
+        store.write(&batch("a", 10, vec![text(10, "y")])).unwrap();
+        assert_eq!(store.read("a").entries.len(), 1);
+    }
+
     #[test]
     fn the_nodes_own_secret_values_never_reach_the_file() {
         let dir = temp("secret");
@@ -1050,18 +1118,20 @@ mod tests {
             store.write(&batch(a, 1, vec![text(1, "x")])).unwrap();
         }
         assert_eq!(store.read("fresh").high, 1);
-        store.move_aside("fresh");
+        store.move_aside("fresh", 1);
         assert!(store.earlier_path("fresh").unwrap().exists());
-        assert!(!store.path("fresh").unwrap().exists());
+        // The new session's file holds only the earlier session's highest id.
+        assert!(store.read("fresh").entries.is_empty());
         let running: HashSet<String> = ["running".to_string()].into();
         // Nothing is old yet.
         assert_eq!(store.sweep(&running, SystemTime::now()), 0);
-        // Three days on: everything but the running agent's file goes, the earlier session's too.
+        // Three days on: everything but the running agent's file goes, both of the fresh agent's too.
         let later = SystemTime::now() + Duration::from_secs(3 * 24 * 3600);
-        assert_eq!(store.sweep(&running, later), 2);
+        assert_eq!(store.sweep(&running, later), 3);
         assert!(store.path("running").unwrap().exists());
         assert!(!store.path("old").unwrap().exists());
         assert!(!store.earlier_path("fresh").unwrap().exists());
+        assert!(!store.path("fresh").unwrap().exists());
         purge_all(&dir).unwrap();
         assert!(!store.dir().exists());
         purge_all(&dir).unwrap();

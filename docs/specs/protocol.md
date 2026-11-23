@@ -460,7 +460,8 @@ The node also writes each structured agent's transcript to its own disk (ADR-008
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
 secret values replaced). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
 before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
-shows: ids never start again at 1. A tool call or a plan from before the restart is changed in place under its id. A permission entry
+shows (a rotated file keeps that mark even when no whole entry fits): ids never start again at 1, unless the file was purged or
+removed by retention. A tool call or a plan from before the restart is changed in place under its id. A permission entry
 still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
 there is dropped with an `adapter.queue_dropped` notice. A fresh start ("Start again") that went through begins a new file (the earlier
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
