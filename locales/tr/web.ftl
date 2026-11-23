@@ -50,6 +50,15 @@ approvals-title = Yanıtınızı bekleyenler
 approval-title = { $name } izin istiyor
 approval-allow = İzin ver
 approval-deny = Reddet
+# Yeniden tasarım PR 4: bir isteğin başlığı isteğin kendisidir, pencerenin sözleriyle, kapalı bir tür kümesinden (başka her şey
+# approval-title). Komut, dosya veya adres altındaki satırda, bütün olarak kalır.
+approval-ask-run = { $name } bir komut çalıştırmak istiyor
+approval-ask-edit = { $name } bir dosyayı değiştirmek istiyor
+approval-ask-read = { $name } bir dosyayı okumak istiyor
+approval-ask-fetch = { $name } bir web adresini açmak istiyor
+approval-ask-delete = { $name } bir şeyi silmek istiyor
+approval-ask-start = { $name } başka bir ajan başlatmak istiyor
+approval-open-agent = { $name } ajanını aç
 approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
 approval-failed = Yanıt iletilemedi. Yeniden deneyin.
 approval-forbidden = Bu cihazdan bu proje için yanıt veremezsiniz: orada başka projelerle sınırlı. Bu projede çalışan birine sorun.
@@ -88,12 +97,21 @@ start-approval-prompt = İlk istemi
 start-approval-no-prompt = İstem yok: başlar ve bekler.
 start-approval-scope = Neye izin verilsin
 start-approval-once = Yalnızca bu
+start-approval-more-short = Bunun gibi daha fazla
 start-approval-no-grant = Yalnızca bu başlatmaya izin verilebilir: bu tür kendisine verilen her programı çalıştırır, bu yüzden hiçbir zaman sormadan başlatılmaz.
 start-approval-settings-once = Yalnızca bu başlatmaya izin verilebilir: kendi modeli veya eforuyla başlatma her zaman sorulur.
 start-approval-options-once = Yalnızca bu başlatmaya izin verilebilir: yanıtınız bu başlatmayı yalnızca burada gösterilen başlatma seçenekleriyle kapsar ve böyle her başlatma yeniden sorulur.
 start-approval-does-not-ask = İzin verirseniz bu yardımcı, çalıştığı sürece size sormadan komut çalıştırır ve dosyaları değiştirir.
 start-approval-more = { $name } çalıştığı sürece bu klasörde, yeniden sormadan en fazla { $count } { $kind } ajanı
 start-approval-nested = Yardımcıları da yardımcı başlatmak isteyebilir (her birini siz yanıtlarsınız)
+approval-review = İncele
+approval-review-for = { $name } isteğinin tamamını oku
+approval-review-close = Kapat
+start-summary-outside = kendi klasörünün dışında
+start-summary-more = { $count ->
+    [one] 1 satır daha
+   *[other] { $count } satır daha
+}
 helper-started-by = { $name } tarafından başlatıldı
 helper-grants = Yardımcı izinleri
 helper-grant-line = Sormadan hâlâ { $count } { $kind } başlatabilir, klasör:
@@ -929,7 +947,11 @@ phone-no-agents = Bu makinede ajan yok.
 phone-needs = Sizi bekleyenler · { $count }
 phone-answer-below = Yanıtı ekranın altındaki düğmelerle verin.
 phone-next = Sıradaki · { $count }
-phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+phone-untrusted-title = Bu cihaz henüz güvenilir değil
+phone-untrusted-machines = { $count ->
+    [one] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+   *[other] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtları reddederler.
+}
 key-bar = Terminal tuşları
 key-esc = Esc
 key-tab = Tab
@@ -986,6 +1008,11 @@ fleet-machines =
         [one] { $total } makineden { $online } tanesi çevrimiçi
        *[other] { $total } makineden { $online } tanesi çevrimiçi
     }
+fleet-stat-machines =
+    { $total ->
+        [0] Çevrimiçi makine
+       *[other] { $total } makineden çevrimiçi olan
+    }
 fleet-filter-active = Yalnızca “{ $name }” gösteriliyor.
 fleet-filter-clear = Hepsini göster
 fleet-filter-none = Burada gösterilecek bir şey yok.
@@ -995,7 +1022,6 @@ fleet-attention-count = { $count ->
 }
 fleet-asked = { $when } soruldu
 fleet-waiting-in-terminal = Terminalinde sizi bekliyor
-fleet-asks-start = Başka bir ajan başlatmak istiyor
 fleet-allow-for = İzin ver: { $name }
 fleet-deny-for = Reddet: { $name }
 fleet-review = İncele ve karar ver
@@ -1049,11 +1075,9 @@ fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi 
 fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
-attention-who = { $machine } üzerinde { $name }
-attention-who-only = { $name }
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
-attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce isteği tam kartında okuyun.
-attention-start = { $name } başka bir ajan başlatmak istiyor. Klasörü, istemi ve ayarları tam kartta okunur.
+attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce İncele isteğin tamamını gösterir.
+attention-start-read = Yanıtlamadan önce İncele klasörünü, istemini ve ayarlarını tam olarak gösterir.
 attention-pair = Onaylamadan önce, tam kartta numarasını ekranındaki numarayla karşılaştır.
 attention-later = Sonra
 attention-review = İncele
@@ -1086,6 +1110,8 @@ notify-body = { $count ->
 notify-body-named = { $name } sana ihtiyaç duyuyor
 notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
 attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
+# A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
+approval-sent = Yanıt gönderildi.
 attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.
 
 # Usage (no money: tokens, context and time)
@@ -1348,3 +1374,23 @@ agents-setting-any = ajanın kabul ettiği herhangi bir değer
 agents-setting-default = varsayılan { $value }
 agents-options = Seçenekler
 agents-option-skips = izin sorularını atlar
+
+# Bileşen galerisindeki bileşen takımı (visual-language.md §3). Yalnızca galeri için örnek metin.
+kit-title = Bileşen takımı
+kit-buttons = Düğmeler
+kit-states = Durumlar ve etiketler
+kit-avatars = Ajan simgeleri
+kit-cards = Kartlar, satırlar ve ayarlar
+kit-controls = Denetimler
+kit-counts = Sayılar
+kit-notices = Bildirimler ve istekler
+kit-empty = Boş durumlar
+kit-rtl = Sağdan sola
+kit-sample-forget = Unut
+kit-sample-shared = Paylaşılan
+kit-sample-notify = Arka planda bildirimler
+kit-sample-notify-hint = Adlar yalnızca siz isterseniz görünür.
+kit-sample-ask = { $name } bir komut çalıştırmak istiyor
+kit-sample-offline = Bu makine çevrimdışı
+kit-sample-offline-line = Ajanları çalışmayı sürdürür ve makine dönünce durumlarını bildirir.
+kit-sample-joined = Makine katıldı. Makineleriniz listesinde görünüyor.

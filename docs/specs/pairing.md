@@ -418,14 +418,19 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   any other (`pair.name_unverified`). After `PairOpen` (which re-issues the leaf first when a name is missing) the command reads the listen address from
   `<hub dir>/listen` and the names from `<hub dir>/server-cert.pem` (`paircmd::join_hint`, no I/O, unit-tested). A loopback listen address: it says the hub
   listens on this computer only, so another machine cannot reach it, and how to make it listen on the network: first on this computer's address on it (the
-  first private or 100.64/10 IPv4 address of an interface that is up, `agora --listen ADDRESS:PORT`, then `agora down` and `agora`; `--listen` for a hub run by
-  hand), with `0.0.0.0:PORT` as the fallback, said plainly to listen on every IPv4 interface, a public one too (reaching the listener is broader than opening the
+  private or 100.64/10 IPv4 address of an interface that is up, `agora --listen ADDRESS:PORT`, then `agora down` and `agora`; `--listen` for a hub run by
+  hand; with several such addresses it lists them all and asks for the one on the other machine's network instead of picking one, #993), with `0.0.0.0:PORT` as the fallback, said plainly to listen on every IPv4 interface, a public one too (reaching the listener is broader than opening the
   switch, though a join still needs the number). It offers only a join from this same computer (the loopback address it listens on, else `localhost`, whichever
   the certificate names). Addresses are offered only where the hub surely listens: a specific address alone; for `0.0.0.0` the certificate's IPv4 addresses;
   for `::` its IPv6 addresses only, because whether `::` also serves IPv4 depends on the system (the listener does not set `IPV6_V6ONLY`, and Windows binds it
-  IPv6-only), never a loopback one. The first address is the one to type, the rest are listed. The certificate's DNS names other than `localhost` are listed as
-  names that *may* reach the hub if the network resolves them to this computer, never as a promise; with no address to offer, the first name is suggested with
-  that condition. Neither: it says so and suggests `--name ADDRESS`. It no longer suggests the computer's host name as the address to type.
+  IPv6-only), never a loopback one. For a wildcard listen address the command lists this computer's interfaces (the only I/O besides the two files; the
+  list is passed to `join_hint`), because the leaf keeps the addresses it names while the wanted ones are covered, so an address an interface no longer has
+  (a changed DHCP lease) can still be in it (#993): an address of an interface that is up comes first, in the certificate's order; one no interface that is up
+  has now is listed apart, as an address that may be old or may lead here through the network (an address in front of a NAT given with `--name`), never as one
+  the hub surely answers at. When the interfaces cannot be listed, every address counts as present. The first present address is the one to type, the rest are
+  listed. The certificate's DNS names other than `localhost` are listed as names that *may* reach the hub if the network resolves them to this computer, never
+  as a promise; with no present address to offer, the first name is suggested with that condition, else the first address no interface has, with the same
+  condition. None: it says so and suggests `--name ADDRESS`. It no longer suggests the computer's host name as the address to type.
 
 **Discovery (section 3).**
 - Port `DISCOVERY_PORT` = **7446**, UDP, IPv4 only. Not IPv6: it has no broadcast, and multicast needs a group membership per interface; a finder on an IPv6-only
