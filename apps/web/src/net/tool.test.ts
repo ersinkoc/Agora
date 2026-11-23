@@ -16,6 +16,16 @@ describe('tool calls in words', () => {
     expect(toolView(call('execute', '{"command":["bash","-lc","ls -la"]}'))).toMatchObject({ action: 'run', title: '', subject: 'ls -la' });
     expect(toolView(call('tool', 'null'))).toMatchObject({ action: 'other', title: '', subject: '', details: [] });
   });
+  it('never takes a kind from a name that is only an Object.prototype member', () => {
+    // The title is the agent's own words, so it is untrusted input: `constructor` and `__proto__` are titles,
+    // not kinds, and the action must stay one of the nine.
+    const actions: ToolAction[] = ['read', 'edit', 'run', 'search', 'fetch', 'delete', 'move', 'think', 'other'];
+    for (const tool of ['constructor', '__proto__']) {
+      const v = toolView(call(tool, '{}'));
+      expect(actions, tool).toContain(v.action);
+      expect(v.title, tool).toBe(tool);
+    }
+  });
   it('tells an edit from a read by its arguments', () => {
     expect(toolView(call('Edit `src/auth.rs`', '{"file_path":"src/auth.rs","old_string":"a","new_string":"b"}')).action).toBe('edit');
     expect(toolView(call('Read src/auth.rs', '{"file_path":"src/auth.rs"}')).action).toBe('read');

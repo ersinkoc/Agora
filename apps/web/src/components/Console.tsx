@@ -50,7 +50,7 @@ import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
 import { LayoutMenu } from '../layout/LayoutMenu';
 import { subscribePanelRequests, subscribeProjectRequests, subscribeToolRequests, takePanelRequest, takeProjectRequest, takeToolRequests, type ToolRequest } from '../layout/requests';
-import { type ToolPanel, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
+import { type ToolPanel, changedFolders, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
 import { Menu, type MenuItem } from '../layout/Menu';
 import { ChangesPane, FilesPane, ManagerPane, TerminalPane, ToolChooser } from './ToolPanes';
 import { ThemeEditor } from '../themes/ThemeEditor';
@@ -244,9 +244,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const resetLayout = () => setStored({ ws: homeWorkspace(), touched: false });
 
   const attention = needsAttention(fleet);
-  const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
-    .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
-    .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
+  const changed = changedFolders(fleet, projectFilter);
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
@@ -329,7 +327,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} agent={a} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
-        <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
+        <HelperGrants view={a.id} list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
       {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
