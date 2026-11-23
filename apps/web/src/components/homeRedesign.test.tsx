@@ -285,34 +285,48 @@ describe('request cards: re-arming and the clock (merger review of #1028)', () =
       act(() => root.render(<></>));
     }
   });
-  it('re-arms after ANSWER_REARM_MS when the answered card is still there, and keeps an answer in flight the only one', async () => {
+  it('keeps an answer that went the only one for as long as its card is there: "Answer sent", Allow and Deny off, a press sends nothing', async () => {
     vi.useFakeTimers();
+    // An explicit true, a promise of true, and a callback that returns nothing all mean the answer went.
+    for (const went of [() => true, () => Promise.resolve(true), () => undefined]) {
+      const sent: string[] = [];
+      render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); return went(); });
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      act(() => button('Allow').click());
+      await flush();
+      act(() => { vi.advanceTimersByTime(60_000); }); // far past any retry interval, the card still there
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      expect(button('Allow').getAttribute('aria-disabled')).toBe('true');
+      expect(button('Deny').getAttribute('aria-disabled')).toBe('true');
+      act(() => button('Allow').click());
+      act(() => button('Deny').click());
+      expect(sent).toEqual(['r1']);
+      expect(host.textContent).toContain(t('attention-sent'));
+      expect(button(t('attention-review'))).toBeDefined();
+      act(() => root.render(<></>));
+    }
+    // An answer still on its way (its promise has not settled) is never joined by a second one, however long it takes; once it went, the
+    // card stays answered.
     const sent: string[] = [];
-    render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); });
-    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
-    act(() => button('Allow').click());
-    act(() => { vi.advanceTimersByTime(4_000); });
-    act(() => button('Allow').click());
-    expect(sent).toEqual(['r1']);
-    act(() => { vi.advanceTimersByTime(1_000); }); // ANSWER_REARM_MS: the card is still there, so a fresh dwell starts
-    act(() => button('Allow').click());
-    expect(sent).toEqual(['r1']);
-    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
-    act(() => button('Allow').click());
-    expect(sent).toEqual(['r1', 'r1']);
-    // An answer still on its way (its promise has not settled) is never joined by a second one, however long it takes.
     let settle: (v: boolean) => void = () => {};
     render([agent('b', { state: 'needs-you' })], [ask('r2', 'b')], (x) => { sent.push(x.id); return new Promise<boolean>((r) => { settle = r; }); });
     act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
     act(() => button('Allow').click());
     act(() => { vi.advanceTimersByTime(30_000); });
     act(() => button('Deny').click());
-    expect(sent).toEqual(['r1', 'r1', 'r2']);
+    expect(host.textContent).not.toContain(t('attention-sent'));
     settle(true);
     await flush();
-    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => { vi.advanceTimersByTime(30_000); });
     act(() => button('Deny').click());
-    expect(sent).toEqual(['r1', 'r1', 'r2', 'r2']);
+    expect(sent).toEqual(['r2']);
+    expect(host.textContent).toContain(t('attention-sent'));
+    // When the request leaves the list it is forgotten; another request is answerable as usual.
+    render([agent('b', { state: 'needs-you' })], [ask('r3', 'b')], (x) => { sent.push(x.id); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r2', 'r3']);
   });
   it('does not start again when only the "Asked …" time changes, and does when the machine, project or ask does', () => {
     vi.useFakeTimers();

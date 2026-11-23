@@ -22,9 +22,6 @@ import { PairRequest } from './PairRequest';
 import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
-// How long after the press a request whose answer went keeps its buttons off while its card is still on the list (the answer may have been
-// lost on the way). Then it re-arms with a fresh dwell. An answer that has not settled always keeps them off; a failed one frees them at once.
-export const ANSWER_REARM_MS = 5_000;
 export type LinkState = 'connecting' | 'live' | 'offline';
 
 // What one filter chip says, in the state words the rest of the window uses.
@@ -165,34 +162,27 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     return () => clearTimeout(h);
   }, [layout, epoch]);
 
-  // Answers, by request (its id: stable across layouts, focus and the dwell). A request is held from the accepted press until its answer
-  // settles, and, when it went, until ANSWER_REARM_MS after the press; a failed answer frees it at once. Only that frees it: a new layout or
-  // the person coming back never does. Other requests stay answerable meanwhile. Freeing a request that is still on the list starts a
-  // fresh dwell. The click handler and the buttons ask the same question, `canAnswer`.
+  // Answers, by request (its id: stable across layouts, focus and the dwell). A request is held from the accepted press: while its answer is
+  // on the way, and, once it went (the window signed it and the machine took it), for as long as the request is on the list, so the card
+  // says "Answer sent" and never asks for a second answer (T44: answered once; a card that stays is the list catching up). Only a failed
+  // answer (`false`, or a promise that rejects) frees it, with a fresh dwell; a new layout or the person coming back never does. Other
+  // requests stay answerable meanwhile. The click handler and the buttons ask the same question, `canAnswer`.
   const held = useRef(new Set<string>());
-  const holdTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const sent = useRef(new Set<string>());
   const shownIds = useRef(new Set<string>());
   shownIds.current = new Set(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])));
-  useEffect(() => () => { for (const h of holdTimers.current.values()) clearTimeout(h); }, []);
+  // A request that left the list is forgotten (its id is never reused for another request).
+  for (const id of held.current) if (!shownIds.current.has(id)) { held.current.delete(id); sent.current.delete(id); }
   const canAnswer = (id: string) => !stale && ready.current === layout && !held.current.has(id);
-  const free = (id: string) => {
-    clearTimeout(holdTimers.current.get(id));
-    holdTimers.current.delete(id);
-    if (!held.current.delete(id)) return;
-    if (shownIds.current.has(id)) restart(); else redraw((n) => n + 1);
-  };
   // The guard is here as well as on the buttons: a press during the dwell, on a held request, or from an older drawing sends nothing.
   const answer = (a: ApprovalModel, ok: boolean) => {
     if (!canAnswer(a.id)) return;
     held.current.add(a.id);
     redraw((n) => n + 1);
-    const pressed = Date.now();
     const done = (v: unknown) => {
-      if (v === false) { free(a.id); return; }
-      const left = pressed + ANSWER_REARM_MS - Date.now();
-      if (left <= 0) { free(a.id); return; }
-      clearTimeout(holdTimers.current.get(a.id));
-      holdTimers.current.set(a.id, setTimeout(() => free(a.id), left));
+      if (v !== false) { if (held.current.has(a.id)) { sent.current.add(a.id); redraw((n) => n + 1); } return; }
+      if (!held.current.delete(a.id)) return;
+      if (shownIds.current.has(a.id)) restart(); else redraw((n) => n + 1);
     };
     let result: unknown;
     try { result = onResolve?.(a, ok); } catch { result = false; }
@@ -240,10 +230,12 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
         {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
         <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{inline ? <span className="fleet-ask__cmd" dir="auto">{ask}</span> : ask}</p>
         {inline && stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
+        {it.kind === 'approval' && sent.current.has(it.approval.id) && <span role="status" className="fleet-ask__why">{t('attention-sent')}</span>}
       </>,
       action === 'answer' && it.kind === 'approval' ? <>
         <Button size="sm" {...off} aria-label={t('fleet-deny-for', { name })} onClick={() => answer(it.approval, false)}>{t('approval-deny')}</Button>
         <Button size="sm" variant="primary" {...off} aria-label={t('fleet-allow-for', { name })} onClick={() => answer(it.approval, true)}>{t('approval-allow')}</Button>
+        {sent.current.has(it.approval.id) && agentId && <Button size="sm" aria-label={t('fleet-review-for', { name })} onClick={() => onOpen(agentId)}>{t('attention-review')}</Button>}
       </> : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
         : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null);
   };
