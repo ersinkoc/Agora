@@ -711,8 +711,8 @@ not built (the window says how many files are not shown): nothing to check.
 - **OS:** Linux, macOS, Windows (Chrome, Firefox, Safari; Windows at 125 % and 150 %).
 - **Do:** Layout > each preset; Split right, Close pane; Save layout as…, reload, Saved layouts… > Use; Export and Import…; Reset
   layout; the colour scheme switch: Dark, Light, Follow the system; Edit theme > Customize a colour.
-- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text is readable (WCAG
-  AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
+- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text and controls are easy
+  to see (WCAG AA)."; before #1054 it said "All text is readable (WCAG AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
 - **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (Chrome, 125 % and 150 %).
 
 ### RM-59 Terminal client (TUI)
