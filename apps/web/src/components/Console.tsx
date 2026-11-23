@@ -404,7 +404,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
         {showAgents && <Explorer by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
-        <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
+        <main className="flex min-h-[55dvh] min-w-0 flex-1 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
             renderTool={renderTool} plusItems={plusItems} welcome={welcome} />
         </main>
