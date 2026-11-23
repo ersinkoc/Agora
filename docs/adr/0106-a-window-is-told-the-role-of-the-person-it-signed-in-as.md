@@ -121,9 +121,10 @@ message Welcome {
   `docs/specs/protocol.md` section 1 describes it. An older window ignores it, as it ignores every control frame it does not use. A
   newer window treats any other first frame as an older hub (`PERSON_ROLE_UNSPECIFIED`).
 - **Clients.**
-  - Both the web and the terminal client ask `PairStatus` (and the web `UsageReport`) only for the owner, and take the picker's role
-    from the `Welcome`.
-  - Neither sends a viewer's typing or terminal sizes. Sizes are refused for a viewer too, and the window sends them by itself.
+  - Both the web and the terminal client ask `PairStatus` and `UsageReport` only for the owner, and take the picker's role from the
+    `Welcome`.
+  - Neither sends a viewer's typing or terminal sizes. Sizes are refused for a viewer too, and the window sends them by itself. A
+    viewer made a member sends the sizes of the terminals it watches once the new `Welcome` arrives.
   - The terminal client hides from a viewer the keys that change something (`y`/`n`, `s`, `f`, `x`, `u`, `d`). A key pressed anyway
     says so and sends nothing.
   - The web hides start, new terminal, close, resume, remove, prompts, options and Give.

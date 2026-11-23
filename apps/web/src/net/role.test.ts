@@ -102,6 +102,23 @@ describe('the live connection and the role (ADR-0106)', () => {
     live.close();
   });
 
+  it('a viewer made a member sizes the terminals it watches once the next connection names the new role', async () => {
+    const { live, sockets } = connect();
+    const first = sockets[0] as FakeSocket;
+    first.onopen?.();
+    first.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, welcome(v1.PersonRole.PERSON_ROLE_VIEWER));
+    const session = live.terminal('laptop', 't-1').connect(() => {});
+    session.resize(120, 40);
+    first.onclose?.();
+    await new Promise((r) => setTimeout(r, 5));
+    const second = sockets[1] as FakeSocket;
+    second.onopen?.();
+    expect(terminalCommands(second)).toEqual(['subscribe']);
+    second.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, welcome(v1.PersonRole.PERSON_ROLE_MEMBER));
+    expect(terminalCommands(second)).toEqual(['subscribe', 'resize']);
+    live.close();
+  });
+
   it('a member\'s window types and sizes as before', () => {
     const { live, sockets } = connect();
     const first = sockets[0] as FakeSocket;

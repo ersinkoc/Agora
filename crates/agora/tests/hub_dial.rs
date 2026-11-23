@@ -859,7 +859,6 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     );
     // Codex review of #796: a focus report or pointer motion the console passes on by itself is refused too, but asks nothing.
     session.terminal_report("laptop", &terminal, b"\x1b[I");
-    session.terminal_resize("laptop", &terminal, 100, 30);
     session.terminal_report("laptop", &terminal, b"\x1b[<35;3;4M");
     let end = Instant::now() + D::from_secs(10);
     while session.typing_unanswered() > 0 {
@@ -2450,6 +2449,8 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         ),
         Some((agora_tui::pair::Owner::No, agora_tui::picker::Role::Limited))
     );
+    // The plain list's cost line is not asked for either (the hub answers it to the owner only).
+    assert!(session.usage_total().is_err());
     let roots = agora_tui::picker::project_roots(&snapshot, "laptop");
     assert_eq!(roots, [pick.join("app").to_string_lossy().into_owned()]);
     let mut nav = agora_tui::picker::Nav::projects(roots.clone());
@@ -2595,6 +2596,7 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         Some((agora_tui::pair::Owner::No, agora_tui::picker::Role::Limited))
     );
     assert!(agora_tui::role::changes('f') && agora_tui::role::changes('s'));
+    assert!(session.usage_total().is_err());
     let shell = |agent_id: &str| agent_id == agent || agent.ends_with(&format!("/{agent_id}"));
     wait("the agent's terminal in the hub", || {
         hub.state
@@ -2617,6 +2619,7 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         .unwrap();
     session.terminal_input("laptop", &terminal, b"echo hi\r");
     session.terminal_report("laptop", &terminal, b"\x1b[I");
+    session.terminal_resize("laptop", &terminal, 100, 30);
     // Anything the hub would answer has had time to arrive.
     let end = Instant::now() + Duration::from_secs(1);
     while Instant::now() < end {

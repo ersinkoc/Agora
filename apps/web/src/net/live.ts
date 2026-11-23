@@ -350,7 +350,13 @@ export function connectLive(o: LiveOptions): Live {
       }
       if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.WELCOME) {
         const named = welcomeRole(f.payload);
-        if (named !== role) { role = named; o.onRole?.(role); }
+        if (named === role) return;
+        const watched = !mayChange(role);
+        role = named;
+        o.onRole?.(role);
+        // A viewer made a member or the owner: the terminals watched were never sized from here (their subscriptions went before
+        // this Welcome), so their sizes go now.
+        if (watched && mayChange(role)) for (const t of terminals.values()) if (t.size) sendSize(t.node, t.terminalId, t.size);
         return;
       }
       if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PONG && synced) {

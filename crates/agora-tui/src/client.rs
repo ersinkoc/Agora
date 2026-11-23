@@ -939,8 +939,15 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
-    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
+    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033). The hub
+    /// answers it to the owner only, so a member's or viewer's session (ADR-0106) does not ask: `auth.forbidden` without a request,
+    /// where the hub would refuse it and write the refusal down. An older hub's session asks as before.
     pub fn usage_total(&mut self) -> Result<u64, String> {
+        if matches!(self.person_role, PersonRole::Member | PersonRole::Viewer) {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
         let ok = self.command_ok(
             "",
             command_request::Command::UsageReport(agora_protocol::v1::UsageReport {}),
