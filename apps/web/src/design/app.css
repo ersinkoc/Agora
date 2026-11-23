@@ -26,6 +26,25 @@
   --radius-m: var(--radius-m);
   --radius-l: var(--radius-l);
   --shadow-card: var(--shadow);
+  /* The widget kit's derived roles (below, and visual-language.md §3): utilities like `text-danger` and `bg-tint-needs`. */
+  --color-danger: var(--danger);
+  --color-on-danger: var(--on-danger);
+  --color-surface-raised: var(--surface-raised);
+  --color-line-strong: var(--border-strong);
+  --color-tint-accent: var(--tint-accent);
+  --color-tint-working: var(--tint-working);
+  --color-tint-needs: var(--tint-needs);
+  --color-tint-finished: var(--tint-finished);
+  --color-tint-danger: var(--tint-danger);
+  --color-tint-idle: var(--tint-idle);
+  --radius-full: var(--radius-full);
+  --shadow-pop: var(--shadow-pop);
+  --text-caption: var(--text-caption);
+  --text-body: var(--text-body);
+  --text-strong: var(--text-strong);
+  --text-title: var(--text-title);
+  --text-page: var(--text-page);
+  --text-display: var(--text-display);
   --spacing: var(--space-1);
 }
 
@@ -113,7 +132,7 @@
   .state--finished { color: var(--state-finished); }
   .state--idle { color: var(--state-idle); }
   .state--unknown { color: var(--state-unknown); }
-  /* Interim, until a failed state has its own token (ADR needed): the full-strength text colour (neutral, but never quieter than the green
+  /* Interim, until this badge adopts the kit's red Failed (ADR-0102 decided it; redesign PRs 2 and 3): the full-strength text colour (neutral, but never quieter than the green
      check was), so a failure is never drawn as success and never missed. */
   .state--failed { color: var(--text); font-weight: 600; }
   .state--working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
@@ -123,90 +142,80 @@
   .strip__title { @apply font-semibold whitespace-nowrap; }
 
   .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  .tile {
-    @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start shadow-card transition-colors duration-150 hover:bg-surface-2;
-    border-inline-start: 4px solid var(--tile-accent, var(--border));
-  }
-  .tile--needs-you { border-color: var(--state-needs-you); }
-  .tile__name { @apply font-semibold; }
+  /* An agent as a tile (ADR-0102: colour is a surface, never a stripe). A flat card with one hairline: who it is is its avatar beside the
+     name, its state a pill (tint, colour, shape and word). Hover is a stronger hairline and a one-pixel lift, never a shadow. */
+  .tile { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink transition-[border-color,transform] duration-150; }
+  .tile:hover { border-color: var(--border-strong); @apply -translate-y-px; }
+  .tile__head { @apply flex min-w-0 items-center gap-2.5; }
+  .tile__name { @apply min-w-0 flex-1 break-words font-semibold; font-size: var(--text-strong); }
   .tile__preview { @apply overflow-hidden rounded-s bg-surface-0 p-2 font-mono text-xs whitespace-pre text-muted; min-height: 3.2em; }
+  /* Needs you: the amber tint and its hairline; the pulse is the mark's in the pill, the card itself never moves or glows. */
+  .tile--needs-you { background: var(--tint-needs); border-color: var(--line-needs); }
 
   /* The fleet console (Home): a header of live counts, what needs you, then the tiles grouped by machine or project. Tokens only; sizes in
      rem so Large text grows everything, and rows wrap instead of clipping. */
-  .fleet-console { @apply mx-auto grid w-full min-w-0 max-w-6xl content-start gap-4 p-4; }
-  .fleet-console__bar { @apply sticky top-0 z-10 -mx-4 -mt-4 border-b border-line bg-surface-0 px-4 py-2; }
-  .fleet-summary { @apply flex flex-wrap items-stretch gap-2; }
-  .fleet-count { @apply inline-flex min-h-9 items-center gap-2 rounded-s border border-line bg-surface-1 px-3 py-1 text-start transition-colors duration-150 hover:bg-surface-2 disabled:cursor-default; }
-  .fleet-count[aria-pressed='true'] { @apply border-accent bg-surface-2; }
-  .fleet-count--zero { @apply opacity-70; }
-  .fleet-count:disabled:hover { @apply bg-surface-1; }
-  .fleet-count__n { @apply text-base font-semibold text-ink; min-width: 1ch; }
-  .fleet-count__word { @apply text-xs; }
-  .fleet-count--machines { @apply ms-auto text-muted hover:text-ink; }
+  .fleet-console { @apply mx-auto grid w-full min-w-0 max-w-6xl content-start gap-5 p-4; }
+  /* The counts scroll with the page: as stat tiles they wrap to two or three rows in a narrow pane, too much to pin over the tiles. */
+  .fleet-console__bar { @apply min-w-0; }
+  /* The five counts are stat tiles (the kit's StatTile): a big number and its name; only Needs you is tinted, and only above zero. */
+  .fleet-summary { @apply flex flex-wrap items-stretch gap-2.5; }
+  .fleet-summary > * { flex: 1 1 7.5rem; }
+  .fleet-summary > .fleet-stat--machines { flex-grow: 1.3; }
+  a.kit-stat { @apply text-ink no-underline transition-colors duration-150; }
+  a.kit-stat:hover { border-color: var(--border-strong); }
+  .fleet-stat__total { @apply font-medium text-muted; font-size: var(--text-body); letter-spacing: 0; }
   .fleet-dot { @apply inline-block size-2 flex-none rounded-full; }
   .fleet-stale { @apply m-0 flex flex-wrap items-center justify-between gap-2 rounded-m border border-line bg-surface-1 px-3 py-2 text-muted; }
 
-  .fleet-section__head { @apply flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1; }
+  .fleet-section__head { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1; }
   .fleet-hint { @apply hidden items-center gap-1.5 text-xs text-muted lg:inline-flex; }
-  .fleet-section__title { @apply m-0; }
-  .fleet-section__n { @apply font-normal; }
-  .fleet-attention { @apply grid gap-2; }
+  .fleet-section__title { @apply m-0 inline-flex items-center gap-2 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-strong); }
+  /* What needs you: one request card each (the kit's Callout, amber): an icon chip by the kind of ask, the agent's avatar and name, where
+     and how long, the ask, and the answers at the end. A container, so a narrow column puts the answers under the ask. */
+  .fleet-attention { @apply grid gap-2.5; container-type: inline-size; }
   .fleet-calm { @apply rounded-m border border-line bg-surface-1 px-3 py-2; }
   .fleet-queue { @apply m-0 grid list-none gap-2 p-0; }
   /* ADR-0065: the number to compare, two groups of three, large, so it is read at a glance and aloud. */
   .pair-number { @apply flex items-baseline gap-4 font-mono font-semibold text-ink; font-size: var(--text-28); letter-spacing: 0.08em; font-variant-numeric: tabular-nums; }
   .pair-recent { @apply m-0 grid list-none gap-1 p-0 text-xs text-muted; }
   .pair-window { @apply grid max-w-[24rem] gap-2 rounded-m border border-line bg-surface-1 p-3; }
-  .fleet-ask { @apply grid min-w-0 gap-1 rounded-m border border-line bg-surface-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-x-4; border-inline-start: 0.25rem solid var(--state-needs-you); }
-  .fleet-ask__who { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
+  .fleet-ask { @apply m-0 min-w-0; }
   .fleet-ask__name { @apply min-w-0 break-words; }
-  .fleet-ask__where, .fleet-ask__time { @apply min-w-0 text-xs text-muted; }
-  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink sm:col-start-1; }
+  .fleet-ask__where, .fleet-ask__time { @apply min-w-0 font-normal text-muted; font-size: var(--text-caption); }
+  /* How long ago it asked changes with the clock: a box of its own width (tabular digits, no wrapping inside) so "15 seconds" becoming
+     "45 seconds" or "2 minutes" does not rewrap the title and move the buttons. It is left out of the dwell's identity for that reason. */
+  .fleet-ask__time { @apply inline-block whitespace-nowrap; min-width: 11em; font-variant-numeric: tabular-nums; }
+  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink; }
+  /* A request answered here is shown whole (never cut): the ask as a mono chip, no wider than its card, that wraps instead of clipping. */
+  .fleet-ask__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; }
   .fleet-ask__what--clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .fleet-ask__why { @apply self-center text-xs text-muted; }
-  .fleet-ask--many { @apply sm:grid-cols-[minmax(0,1fr)_auto]; }
-  .fleet-ask__each { @apply col-span-full mt-1 ps-3; }
-  .fleet-ask__actions { @apply flex flex-wrap gap-2 sm:col-start-2 sm:row-span-2 sm:row-start-1; }
+  .fleet-ask__why { @apply mt-1 block text-xs text-muted; }
+  .fleet-ask__each { @apply mt-2; }
+  /* A card opened in place (a machine's join card, "Review each") keeps its button at the top, by its title, not in the middle. */
+  .fleet-ask--open .kit-callout__actions { @apply self-start; }
+  /* Allow and Deny wait out the dwell (T44): the buttons look off and do nothing until it has passed. */
+  .fleet-ask .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
 
   .fleet-more { @apply justify-self-start; }
   .fleet-groups { @apply grid gap-5; }
   .fleet-tools { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1; }
-  .fleet-tools__by { @apply flex min-w-0 max-w-full flex-nowrap items-center gap-1; }
-  .fleet-tools__by > span { @apply min-w-0 shrink-[8] truncate pe-0.5; }
-  /* In a panel narrower than the four words need with their label, the label goes (the group keeps its accessible name) so no word is cut. */
-  @container (max-width: 20rem) { .fleet-tools__by > span { display: none; } }
-  .fleet-seg { @apply inline-flex min-h-7 items-center min-w-0 shrink truncate rounded-xs border border-line bg-surface-1 px-1.5 py-0.5 text-xs text-muted transition-colors duration-150 hover:text-ink; }
-  .fleet-seg[aria-pressed='true'] { @apply border-accent bg-surface-2 text-ink; }
-  .fleet-group { @apply grid min-w-0 gap-2; content-visibility: auto; contain-intrinsic-size: auto 10rem; }
+  .fleet-group { @apply grid min-w-0 gap-2.5; content-visibility: auto; contain-intrinsic-size: auto 10rem; }
   .fleet-group__head { @apply flex flex-wrap items-center gap-x-2 gap-y-0.5; }
-  .fleet-group__name { @apply m-0 min-w-0 break-words text-sm font-semibold normal-case tracking-normal text-ink; }
+  .fleet-group__name { @apply m-0 min-w-0 break-words font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
   .fleet-group--offline .fleet-group__name { @apply text-muted; }
-  .fleet-grid { @apply grid gap-3; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); }
-  .tile--compact { @apply content-start gap-1.5 p-3 shadow-none; }
-  .tile--compact .tile__head { @apply flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5; }
-  .tile--compact .tile__name { @apply min-w-0 break-words; }
-  .tile__activity { @apply min-w-0 text-xs text-ink; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-  .tile__activity--line { @apply font-mono text-muted; }
-  .tile__meta { @apply flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted; }
-  .tile__where { @apply min-w-0 break-all; }
-  .tile--failed { border-color: var(--text-muted); }
-
-  /* Polish (state first): a tile's edge carries its state colour (the state word and mark are inside: never colour alone). What needs you is
-     the loudest thing on the page: a tinted card with a strong edge and its question in full-strength text. Working has a slow line along
-     its foot; finished settles quietly. Motion is only for people who have not asked for reduced motion. */
-  .tile--compact { @apply relative overflow-hidden transition-[background-color,border-color,transform] duration-150; border-inline-start-width: 4px; }
-  .tile--compact:hover { @apply -translate-y-px; }
-  .tile--needs-you { background: color-mix(in oklab, var(--state-needs-you) 9%, var(--surface-1)); border-color: color-mix(in oklab, var(--state-needs-you) 70%, var(--border)); border-inline-start-color: var(--state-needs-you); box-shadow: 0 0 0 1px color-mix(in oklab, var(--state-needs-you) 35%, transparent); }
-  .tile--needs-you:hover { background: color-mix(in oklab, var(--state-needs-you) 14%, var(--surface-1)); }
-  .tile__activity--ask { @apply text-sm font-medium text-ink; }
-  .tile--working::after { content: ''; @apply pointer-events-none absolute inset-x-0 bottom-0 h-0.5; background: linear-gradient(90deg, transparent, var(--state-working), transparent); opacity: 0.55; }
+  .fleet-grid { @apply grid gap-3; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr)); }
+  .tile--compact { @apply content-start gap-2.5 p-3.5; }
+  /* What the agent is doing, in an inset well: two lines of mono at most, the rest is read in the agent. */
+  .tile__activity { @apply min-w-0 rounded-s bg-surface-0 px-2.5 py-2 font-mono text-muted; font-size: var(--text-caption); line-height: 1.45; min-height: calc(2 * 1.45em + 1rem);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .tile--needs-you .tile__activity { @apply text-ink; background: color-mix(in oklab, var(--surface-0) 60%, transparent); }
+  .tile--failed .tile__activity { @apply text-ink; }
+  /* The foot: neutral facts as grey tags (folder, branch, changed files), signs that belong to the agent, and the time at the end. */
+  .tile__foot { @apply flex min-w-0 flex-wrap items-center gap-1.5; }
+  .tile__foot > .kit-tag { @apply min-w-0 max-w-full; }
+  .tile__where { @apply min-w-0 truncate; }
+  .tile__when { @apply ms-auto inline-flex items-center gap-1 whitespace-nowrap text-muted; font-size: var(--text-caption); }
   .tile--closed .tile__name { @apply text-muted; }
-  .tile__when { @apply inline-flex items-center gap-1; }
-  .tile--needs-you .tile__when { @apply font-medium text-needs-you; }
-  @media (prefers-reduced-motion: no-preference) {
-    .tile--working::after { background-size: 200% 100%; animation: sweep 2.8s ease-in-out infinite; }
-    .tile--needs-you:not(.tile--closed) { animation: nudge 2.4s ease-in-out infinite; }
-  }
   .tile--closed { @apply opacity-90; }
 
   .fleet-empty { @apply mx-auto grid max-w-xl justify-items-start gap-3 py-10; }
@@ -233,7 +242,7 @@
   .fleet-empty--wide { @apply max-w-none; }
   .fleet-empty--wide .tile { @apply pointer-events-none; }
   /* Pressed: a controls sinks by a pixel (a state of its own beside hover and focus). */
-  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .fleet-seg:active, .fleet-count:active:not(:disabled), .rail__btn:active { @apply translate-y-px; }
+  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .rail__btn:active { @apply translate-y-px; }
 
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
@@ -284,16 +293,17 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
   .ide-iconbtn, .menu-tile { min-width: var(--tap); }
+  /* The widget kit's controls; the switch keeps its look and grows an invisible target around it. */
+  .kit-btn, .kit-row, .kit-seg__item, button.kit-stat, a.kit-stat { min-height: var(--tap); }
+  .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }
-@keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-@keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
 /* The chat header's state dot: a ring that spreads and fades while the agent works (colour from the pill's own text colour). */
 @keyframes chat-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
@@ -330,6 +340,213 @@
 .hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* Derived roles for the widget kit (ADR-0102; visual-language.md §2 and §3). Like the syntax colours they are mixed from the theme's own
+   colours, so a user's theme (ADR-0068) gets them with no keys of its own; theme files cannot set them. They are declared on every
+   `[data-theme]` too, so a panel drawn in the other scheme (the gallery) mixes its own colours, not the page's.
+   - `--tint` is how strong a soft state background is; Light stays at 10 % or less so amber text on its tint keeps 4.5:1 (a test pins it).
+   - `--line` is the strength of a decorative hairline around a tinted surface. The tint, the icon and the words carry the meaning; a
+     hairline is never the only sign of a control or a state. Control indicators (toggle, selected ring, focus, button fills) are 3:1.
+   - `--danger` is the one red (ADR-0102): failed, errors, deletions, destructive actions, acting without asking. It is the fixed
+     `--diff-removed`, never a theme colour, and its label colour `--on-danger` is fixed beside it in tokens.css (never the theme's
+     on-accent, which a theme may set to anything that reads on its own accent). `--shadow-pop` is the one elevation, for overlays only; cards and panels stay flat. */
+:root {
+  --text-caption: 0.75rem;
+  --text-body: 0.8125rem;
+  --text-strong: 0.875rem;
+  --text-title: 1rem;
+  --text-page: 1.25rem;
+  --text-display: 1.75rem;
+  --radius-full: 999px;
+}
+:root,
+[data-theme='dark'] { --tint: 14%; --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.5), 0 12px 32px rgb(0 0 0 / 0.45); }
+[data-theme='light'] { --tint: 10%; --shadow-pop: 0 1px 2px rgb(20 20 40 / 0.06), 0 12px 32px rgb(20 20 40 / 0.12); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) { --tint: 10%; --shadow-pop: 0 1px 2px rgb(20 20 40 / 0.06), 0 12px 32px rgb(20 20 40 / 0.12); }
+}
+:root,
+[data-theme] {
+  --line: 40%;
+  --danger: var(--diff-removed);
+  --surface-raised: color-mix(in oklab, var(--text) 4%, var(--surface-1));
+  --border-strong: color-mix(in oklab, var(--text) 18%, var(--border));
+  --tint-accent: color-mix(in oklab, var(--accent) var(--tint), var(--surface-1));
+  --tint-working: color-mix(in oklab, var(--state-working) var(--tint), var(--surface-1));
+  --tint-needs: color-mix(in oklab, var(--state-needs-you) var(--tint), var(--surface-1));
+  --tint-finished: color-mix(in oklab, var(--state-finished) var(--tint), var(--surface-1));
+  --tint-danger: color-mix(in oklab, var(--danger) var(--tint), var(--surface-1));
+  --tint-idle: color-mix(in oklab, var(--state-idle) var(--tint), var(--surface-1));
+  --line-accent: color-mix(in oklab, var(--accent) var(--line), var(--surface-1));
+  --line-working: color-mix(in oklab, var(--state-working) var(--line), var(--surface-1));
+  --line-needs: color-mix(in oklab, var(--state-needs-you) var(--line), var(--surface-1));
+  --line-finished: color-mix(in oklab, var(--state-finished) var(--line), var(--surface-1));
+  --line-danger: color-mix(in oklab, var(--danger) var(--line), var(--surface-1));
+}
+
+/* The widget kit (components/kit/, visual-language.md §3): one widget per job, tokens only, logical properties, colour as a surface
+   (never a stripe). A tone class gives a widget its colour, its tint and its hairline. */
+@layer components {
+  .kit-tone-accent { --kit-fg: var(--accent); --kit-tint: var(--tint-accent); --kit-line: var(--line-accent); }
+  .kit-tone-working { --kit-fg: var(--state-working); --kit-tint: var(--tint-working); --kit-line: var(--line-working); }
+  .kit-tone-needs { --kit-fg: var(--state-needs-you); --kit-tint: var(--tint-needs); --kit-line: var(--line-needs); }
+  .kit-tone-finished { --kit-fg: var(--state-finished); --kit-tint: var(--tint-finished); --kit-line: var(--line-finished); }
+  .kit-tone-danger { --kit-fg: var(--danger); --kit-tint: var(--tint-danger); --kit-line: var(--line-danger); }
+  .kit-tone-idle { --kit-fg: var(--state-idle); --kit-tint: var(--tint-idle); --kit-line: var(--border); }
+  .kit-tone-plain { --kit-fg: var(--text-muted); --kit-tint: var(--surface-2); --kit-line: var(--border); }
+
+  .kit-btn { @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-s border border-line bg-surface-2 font-medium text-ink transition-[background-color,border-color,filter] duration-150 disabled:cursor-not-allowed disabled:opacity-50; height: 2rem; padding-inline: 0.875rem; font-size: var(--text-body); }
+  .kit-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+  .kit-btn--sm { height: 1.75rem; padding-inline: 0.625rem; font-size: var(--text-caption); }
+  .kit-btn--primary, .kit-btn--danger { @apply border-transparent; }
+  .kit-btn--primary { background: var(--accent); color: var(--on-accent); }
+  .kit-btn--danger { background: var(--danger); color: var(--on-danger); }
+  .kit-btn--primary:hover:not(:disabled), .kit-btn--danger:hover:not(:disabled) { border-color: transparent; filter: brightness(1.08); }
+  .kit-btn--ghost, .kit-btn--danger-ghost { @apply border-transparent bg-transparent; }
+  .kit-btn--ghost { @apply text-muted; }
+  .kit-btn--ghost:hover:not(:disabled) { @apply border-transparent bg-surface-2 text-ink; }
+  .kit-btn--danger-ghost { color: var(--danger); }
+  .kit-btn--danger-ghost:hover:not(:disabled) { border-color: transparent; background: var(--tint-danger); }
+  .kit-btn:active:not(:disabled), .kit-seg__item:active, .kit-row:active, button.kit-stat:active { @apply translate-y-px; }
+
+  /* A state as a pill: tint, state colour, shape and word, never colour alone. */
+  .kit-pill { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full; height: 1.25rem; padding-inline: 0.375rem 0.5rem; font-size: var(--text-caption); font-weight: 550; background: var(--kit-tint); color: var(--kit-fg); }
+  .kit-pill .state__mark { @apply size-2.5; }
+  .kit-mark { @apply inline-flex flex-none items-center; color: var(--kit-fg); }
+  .kit-mark .state__mark { @apply size-3; }
+  .kit-tag { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-xs bg-surface-2 text-muted; height: 1.25rem; padding-inline: 0.4375rem; font-size: var(--text-caption); }
+  .kit-tag--mono { @apply font-mono; }
+
+  /* An agent's identity: its colour as a soft square with a ring, and the first letter of its kind in ink. */
+  .kit-avatar { --avatar: var(--agent-slate); @apply relative inline-grid flex-none place-items-center rounded-s text-ink; width: 1.75rem; height: 1.75rem; font-size: var(--text-caption); font-weight: 650; background: color-mix(in oklab, var(--avatar) 22%, var(--surface-1)); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--avatar) 50%, var(--surface-1)); }
+  .kit-avatar--s { @apply rounded-xs; width: 1.125rem; height: 1.125rem; font-size: 0.625rem; }
+  .kit-avatar--l { width: 2.25rem; height: 2.25rem; font-size: var(--text-strong); }
+  .kit-avatar__dot { @apply absolute rounded-full bg-needs-you; inset-block-start: -3px; inset-inline-end: -3px; width: 0.5625rem; height: 0.5625rem; box-shadow: 0 0 0 2px var(--surface-1); }
+
+  .kit-card { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink; }
+  .kit-card--dense { @apply p-3; }
+  .kit-card--flush { @apply gap-0 p-0; }
+  button.kit-card { @apply transition-[border-color,transform] duration-150; }
+  button.kit-card:hover { border-color: var(--border-strong); @apply -translate-y-px; }
+  .kit-card[data-selected] { border-color: var(--accent); background: var(--tint-accent); box-shadow: 0 0 0 0.5px var(--accent); }
+
+  .kit-row { @apply flex w-full min-w-0 items-center gap-2 rounded-s px-2 py-1 text-start text-ink transition-colors duration-150 hover:bg-surface-2; min-height: 1.875rem; }
+  .kit-row[aria-current]:not([aria-current='false']) { background: var(--tint-accent); }
+  .kit-row[aria-current]:not([aria-current='false']) .kit-row__label { @apply font-semibold; }
+  .kit-row__label { @apply min-w-0 flex-1 truncate; }
+  .kit-row__meta { @apply flex flex-none items-center gap-1.5 text-muted; font-size: var(--text-caption); }
+
+  .kit-setting { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3; }
+  .kit-setting + .kit-setting { @apply border-t border-line; }
+  .kit-setting__text { @apply grid min-w-0 gap-0.5; flex: 1 1 12rem; }
+  .kit-setting__label { font-weight: 550; }
+  .kit-setting__hint { @apply text-muted; font-size: var(--text-caption); }
+  .kit-setting__control { @apply flex flex-wrap items-center gap-2; }
+
+  /* One segmented control: the chosen item is a raised thumb ringed in the accent (3:1 against the thumb and the track, a test checks
+     it) with bolder ink text. */
+  .kit-seg { @apply inline-flex max-w-full gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
+  .kit-seg__item { @apply inline-flex min-w-0 items-center justify-center gap-1.5 truncate rounded-xs px-2.5 font-medium text-muted transition-colors duration-150 hover:text-ink; height: 1.5rem; font-size: var(--text-caption); }
+  .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+  /* A switch: off is an outline with a muted thumb, on is filled; one that lets an agent act without asking is red when on. */
+  .kit-toggle { @apply relative inline-flex flex-none items-center rounded-full p-0.5 transition-colors duration-150; width: 2.25rem; height: 1.25rem; border: 1.5px solid var(--text-muted); background: transparent; }
+  .kit-toggle::after { content: ''; @apply rounded-full transition-[margin] duration-150; width: 0.75rem; height: 0.75rem; background: var(--text-muted); }
+  .kit-toggle[aria-checked='true'] { border-color: var(--accent); background: var(--accent); }
+  .kit-toggle[aria-checked='true']::after { margin-inline-start: calc(2.25rem - 0.75rem - 0.25rem - 3px); background: var(--on-accent); }
+  .kit-toggle--risk[aria-checked='true'] { border-color: var(--danger); background: var(--danger); }
+  .kit-toggle--risk[aria-checked='true']::after { background: var(--on-danger); }
+  .kit-toggle:disabled { @apply cursor-not-allowed opacity-50; }
+
+  .kit-stat { @apply grid min-w-30 gap-0.5 rounded-m border border-line bg-surface-1 text-start; padding: 0.625rem 0.875rem; }
+  .kit-stat__n { @apply flex items-center gap-2 font-semibold text-ink; font-size: var(--text-page); line-height: 1.1; letter-spacing: -0.02em; }
+  .kit-stat__label { @apply flex items-center gap-1.5 text-muted; font-size: var(--text-caption); }
+  .kit-stat--zero .kit-stat__n { @apply text-muted; }
+  .kit-stat--tinted { background: var(--kit-tint); border-color: var(--kit-line); }
+  .kit-stat--tinted .kit-stat__label { color: var(--kit-fg); font-weight: 550; }
+  button.kit-stat { @apply transition-colors duration-150; }
+  button.kit-stat:hover { border-color: var(--border-strong); }
+  .kit-stat[aria-pressed='true'] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+  .kit-chip { @apply grid flex-none place-items-center rounded-s; width: 1.75rem; height: 1.75rem; background: color-mix(in oklab, var(--kit-fg) 22%, var(--surface-1)); color: var(--kit-fg); }
+  .kit-callout { @apply grid items-start gap-x-3 gap-y-1 rounded-m border text-ink; grid-template-columns: auto minmax(0, 1fr) auto; padding: 0.75rem 0.875rem; background: var(--kit-tint); border-color: var(--kit-line); }
+  .kit-callout > .kit-chip { grid-row: span 2; }
+  .kit-callout__title { @apply m-0 min-w-0 font-semibold; font-size: var(--text-strong); }
+  .kit-callout__body { @apply col-start-2 m-0 min-w-0 break-words; }
+  .kit-callout__actions { @apply col-start-3 row-span-2 row-start-1 flex flex-wrap gap-2 self-center; }
+  @container (max-width: 28rem) { .kit-callout__actions { @apply col-span-2 col-start-2 row-span-1 row-start-auto; } }
+
+  /* Redesign PR 4: one approval request in three densities (row, card, full), on the callout: the same tint, icon chip and button
+     order everywhere. The ask is never cut where it can be answered: one mono chip that wraps. */
+  .approval-req-host { container-type: inline-size; }
+  .approval-req__title { @apply flex min-w-0 items-start gap-2; }
+  .approval-req__title > .kit-avatar { margin-block-start: 0.0625rem; }
+  .approval-req__text { @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5; }
+  .approval-req__ask { @apply min-w-0 break-words; }
+  .approval-req__where { @apply inline-flex min-w-0 flex-wrap items-center gap-1.5 font-normal text-muted; font-size: var(--text-caption); }
+  .approval-req__open { @apply -my-0.5 size-6 flex-none; }
+  .approval-req__what { @apply m-0 min-w-0 break-words text-ink; }
+  .approval-req__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .approval-req__foot { @apply col-start-2 col-end-4 min-w-0; }
+  /* Card and full: the buttons under the ask, at the end. */
+  .approval-req--card .kit-callout__actions, .approval-req--full .kit-callout__actions { @apply col-start-2 col-end-4 row-span-1 row-start-auto mt-1 justify-end; }
+  /* A wide card (above a terminal) keeps its buttons at the end of the first line, as the row does. */
+  @container (min-width: 36rem) { .approval-req--card .kit-callout__actions { @apply col-start-3 col-end-4 row-span-2 row-start-1 mt-0 self-center; } }
+  .approval-req--full { @apply gap-y-1.5; padding: 1rem 1.125rem; }
+  .approval-req--full .approval-req__title { font-size: var(--text-title); }
+  .approval-req--full .approval-req__cmd { font-size: var(--text-body); }
+  /* A narrow pane: the row density with the text across the whole card and the buttons under it, as wide as they can be. */
+  .approval-req--stacked .kit-callout__body, .approval-req--stacked .approval-req__foot { @apply col-start-1 col-end-4; }
+  .approval-req--stacked .kit-callout__actions { @apply col-start-1 col-end-4 row-span-1 row-start-auto mt-1; }
+  .approval-req--stacked .kit-callout__actions > .kit-btn { flex: 1 1 6rem; }
+  .approval-req--stacked > .kit-chip { grid-row: auto; }
+  /* An answer waiting out the dwell, held or already sent (T44): it looks off and does nothing. */
+  .approval-req .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
+  /* The attention dialog is the full density itself: an overlay (the one elevation), the ask scrolls when it is long, the buttons stay. */
+  .attention-card > .approval-req { @apply min-h-0 flex-1 rounded-m; grid-template-rows: auto minmax(0, 1fr) auto; }
+  .approval-req--full > .kit-chip { grid-row: auto; }
+  .attention-card .kit-callout__body { @apply flex min-h-0 flex-col gap-2; }
+  /* Redesign PR 5: a start or a switch in short (two lines, each cut at its end: Review shows it whole), and Review's dialog, whose body
+     scrolls inside the window so the answers stay in view. */
+  .approval-req__summary { @apply grid min-w-0 gap-0.5 text-muted; font-size: var(--text-caption); }
+  .approval-req__line { @apply m-0 flex min-w-0 items-baseline gap-x-1.5; }
+  .approval-req__line > * + *::before { content: '·'; @apply me-1.5; }
+  .approval-req__line > * { @apply min-w-0 truncate; flex: 0 1 auto; }
+  .approval-req__line > .approval-req__clip { flex-shrink: 1000; } /* the quote gives way first */
+  /* A start's red flags are never cut: the folder takes what is left (to nothing), and only flags too wide for the card wrap. */
+  .approval-req__line--facts { flex-wrap: wrap; }
+  .approval-req__line--facts > * { flex: none; max-width: 100%; }
+  .approval-req__line--facts > .approval-req__clip { flex: 1 1 0; }
+  .approval-req__quote { @apply text-ink; }
+  .approval-req__quote::before { content: '“'; }
+  .approval-req__quote::after { content: '”'; }
+  .review-card .kit-callout__body { @apply self-stretch overflow-y-auto; overscroll-behavior: contain; }
+
+  .kit-empty { @apply grid justify-items-center gap-1.5 px-4 py-7 text-center; }
+  .kit-empty > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }
+  .kit-empty__title { @apply m-0 font-semibold text-ink; font-size: var(--text-strong); }
+  .kit-empty__hint { @apply m-0 max-w-64 text-muted; }
+  .kit-empty__action { @apply mt-2; }
+
+  .kit-tip-host { @apply relative inline-flex; }
+  .kit-tip { @apply absolute z-60 w-max max-w-64 rounded-xs border border-line px-2 py-1 font-normal whitespace-normal text-ink; inset-block-start: calc(100% + 6px); inset-inline-start: 0; font-size: var(--text-caption); background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+
+  .kit-kv { @apply m-0 grid gap-x-4 gap-y-1.5; grid-template-columns: max-content minmax(0, 1fr); }
+  .kit-kv dt { @apply text-muted; font-size: var(--text-caption); padding-block-start: 1px; }
+  .kit-kv dd { @apply m-0 min-w-0 break-words; }
+  .kit-kv__mono { @apply font-mono; font-size: var(--text-caption); }
+
+  .kit-gallery { @apply grid gap-4; container-type: inline-size; }
+  .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }
+  .kit-gallery__group { @apply grid gap-2; }
+  .kit-gallery__row { @apply flex flex-wrap items-center gap-3; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .kit-pill.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
+  .kit-pill.kit-tone-needs .state__mark { animation: attend 1.6s ease-in-out infinite; }
+  .kit-mark.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
+  .kit-mark.kit-tone-needs .state__mark { animation: attend 1.6s ease-in-out infinite; }
+}
 
 /* People who asked for less motion get none: transitions and animations collapse to an instant change (state is still shown by shape and text). */
 @media (prefers-reduced-motion: reduce) {

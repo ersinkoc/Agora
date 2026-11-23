@@ -569,6 +569,20 @@ impl Env {
 
     /// The arguments of the start report that passed `session` as the new session id, once one is written. Found by what it says,
     /// never by how many reports there are: a report is named by its pid, and a later process can get an earlier one's (Windows).
+    /// Waits for the start that passed `session` and returns its arguments as read that time: reading again can miss a report
+    /// a moment later (on Windows a file being read by another check, or rewritten, is skipped), so the found value is kept.
+    fn wait_start(&self, what: &str, session: &str) -> Vec<String> {
+        let found = std::cell::RefCell::new(None);
+        self.wait(what, |e| match e.start_with_session(session) {
+            Some(a) => {
+                *found.borrow_mut() = Some(a);
+                true
+            }
+            None => false,
+        });
+        found.into_inner().unwrap_or_default()
+    }
+
     fn start_with_session(&self, session: &str) -> Option<Vec<String>> {
         self.reports("start-").iter().map(args).find(|a| {
             a.windows(2)
@@ -1039,12 +1053,8 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
     // The ledger may learn the chosen session on a later tick (#696).
     e.wait("the first session", |e| !e.session(&probe).is_empty());
     let first = e.session(&probe);
-    e.wait("the probe's start", |e| {
-        e.start_with_session(&first).is_some()
-    });
     assert!(e
-        .start_with_session(&first)
-        .unwrap()
+        .wait_start("the probe's start", &first)
         .iter()
         .any(|a| a == "--yolo"));
     e.wait("the options in the ledger", |e| {
@@ -1065,12 +1075,8 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
         !s.is_empty() && s != first
     });
     let fresh = e.session(&probe);
-    e.wait("the second start", |e| {
-        e.start_with_session(&fresh).is_some()
-    });
     assert!(!e
-        .start_with_session(&fresh)
-        .unwrap()
+        .wait_start("the second start", &fresh)
         .iter()
         .any(|a| a == "--yolo"));
 }

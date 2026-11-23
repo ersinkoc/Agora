@@ -21,7 +21,7 @@ export function SignInWaiting({ approval, onAskAgain, onUseCode }: {
           <p className="m-0 text-xs text-muted">{t('signin-waiting-hint')}</p>
         </>
       ) : (
-        <p role="alert" className="m-0 text-needs-you">{t(approval.state === 'denied' ? 'signin-denied' : 'signin-expired')}</p>
+        <p role="alert" className="m-0 text-danger">{t(approval.state === 'denied' ? 'signin-denied' : 'signin-expired')}</p>
       )}
       <div className="flex flex-wrap gap-2">
         {!waiting && <button type="button" className="button button--primary" onClick={onAskAgain}>{t('signin-ask-again')}</button>}

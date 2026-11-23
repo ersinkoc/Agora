@@ -67,9 +67,24 @@ body {
 .phone__nav:disabled { opacity: 0.4; }
 .phone__nav--primary { color: var(--accent); }
 
-/* Every control in the phone window, and the ones it borrows (the theme switch, cards' buttons), is big enough for a finger. */
-.phone .button { min-height: var(--tap); }
+/* Every control in the phone window, and the ones it borrows (the theme switch, cards' buttons, the widget kit's), is big enough for a
+   finger. A phone is a narrow window, not always a touch screen (`pointer: coarse` grows the kit only there), so the phone sets it here. */
+.phone .button, .phone .kit-btn, .phone .kit-row, .phone .kit-seg__item, .phone button.kit-stat, .phone a.kit-stat { min-height: var(--tap); }
 .phone .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }
+.phone .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
+
+/* The title of a phone screen: the type scale's title step (16 px at the default size), never a pixel size. */
+.phone-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: normal;
+}
 .phone-iconbtn {
   display: inline-grid;
   place-items: center;
@@ -80,35 +95,25 @@ body {
   color: var(--text-muted);
 }
 .phone-iconbtn:hover, .phone-iconbtn:active { background: var(--surface-2); color: var(--text); }
-.phone-chipbtn {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  min-height: var(--tap);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-s);
-  background: var(--surface-2);
-  font-size: var(--text-12);
-  white-space: nowrap;
-}
+.phone-next { flex: none; }
 
-.phone-notice {
-  margin: var(--space-2) var(--space-3) 0;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--state-needs-you);
-  border-radius: var(--radius-s);
-  background: var(--surface-1);
-}
+/* A notice (a refused answer, an error) is the kit's danger callout, under the title bar. */
+.phone-notice { margin: var(--space-2) var(--space-3) 0; }
 
 .phone-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); padding: var(--space-3); }
 .phone-section + .phone-section { padding-top: 0; }
+/* Section titles in sentence case at the strong step (not the global uppercase overline), as Home's. */
 .phone-section__title {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   margin: 0;
   padding: 0 var(--space-1);
+  color: var(--text);
+  font-size: var(--text-strong);
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .phone-list {
@@ -133,6 +138,8 @@ body {
 }
 .phone-row:hover, .phone-row:active { background: var(--surface-2); }
 .phone-row--closed { opacity: 0.7; }
+/* An agent that waits on you with no request open: the needs tint and hairline, as its tile on Home (no outline, no bar). */
+.phone-list--needs { background: var(--tint-needs); border-color: var(--line-needs); }
 
 .phone-card {
   display: grid;
@@ -144,8 +151,15 @@ body {
   border-radius: var(--radius-m);
   background: var(--surface-1);
 }
-.phone-card--needs { border-color: var(--state-needs-you); }
-.phone-card > .start { border: 0; padding: 0; background: transparent; }
+/* A request to start an agent or a switch keeps its own body (redesign PR 5 restyles it); the phone frames it in the request hairline. */
+.phone-card--slab { padding: 0; overflow: hidden; gap: 0; border-color: var(--line-needs); }
+.phone-card--slab > article { border-bottom: 0; }
+.phone-card--slab > .phone-card__why { padding: 0 var(--space-3) var(--space-2); }
+/* A plain request: the one request component (row density, stacked). Its open-the-agent button is a full touch target. */
+.phone-req .approval-req__title { align-items: center; }
+.phone-req__open { margin-block: calc(-1 * var(--space-2)); margin-inline-end: calc(-1 * var(--space-2)); }
+.phone-req .kit-callout__actions > .kit-btn { min-width: 0; }
+.phone-card > .start, .phone-card > .approval-req { border: 0; padding: 0; background: transparent; }
 .phone-card__head {
   display: flex;
   align-items: center;
@@ -158,20 +172,17 @@ body {
 }
 .phone-card__head:enabled:active { background: var(--surface-2); }
 .phone-card__detail {
-  margin: 0;
+  margin: var(--space-1) 0 0;
   max-height: 9em;
   overflow: auto;
   padding: var(--space-2);
   border-radius: var(--radius-s);
-  background: var(--surface-0);
+  background: color-mix(in oklab, var(--text) 7%, transparent);
   font-family: var(--font-mono);
   font-size: var(--text-12);
   white-space: pre-wrap;
   word-break: break-word;
 }
-.phone-card__hint { display: grid; gap: var(--space-2); margin: 0; color: var(--text-muted); font-size: var(--text-13); }
-.phone-card__actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
-.phone-card__always { grid-column: 1 / -1; }
 
 /* What the agent changed and its files, one tap each (they open the review screen and the file browser full-screen). */
 .phone-tools { display: flex; flex: none; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-2) 0; }
@@ -227,11 +238,11 @@ body {
   header.ide-bar .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }
 }
 
-/* The fleet's five answers above the list (the same strip as the desktop Home): two to a row, every one a full-size touch target. */
+/* The fleet's five answers above the list (the same stat tiles as the desktop Home): two to a row, every one a full-size touch target. */
 .phone-fleet { padding: var(--space-3) var(--space-3) 0; }
 .phone .fleet-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.phone .fleet-count { min-height: var(--tap); }
-.phone .fleet-count--machines { grid-column: 1 / -1; margin-inline-start: 0; }
+.phone .fleet-summary > * { min-height: var(--tap); min-width: 0; }
+.phone .fleet-stat--machines { grid-column: 1 / -1; }
 .phone .fleet-empty { padding: var(--space-6) var(--space-3); }
 .phone .fleet-empty .button, .phone .fleet-empty .link { min-height: var(--tap); display: inline-flex; align-items: center; }
 .phone .fleet-stale { margin: var(--space-3) var(--space-3) 0; }
@@ -245,13 +256,16 @@ body {
   max-height: 45dvh;
   overflow-y: auto;
   padding: var(--space-2) var(--space-3);
-  border-top: 2px solid var(--state-needs-you);
+  border-top: 1px solid var(--border);
   background: var(--surface-1);
 }
 .phone-dock__head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-size: var(--text-13); }
-.phone-dock__ask { overflow-wrap: anywhere; }
-.phone-dock .phone-dock__btn { min-height: 52px; font-size: var(--text-14); }
-.phone-dock .phone-dock__btn:only-child { width: 100%; }
+.phone-dock__title { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); font-weight: 600; }
+.phone-dock__req .kit-callout__actions > .kit-btn { flex: 1 1 0; min-width: 0; }
+/* The bar's answers are larger than a card's: 52 px, the strong step, in reach of a thumb. */
+.phone-dock .kit-btn { min-height: 52px; font-size: var(--text-14); }
+.phone-dock .phone-dock__btn { width: 100%; }
+.phone-dock .kit-btn[aria-disabled='true'] { cursor: not-allowed; opacity: 0.5; }
 .phone-card__why { color: var(--text-muted); font-size: var(--text-13); }
 /* The state of the link, in a row of its own under the title bar. */
 .phone-link { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) var(--space-3) 0; padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface-1); color: var(--text-muted); font-size: var(--text-13); }
