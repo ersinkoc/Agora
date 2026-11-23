@@ -126,6 +126,9 @@ jobs:
       - name: A chat log keeps following its newest entry through a window or pane resize (#1060)
         run: node scripts/e2e-chat-follow-resize.mjs
         timeout-minutes: 5
+      - name: Team chat still shows a message after a reload (ADR-0103)
+        run: node scripts/e2e-team-chat-reload.mjs
+        timeout-minutes: 5
 
   schema-breaking:
     # A published message never changes (ADR-0006): compare schema/ with the target branch.
