@@ -64,7 +64,7 @@ describe('the phone bar for what needs you', () => {
     const onResolve = home([r]);
     await dwell();
     expect(dock()?.textContent).toContain('Edit src/auth.rs · +12 -3');
-    expect(host.querySelectorAll('button.button--primary').length).toBe(1);
+    expect(host.querySelectorAll('button.kit-btn--primary').length).toBe(1);
     press(dock()!, 'Allow');
     expect(onResolve).toHaveBeenCalledWith(r, true);
     press(dock()!, 'Deny');
@@ -114,7 +114,7 @@ describe('the phone bar for what needs you', () => {
     const r = ask('p1');
     const onResolve = vi.fn(async () => undefined);
     act(() => root.render(<PhoneAgent agent={agent} agents={[agent]} approvals={[r]} machines={machines} onResolve={onResolve} onOpen={() => undefined} onBack={() => undefined} />));
-    expect(host.querySelectorAll('button.button--primary').length).toBe(1);
+    expect(host.querySelectorAll('button.kit-btn--primary').length).toBe(1);
     await dwell();
     press(dock()!, 'Allow');
     expect(onResolve).toHaveBeenCalledTimes(1);
@@ -132,7 +132,7 @@ describe('the phone bar for what needs you', () => {
       const old = [...dock()!.querySelectorAll('button')].find((b) => b.textContent === 'Allow') as HTMLButtonElement;
       show([B], onResolve);
       expect(dock()!.textContent).toContain('Run sudo reboot');
-      expect((dock()!.querySelector('button.button--primary') as HTMLButtonElement).disabled).toBe(true);
+      expect(dock()!.querySelector('button.kit-btn--primary')?.getAttribute('aria-disabled')).toBe('true');
       act(() => { old.click(); });
       press(dock()!, 'Allow');
       expect(onResolve).not.toHaveBeenCalled();
@@ -242,7 +242,7 @@ describe('the phone bar for what needs you', () => {
   });
   it('writes the agent and machine names in the bar with hidden characters visible, and the machine the agent header names', () => {
     home([ask('p1')], { agents: [{ ...agent, name: 'claude\u202e amber', machine: 'Laptop' }] });
-    const head = dock()!.querySelector('.phone-dock__head')!.textContent!;
+    const head = dock()!.textContent!;
     expect(head).toContain('claude\\u{202e} amber');
     expect(head).toContain('Laptop');
     expect(head).not.toContain('n1');
