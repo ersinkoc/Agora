@@ -351,7 +351,10 @@ the check is refused). An owner confirms its association; metadata is not an acc
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+and HEAD for the workspace. Each agent started in a folder registers it again, also a folder other agents share; such a
+registration leaves `files_changed` at 0, and the node sends the folder's `WorkspaceStatusChanged` after it, even when the
+counts did not change, so the latest counts follow it (#1017). A registration the node restates (a resync) carries the
+counts it last sent. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
 workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
 are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
@@ -1020,7 +1023,10 @@ forwards either to a node that did not offer it.
   `ask_for_approval` on) is never refused, and where the option's words do not say which value protects, both count as risky.
   `AgentSetMode` and `AgentSetConfig` of a choice that skips follow the node's `skip_permissions`
   policy: refused with `agent.option_forbidden` (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or
-  `confined_only`) when the policy does not allow it; when it does, the node neither applies nor refuses the choice: it raises an
+  `confined_only`) when the policy does not allow it. `confined_only` asks how the agent's own process was launched (#1009, as for
+  "always", ADR-0101 section 7 item 7), never the node's sandbox setting now: an agent the holder runs is not confined, also under a node
+  that confines now, and one with nothing recorded counts as not confined; the same holds for `AgentSetModel` below and for an
+  approved switch when it is applied. When the policy allows it, the node neither applies nor refuses the choice: it raises an
   `agent.skip_permissions` approval and answers `agent.approval_needed { approval_id }` (next item). A choice that keeps protection is
   never held to any of this. (`AgentSetModel` of a model the node judges as skipping is still refused, `agent.option_forbidden` or
   `agent.option_unconfirmed`: Amendment A covers modes and config options.) All three commands are in the team-default `signed_commands`
@@ -1060,8 +1066,8 @@ forwards either to a node that did not offer it.
     back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
     "skip_approvals", limit }`), and one agent may have at most 2 waiting and raise at most 3 per minute (`resource:
     "skip_approvals_agent"`), so one agent's flood never keeps another agent's card from being raised; a replacement counts as a new card
-    for these limits. Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
-    exists. Switching back to a value that keeps protection needs no approval.
+    for these limits. Policy `forbid` and `confined_only` (the agent's process not launched confined) refuse with
+    `agent.option_forbidden` before any request exists, and again when an approval arrives for an agent no longer launched confined. Switching back to a value that keeps protection needs no approval.
   - An adapter can never raise this card or any other node-made one: an approval request from an adapter whose action is in the `agent.`
     namespace (`agent.start`, `agent.skip_permissions`, ...) gets no card, consumes nothing and is answered "denied" at once.
   - Node capability `approval.skip_permissions`, advertised only by a node that handles the above and passed by the hub. A client that

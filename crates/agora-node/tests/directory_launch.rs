@@ -633,6 +633,71 @@ fn a_launched_folders_changes_are_reported_for_its_workspace() {
     .unwrap();
 }
 
+#[test]
+fn a_second_agent_in_a_shared_folder_is_followed_by_the_folders_count() {
+    use v1::event::Body;
+    if !supported() {
+        return;
+    }
+    // #1017: every start in a folder registers it again with no count. The folder's changes did not change, so the watcher said nothing
+    // after the second registration, and the hub and every window kept the registration's zero ("All clean" beside a review of 2 files).
+    let e = Env::new("shared-count");
+    let repo = e.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "committed\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial"]);
+    std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &repo, false);
+    // The count that follows the last registration of the folder, if one has come yet.
+    let after_last_registration = |workspace: &str| {
+        let events = e.node.as_ref().unwrap().events.events_after(0);
+        let last = events.iter().rposition(|ev| {
+            matches!(&ev.body, Some(Body::WorkspaceRegistered(w)) if w.workspace_id == workspace)
+        })?;
+        events[last..]
+            .iter()
+            .filter_map(|ev| match &ev.body {
+                Some(Body::WorkspaceStatusChanged(s)) if s.workspace_id == workspace => {
+                    Some(s.files_changed)
+                }
+                _ => None,
+            })
+            .next_back()
+    };
+    let wait_for_two = |workspace: &str, which: &str| {
+        // Generous: one status is a few git processes, which take seconds each on a busy Windows machine.
+        let end = Instant::now() + Duration::from_secs(60);
+        loop {
+            let count = after_last_registration(workspace);
+            if count == Some(2) {
+                return;
+            }
+            assert!(
+                Instant::now() < end,
+                "the {which} start's registration is not followed by the two changed files: {count:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let first = launch(&mut c, &info, "probe", false);
+    wait_for_two(&first.workspace_id, "first");
+    let second = launch(&mut c, &info, "probe", false);
+    assert_eq!(second.workspace_id, first.workspace_id);
+    wait_for_two(&second.workspace_id, "second");
+    for a in [first, second] {
+        c.call(Cmd::AgentStop(v1::AgentStop {
+            agent_id: a.agent_id,
+            stop_helpers: false,
+        }))
+        .unwrap()
+        .unwrap();
+    }
+}
+
 /// Waits until the node's event log holds an event that `pred` accepts.
 fn wait_for_event(node: &Node, what: &str, pred: impl Fn(&v1::event::Body) -> bool) {
     let until = Instant::now() + Duration::from_secs(10);
