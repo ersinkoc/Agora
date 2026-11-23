@@ -1,8 +1,7 @@
 # 0103. A window gets recent Team chat history
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat: "Accept and build")
 
 Origin: issue #1020, found while investigating #1016 (PR #1025). A window that opens or reloads after agents messaged each other
 shows an empty Team chat, although the hub holds the messages.
@@ -107,7 +106,7 @@ first with a `more` flag.
 (a) for what the window shows on open, (b) for scrolling back. It costs both, and (b)'s costs buy only something no window shows today:
 the web holds 50 messages and shows 5, and there is no full Team chat view to scroll yet.
 
-## Decision (proposed)
+## Decision
 
 **(a) now, shaped so that (b) can be added later without changing it.** Paging is not decided here (open question 1).
 
