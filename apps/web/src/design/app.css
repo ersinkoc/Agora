@@ -318,6 +318,9 @@
   /* A link in a sentence may wrap onto two lines, where one box around it would be wrong: each of its pieces grows by padding above and
      below instead (padding on an inline never changes the height of a line), drawn above the text around it. */
   .tap-inline { position: relative; padding-block: calc(var(--tap) / 2 - 0.5em); }
+  /* Links on lines next to each other: where one's reach meets the other's words, the words win (the entry is `isolate`, so this order
+     stays inside it and never rises over what floats above the chat). */
+  .tap-inline > span { position: relative; z-index: 1; }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }

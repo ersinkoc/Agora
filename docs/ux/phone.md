@@ -72,7 +72,8 @@ the keyboard's own paste works in the terminal. The mapping lives in `apps/web/s
 - In an agent's chat on a touch screen, every control in an entry takes a 44 × 44 px finger too. Rows (a group of steps, a step, a
   thought, a change), a code block's header and the "Show all" buttons grow to 44 px. The small ones keep their drawn size and grow an invisible target instead:
   the file chips (`.tap-target`, with their rows set wider apart so two targets never overlap), "Show the request", and a link in a
-  sentence (`.tap-inline`: padding above and below each piece, which never moves a line). A reply's Copy sits under the reply. A
+  sentence (`.tap-inline`: padding above and below each piece, which never moves a line; where it meets the words of a link on the
+  next line, the words win). A reply's Copy sits under the reply. A
   narrow window with a mouse keeps the dense sizes. `scripts/e2e-chat-touch.mjs` measures the targets in Chromium (#1073).
 - The page uses `viewport-fit=cover`; the bars keep out of the notch and the home indicator (`env(safe-area-inset-*)`), and pages
   keep out of a notch held sideways.

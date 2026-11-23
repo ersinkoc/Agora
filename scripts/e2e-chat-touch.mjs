@@ -146,8 +146,9 @@ for (const scheme of ['dark', 'light']) {
   }
   await ctx.close();
 }
-// A link in the last row of a table in a reply (the gallery's table has none, so one of its links is copied there): its hit area reaches
-// past the row, and that must not make the table scroll up and down (it may reach past the table's box, which clips it).
+// What the gallery's chats do not have, added to its first chat. A link in the last row of a table in a reply (the gallery's table has
+// none, so one of its links is copied there): its hit area reaches past the row, and that must not make the table scroll up and down (it
+// may reach past the table's box, which clips it).
 {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce' });
   const page = await ctx.newPage();
@@ -161,6 +162,49 @@ for (const scheme of ['dark', 'light']) {
     return y === 'hidden' || y === 'clip' ? 0 : box.scrollHeight - box.clientHeight;
   });
   check(extra === 0, `a link in a table's last row does not make the table scroll up and down (${extra} px)`);
+
+  // Links on lines next to each other (a list of sources, a sentence of links; the gallery has neither, so its link is copied): each
+  // reaches into the next line, and a tap on a link's own words must still open that link, never its neighbour.
+  const words = await page.evaluate(() => {
+    const link = document.querySelector('[role=log] a[href]');
+    const reply = link.closest('[data-role=agent]').querySelector(':scope > .grid');
+    const copy = (text) => { const a = link.cloneNode(true); a.firstChild.textContent = text; return a; };
+    const ul = document.createElement('ul');
+    ul.className = 'm-0 grid list-disc gap-0.5 ps-5 marker:text-muted';
+    for (let i = 0; i < 3; i++) { const li = document.createElement('li'); li.append(copy(`source ${i}`)); ul.append(li); }
+    const p = document.createElement('p');
+    p.className = 'm-0 break-words whitespace-pre-wrap';
+    for (let i = 0; i < 6; i++) p.append(copy(`a longer link ${i}`), ' ');
+    reply.append(ul, p);
+    const out = [];
+    for (const a of reply.querySelectorAll('a[href]')) {
+      a.scrollIntoView({ block: 'center' });
+      const words = document.createRange();
+      words.selectNodeContents(a);
+      let lost = 0;
+      for (const g of words.getClientRects()) {
+        for (let y = g.top + 1; y < g.bottom - 1; y += 2) for (let x = g.left + 1; x < g.right - 1; x += 3) if (!a.contains(document.elementFromPoint(x, y))) lost++;
+      }
+      out.push([a.textContent, lost]);
+    }
+    return out;
+  });
+  check(words.length >= 9 && words.every(([, lost]) => lost === 0), `a tap on a link's own words opens that link, with links on the lines above and below (${words.filter(([, n]) => n).map(([w, n]) => `${w}: ${n}`).join(', ') || 'none lost'})`);
+
+  // The chips with the Review button (the full window passes one; the gallery does not, so one is added as FilesChanged draws it).
+  const ids = await page.evaluate(() => {
+    const box = document.querySelector('[data-files-changed]');
+    const review = document.createElement('button');
+    review.className = 'button px-3 py-1 text-[0.8125rem]';
+    review.textContent = 'Review changes';
+    box.append(review);
+    return [...box.querySelectorAll('button')].map((b, i) => { b.setAttribute('data-touch-probe', `files-${i}`); return `files-${i}`; });
+  });
+  for (const id of ids) {
+    const m = await measure(page, id);
+    const what = await page.$eval(`[data-touch-probe="${id}"]`, (e) => e.textContent.trim());
+    check(m.spans[0].h >= TAP && m.covered.length === 0, `with the Review button: "${what}" is ${m.spans[0].w}×${m.spans[0].h} to a finger and nothing covers it${m.covered.length ? ` (covered by ${m.covered.join(', ')})` : ''}`);
+  }
   await ctx.close();
 }
 await browser.close();

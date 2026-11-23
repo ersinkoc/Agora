@@ -57,6 +57,8 @@ describe('#1073: a 44 px hit area for every control in a chat entry on a touch s
     expect(coarse).toMatch(/\.tap-target \{ position: relative; \}/);
     expect(coarse).toMatch(/\.tap-target::before \{ content: ''; position: absolute; inset-block: min\(0px, calc\(\(100% - var\(--tap\)\) \/ 2\)\); inset-inline: min\(0px, calc\(\(100% - var\(--tap\)\) \/ 2\)\); \}/);
     expect(coarse).toMatch(/\.tap-inline \{ position: relative; padding-block: calc\(var\(--tap\) \/ 2 - 0\.5em\); \}/);
+    // A link's words stay above a neighbouring link's reach.
+    expect(coarse).toMatch(/\.tap-inline > span \{ position: relative; z-index: 1; \}/);
     const outside = css.replace(coarse, '');
     expect(outside).not.toMatch(/\.tap-(target|inline)/);
     // The rules the other classes rely on.
@@ -81,10 +83,15 @@ describe('#1073: a 44 px hit area for every control in a chat entry on a touch s
       expect(chip.classList.contains('h-6'), name(chip)).toBe(true);
       expect([...chip.classList].some((c) => c.startsWith('pointer-coarse:')), name(chip)).toBe(false);
     }
-    // Their rows sit far enough apart that two targets never overlap: 1.5rem chips, 1.25rem between rows on touch.
+    // Their rows sit far enough apart that two targets never overlap: 1.5rem chips, 1.25rem between rows on touch, and 0.75rem to the
+    // Review button when it wraps under them (a chip's target reaches 10 px past it).
     expect(host.querySelector('[data-files-changed] ul')?.classList.contains('pointer-coarse:gap-y-5')).toBe(true);
+    expect(host.querySelector('[data-files-changed]')?.classList.contains('pointer-coarse:gap-y-3')).toBe(true);
     const link = [...host.querySelectorAll<HTMLElement>('a[href]')].find((a) => a.textContent === 'redirect notes');
     expect(link?.classList.contains('tap-inline')).toBe(true);
+    // Its words are in the span the rule raises, and the entry keeps that order to itself.
+    expect(link?.firstElementChild?.tagName).toBe('SPAN');
+    expect(link?.closest('[data-role=agent]')?.classList.contains('isolate')).toBe(true);
   });
 
   it('a reply\'s Copy sits under the reply on touch, never over a code block\'s own Copy', () => {

@@ -23,8 +23,9 @@ function Inlines({ parts }: { parts: Inline[] }) {
   return <>{parts.map((p, i) => p.kind === 'code'
     ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{p.text}</code>
     : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{p.text}</strong>
-      // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window.
-      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110">{p.text}</a>
+      // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window. On a touch screen it reaches
+      // into the lines above and below (#1073); its text, in the inner span, stays above a neighbouring link's reach (`.tap-inline`).
+      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{p.text}</span></a>
         : <span key={i}>{p.text}</span>)}</>;
 }
 
@@ -86,7 +87,7 @@ const clock = (atMs: number): string => new Date(atMs).toLocaleTimeString([], { 
 const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }) {
   const parsed = useMemo(() => blocks(text), [text]);
   return (
-    <div className="group/msg relative max-w-3xl" title={fullStamp(atMs)} data-role="agent">
+    <div className="group/msg relative isolate max-w-3xl" title={fullStamp(atMs)} data-role="agent">
       <span className="sr-only">{t('chat-agent')}: </span>
       <div className="grid gap-2 leading-relaxed">{parsed.map((b, i) => <BlockView key={i} block={b} />)}</div>
       {/* On a touch screen it is always shown at full size, so it sits under the reply rather than over its top corner, where it would
@@ -235,7 +236,7 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
   const heading = v.raw
     ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
     : <>
-      <span className="min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
+      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
       {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
       {line.locations && <PlaceChips places={line.locations} skip={showsSubject ? v.subject : undefined} />}
     </>;
@@ -341,7 +342,7 @@ export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLi
   const removed = files.reduce((n, f) => n + f.removed, 0);
   const base = (p: string) => p.slice(p.replace(/\\/g, '/').lastIndexOf('/') + 1);
   return (
-    <div className="flex w-full flex-none flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-line bg-surface-1 px-3.5 py-2.5" data-files-changed>
+    <div className="flex w-full flex-none flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-line bg-surface-1 px-3.5 py-2.5 pointer-coarse:gap-y-3" data-files-changed>
       <Icon name="diff" className="size-4 flex-none text-muted" />
       <b className="font-semibold text-ink">{t('chat-files-title', { count: files.length })}</b>
       <Counts added={added} removed={removed} />
@@ -367,7 +368,7 @@ export function PlanCard({ steps, status, label }: { steps: readonly string[]; s
   // The step being worked on: marked for a screen reader (`aria-current`) and in weight, as well as by its dot.
   const now = status ? currentStep(status) : undefined;
   return (
-    <div className="max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
+    <div className="isolate max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
       <div className="mb-2 flex items-center gap-2 font-semibold text-ink">
         <Icon name="board" className="size-4 text-accent" />{label}
         {progress && <small className="font-normal text-muted">{t('chat-plan-progress', { done: progress.done, total: progress.total })}</small>}
