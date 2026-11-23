@@ -1,4 +1,4 @@
-import { useId, useRef } from 'react';
+import { useId, useLayoutEffect, useRef } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { approvalName } from '../net/approvalText';
@@ -7,7 +7,7 @@ import { detailText } from '../net/tool';
 import { visible, type ApprovalModel } from '../net/view';
 import { kindOf } from './AgentTile';
 import { AlwaysNote, AlwaysOnly, alwaysNoteId, type AlwaysSurface } from './AllowAlways';
-import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, useNarrowPane, usePinnedRow } from './ApprovalRequest';
+import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, PINNED_ANSWERS_PX, useBelow, useNarrowPane, usePinnedRow } from './ApprovalRequest';
 import { Icon } from './Icon';
 import { AgentAvatar, Button } from './kit';
 import { ReviewableRequest } from './ReviewRequest';
@@ -49,6 +49,11 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
   const host = useRef<HTMLDivElement>(null);
   const narrow = useNarrowPane(host, narrowable, guard.restart);
   const pin = usePinnedRow(guard.restart);
+  const roomy = !useBelow(host, PINNED_ANSWERS_PX, 'width', pin.short);
+  // The row's two forms put the buttons in different places: a change between them (the pane getting wider or narrower) restarts the dwell.
+  const inline = pin.row && roomy && !!onAnswer && decidableInline(x);
+  const drawnInline = useRef(inline);
+  useLayoutEffect(() => { if (drawnInline.current !== inline) { drawnInline.current = inline; guard.restart(); } }, [inline, guard.restart]);
   const name = agent?.name || approvalName(x);
   const d = x.detail ? detailText(x.detail) : '';
   const ask = visible(d ? `${x.action} · ${d}` : x.action);
@@ -58,7 +63,6 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
   const avatar = agent ? <AgentAvatar accent={agent.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent.kind, name })} size="s" /> : undefined;
   const where = x.machineName?.trim() ? <bdi>{visible(x.machineName)}</bdi> : undefined;
   if (pin.row) {
-    const inline = !narrow && !!onAnswer && decidableInline(x);
     // The button goes with the row: the card that opens takes the focus, so it is not lost to the page.
     const open = () => { pin.open(); if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => host.current?.focus()); };
     return (
@@ -66,7 +70,7 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
         <ApprovalRequest density="row" alert={alert} icon={ASK_ICON[askKind(x)]} avatar={avatar} title={askTitle(x, name)} where={where}
           className={inline ? undefined : 'approval-req--bar'} attrs={{ 'data-pinned-row': inline ? 'answer' : 'review' }}
           actions={inline
-            ? <AnswerButtons approval={x} size="sm" off={off} onDeny={() => onAnswer(false)} onAllow={() => onAnswer(true)} />
+            ? <AnswerButtons approval={x} size="sm" off={off} onDeny={() => onAnswer?.(false)} onAllow={() => onAnswer?.(true)} />
             : <Button size="sm" variant="primary" aria-expanded={false} aria-label={t('approval-review-for', { name })} onClick={open}>{t('approval-review')}</Button>}>
           {inline && <p className="approval-req__what"><span className="approval-req__cmd" dir="auto">{ask}</span></p>}
           {inline && guard.stale && <p id={why} className="m-0 text-xs text-muted">{t('fleet-stale-no-answer')}</p>}

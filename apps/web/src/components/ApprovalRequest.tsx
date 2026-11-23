@@ -114,13 +114,14 @@ export function useNarrow(ref: RefObject<HTMLElement | null>, below = NARROW_PX)
   return useBelow(ref, below, 'width');
 }
 
-// Whether an element is smaller than `below` px along one axis. Unknown (nothing laid out yet, a test without layout) counts as large.
-export function useBelow(ref: RefObject<HTMLElement | null>, below: number, axis: 'width' | 'height'): boolean {
+// Whether an element is smaller than `below` px along one axis. Unknown (nothing laid out yet, a test without layout) counts as large, and
+// so does everything while `on` is false (nothing is observed then).
+export function useBelow(ref: RefObject<HTMLElement | null>, below: number, axis: 'width' | 'height', on = true): boolean {
   const [small, setSmall] = useState(false);
   // Measured before the first paint, so a small pane never shows the large layout for a frame.
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || !on) return;
     const now = el.getBoundingClientRect()[axis];
     if (now > 0) setSmall(now < below);
     if (typeof ResizeObserver === 'undefined') return;
@@ -131,13 +132,16 @@ export function useBelow(ref: RefObject<HTMLElement | null>, below: number, axis
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref, below, axis]);
-  return small;
+  }, [ref, below, axis, on]);
+  return on && small;
 }
 
 // #1082: a chat pane shorter than this (the whole pane, header and composer included, which the card's own size never changes) draws the
 // request pinned above its composer as one row, so the conversation keeps its room. The pane says so through `PinnedShort`.
 export const SHORT_PANE_PX = 400;
+// The row has Deny and Allow beside the ask only from this width of the card up: narrower, the callout puts its buttons under the text
+// (28rem) and the title wraps, so the row would be as tall as the card; there it is the title and Review.
+export const PINNED_ANSWERS_PX = 480;
 export const PinnedShort = createContext(false);
 
 // A card pinned above a chat's composer: whether it is drawn as the short row now, and the press that opens it to the whole card in place.

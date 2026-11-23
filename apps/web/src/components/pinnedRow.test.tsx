@@ -13,7 +13,7 @@ import { ATTENTION_DWELL_MS } from '../net/attention';
 import type { ApprovalModel } from '../net/view';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ApprovalCard } from './ApprovalCard';
-import { NARROW_PX, PinnedShort, SHORT_PANE_PX } from './ApprovalRequest';
+import { NARROW_PX, PINNED_ANSWERS_PX, PinnedShort, SHORT_PANE_PX } from './ApprovalRequest';
 import { PromptBox } from './PromptBox';
 import { AnswerHoldsProvider } from './useAnswerGuard';
 
@@ -111,19 +111,43 @@ describe('a request pinned above a chat in a short pane is one row', () => {
     expect(buttons().map((b) => b.textContent)).toEqual(['Review']);
   });
 
-  it('a pane both short and narrow has no room for the answers beside the ask: the title and Review', () => {
-    let report: (w: number) => void = () => {};
+  // Every width observer of the card is told the card's new width (jsdom lays nothing out).
+  const widths = () => {
+    const cbs: ((e: { contentRect: { width: number; height: number } }[]) => void)[] = [];
     (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
-      constructor(cb: (e: { contentRect: { width: number; height: number } }[]) => void) { report = (w) => cb([{ contentRect: { width: w, height: 0 } }]); }
+      constructor(cb: (typeof cbs)[number]) { cbs.push(cb); }
       observe() { /* reported by hand */ }
       disconnect() { /* nothing */ }
     };
+    return (w: number) => { for (const cb of cbs) cb([{ contentRect: { width: w, height: 0 } }]); };
+  };
+
+  it('a pane both short and narrow has no room for the answers beside the ask: the title and Review', () => {
+    const report = widths();
     vi.useFakeTimers();
     act(() => root.render(pinned(ask(), true, vi.fn())));
     expect(card().getAttribute('data-pinned-row')).toBe('answer');
     act(() => report(NARROW_PX - 100));
     expect(card().getAttribute('data-pinned-row')).toBe('review');
     expect(buttons().map((b) => b.textContent)).toEqual(['Review']);
+  });
+
+  it('below the width where the buttons sit beside the ask it is the title and Review, and a change between the two restarts the dwell', () => {
+    const report = widths();
+    vi.useFakeTimers();
+    const onResolve = vi.fn(() => true);
+    act(() => root.render(pinned(ask(), true, onResolve)));
+    act(() => report(PINNED_ANSWERS_PX - 60)); // wider than a narrow pane, too narrow for the buttons beside the ask
+    expect(card().getAttribute('data-pinned-row')).toBe('review');
+    expect(button('Allow')).toBeUndefined();
+    dwell();
+    act(() => report(PINNED_ANSWERS_PX + 40));
+    expect(card().getAttribute('data-pinned-row')).toBe('answer');
+    act(() => button('Allow')!.click());
+    expect(onResolve).not.toHaveBeenCalled();
+    dwell();
+    act(() => button('Allow')!.click());
+    expect(onResolve).toHaveBeenCalledTimes(1);
   });
 
   it('an answer from the row is held for the whole window: the side panel\'s card of the same request sends nothing', () => {
