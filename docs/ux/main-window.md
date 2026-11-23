@@ -160,9 +160,10 @@ One window: **Machine**, then **Working folder** (a known folder in one click, o
 ![Agent cards, light](screens/start-redesign-agent-light.png)
 ![Acting without asking, dark](screens/start-redesign-noask-dark.png)
 ![Phone](screens/start-redesign-agent-phone-light.png)
+![Confirm step on a phone](screens/start-redesign-confirm-phone-light.png)
 
 Built from the widget kit (redesign PR 10; screens `start-redesign-{agent,missing,confirm,noask}-{dark,light}.png` and
-`start-redesign-{agent,noask}-phone-{dark,light}.png`):
+`start-redesign-{agent,confirm,noask}-phone-{dark,light}.png`):
 
 - **Machine** is a segmented control of the online machines, each with its system's outline (Linux, macOS, Windows; the plain machine
   for any other) and its name; one tab stop, the arrow keys move and choose.

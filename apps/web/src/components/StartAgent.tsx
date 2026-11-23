@@ -200,7 +200,8 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
           {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-m border border-line-accent bg-tint-accent px-3 py-2.5 text-body text-ink">{t('start-for-task', { title: forTask.title, project: forTask.project })}</p>}
           <div className="grid gap-2">
             <h2 className={H}>{t('start-machine')}</h2>
-            <div className="max-w-full overflow-x-auto">
+            {/* Many machines shrink their segments (each shows its whole name as its tooltip) rather than scroll. */}
+            <div>
               <SegmentedControl label={t('start-machine')} value={node} disabled={busy} onChange={(id) => { if (id !== node) changeNode(id); }}
                 items={online.map((m) => ({ value: m.id, label: machineName(m), title: machineName(m), icon: <Icon name={OS_ICON[m.os] ?? 'machine'} className="size-3.5" /> }))} />
             </div>
@@ -262,7 +263,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                   older machine that does not name it. */}
               {missing && <p role="note" data-start-missing="" className="m-0 rounded-m bg-surface-2 px-3 py-2 text-caption text-muted">{t(...missing)}</p>}
             </div>
-            {startable && (info.gitRoot || info.previousProjectId) && <div className="grid gap-2">
+            {!missing && (info.gitRoot || info.previousProjectId) && <div className="grid gap-2">
               <h2 className={H}>{t('ide-options')}</h2>
               {info.gitRoot && <label className="flex items-center gap-2 text-body"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
               {info.previousProjectId && <label className="flex items-center gap-2 text-body"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
@@ -275,7 +276,8 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
               {skips.length > 0 && <div><SegmentedControl label={t('start-how-it-acts')} value={launch.permission} risk={risky} disabled={busy}
                 onChange={(id) => setLaunch((s) => pickPermission(s, id))}
                 items={[{ value: ASK, label: t('option-ask') }, ...skips.map((o) => ({ value: o.id, label: labelOf(o, t), icon: <Icon name="bolt" className="size-3.5" /> }))]} /></div>}
-              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')}>
+              {/* A container, so the callout puts its answers under the text in a narrow window (its own container query). */}
+              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')} className="@container">
                 <Callout tone="danger" icon="bolt" title={t('session-confirm-title')}
                   actions={<>
                     <Button variant="danger" size="sm" onClick={() => setLaunch(confirmSkip)}>{t('start-confirm-skip-yes')}</Button>
