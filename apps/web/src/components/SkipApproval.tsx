@@ -77,8 +77,8 @@ export function SkipApproval({ approval, busy, onResolve }: {
       {/* Redesign PR 4: Deny, then Allow, as on every request; this Allow lets the agent act without asking, so it is the danger button
           (ADR-0102). The dwell and "Read it first" are unchanged. */}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={busy || sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</Button>
-        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={busy || sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
+        <Button size="sm" disabled={sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</Button>
+        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
           {t('approval-allow')}
           {answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
         </Button>

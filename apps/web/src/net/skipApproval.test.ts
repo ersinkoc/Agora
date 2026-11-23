@@ -191,15 +191,13 @@ describe('the card', () => {
     expect(answers).toEqual([true]);
     vi.useRealTimers();
   });
-  it('Allow and Deny stay off for the dwell (Allow with a visible reason), and one click sends one decision', async () => {
+  it('Allow stays off for the dwell (with a visible reason), Deny does not, and one click sends one decision', async () => {
     vi.useFakeTimers();
     markSkipCapable('laptop');
     const answers: boolean[] = [];
-    // A failed answer (the window could not sign or send it) comes back as false.
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); return false; } })));
+    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); } })));
     expect(named('Allow').disabled).toBe(true);
-    // #1045: the banner's own T44 dwell (as on every request card) keeps Deny off too.
-    expect(named('Deny').disabled).toBe(true);
+    expect(named('Deny').disabled).toBe(false);
     expect(host.textContent).toContain('Read it first');
     act(() => named('Allow').click()); // a click inside the dwell does nothing
     expect(answers).toEqual([]);
@@ -207,26 +205,12 @@ describe('the card', () => {
     expect(named('Allow').disabled).toBe(true);
     await dwell(400);
     expect(named('Allow').disabled).toBe(false);
-    expect(named('Deny').disabled).toBe(false);
     expect(host.textContent).not.toContain('Read it first');
     act(() => { named('Allow').click(); named('Allow').click(); });
     expect(answers).toEqual([true]);
     expect(named('Allow').disabled && named('Deny').disabled).toBe(true); // after a click both wait
     await dwell(4100);
     expect(named('Allow').disabled).toBe(false); // a failed answer can be tried again
-    vi.useRealTimers();
-  });
-  it('an answer that went keeps both buttons off while the request is listed (#1045)', async () => {
-    vi.useFakeTimers();
-    markSkipCapable('laptop');
-    const answers: boolean[] = [];
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); return true; } })));
-    await dwell();
-    act(() => named('Deny').click());
-    await dwell(10_000);
-    expect(named('Allow').disabled && named('Deny').disabled).toBe(true);
-    act(() => named('Allow').click());
-    expect(answers).toEqual([false]);
     vi.useRealTimers();
   });
   it('the dwell starts again when the card says something else', async () => {

@@ -70,7 +70,7 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
         {/* ADR-0101: "Allow always" only when the request offers it; in the place of Allow (the primary) when it offers nothing else. */}
         <AlwaysOnly approval={x} className="mt-1" />
         {onAnswer && guard.stale && <p id={why} className="m-0 text-xs text-muted">{t('fleet-stale-no-answer')}</p>}
-        {onAnswer && sent && <p role="status" className="m-0 text-xs text-muted">{t('attention-sent')}</p>}
+        {onAnswer && sent && <p role="status" className="m-0 text-xs text-muted">{t('approval-sent')}</p>}
       </ApprovalRequest>
     </div>
   );
@@ -82,7 +82,7 @@ export function useOwnGuard(x: ApprovalModel, agent?: RequestAgent): AnswerGuard
 }
 
 // The side panel's card for one request. `onOpen` opens the agent that asks (the panel lists no separate row for it). `guard` is the side
-// panel's (one dwell for its whole list); a card drawn alone has its own. Every answer, a start's and a switch's included, goes through it.
+// panel's (one dwell for its whole list); a card drawn alone has its own. Every answer but a switch's goes through it.
 export function ApprovalCard({ approval, busy, agent, guard, onResolve, onOpen }: {
   approval: ApprovalModel;
   busy?: boolean;
@@ -97,7 +97,8 @@ export function ApprovalCard({ approval, busy, agent, guard, onResolve, onOpen }
   // ADR-0057: a request to start an agent shows everything it asks for.
   if (approval.start) return <StartApproval approval={approval} start={approval.start} busy={busy || !g.canAnswer(approval.id)} onResolve={(ok, choice) => send(() => onResolve(ok, choice))} />;
   // ADR-0090 Amendment A: a switch to a mode that skips permission questions, in the machine's own rendering.
-  if (approval.skip || approval.skipUnknown) return <SkipApproval approval={approval} busy={busy || !g.canAnswer(approval.id)} onResolve={(ok) => send(() => onResolve(ok))} />;
+  // It keeps its own guards (its Allow dwell and one-click lock, and Deny always available: main-window.md), not this list's.
+  if (approval.skip || approval.skipUnknown) return <SkipApproval approval={approval} busy={busy} onResolve={(ok) => onResolve(ok)} />;
   return <PlainRequest approval={approval} density="card" surface="card" agent={agent} busy={busy} guard={g} onOpen={onOpen}
     onAnswer={(ok, always) => send(() => (always ? onResolve(true, undefined, true) : onResolve(ok)))} />;
 }

@@ -33,9 +33,9 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
   a chat's composer) has the same dwell and per-request holds, from one hook (`useAnswerGuard`, #1045): Allow and Deny do nothing for
   600 ms after anything the list shows changed or moved (a pane narrow enough to put the buttons under the text included), after the
   person came back and after the link came back; one answer per request, held while it goes, "Answer sent" once it went, answerable
-  again after a fresh dwell when it failed; off while the link is down, with the reason. A start or a switch in a card goes through the
-  same guard. The dialog keeps its own dwell, answered-once and Later; the switch card also keeps its own Allow dwell and one-click
-  lock. The component only draws what the surface decided.
+  again after a fresh dwell when it failed; off while the link is down, with the reason. A start in a card goes through the same guard.
+  The dialog keeps its own dwell, answered-once and Later; the switch card keeps its own Allow dwell, one-click lock and a Deny that is
+  always available (main-window.md). The component only draws what the surface decided.
 - **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
   as it can be; nothing of the ask is cut.
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner

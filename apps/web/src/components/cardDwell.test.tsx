@@ -153,7 +153,7 @@ describe.each(surfaces)('request cards %s keep T44 (#1045)', (_name, draw) => {
       act(() => btn('a.rs', 'Allow').click());
       act(() => btn('a.rs', 'Deny').click());
       expect(sent).toEqual(['r1']);
-      expect(cardOf('a.rs')?.textContent).toContain(t('attention-sent'));
+      expect(cardOf('a.rs')?.textContent).toContain(t('approval-sent'));
       act(() => root.render(<></>));
     }
   });
