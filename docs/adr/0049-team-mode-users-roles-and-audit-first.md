@@ -74,4 +74,3 @@ is allowed.
    (#1044). A viewer's folder commands are refused as before, granted project or not.
 6. This is the hub's check. The node stays the authority (decision 3): a member's device that the node's policy limits to some
    projects is checked there again by the node's own records.
-
