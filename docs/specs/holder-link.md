@@ -295,7 +295,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   Its earlier conversation is shown again (ADR-0104 C1, #931): before the node reads anything new from the holder, it fills the agent's chat
   ring from the end of the transcript the old node wrote (`<data>/transcripts/<id>.jsonl`, ADR-0089), numbers on after the file's highest
   id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
-  asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node). The transcript is
+  asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
+  its last unwritten second is said dropped too). The transcript is
   written in batches at most a second apart, so a kill loses at most the last batch: those entries were shown live, are not in the file,
   and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines the old node read
   from the holder (the holder counts them given) and had not yet recorded are lost too, as before.

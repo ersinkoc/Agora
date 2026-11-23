@@ -1353,7 +1353,12 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
         wait_for("the answer after the resume", || said(&node, &id, &word));
         // The replay came before the session's answer, so it was taken in before the answer to this prompt.
         for text in ["hello-1", "hello-2"] {
-            assert_eq!(count(&node, text), 1, "{text} in round {round}: {:#?}", chat(&node, &id));
+            assert_eq!(
+                count(&node, text),
+                1,
+                "{text} in round {round}: {:#?}",
+                chat(&node, &id)
+            );
         }
         wait_for("the new turn on disk", || on_disk(&rig, &id, &word));
         for text in ["hello-1", "hello-2"] {

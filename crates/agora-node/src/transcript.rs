@@ -28,21 +28,31 @@
 //! **Writes.** Off every agent's path: the chat path only marks which entries changed (an id in a set); the writer thread
 //! ([`spawn_writer`]) takes the changed entries under the board's lock once a second, or as soon as 64 KiB of them wait, and encodes,
 //! redacts and appends them after letting it go (an entry that changed many times is written once, as it is then). A batch after a
-//! write that was cut short starts on a line of its own. A write that fails (a full disk, a folder that cannot be made) drops that batch:
-//! the entries stay in the ring, the agent is not touched, and its conversation says once `chat.history_not_saved`. A node that is
-//! killed loses at most the last batch (up to a second or 64 KiB).
+//! write that was cut short starts on a line of its own. A write that fails (a full disk, a folder that cannot be made) drops that
+//! batch and is not tried again: the entries stay in the ring, the agent is not touched, and its conversation says once
+//! `chat.history_not_saved`. A node that is killed loses at most the last batch (up to a second or 64 KiB). The writer is the only
+//! one that writes, rotates or moves a file aside, so none of these races another.
 //!
-//! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, only lowered by the node policy
-//! `chat.history_max_bytes` (0 writes nothing); over it, the newest half is written to a new file that replaces the old one (whole
-//! lines, a header that says `truncated`). The file of an agent that does not run is removed once it was not written for
-//! `chat.history_days` (30 by default, never more); a fresh start ("Start again") that went through moves the earlier file aside as
-//! `<id>.earlier.jsonl` (replacing an older one), which ages the same way. Over 2 GiB in all, the files of agents that do not run
-//! go, oldest first. Checked when the node starts and every hour. `agora history purge` removes the folder.
+//! **Seeding** (ADR-0104 C1). On take-up and on resume the ring is filled from the file's end, every entry held to the live path's
+//! shapes and bounds (`chat::seeded_entry`) and ids kept below 2^52. A permission still pending there is shown cancelled, and a prompt
+//! still queued is dropped with `adapter.queue_dropped` (its queue ended with the old node; one the old node sent in its last unwritten
+//! second is said dropped too, as the file cannot tell). A resumed agent that loads its session replays its conversation
+//! (ACP `session/load`): that replay is shown only when the ring is empty (review of #1103, B1).
+//!
+//! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, only lowered by the node policy `chat.history_max_bytes` (0 writes
+//! nothing); over it, the newest half is written to a new file that replaces the old one (whole lines, a header that says
+//! `truncated`). A file is removed `chat.history_days` (30 by default, only lowered; 0: once its agent ended) after its agent ended,
+//! as the session ledger says, or after its last write for an agent the ledger no longer knows; never while its agent runs or is
+//! offered for Resume. A fresh start ("Start again") that went through moves the earlier file aside as `<id>.earlier.jsonl`
+//! (replacing an older one), which follows its agent. Over 2 GiB in all, the files of agents that are not kept go, oldest first.
+//! Leftovers of a rewrite go. Checked when the node starts and every hour. `agora history purge` removes the folder.
 //!
 //! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, and the environment variables its
-//! policy passes to agents, ADR-0084) are replaced by
-//! `<redacted>` in every text of a line before it is written. A secret the node does not hold cannot be found in what an agent or a
-//! tool printed; the file is as sensitive as the terminal, and its mode is what protects it.
+//! policy passes to agents, ADR-0084), of 8 bytes or more, are replaced by `<redacted>` before a line is written: in every text, and
+//! as JSON escapes them in a tool's arguments. What an agent streams arrives in pieces and a long tool output is cut in its middle,
+//! so a piece of a value (4 bytes or more) at the edge of a text or on the cut is replaced too; a piece shorter than that is left.
+//! Ids (`call_id`, `approval_id`) are never changed. A secret the node does not hold cannot be found in what an agent or a tool
+//! printed; the file is as sensitive as the terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
 //! remove the file; retention does.
@@ -114,7 +124,10 @@ impl Limits {
     /// `chat.history_max_bytes`: a number of bytes, at most [`DEFAULT_MAX_BYTES`] (the policy lowers it). `None` for a value that is
     /// not a number.
     pub fn parse_max_bytes(v: &str) -> Option<u64> {
-        v.trim().parse::<u64>().ok().map(|b| b.min(DEFAULT_MAX_BYTES))
+        v.trim()
+            .parse::<u64>()
+            .ok()
+            .map(|b| b.min(DEFAULT_MAX_BYTES))
     }
 
     /// `chat.history_days`: a number of days, at most [`DEFAULT_DAYS`] (the policy lowers it). `None` for a value that is not a number.
@@ -786,6 +799,9 @@ impl Store {
     }
 }
 
+/// What the writer asks the node for retention: for the agents whose files are there, which are kept and when the others ended.
+pub type AgentStatus = Box<dyn Fn(&[String]) -> HashMap<String, Kept> + Send>;
+
 /// ADR-0089 decision 2: what the node knows of an agent whose transcript is on disk, for retention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kept {
@@ -870,7 +886,7 @@ impl Wake {
 /// written as it comes). Nothing is written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
 pub fn spawn_writer(
     board: Arc<crate::chat::ChatBoard>,
-    status: Box<dyn Fn(&[String]) -> HashMap<String, Kept> + Send>,
+    status: AgentStatus,
     stop: Arc<AtomicBool>,
 ) -> io::Result<Option<std::thread::JoinHandle<()>>> {
     let (Some(store), Some(wake)) = (board.store(), board.wake()) else {
@@ -1115,7 +1131,15 @@ mod tests {
             Limits::default(),
             None,
         );
-        for bad in ["", "../x", "a/b", ".hidden", "a\\b", "x.earlier", "a.jsonl.tmp-1"] {
+        for bad in [
+            "",
+            "../x",
+            "a/b",
+            ".hidden",
+            "a\\b",
+            "x.earlier",
+            "a.jsonl.tmp-1",
+        ] {
             assert!(store.path(bad).is_none(), "{bad}");
         }
         assert!(store.path("agent-7").is_some());
@@ -1206,7 +1230,13 @@ mod tests {
         let seed = store.read("a");
         assert!(seed.entries.is_empty());
         assert_eq!(seed.high, 9);
-        assert_eq!(read_tail(&store.earlier_path("a").unwrap()).unwrap().entries.len(), 1);
+        assert_eq!(
+            read_tail(&store.earlier_path("a").unwrap())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
         // A new entry is appended after the mark, and the file stays private.
         store.write(&batch("a", 10, vec![text(10, "y")])).unwrap();
         assert_eq!(store.read("a").entries.len(), 1);
@@ -1252,10 +1282,17 @@ mod tests {
     #[test]
     fn a_secret_split_between_two_entries_is_replaced_on_both_sides() {
         let (_dir, store) = store_with_secret("secret-split", "sk-very-secret-1234");
-        store.write(&batch("a", 1, vec![text(1, "my key is sk-very-se")])).unwrap();
-        store.write(&batch("a", 2, vec![text(2, "cret-1234, keep it")])).unwrap();
+        store
+            .write(&batch("a", 1, vec![text(1, "my key is sk-very-se")]))
+            .unwrap();
+        store
+            .write(&batch("a", 2, vec![text(2, "cret-1234, keep it")]))
+            .unwrap();
         let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
-        assert!(!body.contains("sk-very-se") && !body.contains("cret-1234"), "{body}");
+        assert!(
+            !body.contains("sk-very-se") && !body.contains("cret-1234"),
+            "{body}"
+        );
         let seed = store.read("a");
         assert_eq!(seed.entries[0].0.text, format!("my key is {REDACTED}"));
         assert_eq!(seed.entries[1].0.text, format!("{REDACTED}, keep it"));
@@ -1271,10 +1308,17 @@ mod tests {
         e.output = format!("{}sk-very-se{}", "a".repeat(half - 10), "t-1234 the end");
         e.output_truncated = true;
         store
-            .write(&batch("a", 7, vec![Line::Entry(Box::new(e), Side::default())]))
+            .write(&batch(
+                "a",
+                7,
+                vec![Line::Entry(Box::new(e), Side::default())],
+            ))
             .unwrap();
         let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
-        assert!(!body.contains("sk-very-se") && !body.contains("t-1234"), "{body}");
+        assert!(
+            !body.contains("sk-very-se") && !body.contains("t-1234"),
+            "{body}"
+        );
         assert!(body.contains(&format!("a{REDACTED} the end")));
     }
 
@@ -1294,13 +1338,18 @@ mod tests {
             .unwrap();
         let seed = store.read("a");
         let (got, side) = &seed.entries[0];
-        assert_eq!(side.tool.as_ref().unwrap().1, format!(r#"{{"pw":"{REDACTED}"}}"#));
+        assert_eq!(
+            side.tool.as_ref().unwrap().1,
+            format!(r#"{{"pw":"{REDACTED}"}}"#)
+        );
         assert_eq!(got.call_id, e.call_id, "an id is never changed");
         SecretStore::in_data(&dir)
             .set("SHORT", &crate::credentials::Secret::new("toolu").unwrap())
             .unwrap();
         let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)));
-        store.write(&batch("b", 1, vec![text(1, "toolu_01abc")])).unwrap();
+        store
+            .write(&batch("b", 1, vec![text(1, "toolu_01abc")]))
+            .unwrap();
         assert_eq!(store.read("b").entries[0].0.text, "toolu_01abc");
     }
 
@@ -1321,7 +1370,11 @@ mod tests {
         assert!(store.read("fresh").entries.is_empty());
         // A leftover of a rewrite another process did not finish.
         std::fs::write(store.dir().join("old.jsonl.tmp-1"), "x").unwrap();
-        let ms = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let ms = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        };
         let later = SystemTime::now() + Duration::from_secs(3 * 24 * 3600);
         // Review of #1103 (N6): an agent idle for long (its file not written for 3 days) that ended a day ago keeps its file.
         let status = |names: &[String]| -> HashMap<String, Kept> {

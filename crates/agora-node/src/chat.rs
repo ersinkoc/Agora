@@ -824,7 +824,8 @@ fn seeded_entry(mut e: ChatEntry, mut side: Side) -> Option<(ChatEntry, Side)> {
     }
     e.tool_kind = ToolKind::try_from(e.tool_kind).map_or(0, |k| k as i32);
     e.status = ToolStatus::try_from(e.status).map_or(0, |k| k as i32);
-    e.permission_outcome = PermissionOutcome::try_from(e.permission_outcome).map_or(0, |k| k as i32);
+    e.permission_outcome =
+        PermissionOutcome::try_from(e.permission_outcome).map_or(0, |k| k as i32);
     e.approval_id = cut_to(std::mem::take(&mut e.approval_id), MAX_CALL_ID);
     side.tool = side
         .tool
@@ -954,7 +955,10 @@ impl ChatBoard {
             let Some(s) = &mut t.save else {
                 continue;
             };
-            if s.dirty.is_empty() && s.evicted.is_empty() && s.removed.is_empty() && s.fresh.is_none()
+            if s.dirty.is_empty()
+                && s.evicted.is_empty()
+                && s.removed.is_empty()
+                && s.fresh.is_none()
             {
                 continue;
             }
@@ -2781,27 +2785,58 @@ mod tests {
         let seed = Seed {
             entries: vec![
                 (bad_role, Side::default()),
-                (e(2, ChatRole::User, ChatKind::ToolCall, "{}".into()), Side::default()),
-                (e(3, ChatRole::Agent, ChatKind::Text, "y".repeat(100_000)), Side::default()),
+                (
+                    e(2, ChatRole::User, ChatKind::ToolCall, "{}".into()),
+                    Side::default(),
+                ),
+                (
+                    e(3, ChatRole::Agent, ChatKind::Text, "y".repeat(100_000)),
+                    Side::default(),
+                ),
                 (bad_code, Side::default()),
                 (good_code, Side::default()),
-                (thought, Side { tool: Some(("t".into(), "a".into())), plan: true }),
+                (
+                    thought,
+                    Side {
+                        tool: Some(("t".into(), "a".into())),
+                        plan: true,
+                    },
+                ),
             ],
             high: u64::MAX,
         };
         assert!(b.seed(&a, seed, 1));
         let got = b.snapshot(&a);
-        assert_eq!(got.iter().map(|e| e.entry_id).collect::<Vec<_>>(), [3, 5, 6]);
+        assert_eq!(
+            got.iter().map(|e| e.entry_id).collect::<Vec<_>>(),
+            [3, 5, 6]
+        );
         assert_eq!(got[0].text.len(), MAX_ENTRY_BYTES);
         assert_eq!(got[2].text, "tx");
         assert!(got[2].output.len() <= MAX_OUTPUT_BYTES && got[2].output_truncated);
         {
             let g = b.lock();
             let t = g.get(&a).unwrap();
-            assert!(t.calls.is_empty() && t.plan.is_none(), "side state only where it belongs");
+            assert!(
+                t.calls.is_empty() && t.plan.is_none(),
+                "side state only where it belongs"
+            );
         }
         b.push_item(&a, &ChatItem::Text("next".into()), 2);
         assert_eq!(b.snapshot(&a).last().unwrap().entry_id, MAX_SEEDED_ID + 1);
+    }
+
+    /// Review of #1103 (B1): a resumed session's replay is shown only to an agent whose transcript holds nothing.
+    #[test]
+    fn a_replay_is_shown_only_when_the_transcript_is_empty() {
+        let b = ChatBoard::new();
+        let (fresh, kept) = (AgentId::new("fresh"), AgentId::new("kept"));
+        let replay = [ChatItem::Text("one".into()), ChatItem::Text("two".into())];
+        assert!(b.replayed(&fresh, &replay, 1));
+        assert_eq!(b.snapshot(&fresh).len(), 2);
+        b.push_item(&kept, &ChatItem::Text("one".into()), 1);
+        assert!(!b.replayed(&kept, &replay, 2));
+        assert_eq!(b.snapshot(&kept).len(), 1);
     }
 
     #[test]
@@ -2836,7 +2871,10 @@ mod tests {
         // anything of the new session, even when nothing new was said yet.
         assert_eq!(s.read("a").entries.len(), 2);
         let batches = new.take_unsaved();
-        assert_eq!((batches.len(), batches[0].fresh, batches[0].lines.len()), (1, Some(2), 0));
+        assert_eq!(
+            (batches.len(), batches[0].fresh, batches[0].lines.len()),
+            (1, Some(2), 0)
+        );
         s.write(&batches[0]).unwrap();
         assert!(s.read("a").entries.is_empty());
         assert_eq!(s.read("a").high, 2);

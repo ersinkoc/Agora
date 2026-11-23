@@ -239,7 +239,11 @@ fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
     let data = base.join("data");
     let transcript = data.join("transcripts").join("agent-1.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "{\"n\":1,\"entry\":{\"entry_id\":1,\"text\":\"private-words\"}}\n").unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"n\":1,\"entry\":{\"entry_id\":1,\"text\":\"private-words\"}}\n",
+    )
+    .unwrap();
     let script = format!(
         "cat {} > copied 2>/dev/null; echo in > inside; sleep 30",
         transcript.display()
@@ -260,7 +264,10 @@ fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
     }
     assert!(inside.exists(), "the agent did not run");
     let copied = std::fs::read_to_string(dir.join("worktrees/a/copied")).unwrap_or_default();
-    assert!(!copied.contains("private-words"), "the agent read the transcript");
+    assert!(
+        !copied.contains("private-words"),
+        "the agent read the transcript"
+    );
     drop(sup);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(base);

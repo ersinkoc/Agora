@@ -3815,15 +3815,16 @@ impl Supervisor {
                 self.sandbox.enforceable(),
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
-            let (adapter, session_id, capabilities, git_config, confinement, replayed) = match launched {
-                Ok(l) => l,
-                Err(e) => {
-                    if let Some(hook) = &self.abort_hook {
-                        hook(id);
+            let (adapter, session_id, capabilities, git_config, confinement, replayed) =
+                match launched {
+                    Ok(l) => l,
+                    Err(e) => {
+                        if let Some(hook) = &self.abort_hook {
+                            hook(id);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
-            };
+                };
             let entry = self
                 .adapters
                 .get_mut(id)

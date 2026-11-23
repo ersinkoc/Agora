@@ -69,8 +69,9 @@ a confined agent cannot read it; paging returns exactly the entries before an id
 ## Build status
 
 - Decisions 1, 2, 3 (the node's side) and 7, and the seeding of decisions 4 and 5, are built ahead of the schema step, as ADR-0104 C1
-  (its build step 4, #931) decides: the writer, the bounds and policy keys, retention, `agora history purge`, the node's secret values
-  replaced, continuous ids, and a resume or a take-up that shows the earlier turns. See ADR-0104 "Build status".
+  (its build step 4, #931) decides: the writer, the bounds and policy keys (both only lower the defaults), retention counted from when
+  the agent ended, `agora history purge`, the node's secret values replaced, continuous ids, and a resume or a take-up that shows the
+  earlier turns once (an agent's own replay of a loaded session is not shown again). See ADR-0104 "Build status".
 - Not built: the schema step and paging (decision 4's `chat.history`), the window's scroll-back and its "resumed" and "earlier session"
   markers (decision 5; a fresh start already keeps the earlier session as `<id>.earlier.jsonl`), search (decision 6). A forget at the hub
   (ADR-0053) never reaches the node, so decision 3's "forgetting an agent forgets its history" holds only through retention.
