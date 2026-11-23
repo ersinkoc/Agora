@@ -3591,7 +3591,10 @@ mod announce_tests {
                 projects: vec![],
                 limits: crate::supervisor::NodeLimits::default(),
             };
-            let transcripts = Path::new(data).join(crate::transcript::TRANSCRIPTS_DIR);
+            // `node_private_paths` makes every path absolute (on Windows `/tmp/...` becomes `C:\tmp\...`), so compare the same way.
+            let transcripts =
+                std::path::absolute(Path::new(data).join(crate::transcript::TRANSCRIPTS_DIR))
+                    .unwrap();
             assert!(
                 node_private_paths(&cfg)
                     .iter()
