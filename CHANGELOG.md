@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A structured agent that kept running through a node restart is no longer shown with an earlier mode or settings when it changed them just before its node stopped (for example a switch to a mode that acts without asking): the next node now uses the newest the agent reported, also when the old node had read it and not yet recorded it (#1080, ADR-0104).
 - In team mode, a member can now browse the folders of a project they were granted on its machine, choose one and start an agent there, in the window's Start an agent; a folder of another project or machine, a folder above the project (the way up stops at the project's folder) and a link that leads out of the project are refused with "Your role does not let you choose this folder", and a viewer stays read-only (#1049, ADR-0049 Amendment A). The terminal client's folder start still opens at the home folder, which a member is refused (#1086).
 - The desktop app now builds with `cookie` 0.18.3 (RUSTSEC-2026-0594: private-cookie nonces could repeat after a fork; the app does not fork after it starts, so it was most likely not exposed).
 - Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
