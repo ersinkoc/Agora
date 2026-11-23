@@ -738,7 +738,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     restarts: 0,
                 })
                 .collect();
-            let agents = earlier
+            let mut agents: Vec<v1::AgentSummary> = earlier
                 .into_iter()
                 .chain(views.into_iter().map(|v| {
                     let has_terminal = sup.terminal(&v.id).is_some();
@@ -763,6 +763,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     }
                 }))
                 .collect();
+            // One list in id order (`agent-2` before `agent-10`), whether a row comes from the ledger or the supervisor (#1122 review).
+            agents.sort_by_key(|a| {
+                (
+                    crate::ledger::id_number(&a.agent_id).unwrap_or(u64::MAX),
+                    a.agent_id.clone(),
+                )
+            });
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
             })

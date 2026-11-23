@@ -186,9 +186,19 @@ impl Env {
             .result
         {
             Some(Ok_::AgentList(l)) => {
-                let mut v = l.agents;
-                v.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-                v
+                // The node answers in id order (`agent-2` before `agent-10`), ledger rows and supervisor rows together.
+                let n = |a: &v1::AgentSummary| {
+                    a.agent_id
+                        .strip_prefix("agent-")
+                        .and_then(|d| d.parse::<u64>().ok())
+                        .unwrap_or(u64::MAX)
+                };
+                assert!(
+                    l.agents.windows(2).all(|w| n(&w[0]) <= n(&w[1])),
+                    "not in id order: {:?}",
+                    l.agents.iter().map(|a| &a.agent_id).collect::<Vec<_>>()
+                );
+                l.agents
             }
             other => panic!("{other:?}"),
         }

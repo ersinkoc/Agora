@@ -536,7 +536,7 @@ impl Entry {
 }
 
 /// The number in a node's agent id (`agent-7` is 7).
-fn id_number(id: &str) -> Option<u64> {
+pub(crate) fn id_number(id: &str) -> Option<u64> {
     id.strip_prefix("agent-")?.parse().ok()
 }
 
