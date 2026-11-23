@@ -350,7 +350,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 - **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
   collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
   and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. Only an end counts (the
-  child exited, or a signal killed it): a stopped agent (`SIGSTOP`, a debugger) is not ended, whatever the system's `waitid` reports for it. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  child exited, or a signal killed it, by `siginfo_t.si_code`): a stopped agent (`SIGSTOP`, a debugger) is not ended. `waitid` with only
+  `WEXITED` reports no other state on Linux or macOS, so this is a defence, not a fix of an observed case. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
   `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
   counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only
