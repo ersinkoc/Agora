@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A structured agent that kept running through a node restart keeps its token counts, cost, model and context level in the window, the terminal client and the cost total, instead of starting again from 0; so does every running agent when a hub that missed some of its machine's events catches up (#930, ADR-0104). Usage the agent reported in the last few seconds before its node stopped can still be lost.
 - A structured agent that kept running through a node restart is no longer shown with an earlier mode or settings when it changed them just before its node stopped (for example a switch to a mode that acts without asking): the next node now uses the newest the agent reported, also when the old node had read it and not yet recorded it (#1080, ADR-0104).
 - Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
 - A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
