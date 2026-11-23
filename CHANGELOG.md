@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A node now refuses any command other than a subscription on a terminal, chat or preview stream, as the protocol says, instead of relying on the hub to; a subscription there needs the same grant as on the commands stream.
 - `agora agent list` keeps listing the agents that ended (stopped, with their last state and folder) after the node restarts, for as long as the node keeps them (14 days), whatever folder they ran in; before, a restarted node said it had no agents although it still kept them (#1120).
 
 ## 0.3.36

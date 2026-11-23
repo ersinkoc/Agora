@@ -833,20 +833,48 @@ where
                         }
                     }
                 }
-                // A terminal subscription: a thread bridges the node's local stream to this connection.
+                // A terminal or chat subscription: a thread bridges the node's local stream to this connection.
                 (stream, 0) if stream >= FIRST_DYNAMIC_STREAM => {
                     let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
                         continue;
                     };
+                    // Only a command that opens a stream may come on one (protocol.md, terminal relay). Any other is refused here,
+                    // whatever the hub does: carried to the control socket it would skip every check `run_local_on` makes on stream 1.
+                    if !req
+                        .command
+                        .as_ref()
+                        .is_some_and(crate::control::opens_stream)
+                    {
+                        let _ = answers_tx.send(CommandResponse {
+                            request_id: req.request_id,
+                            result: Some(command_response::Result::Err(
+                                agora_protocol::Error::new(
+                                    agora_protocol::ErrorCode::ProtocolInvalidMessage,
+                                )
+                                .with("field", "stream_id")
+                                .to_info(),
+                            )),
+                        });
+                        continue;
+                    }
                     let alive = Arc::new(AtomicBool::new(true));
                     relays.0.insert(stream, Arc::clone(&alive));
-                    let (socket, answers, out) = (
+                    let (socket, answers, out, grants) = (
                         commands.map(std::path::Path::to_path_buf),
                         answers_tx.clone(),
                         relay_tx.clone(),
+                        grants.clone(),
                     );
                     tokio::task::spawn_blocking(move || {
-                        relay_terminal(socket.as_deref(), &req, stream, &alive, &answers, &out);
+                        relay_terminal(
+                            socket.as_deref(),
+                            &req,
+                            grants.as_deref(),
+                            stream,
+                            &alive,
+                            &answers,
+                            &out,
+                        );
                     });
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
@@ -917,6 +945,7 @@ impl Drop for Relays {
 fn relay_terminal(
     socket: Option<&std::path::Path>,
     req: &CommandRequest,
+    grants: Option<&crate::grants::Grants>,
     stream: u32,
     alive: &AtomicBool,
     answers: &tokio::sync::mpsc::UnboundedSender<CommandResponse>,
@@ -929,6 +958,12 @@ fn relay_terminal(
             result: Some(command_response::Result::Err(e.to_info())),
         });
     };
+    // ADR-0041: a subscription the policy lists needs a live grant here as much as on stream 1 (`run_local_on`).
+    if let (Some(g), Some(c)) = (grants, &req.command) {
+        if let Err(e) = g.gate(c, crate::grants::now_ms()) {
+            return refuse(e);
+        }
+    }
     let Some(socket) = socket else {
         return refuse(
             Error::new(ErrorCode::NodePolicyDenied)

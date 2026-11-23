@@ -196,7 +196,9 @@ have 256 requests waiting. At most 1024 commands from all clients together wait 
 rules of a local command (the hub cannot widen them).
 
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
-other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
+other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`; the hub refuses it, and the node
+refuses it again on its hub connection, never relying on the hub, and judges an allowed one by the grants it applies on stream 1).
+The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
 (kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
@@ -394,7 +396,8 @@ A node serves the same commands on a local socket (owner-only; `agora node run`,
 so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
-opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
+opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client (`ChatSubscribe` and `PreviewConnect` too; any
+other command on a dynamic stream, and a subscription on stream 1, is `protocol.invalid_message` here as well). After the response the
 node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
 or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
 that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
