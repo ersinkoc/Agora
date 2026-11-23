@@ -97,12 +97,21 @@ start-approval-prompt = İlk istemi
 start-approval-no-prompt = İstem yok: başlar ve bekler.
 start-approval-scope = Neye izin verilsin
 start-approval-once = Yalnızca bu
+start-approval-more-short = Bunun gibi daha fazla
 start-approval-no-grant = Yalnızca bu başlatmaya izin verilebilir: bu tür kendisine verilen her programı çalıştırır, bu yüzden hiçbir zaman sormadan başlatılmaz.
 start-approval-settings-once = Yalnızca bu başlatmaya izin verilebilir: kendi modeli veya eforuyla başlatma her zaman sorulur.
 start-approval-options-once = Yalnızca bu başlatmaya izin verilebilir: yanıtınız bu başlatmayı yalnızca burada gösterilen başlatma seçenekleriyle kapsar ve böyle her başlatma yeniden sorulur.
 start-approval-does-not-ask = İzin verirseniz bu yardımcı, çalıştığı sürece size sormadan komut çalıştırır ve dosyaları değiştirir.
 start-approval-more = { $name } çalıştığı sürece bu klasörde, yeniden sormadan en fazla { $count } { $kind } ajanı
 start-approval-nested = Yardımcıları da yardımcı başlatmak isteyebilir (her birini siz yanıtlarsınız)
+approval-review = İncele
+approval-review-for = { $name } isteğinin tamamını oku
+approval-review-close = Kapat
+start-summary-outside = kendi klasörünün dışında
+start-summary-more = { $count ->
+    [one] 1 satır daha
+   *[other] { $count } satır daha
+}
 helper-started-by = { $name } tarafından başlatıldı
 helper-grants = Yardımcı izinleri
 helper-grant-line = Sormadan hâlâ { $count } { $kind } başlatabilir, klasör:
@@ -1067,8 +1076,8 @@ fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
-attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce isteği tam kartında okuyun.
-attention-start-read = Klasörü, istemi ve ayarları tam kartta okunur.
+attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce İncele isteğin tamamını gösterir.
+attention-start-read = Yanıtlamadan önce İncele klasörünü, istemini ve ayarlarını tam olarak gösterir.
 attention-pair = Onaylamadan önce, tam kartta numarasını ekranındaki numarayla karşılaştır.
 attention-later = Sonra
 attention-review = İncele

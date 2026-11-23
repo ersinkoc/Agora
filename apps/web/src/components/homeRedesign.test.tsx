@@ -182,7 +182,7 @@ describe('request cards keep the safety rules', () => {
     act(() => button('Allow')?.click());
     expect(sent).toEqual(['r1']);
   });
-  it('reads first: a start request, a no-ask start, a switch to acting freely and a long request have Review only, which opens the agent', () => {
+  it('reads first: a start request, a no-ask start, a switch to acting freely and a long request have Review only (#1070: the first three open Review over Home, the long one opens the agent)', () => {
     const start = { ...demoStartApproval, agentId: 'a' } as unknown as ApprovalModel;
     const noAsk = { ...demoStartNoAskApproval, agentId: 'a' } as unknown as ApprovalModel;
     const skip = { ...demoSkipApproval, agentId: 'a' } as unknown as ApprovalModel;
@@ -194,7 +194,10 @@ describe('request cards keep the safety rules', () => {
       expect(button('Deny'), x.id).toBeUndefined();
       expect(host.querySelector('.fleet-ask__what--clamp'), x.id).not.toBeNull(); // cut text is never answered here
       act(() => button(t('fleet-review'))?.click());
-      expect(opened, x.id).toEqual(['a']);
+      const review = !!(x.start || x.skip);
+      expect(opened, x.id).toEqual(review ? [] : ['a']);
+      expect(!!document.querySelector('[data-review-dialog]'), x.id).toBe(review);
+      act(() => root.render(<></>));
     }
   });
 });

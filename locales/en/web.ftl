@@ -98,12 +98,22 @@ start-approval-prompt = Its first prompt
 start-approval-no-prompt = No prompt: it starts and waits.
 start-approval-scope = What to allow
 start-approval-once = Only this one
+# The second choice of the grant's segmented control (#1070): short, so it is never cut; start-approval-more says it in full under it.
+start-approval-more-short = More like this
 start-approval-no-grant = Only this one can be allowed: this kind runs any program it is given, so it is never started without asking.
 start-approval-settings-once = Only this one can be allowed: a start with its own model or effort is always asked.
 start-approval-options-once = Only this one can be allowed: your answer covers this start with exactly the launch options shown, and every such start is asked again.
 start-approval-does-not-ask = If you allow it, this helper runs commands and changes files without asking you first, for as long as it runs.
 start-approval-more = Up to { $count } { $kind } agents in this folder while { $name } runs, without asking again
 start-approval-nested = Its helpers may ask to start helpers too (you answer each)
+approval-review = Review
+approval-review-for = Read the whole request from { $name }
+approval-review-close = Close
+start-summary-outside = outside its folder
+start-summary-more = { $count ->
+    [one] 1 more line
+   *[other] { $count } more lines
+}
 helper-started-by = started by { $name }
 helper-grants = Helper permissions
 helper-grant-line = Can still start { $count } { $kind } without asking in
@@ -1092,8 +1102,8 @@ fleet-review-each = Review each
 fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
 attention-ask-review = This needs to be read in full before you answer. Review it to decide.
-attention-skip = { $name } was asked to act without asking you. Read the request in its full card before you answer.
-attention-start-read = Its folder, prompt and settings are read in the full card.
+attention-skip = { $name } was asked to act without asking you. Review shows the whole request before you answer.
+attention-start-read = Review shows its folder, prompt and settings in full before you answer.
 attention-pair = Compare its number with the one on its screen in the full card before you approve.
 attention-later = Later
 attention-review = Review

@@ -212,7 +212,9 @@ describe('a card drawn alone has a dwell of its own (#1045)', () => {
     const start = { ...ask('r9', 'x'), action: 'agent.start', start: { agent: '', agentKind: '', node: '', kind: 'k', folder: '/w', prompt: 'p', inside: true, worktree: false, depth: 1, grantAllowed: false, settings: [], options: [] } } as ApprovalModel;
     const on = vi.fn();
     act(() => root.render(<ApprovalCard approval={start} onResolve={on} />));
-    const allow = () => [...host.querySelectorAll('button')].find((b) => b.textContent === 'Allow') as HTMLButtonElement;
+    dwell(); // the card's own dwell ran out: Review's dialog starts one of its own (a second click on Review never lands on Allow)
+    act(() => ([...host.querySelectorAll('button')].find((b) => b.textContent === 'Review') as HTMLButtonElement).click());
+    const allow = () => [...document.querySelectorAll('[data-review-dialog] button')].find((b) => b.textContent === 'Allow') as HTMLButtonElement;
     expect(allow().disabled).toBe(true);
     act(() => allow().click());
     expect(on).not.toHaveBeenCalled();

@@ -38,6 +38,8 @@ export interface AnswerGuard {
   restart: () => void;
   /** The link is not live: nothing can be answered, and the surface says why. */
   stale: boolean;
+  /** The holds this guard reads and writes (the window's, or its own outside a provider), for what it opens (`ShareHolds`). */
+  holds: AnswerHolds;
 }
 
 /** What a card draws of one request, for a surface's layout key: a change in any of it restarts the dwell. */
@@ -90,6 +92,12 @@ const HoldsContext = createContext<AnswerHolds | undefined>(undefined);
 export function AnswerHoldsProvider({ listed, children }: { listed: readonly string[]; children?: ReactNode }) {
   const [holds] = useState(() => new AnswerHolds());
   holds.list(new Set(listed));
+  return createElement(HoldsContext.Provider, { value: holds }, children);
+}
+
+/** Gives everything under it these holds: what a card opens (its Review dialog) holds a request with that card's guard, also outside
+ *  the window's provider (a card alone, a test). */
+export function ShareHolds({ holds, children }: { holds: AnswerHolds; children?: ReactNode }) {
   return createElement(HoldsContext.Provider, { value: holds }, children);
 }
 
@@ -150,5 +158,5 @@ export function useAnswerGuard(listed: readonly string[], layoutOf: (status: (id
     if (!canAnswer(id)) return;
     holds.hold(id, send);
   };
-  return { canAnswer, answer, status, restart, stale };
+  return { canAnswer, answer, status, restart, stale, holds };
 }

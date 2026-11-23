@@ -159,6 +159,18 @@ body {
 .phone-req .approval-req__title { align-items: center; }
 .phone-req__open { margin-block: calc(-1 * var(--space-2)); margin-inline-end: calc(-1 * var(--space-2)); }
 .phone-req .kit-callout__actions > .kit-btn { min-width: 0; }
+.phone-card > .start, .phone-card > .approval-req { border: 0; padding: 0; background: transparent; }
+.phone-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  text-align: start;
+}
+.phone-card__head:enabled:active { background: var(--surface-2); }
 .phone-card__detail {
   margin: var(--space-1) 0 0;
   max-height: 9em;
