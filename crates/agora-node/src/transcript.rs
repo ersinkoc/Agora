@@ -82,8 +82,13 @@ pub const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
 pub const NOT_SAVED: &str = "chat.history_not_saved";
 /// What a secret's value is replaced by on disk.
 pub const REDACTED: &str = "<redacted>";
-/// Shorter secret values are not looked for (they would match ordinary words).
-const MIN_SECRET: usize = 4;
+/// Shorter secret values are not looked for: a token or a key is longer, and a shorter value would match ordinary words and ids
+/// (review of #1103, N3: a value `toolu` turned every Anthropic tool call id into `<redacted>_01...`).
+const MIN_SECRET: usize = 8;
+/// Review of #1103 (N1): the shortest piece of a secret looked for at the edge of a text, where a value split across two entries
+/// (the bridge sends what an agent streams in pieces) or across the cut of a long tool output leaves a part on each side. Shorter
+/// pieces are left: they are too common at a text's edge to tell from ordinary words.
+const MIN_PIECE: usize = 4;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The bounds the node policy sets.
@@ -422,6 +427,79 @@ fn redact(s: &mut String, known: &[String]) {
     }
 }
 
+/// The longest piece (at least [`MIN_PIECE`] bytes, shorter than the whole value) of a known value that `s` ends with as its start,
+/// as a byte count; 0 for none.
+fn ends_with_start(s: &str, known: &[String]) -> usize {
+    let b = s.as_bytes();
+    let mut best = 0;
+    for k in known {
+        let k = k.as_bytes();
+        let longest = (k.len() - 1).min(b.len());
+        for n in (MIN_PIECE.max(best + 1)..=longest).rev() {
+            if b[b.len() - n..] == k[..n] && s.is_char_boundary(b.len() - n) {
+                best = n;
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// The longest piece of a known value that `s` starts with as its end, as a byte count; 0 for none.
+fn starts_with_end(s: &str, known: &[String]) -> usize {
+    let b = s.as_bytes();
+    let mut best = 0;
+    for k in known {
+        let k = k.as_bytes();
+        let longest = (k.len() - 1).min(b.len());
+        for n in (MIN_PIECE.max(best + 1)..=longest).rev() {
+            if b[..n] == k[k.len() - n..] && s.is_char_boundary(n) {
+                best = n;
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// Review of #1103 (N1): [`redact`], and a piece of a known value at either edge of `s` (what is left of a value split across two
+/// entries) replaced too.
+fn redact_split(s: &mut String, known: &[String]) {
+    redact(s, known);
+    let end = ends_with_start(s, known);
+    if end > 0 {
+        s.truncate(s.len() - end);
+        s.push_str(REDACTED);
+    }
+    let start = starts_with_end(s, known);
+    if start > 0 {
+        s.replace_range(..start, REDACTED);
+    }
+}
+
+/// A tool output the node cut (head and tail kept, `chat::MAX_OUTPUT_BYTES` in all): the head ends within 3 bytes before half of it
+/// (on a character boundary), so a value cut there is looked for on both sides of each such place.
+fn redact_cut_output(s: &mut String, known: &[String]) {
+    let half = crate::chat::MAX_OUTPUT_BYTES / 2;
+    for cut in (half.saturating_sub(3)..=half.min(s.len())).rev() {
+        if !s.is_char_boundary(cut) {
+            continue;
+        }
+        let (head, tail) = s.split_at(cut);
+        let (end, start) = (ends_with_start(head, known), starts_with_end(tail, known));
+        if end > 0 || start > 0 {
+            let out = format!(
+                "{}{}{}",
+                &head[..head.len() - end],
+                if end > 0 || start > 0 { REDACTED } else { "" },
+                &tail[start..]
+            );
+            *s = out;
+            return;
+        }
+    }
+}
+
 /// `line` with every known secret value replaced in each text it holds.
 fn redacted(line: &Line, known: &[String]) -> Line {
     let mut line = line.clone();
@@ -429,15 +507,14 @@ fn redacted(line: &Line, known: &[String]) -> Line {
         return line;
     }
     if let Line::Entry(e, side) = &mut line {
-        for s in [
-            &mut e.text,
-            &mut e.path,
-            &mut e.output,
-            &mut e.call_id,
-            &mut e.approval_id,
-        ] {
-            redact(s, known);
+        // Not `call_id` or `approval_id`: ids the node matches later (a call that finishes after a restart), never a value it holds.
+        // The text and the output are what an agent streams in pieces: a value split between two entries is found at their edges.
+        redact_split(&mut e.text, known);
+        redact_split(&mut e.output, known);
+        if e.output_truncated {
+            redact_cut_output(&mut e.output, known);
         }
+        redact(&mut e.path, known);
         for v in e.params.values_mut() {
             redact(v, known);
         }
@@ -518,6 +595,16 @@ impl Store {
                 .filter(|v| v.len() >= MIN_SECRET)
                 .chain(self.env_values.iter().cloned())
                 .collect();
+            // Review of #1103 (N2): a tool's arguments and a call's text are JSON, where a value with `"` or `\` is escaped.
+            let escaped: Vec<String> = values
+                .iter()
+                .filter_map(|v| {
+                    let e = serde_json::to_string(v).ok()?;
+                    let e = e.get(1..e.len() - 1)?.to_string();
+                    (e != *v).then_some(e)
+                })
+                .collect();
+            values.extend(escaped);
             values.sort_by_key(|v| std::cmp::Reverse(v.len()));
             values.dedup();
             *g = (changed, values);
@@ -1101,6 +1188,72 @@ mod tests {
         let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
         assert!(!body.contains("sk-very-secret-1234"));
         assert_eq!(body.matches(REDACTED).count(), 3, "{body}");
+    }
+
+    fn store_with_secret(tag: &str, value: &str) -> (PathBuf, Store) {
+        let dir = temp(tag);
+        SecretStore::in_data(&dir)
+            .set("TOKEN", &crate::credentials::Secret::new(value).unwrap())
+            .unwrap();
+        let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)));
+        (dir, store)
+    }
+
+    /// Review of #1103 (N1): what an agent streams arrives in pieces, so a value can be split between two entries (here written in
+    /// two batches); neither piece reaches the file.
+    #[test]
+    fn a_secret_split_between_two_entries_is_replaced_on_both_sides() {
+        let (_dir, store) = store_with_secret("secret-split", "sk-very-secret-1234");
+        store.write(&batch("a", 1, vec![text(1, "my key is sk-very-se")])).unwrap();
+        store.write(&batch("a", 2, vec![text(2, "cret-1234, keep it")])).unwrap();
+        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(!body.contains("sk-very-se") && !body.contains("cret-1234"), "{body}");
+        let seed = store.read("a");
+        assert_eq!(seed.entries[0].0.text, format!("my key is {REDACTED}"));
+        assert_eq!(seed.entries[1].0.text, format!("{REDACTED}, keep it"));
+    }
+
+    /// Review of #1103 (N1): a long tool output is cut in its middle (head and tail kept); a value on the cut is replaced on both sides.
+    #[test]
+    fn a_secret_on_the_cut_of_a_long_output_is_replaced() {
+        let (_dir, store) = store_with_secret("secret-cut", "sk-very-secret-1234");
+        let half = crate::chat::MAX_OUTPUT_BYTES / 2;
+        let mut e = full();
+        // The head ends with the value's start, the middle (`cre`) was cut out, the tail starts with its end.
+        e.output = format!("{}sk-very-se{}", "a".repeat(half - 10), "t-1234 the end");
+        e.output_truncated = true;
+        store
+            .write(&batch("a", 7, vec![Line::Entry(Box::new(e), Side::default())]))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(!body.contains("sk-very-se") && !body.contains("t-1234"), "{body}");
+        assert!(body.contains(&format!("a{REDACTED} the end")));
+    }
+
+    /// Review of #1103 (N2, N3): a value with `"` or `\` is found where it is JSON-escaped (a tool's arguments); ids are never
+    /// changed, and a value shorter than 8 bytes is not looked for.
+    #[test]
+    fn escaped_values_are_found_and_ids_and_short_values_are_left() {
+        let (dir, store) = store_with_secret("secret-escaped", "pa\"ss\\word-99");
+        let mut e = full();
+        e.call_id = "toolu_01pa\"ss\\word-99".into();
+        let side = Side {
+            tool: Some(("sh".into(), r#"{"pw":"pa\"ss\\word-99"}"#.into())),
+            plan: false,
+        };
+        store
+            .write(&batch("a", 7, vec![Line::Entry(Box::new(e.clone()), side)]))
+            .unwrap();
+        let seed = store.read("a");
+        let (got, side) = &seed.entries[0];
+        assert_eq!(side.tool.as_ref().unwrap().1, format!(r#"{{"pw":"{REDACTED}"}}"#));
+        assert_eq!(got.call_id, e.call_id, "an id is never changed");
+        SecretStore::in_data(&dir)
+            .set("SHORT", &crate::credentials::Secret::new("toolu").unwrap())
+            .unwrap();
+        let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)));
+        store.write(&batch("b", 1, vec![text(1, "toolu_01abc")])).unwrap();
+        assert_eq!(store.read("b").entries[0].0.text, "toolu_01abc");
     }
 
     #[test]
