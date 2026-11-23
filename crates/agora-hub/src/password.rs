@@ -134,16 +134,17 @@ impl<'a> ScreenPassword<'a> {
         Self { store, iterations }
     }
 
-    pub(crate) fn stored(&self) -> Option<String> {
-        self.store
-            .setting(SETTING)
-            .ok()
-            .flatten()
-            .and_then(|v| String::from_utf8(v).ok())
+    pub(crate) fn stored(&self) -> Result<Option<String>, PasswordError> {
+        let Some(v) = self.store.setting(SETTING)? else {
+            return Ok(None);
+        };
+        String::from_utf8(v)
+            .map(Some)
+            .map_err(|e| PasswordError::Store(e.to_string()))
     }
 
     pub fn is_set(&self) -> bool {
-        self.stored().is_some()
+        !matches!(self.stored(), Ok(None))
     }
 
     /// Sets (or replaces) the password.
@@ -169,7 +170,7 @@ impl<'a> ScreenPassword<'a> {
 
     /// Does `candidate` match? `false` when no password is set.
     pub fn verify(&self, candidate: &str) -> bool {
-        self.stored().is_some_and(|s| verify(&s, candidate))
+        matches!(self.stored(), Ok(Some(s)) if verify(&s, candidate))
     }
 }
 
@@ -178,51 +179,89 @@ const VOUCHED: &str = "passkeys_vouched";
 /// Records that the passkey `id` was added where the screen password would not have been asked (the hub's own machine) or was
 /// given. Such passkeys outlive a password change; every other one does not ([`drop_unvouched_passkeys`]).
 pub fn vouch_passkey(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let mut ids = vouched(store);
-    if !ids.iter().any(|v| v == id) {
-        ids.push(id.to_string());
-    }
-    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    set_vouch_in(&tx, id, true)?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Forgets the vouch for `id` when no passkey has that id (its passkey went with its person): ids are chosen by the client, so a
 /// passkey added later under the same id without the password must not inherit it ([`drop_unvouched_passkeys`]).
 pub fn forget_stale_vouch(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let exists = store
-        .lock()?
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let exists = tx
         .query_row("SELECT 1 FROM passkeys WHERE id = ?1", [id], |_| Ok(()))
         .optional()?
         .is_some();
-    let mut ids = vouched(store);
-    if exists || !ids.iter().any(|v| v == id) {
-        return Ok(());
+    if !exists {
+        set_vouch_in(&tx, id, false)?;
     }
-    ids.retain(|v| v != id);
-    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    tx.commit()?;
     Ok(())
 }
 
-fn vouched(store: &SqliteStore) -> Vec<String> {
-    store
-        .setting(VOUCHED)
-        .ok()
-        .flatten()
-        .map(|v| {
-            String::from_utf8_lossy(&v)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+/// Within the caller's transaction: `id` vouched for (`true`) or not (`false`) in the list of vouched passkeys. An unreadable list
+/// is an error, never an empty one.
+pub(crate) fn set_vouch_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+    vouched: bool,
+) -> Result<(), PasswordError> {
+    let mut ids = vouched_in(conn)?;
+    let has = ids.iter().any(|v| v == id);
+    if vouched && !has {
+        ids.push(id.to_string());
+    } else if !vouched && has {
+        ids.retain(|v| v != id);
+    } else {
+        return Ok(());
+    }
+    write_vouched_in(conn, &ids)
+}
+
+fn vouched_in(conn: &rusqlite::Connection) -> Result<Vec<String>, PasswordError> {
+    let raw: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [VOUCHED],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(v) = raw else {
+        return Ok(Vec::new());
+    };
+    let text = String::from_utf8(v).map_err(|e| PasswordError::Store(e.to_string()))?;
+    Ok(text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn write_vouched_in(conn: &rusqlite::Connection, ids: &[String]) -> Result<(), PasswordError> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![VOUCHED, ids.join("\n").as_bytes()],
+    )?;
+    Ok(())
 }
 
 /// Removes every passkey that was added from another machine without the screen password (when none was set, or before this
 /// rule existed): setting, changing or clearing the password must not leave a way in that never knew it. Returns how many.
 pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordError> {
-    let keep = vouched(store);
-    let conn = store.lock()?;
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let dropped = drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(dropped)
+}
+
+/// [`drop_unvouched_passkeys`] within the caller's transaction.
+fn drop_unvouched_in(conn: &rusqlite::Connection) -> Result<usize, PasswordError> {
+    let keep = vouched_in(conn)?;
     let ids: Vec<String> = conn
         .prepare("SELECT id FROM passkeys")?
         .query_map([], |r| r.get(0))?
@@ -231,18 +270,33 @@ pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordErr
     for id in ids.iter().filter(|id| !keep.contains(id)) {
         dropped += conn.execute("DELETE FROM passkeys WHERE id = ?1", params![id])?;
     }
-    drop(conn);
-    let still: Vec<&String> = keep.iter().filter(|k| ids.contains(k)).collect();
-    store.set_setting(
-        VOUCHED,
-        still
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-            .as_bytes(),
-    )?;
+    let still: Vec<String> = keep.into_iter().filter(|k| ids.contains(k)).collect();
+    write_vouched_in(conn, &still)?;
     Ok(dropped)
+}
+
+/// A password change as one transaction (Codex review of #1027): the new hash is stored, every session but the one whose token
+/// hash is `keep_session` ends, and every unvouched passkey goes, or nothing changes. The hash is derived before, outside it.
+/// Returns how many sessions ended.
+pub(crate) fn commit_change(
+    store: &SqliteStore,
+    hashed: &str,
+    keep_session: &[u8],
+) -> Result<usize, PasswordError> {
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SETTING, hashed.as_bytes()],
+    )?;
+    let revoked = tx.execute(
+        "DELETE FROM sessions WHERE token_hash != ?1",
+        params![keep_session],
+    )?;
+    drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(revoked)
 }
 
 /// Who is asking, as far as the hub can tell: the TCP peer address and a short summary of the user agent, for rate limits and the
@@ -803,5 +857,33 @@ mod tests {
         g.undo(first);
         let s = g.state.lock().unwrap();
         assert_eq!(s.by_address.get(&c.bucket()).unwrap().failures, 1);
+    }
+
+    #[test]
+    fn drop_unvouched_passkeys_propagates_store_error_without_deleting_passkeys() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO passkeys (id, public_key, sign_count, created_ms, user_id) VALUES ('pk-v', X'01', 0, 1, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        vouch_passkey(&store, "pk-v").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE settings", [])
+            .unwrap();
+        assert!(drop_unvouched_passkeys(&store).is_err());
+        let count: i64 = store
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM passkeys WHERE id = 'pk-v'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

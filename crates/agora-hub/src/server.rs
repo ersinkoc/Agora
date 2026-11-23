@@ -507,8 +507,6 @@ where
     // Mesh posts this node sent for another node (ADR-0031): answers come back here from tasks that wait on the target.
     let (posted_tx, mut posted) = tokio::sync::mpsc::unbounded_channel::<v1::CommandResponse>();
     let posts_open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
-    let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
     loop {
         if last_heard.elapsed() >= silence {
             return Err(ServeError::Silent);
@@ -518,10 +516,6 @@ where
             r = tokio::time::timeout(ACK_IDLE, frames.recv(conn)) => r,
             Some(answer) = posted.recv() => {
                 put(conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), silence).await?;
-                continue;
-            }
-            Some(handoff) = reverts.recv() => {
-                hub.board_revert(&handoff, now_ms());
                 continue;
             }
             Some(to_node) = commands.recv() => {
@@ -587,14 +581,7 @@ where
                         let posted_tx = posted_tx.clone();
                         let answer = v1::CommandRequest::decode(f.payload.as_slice())
                             .map_err(|_| invalid("request"))?;
-                        post_for_node(
-                            hub,
-                            node_id,
-                            answer,
-                            &posts_open,
-                            posted_tx,
-                            revert_tx.clone(),
-                        );
+                        post_for_node(hub, node_id, answer, &posts_open, posted_tx);
                     }
                     // An answer to a routed command: hand it to whoever asked. A garbled answer is dropped, and
                     // the asker's deadline turns it into `node.timeout`.
@@ -1394,12 +1381,11 @@ where
 /// A node's `MeshPost` for an agent on another node: forwarded to that node like a client command (ADR-0029) with `origin`
 /// set from the connection, whatever the node wrote. The answer (or an error) is sent on `answers`.
 fn post_for_node(
-    hub: &Hub,
+    hub: &Arc<Hub>,
     node_id: &str,
     req: v1::CommandRequest,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
-    reverts: tokio::sync::mpsc::UnboundedSender<crate::board::Handoff>,
 ) {
     use std::sync::atomic::Ordering;
     let rid = req.request_id.clone();
@@ -1409,7 +1395,7 @@ fn post_for_node(
     let post = match req.command {
         Some(command_request::Command::MeshPost(post)) => post,
         Some(command_request::Command::BoardCall(call)) => {
-            return board_for_node(hub, node_id, &rid, &call, open, answers, reverts);
+            return board_for_node(hub, node_id, &rid, &call, open, answers);
         }
         _ => {
             return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
@@ -1531,13 +1517,12 @@ fn board_notice(hub: &Hub, n: &crate::board::Notice) {
 /// A node's `BoardCall` (ADR-0039): the board decides, the answer goes back to the node. A handoff is also passed to the
 /// receiving agent's node, as a mesh message from the giver, and the node's answer waits for that.
 fn board_for_node(
-    hub: &Hub,
+    hub: &Arc<Hub>,
     node_id: &str,
     rid: &str,
     call: &v1::BoardCall,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
-    reverts: tokio::sync::mpsc::UnboundedSender<crate::board::Handoff>,
 ) {
     use crate::board::Verdict;
     use std::sync::atomic::Ordering;
@@ -1612,13 +1597,18 @@ fn board_for_node(
     let reply = match hub.router().send(&h.to_node, forwarded) {
         Ok(r) => r,
         Err(e) => {
-            let _ = reverts.send(handoff);
+            hub.board_revert(&handoff, now_ms());
             let _ = answers.send(error_response(rid, &e));
             return;
         }
     };
     open.fetch_add(1, Ordering::Relaxed);
-    let (open, rid, node) = (Arc::clone(open), rid.to_string(), handoff.to_node.clone());
+    let (hub, open, rid, node) = (
+        Arc::clone(hub),
+        Arc::clone(open),
+        rid.to_string(),
+        handoff.to_node.clone(),
+    );
     tokio::spawn(async move {
         // The board has accepted the handoff; whether the message arrived only changes what the giver is told.
         let delivered = matches!(
@@ -1630,7 +1620,7 @@ fn board_for_node(
         );
         open.fetch_sub(1, Ordering::Relaxed);
         if !delivered {
-            let _ = reverts.send(handoff);
+            hub.board_revert(&handoff, now_ms());
         }
         let resp = if delivered {
             v1::CommandResponse {
@@ -2605,6 +2595,161 @@ mod event_writer_tests {
         assert!(hub.node_link_closed(registration, generation, false, 1, 2));
         assert_eq!(hub.store().acked("n").unwrap(), 1);
         assert!(!hub.view().0.nodes["n"].online);
+    }
+
+    #[tokio::test]
+    async fn handoff_reverts_when_giver_disconnects_before_receiver_rejects() {
+        let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+        let (mut alpha, alpha_link) = connect(&hub, "alpha").await;
+        let (mut beta, beta_link) = connect(&hub, "beta").await;
+
+        let register = |node: &str, seq: u64, body| {
+            v1::Event {
+                producer_id: node.into(),
+                seq,
+                at_ms: 1000 + seq,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        for (conn, node) in [(&mut alpha, "alpha"), (&mut beta, "beta")] {
+            for (seq, body) in [
+                (
+                    1,
+                    v1::event::Body::NodeOnline(v1::NodeOnline {
+                        node_id: node.into(),
+                        hostname: node.into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    2,
+                    v1::event::Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                        workspace_id: "w".into(),
+                        node_id: node.into(),
+                        project_id: "p".into(),
+                        path: "/proj".into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    3,
+                    v1::event::Body::AgentStarted(v1::AgentStarted {
+                        agent_id: "a".into(),
+                        node_id: node.into(),
+                        project_id: "p".into(),
+                        kind: "shell".into(),
+                        ..Default::default()
+                    }),
+                ),
+            ] {
+                conn.send(&frame(
+                    STREAM_EVENTS,
+                    kinds::EVENT,
+                    register(node, seq, body),
+                ))
+                .await
+                .unwrap();
+            }
+            loop {
+                let ack = recv(conn).await;
+                if ack.kind == kinds::EVENT_ACK
+                    && v1::EventAck::decode(ack.payload.as_slice())
+                        .unwrap()
+                        .up_to_seq
+                        >= 3
+                {
+                    break;
+                }
+            }
+        }
+
+        let board = |node: &str, tool: &str, args: serde_json::Value| -> serde_json::Value {
+            let call = v1::BoardCall {
+                origin: node.into(),
+                from_agent: "a".into(),
+                project_id: "p".into(),
+                tool: tool.into(),
+                arguments_json: args.to_string(),
+            };
+            match hub.board_call(node, &call, 2000).verdict {
+                crate::board::Verdict::Done { result, is_error } => {
+                    assert!(!is_error);
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+                }
+                other => panic!("unexpected verdict: {other:?}"),
+            }
+        };
+        let task_id = board(
+            "alpha",
+            "task_create",
+            serde_json::json!({"title": "t1", "depends_on": []}),
+        )["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        board(
+            "alpha",
+            "task_claim",
+            serde_json::json!({"task_id": task_id}),
+        );
+
+        let req = v1::CommandRequest {
+            request_id: "handoff-1".into(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: Some(command_request::Command::BoardCall(v1::BoardCall {
+                origin: "alpha".into(),
+                from_agent: "a".into(),
+                project_id: "p".into(),
+                tool: "handoff".into(),
+                arguments_json: serde_json::json!({
+                    "to": "beta/a",
+                    "task_id": task_id,
+                    "summary": "s",
+                    "refs": []
+                })
+                .to_string(),
+            })),
+        };
+        alpha
+            .send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let forwarded = loop {
+            let f = recv(&mut beta).await;
+            if f.stream_id == STREAM_COMMANDS && f.kind == 0 {
+                break v1::CommandRequest::decode(f.payload.as_slice()).unwrap();
+            }
+        };
+
+        // Giver disconnects before receiver replies with delivery failure.
+        alpha.close().await;
+        let _ = alpha_link.await;
+
+        let err_resp = v1::CommandResponse {
+            request_id: forwarded.request_id,
+            result: Some(command_response::Result::Err(v1::ErrorInfo {
+                code: "agent.not_found".into(),
+                ..Default::default()
+            })),
+        };
+        beta.send(&frame(STREAM_COMMANDS, 1, err_resp.encode_to_vec()))
+            .await
+            .unwrap();
+
+        let mut reverted = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let tasks = board("beta", "task_list", serde_json::json!({}));
+            if tasks[0]["owner"] == "alpha/a" {
+                reverted = true;
+                break;
+            }
+        }
+        beta.close().await;
+        let _ = beta_link.await;
+        assert!(reverted, "handoff must revert after giver disconnects");
     }
 }
 

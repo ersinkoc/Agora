@@ -320,7 +320,10 @@ impl DiskEventLog {
                 oldest_retained: self.first_seq,
             });
         }
-        let idx = usize::try_from(after + 1 - self.first_seq).unwrap_or(usize::MAX);
+        let idx = after
+            .checked_add(1)
+            .and_then(|next| usize::try_from(next - self.first_seq).ok())
+            .unwrap_or(usize::MAX);
         let Some(start) = self.offsets.get(idx) else {
             return Ok(Vec::new());
         };
@@ -732,5 +735,13 @@ mod tests {
         let log = DiskEventLog::open(&dir, 1 << 20).unwrap();
         assert_eq!((log.next_seq(), log.acked(), log.len()), (11, 9, 1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replay_after_u64_max_does_not_overflow() {
+        let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
+        log.append(b"a").unwrap();
+        assert_eq!(log.replay_after(0).unwrap(), vec![b"a".to_vec()]);
+        assert!(log.replay_after(u64::MAX).unwrap().is_empty());
     }
 }

@@ -446,6 +446,10 @@ impl Router {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(r.client_stream);
+                drop(relays);
+                if let Some(t) = r.terminal {
+                    self.reshape(node, &t);
+                }
             }
             return;
         }
@@ -473,6 +477,9 @@ impl Router {
                         .push(r.client_stream);
                     drop(relays);
                     self.tell_node(node, ToNode::Close { stream });
+                    if let Some(t) = r.terminal {
+                        self.reshape(node, &t);
+                    }
                 }
             }
         }
@@ -1309,6 +1316,30 @@ mod tests {
         // The last one leaving sends nothing: the terminal keeps its size.
         drop(big);
         assert!(sent_sizes(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn when_a_lagging_small_window_is_dropped_the_others_grow_back() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (small, _f1) = r.client();
+        let (big, _f2) = r.client();
+        let s_stream = r.open_relay("n", &small, 3, Some("t-a"));
+        let _b_stream = r.open_relay("n", &big, 4, Some("t-a"));
+        assert_eq!(
+            r.resize(&big, "n", "t-a", 200, 50),
+            Resize::Forward((200, 50))
+        );
+        assert_eq!(
+            r.resize(&small, "n", "t-a", 100, 40),
+            Resize::Forward((100, 40))
+        );
+        let _ = sent_sizes(&mut rx);
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", s_stream, 0, vec![b'x']);
+        }
+        assert_eq!(r.relays_dropped(), 1);
+        assert_eq!(sent_sizes(&mut rx), sz("t-a", 200, 50));
     }
 
     #[test]

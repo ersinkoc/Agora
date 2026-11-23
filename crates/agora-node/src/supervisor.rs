@@ -1626,6 +1626,29 @@ impl Supervisor {
         crate::files::disk_usage(&e.worktree).map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
+    /// An agent that cannot be confined is not started unconfined (ADR-0047), and is refused before anything (a worktree) is created.
+    /// #897: an agent of a kind started as a plain process (an adapter or ACP bridge) also needs the platform to confine a command,
+    /// which Windows cannot yet; before, it failed only at spawn, after its worktree was made, as an internal error.
+    fn refuse_unconfinable(&self, kind: &str) -> Result<(), SupervisorError> {
+        let structured = self
+            .kinds
+            .get(kind)
+            .is_some_and(|k| k.manifest.driver(&bridge_program()).is_some());
+        let confinable = if structured {
+            self.sandbox.enforceable_for_commands()
+        } else {
+            self.sandbox.enforceable()
+        };
+        if confinable {
+            Ok(())
+        } else {
+            Err(SupervisorError::SandboxUnavailable(
+                kind.to_string(),
+                self.sandbox.level.name(),
+            ))
+        }
+    }
+
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
         self.start_with_options(req, &Requested::default(), now)
@@ -1646,14 +1669,8 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        // An agent that cannot be confined is not started unconfined (ADR-0047). Adapter-hosted agents are not confined yet.
         let driver = kind.manifest.driver(&bridge_program());
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         if let Some(spec) = driver {
             if let Some(p) = spec.command.first().and_then(|c| {
                 agora_adapters::package::revoked_publisher_of(
@@ -1781,12 +1798,7 @@ impl Supervisor {
             return self.start_directory_impl(req, project, now, true, options, Some(&folder));
         }
         self.check_limits()?;
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         let target = req.worktree_root.join(&req.name);
         let relative = req
             .checkout
@@ -1841,12 +1853,7 @@ impl Supervisor {
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
         let choice = self.launch_choice(&req.kind, options)?;
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         let kind = self
             .kinds
             .get(&req.kind)
@@ -3709,7 +3716,8 @@ impl Supervisor {
                 return Err(SupervisorError::StillRunning(id.clone()));
             }
             self.check_limits()?;
-            if !self.sandbox.enforceable() {
+            // An adapter is a plain process: it needs the platform to confine a command (#897).
+            if !self.sandbox.enforceable_for_commands() {
                 return Err(SupervisorError::SandboxUnavailable(
                     entry.agent.kind.clone(),
                     self.sandbox.level.name(),

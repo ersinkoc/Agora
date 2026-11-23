@@ -57,7 +57,7 @@ import { AnswerHoldsProvider } from './components/useAnswerGuard';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
 import { TOOL_PANELS } from './net/paneTools';
-import { isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
+import { decodeHash, isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 
@@ -382,7 +382,7 @@ export function App() {
   useEffect(() => { if (link === 'live') forgetGiveSupport(); }, [link]);
   useEffect(() => { if (giveApi?.online) forgetOffline(giveApi.online); }, [giveApi?.online]);
   const giveSupport = useGiveSupport(); // machines heard not to take tasks drop out of the palette too
-  const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
+  const current = hash.startsWith('#/agent/') ? decodeHash(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
   // On a phone a notice's link to an approval opens the agent that asks (ADR-0046, ADR-0067); answered already, the list.
   const redirect = phone ? approvalRedirect(phoneScreen(hash), approvalsNow, !hub || live !== undefined) : undefined;
