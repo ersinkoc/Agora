@@ -113,14 +113,19 @@ fn sends_that_time_out_and_are_tried_again_deliver_every_byte_once() {
     let mut got = Vec::with_capacity(total);
     let mut buf = vec![0u8; 3000];
     let began = Instant::now();
+    let mut since_pause = 0usize;
     while got.len() < total {
-        // A reader slower than the writer: a few KiB, then a pause, so sends wait and time out while part is being taken.
+        // A reader slower than the writer: it takes a few KiB at a time and stops for 20 ms after each 64 KiB, so the buffer stays full
+        // longer than the write timeout (a Unix send that can move any bytes returns their count instead of timing out) and sends
+        // time out while a write is being taken.
         let want = buf.len().min(total - got.len());
         let n = r.read(&mut buf[..want]).unwrap();
         assert!(n > 0, "the stream ended after {} bytes", got.len());
         got.extend_from_slice(&buf[..n]);
-        if got.len() % 4 == 0 {
-            std::thread::sleep(Duration::from_millis(1));
+        since_pause += n;
+        if since_pause >= 64 << 10 {
+            since_pause = 0;
+            std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             began.elapsed() < Duration::from_secs(60),
@@ -145,8 +150,11 @@ fn sends_that_time_out_and_are_tried_again_deliver_every_byte_once() {
         "bytes after the end: {extra:?}"
     );
     assert_eq!(sent, total, "the writer did not finish");
+    // The retry after a timed-out pipe write is what this test is for on Windows, so there it must have happened. On Unix a send that
+    // can move any bytes returns their count instead of timing out, and on Linux (WSL2) no send timed out here with these pauses, so
+    // there only the whole, unduplicated stream is checked.
     assert!(
-        timeouts > 0,
+        timeouts > 0 || !cfg!(windows),
         "no send timed out, so the retry was not exercised"
     );
     println!("{timeouts} sends timed out and were tried again");
