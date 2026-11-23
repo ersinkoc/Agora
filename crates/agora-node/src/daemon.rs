@@ -1967,6 +1967,9 @@ impl Node {
             chat.seed_from_disk(id, now_ms());
         }
         let git_wake = Arc::new(AtomicBool::new(false));
+        // The node's stop flag: its threads end on it, and its control commands and helper starts are refused once it is set (ADR-0104
+        // O2).
+        let stop = Arc::new(AtomicBool::new(false));
         // ADR-0057: agents may ask to start helpers; every start needs a decision a trusted device signed.
         let spawner = Arc::new(
             crate::spawn::Spawner::new(
@@ -1977,11 +1980,10 @@ impl Node {
                 Some(Arc::clone(&events)),
                 Arc::clone(&chat),
             )
-            .with_git_wake(Arc::clone(&git_wake)),
+            .with_git_wake(Arc::clone(&git_wake))
+            .with_stopping(Arc::clone(&stop)),
         );
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
-        // The node's stop flag: its threads end on it, and its control commands are refused once it is set (ADR-0104 O2).
-        let stop = Arc::new(AtomicBool::new(false));
         let mut ctx = ControlContext::new(
             Arc::clone(&supervisor),
             projects,
@@ -2702,6 +2704,10 @@ fn resume_round(
         // ADR-0060 Amendment A: an agent that was working gets its kind's one "carry on" message with its resume, if the owner's policy
         // allows it and it has not had one for this interruption; the message itself comes from the kind's manifest.
         let carry = carry_on && ledger.wants_continue(&id);
+        // #1119 item 3: as a command is, counted while it runs and not begun once the node is stopping (the agent stays offered).
+        let Some(_running) = ctx.admit() else {
+            return;
+        };
         if crate::control::resume_agent(ctx, &id, false, carry).is_ok() {
             ledger.mark_auto_resumed(&id, now_ms());
             brought += 1;

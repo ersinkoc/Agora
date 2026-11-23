@@ -99,8 +99,8 @@ pub struct ControlContext {
     running: AtomicU64,
 }
 
-/// Counts one command as running while it lives.
-struct Running<'a>(&'a AtomicU64);
+/// Counts one command as running while it lives ([`ControlContext::admit`]).
+pub(crate) struct Running<'a>(&'a AtomicU64);
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
@@ -213,6 +213,19 @@ impl ControlContext {
     /// ADR-0104 O2: how many commands are being run now (one that began before the node's stop flag was set runs to its end).
     pub fn commands_running(&self) -> u64 {
         self.running.load(Ordering::Acquire)
+    }
+
+    /// ADR-0104 O2: lets one piece of work in (a command, or an agent the node resumes by itself, #1119 item 3): counted as running
+    /// while the result lives, so a stop that waits for the running commands never misses one that began; `None` once the node is
+    /// stopping (counted before the flag is read).
+    pub(crate) fn admit(&self) -> Option<Running<'_>> {
+        self.running.fetch_add(1, Ordering::AcqRel);
+        let running = Running(&self.running);
+        let stopping = self
+            .stopping
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Acquire));
+        (!stopping).then_some(running)
     }
 
     /// ADR-0104 O2: the node's stop flag; once it is set every command is refused with `node.offline`.
@@ -644,17 +657,10 @@ pub(crate) fn record_always_answer(
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
-    // ADR-0104 O2: counted before the stop flag is read, so a stop that waits for the running commands never misses one that began.
-    ctx.running.fetch_add(1, Ordering::AcqRel);
-    let _running = Running(&ctx.running);
-    // A node that is stopping runs nothing more; it is going offline.
-    if ctx
-        .stopping
-        .as_ref()
-        .is_some_and(|s| s.load(Ordering::Acquire))
-    {
+    // ADR-0104 O2: a node that is stopping runs nothing more; it is going offline.
+    let Some(_running) = ctx.admit() else {
         return Err(Error::new(ErrorCode::NodeOffline).with("node_id", ctx.node_id.as_str()));
-    }
+    };
     if matches!(
         cmd,
         Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_) | Cmd::AgentResume(_)

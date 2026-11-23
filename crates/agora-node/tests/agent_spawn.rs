@@ -566,6 +566,36 @@ fn a_refusal_a_grant_and_the_limits() {
     assert!(e.node().approvals.helper_grants().is_empty());
 }
 
+/// #1119 item 3: a node that is stopping starts no helper, even one a grant covers (it would launch under the lock the stop takes to
+/// let its agents go, and nothing counts it): the agent is told `node.offline`, as a command is.
+#[test]
+fn a_node_that_is_stopping_starts_no_helper_even_under_a_grant() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("stopping");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p = e.request_of(&parent);
+    e.decide(&p, true, 3, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    e.node().begin_stop();
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(m.error_code(call), "node.offline");
+    let helpers = e
+        .node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .filter(|v| v.parent.as_ref().is_some_and(|p| p.as_str() == parent))
+        .count();
+    assert_eq!(helpers, 1, "a helper started while the node stopped");
+}
+
 #[test]
 fn the_folder_ceiling_and_a_decision_that_lets_a_helper_ask() {
     if !supported() {
