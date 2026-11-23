@@ -2748,13 +2748,18 @@ impl Drop for Node {
             self.write_held();
             sup = lock_by(&supervisor, began + LOCK_RETRY_UNTIL);
         }
-        if sup.is_none() && !self.keep_agents {
+        // In-process, the agents must end: the lock is waited for, and the stop has no deadline.
+        let waited = sup.is_none() && !self.keep_agents;
+        if waited {
             sup = Some(supervisor.lock().unwrap_or_else(|e| e.into_inner()));
         }
         // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (it never ticks once the stop is set). The
-        // readers get DRAIN_WAIT from when the lock was had, within LOCK_WAIT + DRAIN_WAIT of the stop's start.
+        // readers get DRAIN_WAIT from when the lock was had, within LOCK_WAIT + DRAIN_WAIT of the stop's start unless it was waited for.
         let drain = sup.map(|mut s| {
-            let until = (Instant::now() + DRAIN_WAIT).min(began + LOCK_WAIT + DRAIN_WAIT);
+            let mut until = Instant::now() + DRAIN_WAIT;
+            if !waited {
+                until = until.min(began + LOCK_WAIT + DRAIN_WAIT);
+            }
             let drained = s.let_go_held(until);
             (drained, s.list())
         });

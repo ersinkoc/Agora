@@ -324,9 +324,9 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   that first one reaching the node again, not a second (#1119): Ctrl-C on a foreground `agora supervise node` signals the node and its
   supervisor (one process group), and the supervisor passes its own on as `SIGTERM`. `agora down` and the systemd unit
   (`KillMode=process`) signal the supervisor only. launchd, from its documentation (`launchd.plist(5)`; not measured on macOS), stops the
-  job with `SIGTERM` to the job's process (the supervisor) and `SIGKILL` after `ExitTimeOut`, and with `AbandonProcessGroup` false ends
-  what is left of the job's process group once that process ended, which is after its node; a signal to the whole group would also be one
-  request. An adapter that really ended just before the stop, whose end the loop had not taken, is let go like the others and its end is
+  job with `SIGTERM` and `SIGKILL` after `ExitTimeOut` (the page does not say whether to the job's process, the supervisor, or to its
+  whole process group), and with `AbandonProcessGroup` false kills what is left of the job's process group once the job died, which is
+  after its node. Either way the node gets one request. An adapter that really ended just before the stop, whose end the loop had not taken, is let go like the others and its end is
   not recorded (the stop cannot act on it): the next node finds it ended in the holder, does not take it up, the holder lets it go, and
   the ledger offers it for Resume (#1119). Windows ends the node with
   `TerminateProcess` and has no clean stop.

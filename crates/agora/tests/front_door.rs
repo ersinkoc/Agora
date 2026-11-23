@@ -842,16 +842,9 @@ fn logged_usage(home: &Path, agent: &str) -> (u64, u64) {
         .fold((0, 0), |(i, o), (a, b)| (i + a, o + b))
 }
 
-/// ADR-0104 O2: `agora down` stops the node cleanly. Its structured agent, which the terminal holder runs, keeps running, and what the
-/// node still held of the turn it just finished is on disk after the stop: the answer in the conversation's file and the usage the
-/// node gathers for 5 s before it logs it (lost on every planned stop before, which ended the node like a kill). Then the same with a
-/// holder that does not answer (stopped by the test): the node still stops within its deadline and `agora down` succeeds.
-#[test]
-fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
-    if !cfg!(unix) || !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
-        return;
-    }
-    let home = tmp("o2");
+/// A home whose machine runs a node only, for the project `proj` (a Git repository), with the agent kind `k`: the fake adapter.
+fn node_home_with_an_adapter_kind(tag: &str) -> (PathBuf, PathBuf) {
+    let home = tmp(tag);
     let repo = home.join("proj");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -873,13 +866,37 @@ fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
         ),
     )
     .unwrap();
-    // However the test ends, the agent the holder keeps is stopped too (`Down` stops only the node).
-    struct DownAgents(PathBuf);
-    impl Drop for DownAgents {
-        fn drop(&mut self) {
-            let _ = agora(&self.0, &["down", "--agents"]).output();
-        }
+    (home, repo)
+}
+
+/// However a test ends, the agents the holder keeps are stopped too (`agora down` stops only the node).
+struct DownAgents(PathBuf);
+
+impl Drop for DownAgents {
+    fn drop(&mut self) {
+        let _ = agora(&self.0, &["down", "--agents"]).output();
     }
+}
+
+/// The agent id `agora agent start` printed.
+fn agent_id_in(out: &str) -> String {
+    out.split_whitespace()
+        .find(|w| w.starts_with("agent-"))
+        .expect("an agent id")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+        .to_string()
+}
+
+/// ADR-0104 O2: `agora down` stops the node cleanly. Its structured agent, which the terminal holder runs, keeps running, and what the
+/// node still held of the turn it just finished is on disk after the stop: the answer in the conversation's file and the usage the
+/// node gathers for 5 s before it logs it (lost on every planned stop before, which ended the node like a kill). Then the same with a
+/// holder that does not answer (stopped by the test): the node still stops within its deadline and `agora down` succeeds.
+#[test]
+fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
+    if !cfg!(unix) || !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (home, repo) = node_home_with_an_adapter_kind("o2");
     let _down = DownAgents(home.clone());
     let up = || {
         let (code, out, err) = run(&home, &[]);
@@ -912,12 +929,7 @@ fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
         &["agent", "start", "k", "--cwd", &repo.to_string_lossy()],
     );
     assert_eq!(code, 0, "{out}{err}");
-    let id = out
-        .split_whitespace()
-        .find(|w| w.starts_with("agent-"))
-        .expect("an agent id")
-        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
-        .to_string();
+    let id = agent_id_in(&out);
     turn(&id, "first");
     down();
     assert_eq!(
@@ -1086,5 +1098,60 @@ fn a_stop_that_reaches_the_node_twice_at_once_still_stops_it_cleanly() {
         Some(15),
         "the second signal ended the node at once: {status:?}"
     );
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// #1119 item 2: `agora down` while an agent is being started. The start holds the node's supervisor while its adapter answers
+/// `initialize` (up to 30 s; here a program that never answers). The node's stop cannot have that lock in time, and still writes what
+/// does not need it: the usage it was still gathering for another agent's turn. `agora down` succeeds within its wait. Before, the stop
+/// waited for the lock until its 5 s deadline ended the process, and the usage was lost.
+#[cfg(unix)]
+#[test]
+fn agora_down_while_an_agent_starts_still_keeps_the_usage_being_gathered() {
+    if !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (home, repo) = node_home_with_an_adapter_kind("o2-busy");
+    // `slow`: an adapter that never answers.
+    std::fs::write(
+        home.join("manifests/slow.toml"),
+        "kind = \"slow\"\ndisplay_name = \"Slow\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [\"/bin/sh\", \"-c\", \"sleep 60\"]\n",
+    )
+    .unwrap();
+    let _down = DownAgents(home.clone());
+    let (code, out, err) = run(&home, &[]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for("the node", Duration::from_secs(30), || {
+        run(&home, &["agent", "list"]).0 == 0
+    });
+    let cwd = repo.to_string_lossy().into_owned();
+    let (code, out, err) = run(&home, &["agent", "start", "k", "--cwd", &cwd]);
+    assert_eq!(code, 0, "{out}{err}");
+    let id = agent_id_in(&out);
+    let (code, out, err) = run(&home, &["agent", "prompt", &id, "first"]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for("the answer on disk", Duration::from_secs(20), || {
+        written_answer(&home, &id, "first")
+    });
+    let mut starting = agora(&home, &["agent", "start", "slow", "--cwd", &cwd])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The start is waiting for the adapter's answer, under the supervisor's lock.
+    std::thread::sleep(Duration::from_millis(1500));
+    let stopping = Instant::now();
+    let (code, out, err) = run(&home, &["down"]);
+    let took = stopping.elapsed();
+    let _ = starting.kill();
+    let _ = starting.wait();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(
+        logged_usage(&home, &id),
+        (10, 5),
+        "the usage the node was still gathering when it stopped"
+    );
+    drop(_down);
     let _ = std::fs::remove_dir_all(home);
 }
