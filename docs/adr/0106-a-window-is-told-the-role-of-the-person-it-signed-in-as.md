@@ -1,8 +1,8 @@
 # 0106. A window is told the role of the person it signed in as
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat: "Accept and build" for ADR-0106).
 
 Origin: issue #1099, the leftovers of #1098 (the terminal client's folder picker for members). PR #1107 fixes what it can without a
 protocol change. On 2026-11-23 the maintainer chose to draft this ADR for the rest ("Draft a Proposed ADR").
@@ -48,7 +48,7 @@ Nothing on the wire carries the role today:
 4. **Keep learning from refusals.** No schema change, and the refused rows stay: one per member connection after a lost link, and one
    per viewer's first folder try.
 
-## Decision (proposed)
+## Decision
 
 Option 1.
 
