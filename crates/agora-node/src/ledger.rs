@@ -1968,6 +1968,7 @@ mod carry_on_tests {
                 kind: "claude-code".into(),
                 level: 1,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             }),

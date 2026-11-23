@@ -542,6 +542,30 @@ impl View {
                 if !e.worktree_id.is_empty() {
                     self.agent_workspaces.remove(&q(&e.agent_id));
                 }
+                // ADR-0104 (#930): the node re-states a process it announced before under this id (taken up from the holder after
+                // its restart, or in a resync). What the hub summed for it stays: tokens, model, context level and its own cost. Only
+                // for that node's own agent (the key is qualified by the producer); a new start, a resume, a restart after a crash and
+                // every `AgentStarted` of an older node start again from 0. The rest starts again as for any start (the node
+                // re-states options, config, commands and always answers).
+                let (input_tokens, output_tokens, model, session) = match self
+                    .agents
+                    .get_mut(&q(&e.agent_id))
+                    .filter(|a| e.same_process && a.node_id == producer)
+                {
+                    Some(a) => (
+                        a.input_tokens,
+                        a.output_tokens,
+                        std::mem::take(&mut a.model),
+                        SessionView {
+                            context_tokens: a.session.context_tokens,
+                            context_window: a.session.context_window,
+                            cost_micros: a.session.cost_micros,
+                            currency: std::mem::take(&mut a.session.currency),
+                            ..SessionView::default()
+                        },
+                    ),
+                    None => (0, 0, String::new(), SessionView::default()),
+                };
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
@@ -555,11 +579,11 @@ impl View {
                         session_id: None,
                         running: true,
                         exit_code: None,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        model: String::new(),
+                        input_tokens,
+                        output_tokens,
+                        model,
                         forgotten: false,
-                        session: SessionView::default(),
+                        session,
                         parent_agent_id: if e.parent_agent_id.is_empty() {
                             String::new()
                         } else {
@@ -1059,6 +1083,7 @@ mod tests {
             kind: "claude-code".into(),
             level: 2,
             parent_agent_id: String::new(),
+            same_process: false,
             launch_options: Vec::new(),
             skips_permissions: false,
         })
@@ -1783,6 +1808,146 @@ mod tests {
         let a = &v.agents["n1/a"];
         assert!(!a.running);
         assert_eq!((a.exit_code, a.state), (Some(3), AgentState::Done));
+    }
+
+    /// ADR-0104 (#930): what a kept agent had used, as the hub summed it before its node restarted.
+    fn used_before(v: &mut View, producer: &str, id: &str) {
+        v.apply(&ev(producer, 1, started_again(producer, id, false)));
+        v.apply(&ev(
+            producer,
+            2,
+            Body::AgentSessionOptions(AgentSessionOptions {
+                agent_id: id.into(),
+                current_mode: "plan".into(),
+                ..AgentSessionOptions::default()
+            }),
+        ));
+        v.apply(&ev(
+            producer,
+            3,
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: id.into(),
+                model: "m".into(),
+                input_tokens: 5,
+                output_tokens: 7,
+                cost_micros: Some(10),
+                currency: "USD".into(),
+                context_tokens: 100,
+                context_window: 1000,
+            }),
+        ));
+    }
+
+    fn started_again(producer: &str, id: &str, same_process: bool) -> Body {
+        let Body::AgentStarted(mut s) = started(id) else {
+            unreachable!()
+        };
+        s.node_id = producer.into();
+        s.same_process = same_process;
+        Body::AgentStarted(s)
+    }
+
+    type Counters<'a> = (u64, u64, &'a str, u64, u64, Option<u64>, &'a str);
+
+    fn counters(a: &AgentView) -> Counters<'_> {
+        let s = &a.session;
+        (
+            a.input_tokens,
+            a.output_tokens,
+            a.model.as_str(),
+            s.context_tokens,
+            s.context_window,
+            s.cost_micros,
+            s.currency.as_str(),
+        )
+    }
+
+    const KEPT: Counters<'static> = (5, 7, "m", 100, 1000, Some(10), "USD");
+    const ZERO: Counters<'static> = (0, 0, "", 0, 0, None, "");
+
+    /// ADR-0104 decision 2 (#930): a node that takes a kept agent up after its restart says `NodeOnline`, then the agent's
+    /// `AgentStarted` with `same_process`. The hub keeps its tokens, model, context level and own cost (the cost report reads the same
+    /// numbers), and what the node re-states (options, config, commands, always answers) starts again as for any start. Usage reported
+    /// after the take-up adds to the kept totals. A view rebuilt from the log (a hub restart) has the same totals.
+    #[test]
+    fn a_kept_agent_taken_up_after_its_node_restarts_keeps_its_counters() {
+        let online = Body::NodeOnline(NodeOnline {
+            node_id: "n1".into(),
+            hostname: "n1".into(),
+            os: "linux".into(),
+            build: "b".into(),
+            binary: String::new(),
+        });
+        let log = [
+            ev("n1", 4, online),
+            ev("n1", 5, started_again("n1", "a", true)),
+            ev(
+                "n1",
+                6,
+                Body::AgentUsageReported(AgentUsageReported {
+                    agent_id: "a".into(),
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cost_micros: Some(3),
+                    currency: "USD".into(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&log[0]);
+        assert!(!v.agents["n1/a"].running);
+        v.apply(&log[1]);
+        let a = &v.agents["n1/a"];
+        assert!(a.running);
+        assert_eq!(counters(a), KEPT);
+        assert_eq!(a.session.options, None, "the node re-states its options");
+        v.apply(&log[2]);
+        assert_eq!(
+            counters(&v.agents["n1/a"]),
+            (6, 9, "m", 100, 1000, Some(13), "USD")
+        );
+        let mut rebuilt = View::default();
+        used_before(&mut rebuilt, "n1", "a");
+        for e in &log {
+            rebuilt.apply(e);
+        }
+        assert_eq!(rebuilt.agents["n1/a"], v.agents["n1/a"]);
+    }
+
+    /// ADR-0104 decision 2: a resync re-states every running agent with `same_process`, and a hub that only missed events keeps their
+    /// counters (no `NodeOnline` before it).
+    #[test]
+    fn a_resync_restatement_keeps_the_counters_of_an_agent_that_never_stopped() {
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n1", 9, started_again("n1", "a", true)));
+        assert!(v.agents["n1/a"].running);
+        assert_eq!(counters(&v.agents["n1/a"]), KEPT);
+    }
+
+    /// ADR-0104 decision 2: a new start, a resume or a restart after a crash of a reused id is a new process and starts again from 0,
+    /// and so does every `AgentStarted` of a node that predates the field (absent reads as false). One that says `same_process`
+    /// keeps only what the hub holds for that node's own agent: nothing for an id it never listed.
+    #[test]
+    fn a_new_process_under_a_reused_id_starts_its_counters_again() {
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n1", 4, started_again("n1", "a", false)));
+        assert_eq!(counters(&v.agents["n1/a"]), ZERO);
+
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started_again("n1", "b", true)));
+        assert_eq!(counters(&v.agents["n1/b"]), ZERO);
+        assert!(v.agents["n1/b"].running);
+
+        // Another node's agent of the same local id is another agent (T19): its counters are not taken.
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n2", 1, started_again("n2", "a", true)));
+        assert_eq!(counters(&v.agents["n2/a"]), ZERO);
+        assert_eq!(counters(&v.agents["n1/a"]), KEPT);
     }
 
     fn always(agent: &str, approval: &str, action: &str) -> Body {

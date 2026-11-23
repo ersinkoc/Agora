@@ -290,8 +290,9 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   re-states them from the supervisor's copy (`Supervisor::session_events`), which also records them in the file again, so the
   window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
-  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
-  conversation is not shown (the chat history is in memory, ADR-0089; #931).
+  (`skips_permissions_now`) until the agent reports new ones. Its `AgentStarted` says `same_process` (ADR-0104 decision 2), so the hub and the
+  window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering when it stopped (up to 5 s) is lost.
+  Not built: its earlier conversation is not shown (the chat history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
   reports above; `pending_approvals` is its requests), which keeps an `approval/request` unless a later

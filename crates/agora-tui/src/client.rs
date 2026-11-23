@@ -2747,3 +2747,61 @@ mod history_tests {
         assert_eq!(h.take(3), b"ok");
     }
 }
+
+#[cfg(test)]
+mod same_process_tests {
+    use super::*;
+    use agora_protocol::v1::{
+        event::Body, AgentSessionConfig, AgentStarted, Event, PositionedEvent,
+    };
+
+    fn at(pos: u64, body: Body) -> Frame {
+        Frame {
+            stream_id: STREAM_EVENTS,
+            kind: kinds::POSITIONED_EVENT,
+            seq: None,
+            payload: PositionedEvent {
+                pos,
+                event: Some(Event {
+                    producer_id: "mac".into(),
+                    body: Some(body),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec(),
+        }
+    }
+
+    /// ADR-0104 (#930): the terminal client sums no usage of its own; it draws the hub's snapshot, which keeps a kept agent's counters.
+    /// So the `AgentStarted` (`same_process`) of an agent its restarted node took up asks for a fresh snapshot, and leaves the options
+    /// it holds for that agent as they are (the node re-states them right after, and each report replaces the last).
+    #[test]
+    fn a_taken_up_agent_asks_for_the_hubs_snapshot_and_keeps_its_held_options() {
+        let mut seen = Seen {
+            snapshot_pos: Some(7),
+            ..Seen::default()
+        };
+        let option = agora_protocol::v1::SessionConfigOption {
+            id: "effort".into(),
+            current: "high".into(),
+            ..Default::default()
+        };
+        seen.note(&at(
+            7,
+            Body::AgentSessionConfig(AgentSessionConfig {
+                agent_id: "agent-1".into(),
+                options: vec![option.clone()],
+            }),
+        ));
+        seen.configs_changed = false;
+        let taken_up = Body::AgentStarted(AgentStarted {
+            agent_id: "agent-1".into(),
+            node_id: "mac".into(),
+            same_process: true,
+            ..Default::default()
+        });
+        assert!(seen.note(&at(8, taken_up)), "a fresh snapshot is wanted");
+        assert_eq!(seen.configs.options.get("mac/agent-1"), Some(&vec![option]));
+        assert!(!seen.configs_changed);
+    }
+}

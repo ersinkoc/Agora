@@ -1010,3 +1010,126 @@ fn a_crashed_held_adapter_is_back_after_one_restart_and_a_crash_loop_gives_up_wi
         "{seen:#?}"
     );
 }
+
+/// The usage a node logged for `id`: (input, output) summed over its `AgentUsageReported` events.
+fn logged_usage(node: &Node, id: &str) -> (u64, u64) {
+    node.events
+        .events_after(0)
+        .iter()
+        .filter_map(|e| match &e.body {
+            Some(v1::event::Body::AgentUsageReported(u)) if u.agent_id == id => {
+                Some((u.input_tokens, u.output_tokens))
+            }
+            _ => None,
+        })
+        .fold((0, 0), |(i, o), (a, b)| (i + a, o + b))
+}
+
+/// ADR-0104 decision 2 (#930): a kept agent reports usage, its node restarts and takes it up (the same process), and the hub's view
+/// folded from the node's log still has the tokens and the model it reported before, then adds what it uses after. The window and
+/// the terminal client start from that view's snapshot, so the terminal client's header still counts them. Before, the take-up's
+/// `AgentStarted` started them again from 0.
+#[test]
+fn a_kept_agents_usage_counters_survive_its_node_restarting() {
+    let _serial = serial();
+    let rig = Rig::new("usage");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    prompt(&node, &id, "hello");
+    wait_for("the answer", || said(&node, &id, "hello"));
+    // The node gathers usage for a few seconds before it logs it (`usage_merge`); a report still gathering when a node stops is lost
+    // (ADR-0104 "Still lost"), so this waits until it is logged.
+    wait_for("the usage in the node's log", || {
+        logged_usage(&node, &id) == (10, 5)
+    });
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid);
+    let events = node.events.events_after(0);
+    // The order the hub folds: the usage, the second start's `NodeOnline`, then the take-up's `AgentStarted` saying the same process.
+    let position = |f: &dyn Fn(&v1::event::Body) -> bool| {
+        events
+            .iter()
+            .rposition(|e| e.body.as_ref().is_some_and(f))
+            .expect("the event")
+    };
+    let usage =
+        position(&|b| matches!(b, v1::event::Body::AgentUsageReported(u) if u.agent_id == id));
+    let online = position(&|b| matches!(b, v1::event::Body::NodeOnline(_)));
+    let taken_up = position(&|b| matches!(b, v1::event::Body::AgentStarted(s) if s.agent_id == id));
+    assert!(
+        usage < online && online < taken_up,
+        "{usage} {online} {taken_up}"
+    );
+    let Some(v1::event::Body::AgentStarted(s)) = &events[taken_up].body else {
+        unreachable!()
+    };
+    assert!(s.same_process, "the take-up says it is the same process");
+    let first = events
+        .iter()
+        .find_map(|e| match &e.body {
+            Some(v1::event::Body::AgentStarted(s)) if s.agent_id == id => Some(s.same_process),
+            _ => None,
+        })
+        .expect("the first start");
+    assert!(!first, "the first start is a new process");
+
+    let key = agora_hub::projection::qualified("hold-node", &id);
+    let fold = |events: &[v1::Event]| {
+        let mut view = agora_hub::projection::View::default();
+        for ev in events {
+            view.apply(ev);
+        }
+        view
+    };
+    let view = fold(&events);
+    let agent = &view.agents[&key];
+    assert!(agent.running, "the hub shows the kept agent finished");
+    assert_eq!(
+        (
+            agent.input_tokens,
+            agent.output_tokens,
+            agent.model.as_str()
+        ),
+        (10, 5, "fake/model"),
+        "the counters started again after the node's restart"
+    );
+    // The terminal client draws the hub's snapshot: its header still counts what the agent used before the restart.
+    let snapshot = agora_hub::server::snapshot_of(&view, 0);
+    let catalog = agora_i18n::Catalog::english();
+    let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
+        catalog.render(id, args).unwrap_or_else(|| id.to_string())
+    };
+    let shown = agora_tui::render::render(&snapshot, false, false, "", "", 0, 0, &text);
+    let header_tokens = |s: &v1::Snapshot| {
+        s.agents
+            .iter()
+            .find(|a| a.agent_id == key)
+            .map(|a| (a.input_tokens, a.output_tokens))
+    };
+    assert_eq!(header_tokens(&snapshot), Some((10, 5)));
+    let usage_line = catalog
+        .render(
+            "tui-usage",
+            &[
+                ("input", agora_i18n::Arg::Num(10)),
+                ("output", agora_i18n::Arg::Num(5)),
+            ],
+        )
+        .expect("the usage line");
+    assert!(shown.iter().any(|l| l.contains(&usage_line)), "{shown:#?}");
+
+    // What it uses after the take-up adds to what it used before.
+    prompt(&node, &id, "hello again");
+    wait_for("the answer", || said(&node, &id, "hello again"));
+    wait_for("the new usage in the node's log", || {
+        logged_usage(&node, &id) == (20, 16)
+    });
+    let view = fold(&node.events.events_after(0));
+    let agent = &view.agents[&key];
+    assert_eq!((agent.input_tokens, agent.output_tokens), (20, 16));
+}

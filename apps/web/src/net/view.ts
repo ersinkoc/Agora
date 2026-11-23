@@ -299,11 +299,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       // A new run of an id: whether it has a terminal is told again by the `terminalOpened` that follows (or not at all).
       v.withTerminal.delete(q(b.agentId));
       v.forgottenAgents?.delete(q(b.agentId));
+      // ADR-0104 (#930): the node re-states a process it announced before under this id (taken up from the holder after its restart,
+      // or in a resync). Its tokens, context level, own cost and start time stay, for that machine's own agent only; a new start, a
+      // resume, a restart after a crash and an older node's start begin again from 0. The rest starts again as for any start (the
+      // node re-states modes, settings, commands and always answers).
+      const was = b.sameProcess ? v.agents.get(q(b.agentId)) : undefined;
+      const kept = was && was.nodeId === producer ? was : undefined;
+      const s = kept?.session;
+      const session = s && (s.contextTokens || s.contextWindow || s.currency)
+        ? { ...emptySession(), contextTokens: s.contextTokens, contextWindow: s.contextWindow, ...(s.currency ? { costMicros: s.costMicros, currency: s.currency } : {}) }
+        : undefined;
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
-        reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
+        reported: false, running: true, sinceMs: at, tokens: kept ? kept.tokens : 0, startedMs: kept ? kept.startedMs : at,
         parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
         skipsPermissions: !!b.skipsPermissions,
+        ...(session ? { session } : {}),
       });
       break;
     }
