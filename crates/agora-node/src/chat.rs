@@ -1174,14 +1174,15 @@ impl ChatBoard {
             // A fresh start splits what is taken by id: up to the earlier session's highest id goes to its file before it is moved
             // aside, the rest to the new one (review of #1103, probe 5).
             // Each part: which ids it takes, and the fresh start's mark it carries.
-            let parts: Vec<(Box<dyn Fn(u64) -> bool>, Option<u64>, u64)> = match fresh {
-                None => vec![(Box::new(|_| true), None, t.next_id)],
+            let parts: Vec<(std::ops::RangeInclusive<u64>, Option<u64>, u64)> = match fresh {
+                None => vec![(0..=u64::MAX, None, t.next_id)],
                 Some(h) => vec![
-                    (Box::new(move |id| id <= h), None, h.min(t.next_id)),
-                    (Box::new(move |id| id > h), Some(h), t.next_id),
+                    (0..=h, None, h.min(t.next_id)),
+                    (h.saturating_add(1)..=u64::MAX, Some(h), t.next_id),
                 ],
             };
-            for (mine, mark, high) in parts {
+            for (ids, mark, high) in parts {
+                let mine = |id: u64| ids.contains(&id);
                 let mut lines: Vec<Line> = Vec::new();
                 // The sequence the runs are found in: only when the node holds a value to look for.
                 let mut items: Vec<RunItem> = Vec::new();
