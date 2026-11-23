@@ -186,7 +186,7 @@ try {
   await page.goto(`${origin}/#/`);
   const allow = page.locator('.phone').getByRole('button', { name: 'Allow', exact: true });
   await allow.first().click();
-  await page.waitForFunction(() => !document.querySelector('.phone-card--needs .button--primary'), null, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(() => !document.querySelector('.phone .kit-btn--primary'), null, { timeout: 10000 }).catch(() => {});
   check((await allow.count()) === 0, 'one tap on Allow answers the request and it leaves the list');
   check((await page.locator('[role=alert]').count()) === 0, 'no error is shown');
 

@@ -93,8 +93,8 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Failed | danger red (ADR-0102) | cross in a ring | none |
 
 An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
-status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2); the screens that still draw it in neutral ink (the
-agent list, the phone list) switch over as they adopt the kit.
+status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2) and the phone's lists (PR 13); the screens that still
+draw it in neutral ink (the agent list) switch over as they adopt the kit.
 
 ### Agent identity
 - Each agent kind shows its brand mark (provider logos used per their trademark guidelines; models.dev provides
