@@ -13,10 +13,11 @@ const TICK_MS = 30_000;
 interface QuotaValue { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; now: number }
 const Ctx = createContext<QuotaValue>({ obs: [], machines: new Map(), now: 0 });
 
-export function QuotaProvider({ obs, machines, children }: { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; children: ReactNode }) {
-  const [now, setNow] = useState(() => Date.now());
+// `fixedNow`: a clock that never moves, for the gallery, so a capture of it says the same times every run.
+export function QuotaProvider({ obs, machines, children, fixedNow }: { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; children: ReactNode; fixedNow?: number }) {
+  const [now, setNow] = useState(() => fixedNow ?? Date.now());
   useEffect(() => {
-    if (obs.length === 0) return;
+    if (obs.length === 0 || fixedNow !== undefined) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
     return () => clearInterval(id);

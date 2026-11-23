@@ -11,7 +11,7 @@ import { QuotaProvider } from './Quota';
 import { UsagePanel } from './UsagePanel';
 
 // Redesign PR 12 in the gallery: a chat agent idle, needing you and acting freely; the board view's columns; the Usage panel with a plan
-// limit at 82 %. Fixed times and no clock, so a capture is the same every time (the visual comparison and docs/ux/screens/polish-redesign-*).
+// limit at 82 %. Fixed times and a fixed clock, so a capture is the same every time (the visual comparison and docs/ux/screens/polish-redesign-*).
 const AT = new Date(2026, 10, 22, 21, 33).getTime();
 const choice = (id: string, name: string, skips = false) => ({ id, name, description: '', skipsPermissions: skips });
 const session = (mode: string): SessionModel => ({
@@ -49,11 +49,10 @@ const usageFleet: AgentTileModel[] = [
   chatAgent({ id: 'laptop/a2', name: 'codex · teal', kind: 'codex', accent: 'var(--agent-teal)', tokens: 21_000, startedMs: AT - 34 * 60_000, session: { ...session('default'), contextTokens: 172_000, contextWindow: 200_000 } }),
   chatAgent({ id: 'build/a3', name: 'claude · violet', accent: 'var(--agent-violet)', machine: 'build', machineId: 'build', project: 'api', projectId: 'api', tokens: 9_100, startedMs: AT - 20 * 60_000, closed: true, endedMs: AT - 5 * 60_000 }),
 ];
-// Read once when the gallery module loads; the provider's clock is read at the same moment, so the times it says stay put.
-const quotaAt = Date.now();
+// The plan limits read the same fixed clock (`fixedNow`), so "Resets in…" and "Observed…" never move.
 const quota: QuotaObs[] = [
-  { machineId: 'laptop', tool: 'codex', window: 'five_hour', usedPercent: 82, resetsAtMs: quotaAt + 95 * 60_000, observedAtMs: quotaAt },
-  { machineId: 'laptop', tool: 'codex', window: 'seven_day', usedPercent: 41, resetsAtMs: quotaAt + 3 * 86_400_000, observedAtMs: quotaAt },
+  { machineId: 'laptop', tool: 'codex', window: 'five_hour', usedPercent: 82, resetsAtMs: AT + 95 * 60_000, observedAtMs: AT - 4 * 60_000 },
+  { machineId: 'laptop', tool: 'codex', window: 'seven_day', usedPercent: 41, resetsAtMs: AT + 3 * 86_400_000, observedAtMs: AT - 4 * 60_000 },
 ];
 
 export function PolishGallery() {
@@ -68,7 +67,7 @@ export function PolishGallery() {
         <GiveContext.Provider value={give}><BoardColumns board={board} /></GiveContext.Provider>
       </div>
       <div data-polish-usage className="max-w-sm rounded-l border border-line bg-surface-1 p-4">
-        <QuotaProvider obs={quota} machines={new Map([['laptop', 'laptop'], ['build', 'build']])}><UsagePanel fleet={usageFleet} now={AT} /></QuotaProvider>
+        <QuotaProvider obs={quota} machines={new Map([['laptop', 'laptop'], ['build', 'build']])} fixedNow={AT}><UsagePanel fleet={usageFleet} now={AT} /></QuotaProvider>
       </div>
     </div>
   );
