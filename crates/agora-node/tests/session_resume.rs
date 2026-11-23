@@ -112,29 +112,31 @@ impl Drop for Watchdog {
 }
 
 /// Ends the fake agents this test process started (`only`: just these pids), without asking any node: a node whose thread is stuck may
-/// hold the lock that knows them. A process is ended only while it is still the one that was found (a pid can be given again); one
-/// that cannot be identified is left alone and said so (on Windows its node's job ends it with the node). Says which pids it ended.
+/// hold the lock that knows them. Each process is identified first; only an identity that names a fake agent and is still this
+/// process's child is ended, and only while it is still that process (a pid can be given again). One that cannot be identified is
+/// left alone and said so (on Windows its node's job ends it with the node). Says which pids it ended.
 fn end_scratch_agents(only: Option<&[u32]>) -> Vec<u32> {
     let mut ended = Vec::new();
+    let is_child = |pid: u32| {
+        agora_platform::process_children(std::process::id()).is_ok_and(|c| c.contains(&pid))
+    };
     for pid in agora_platform::process_children(std::process::id()).unwrap_or_default() {
-        if only.is_some_and(|o| !o.contains(&pid))
-            || !agora_platform::process_name(pid).is_ok_and(|n| n.contains("agora-fake"))
-        {
+        if only.is_some_and(|o| !o.contains(&pid)) {
             continue;
         }
-        match end_if_identified(
+        match end_if_ours(
             pid,
             agora_platform::process_identity,
+            is_child,
             agora_platform::kill_process_if_same,
         ) {
             Ending::Ended => ended.push(pid),
-            Ending::Gone => {}
+            Ending::NotOurs | Ending::Gone => {}
             // Straight to the standard error: this may run on the watchdog's thread just before the process exits.
             Ending::Skipped(why) => {
                 let _ = std::io::Write::write_all(
                     &mut std::io::stderr(),
-                    format!("left fake agent {pid} alone: it cannot be identified ({why})\n")
-                        .as_bytes(),
+                    format!("left child {pid} alone: it cannot be identified ({why})\n").as_bytes(),
                 );
             }
         }
@@ -142,63 +144,87 @@ fn end_scratch_agents(only: Option<&[u32]>) -> Vec<u32> {
     ended
 }
 
-/// What [`end_if_identified`] did with one pid.
+/// What [`end_if_ours`] did with one pid.
 #[derive(Debug, PartialEq, Eq)]
 enum Ending {
     Ended,
+    /// The identity read names no fake agent, or that pid is no longer this process's child: nothing was signalled.
+    NotOurs,
     /// It was no longer the process that was identified (or had ended): nothing was signalled.
     Gone,
     /// It could not be identified, so nothing was signalled.
     Skipped(String),
 }
 
-/// Ends `pid` only through its identity (`identify`, then `kill_if_same`, which signals only the same process); a pid that cannot be
-/// identified is never signalled by its bare number, which may by now name another process (Codex review of #1030).
-fn end_if_identified(
+/// Ends `pid` only through the identity read first (`identify`): that identity must name a fake agent, the pid must still be this
+/// process's child after it was read (`is_child`), and `kill_if_same` signals only the process that identity names. A pid that cannot
+/// be identified is never signalled by its bare number, which may by now name another process (Codex review of #1030).
+fn end_if_ours(
     pid: u32,
     identify: impl Fn(u32) -> std::io::Result<agora_platform::ProcessIdentity>,
+    is_child: impl Fn(u32) -> bool,
     kill_if_same: impl Fn(&agora_platform::ProcessIdentity) -> std::io::Result<bool>,
 ) -> Ending {
-    match identify(pid) {
-        Ok(id) => match kill_if_same(&id) {
-            Ok(true) => Ending::Ended,
-            Ok(false) => Ending::Gone,
-            Err(e) => Ending::Skipped(e.to_string()),
-        },
+    let id = match identify(pid) {
+        Ok(id) => id,
+        Err(e) => return Ending::Skipped(e.to_string()),
+    };
+    if !id.name.contains("agora-fake") || !is_child(id.pid) {
+        return Ending::NotOurs;
+    }
+    match kill_if_same(&id) {
+        Ok(true) => Ending::Ended,
+        Ok(false) => Ending::Gone,
         Err(e) => Ending::Skipped(e.to_string()),
     }
 }
 
 #[test]
-fn the_watchdog_never_signals_a_pid_it_cannot_identify() {
+fn the_watchdog_never_signals_a_pid_it_cannot_identify_or_that_is_not_its_fake_agent() {
     let signalled = std::cell::Cell::new(false);
     let kill = |_: &agora_platform::ProcessIdentity| {
         signalled.set(true);
         Ok(true)
     };
+    let child = |_: u32| true;
     // Unsupported (Windows) or a passing error (Unix): nothing is signalled, and the reason is kept to be said.
     for err in [
         std::io::ErrorKind::Unsupported,
         std::io::ErrorKind::NotFound,
         std::io::ErrorKind::PermissionDenied,
     ] {
-        let ending = end_if_identified(4242, |_| Err(std::io::Error::from(err)), kill);
+        let ending = end_if_ours(4242, |_| Err(std::io::Error::from(err)), child, kill);
         assert!(matches!(ending, Ending::Skipped(_)), "{err:?}: {ending:?}");
         assert!(
             !signalled.get(),
             "{err:?}: a pid that could not be identified was signalled"
         );
     }
-    // An identified one goes through the identity-checked kill only.
-    let id = agora_platform::ProcessIdentity {
+    let fake = agora_platform::ProcessIdentity {
         pid: 4242,
         group: 4242,
         started: 1,
         boot: String::new(),
-        name: "agora-fake-agent".into(),
+        name: "agora-fake-agen".into(),
+    };
+    // The identity read names another program (the pid was given to a replacement before it was read): not signalled.
+    let other = agora_platform::ProcessIdentity {
+        name: "sshd".into(),
+        ..fake.clone()
     };
     assert_eq!(
-        end_if_identified(4242, |_| Ok(id.clone()), kill),
+        end_if_ours(4242, |_| Ok(other.clone()), child, kill),
+        Ending::NotOurs
+    );
+    // A fake agent that is no longer this process's child once identified: not signalled.
+    assert_eq!(
+        end_if_ours(4242, |_| Ok(fake.clone()), |_| false, kill),
+        Ending::NotOurs
+    );
+    assert!(!signalled.get());
+    // A child fake agent goes through the identity-checked kill only.
+    assert_eq!(
+        end_if_ours(4242, |_| Ok(fake.clone()), child, kill),
         Ending::Ended
     );
     assert!(signalled.get());
