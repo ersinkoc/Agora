@@ -544,6 +544,7 @@ grant-title-stop = { $agent } ajanını 1 saat boyunca durdurmaya izin verilsin 
 grant-title-interrupt = { $agent } ajanının sürmekte olan turunu 1 saat boyunca kesmeye izin verilsin mi?
 grant-title-settings = { $agent } ajanının modunu, modelini veya ayarlarını 1 saat boyunca değiştirmeye izin verilsin mi?
 grant-title-resize = { $agent } ajanının terminal boyutunu 1 saat boyunca değiştirmeye izin verilsin mi?
+grant-title-watch = { $agent } ajanını 1 saat boyunca izlemeye izin verilsin mi?
 grant-title-start = Bu projede 1 saat boyunca ajan başlatmaya izin verilsin mi?
 grant-title-task = { $agent } ajanına 1 saat boyunca görev vermeye izin verilsin mi?
 grant-title-other = Bu pencerenin 1 saat boyunca { $machine } üzerinde işlem yapmasına izin verilsin mi?
