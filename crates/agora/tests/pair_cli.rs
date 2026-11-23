@@ -870,6 +870,139 @@ fn an_answer_from_a_window_ends_the_question_at_the_terminal() {
     );
 }
 
+/// The owner's screen asking about machine "rm-a" while machine "rm-b" waits its turn; the window holds both cards.
+struct TwoWaiting {
+    _hub: Hub,
+    screen: Screen,
+    _a: Live,
+    b: Live,
+    b_home: PathBuf,
+    window: agora_tui::client::Session,
+    card_a: agora_protocol::v1::PairRequested,
+}
+
+fn two_waiting(root: &Path) -> TwoWaiting {
+    let hub = hub(root);
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut screen = hub.open(&owner_home);
+    let mut w = window(&hub);
+    let addr = format!("localhost:{}", hub.port);
+    let mut a = join(&root.join("a"), &addr, &["--id", "rm-a"]);
+    a.wait_for("Number ");
+    screen.wait_for("\"rm-a\"");
+    screen.wait_for("[y/N]");
+    let b_home = root.join("b");
+    let mut b = join(&b_home, &addr, &["--id", "rm-b"]);
+    b.wait_for("Number ");
+    let card_a = window_card(&mut w, "rm-a");
+    window_card(&mut w, "rm-b");
+    TwoWaiting {
+        _hub: hub,
+        screen,
+        _a: a,
+        b,
+        b_home,
+        window: w,
+        card_a,
+    }
+}
+
+fn deny_in_window(w: &mut agora_tui::client::Session, card: &agora_protocol::v1::PairRequested) {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    w.command_info(
+        "",
+        Cmd::PairDeny(v1::PairDeny {
+            pair_id: card.pair_id.clone(),
+        }),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+/// #942 review: when the question moves to another machine without a keystroke (the one asked about was answered in a window), a
+/// `y` meant for the first one never approves the next. The next card is set apart by a line and shows its own name and number; keys
+/// typed just before the move and within two seconds after it are thrown away (the wait starts again, and nothing is denied).
+#[test]
+fn a_key_meant_for_a_request_answered_in_a_window_never_approves_the_next_machine() {
+    let root = tmp("moved");
+    let TwoWaiting {
+        _hub,
+        mut screen,
+        _a,
+        mut b,
+        b_home,
+        window: mut w,
+        card_a,
+    } = two_waiting(&root);
+    // The owner had read "rm-a" and is typing yes when the window denies it: the key lands on "rm-a" or on the next question.
+    std::thread::sleep(Duration::from_millis(1500));
+    deny_in_window(&mut w, &card_a);
+    screen.pty.write_input(b"y\r").unwrap();
+    // The next question is set apart and names the next machine with its number.
+    screen.wait_for("A different machine is asking now");
+    let card = screen.wait_for("[y/N]");
+    assert!(
+        card.contains("\"rm-b\"") && card.contains(". Number "),
+        "{card}"
+    );
+    // A yes typed soon after it appeared (later than the 700 ms an ordinary question asks for, sooner than two seconds) is thrown
+    // away, again and again.
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(1200));
+        screen.pty.write_input(b"y\r").unwrap();
+        screen.wait_for("[y/N]");
+    }
+    assert!(
+        screen
+            .seen
+            .contains("That key came before you could read the new request"),
+        "{}",
+        screen.seen
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        b.child.0.try_wait().unwrap().is_none(),
+        "the next machine was answered by a key meant for the one before: {:#?}",
+        b.seen
+    );
+    assert!(!screen.seen.contains("Approved."), "{}", screen.seen);
+    nothing_stored(&b_home);
+}
+
+/// #942 review: after the longer wait, a yes typed for the next machine approves it, and the hub closes as after any approval.
+#[test]
+fn after_the_wait_a_yes_approves_the_machine_the_question_moved_to() {
+    let root = tmp("movedyes");
+    let TwoWaiting {
+        _hub,
+        mut screen,
+        _a,
+        b,
+        window: mut w,
+        card_a,
+        ..
+    } = two_waiting(&root);
+    deny_in_window(&mut w, &card_a);
+    screen.wait_for("Answered in a window: \"rm-a\" was denied");
+    screen.wait_for("A different machine is asking now");
+    let card = screen.wait_for("[y/N]");
+    assert!(card.contains("\"rm-b\""), "{card}");
+    std::thread::sleep(Duration::from_millis(2500));
+    screen.pty.write_input(b"y\r").unwrap();
+    let (ok, joined) = b.finish();
+    assert!(
+        ok && joined.contains("Joined. This machine is \"rm-b\""),
+        "{joined}"
+    );
+    let (ok, text) = screen.finish();
+    assert!(
+        ok && text.contains("Approved. \"rm-b\" is joining"),
+        "{text}"
+    );
+    assert!(text.contains("closed to new machines again"), "{text}");
+}
+
 /// Audit F890: `agora join` looks at "already joined" before it waits for the owner, and again before it stores: a link this machine
 /// got meanwhile (`agora` enrolling with its own hub, `agora node enroll`, another join) is kept unless `--replace` was given. Each
 /// join has a hub of its own (a hub limits pairing attempts per address per minute); the link is planted only after the number is

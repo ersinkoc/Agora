@@ -35,6 +35,11 @@ const MIN_THINK: Duration = Duration::from_millis(700);
 /// How many answers that came too fast are ignored (and asked again) before the request is denied.
 const TOO_FAST_TRIES: u32 = 3;
 
+/// The wait before an answer counts when the question moved to another machine by itself (#942): the request asked about before
+/// ended somewhere else while the owner may have been typing an answer to it, so a key meant for that one must not answer this one.
+/// A key sooner than this is thrown away and the wait starts again, as often as it happens (never a deny).
+const NEXT_THINK: Duration = Duration::from_secs(2);
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -507,6 +512,9 @@ struct Board<'a> {
     waiting: std::collections::VecDeque<v1::PairRequested>,
     ended: std::collections::HashMap<Vec<u8>, i32>,
     gone: bool,
+    /// The last question ended without an answer typed here (the request was decided somewhere else, ran out or closed), so the
+    /// next one comes without a keystroke: it is set apart and answered only after [`NEXT_THINK`]. Cleared by an answer typed here.
+    moved_on: bool,
 }
 
 impl Board<'_> {
@@ -540,9 +548,15 @@ impl Board<'_> {
     /// Asks `question` about the request `pair_id` at the terminal (the discipline of [`ask`]: the terminal only, typed-ahead input
     /// discarded, a first key that comes too fast is ignored three times, then no) while the hub is still listened to, so the
     /// question ends as soon as that request ended somewhere else: answered in a window, run out, or closed (#942).
-    fn ask(&mut self, say: &Say, question: &str, pair_id: &[u8]) -> CardAnswer {
+    ///
+    /// `moved_on`: the question came without a keystroke, after another one ended elsewhere. Then the first key must come at least
+    /// [`NEXT_THINK`] after the question (instead of [`MIN_THINK`]); one that comes sooner is thrown away with everything typed
+    /// before it, and the question and its wait start again, however often (a key meant for the last request never denies this one).
+    fn ask(&mut self, say: &Say, question: &str, pair_id: &[u8], moved_on: bool) -> CardAnswer {
         let yes = say.text(key!("cli-devices-yes"), &[]);
-        for _ in 0..TOO_FAST_TRIES {
+        let think = if moved_on { NEXT_THINK } else { MIN_THINK };
+        let (mut tries, mut told) = (0, false);
+        while tries < TOO_FAST_TRIES {
             let mut out = std::io::stdout();
             let _ = write!(out, "{question} ");
             let _ = out.flush();
@@ -556,7 +570,7 @@ impl Board<'_> {
                     }
                     self.ended.contains_key(pair_id)
                 };
-                agora_platform::read_confirmation_until(MIN_THINK, &mut stop)
+                agora_platform::read_confirmation_until(think, &mut stop)
             };
             let _ = writeln!(out);
             if self.gone {
@@ -570,7 +584,15 @@ impl Board<'_> {
                         Answer::No
                     })
                 }
-                Ok(Confirmation::TooSoon) => say.out(key!("pair-too-fast"), &[]),
+                Ok(Confirmation::TooSoon) if moved_on => {
+                    if !std::mem::replace(&mut told, true) {
+                        say.out(key!("pair-next-too-fast"), &[]);
+                    }
+                }
+                Ok(Confirmation::TooSoon) => {
+                    tries += 1;
+                    say.out(key!("pair-too-fast"), &[]);
+                }
                 Ok(Confirmation::Stopped) => {
                     return self
                         .ended
@@ -592,6 +614,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
         waiting: Default::default(),
         ended: Default::default(),
         gone: false,
+        moved_on: false,
     };
     let mut last_status = Instant::now();
     loop {
@@ -620,6 +643,11 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                 continue;
             }
             let number = grouped(&card.number);
+            // A question that comes by itself, after the last one ended elsewhere, is set apart so it is not taken for that one.
+            let moved_on = board.moved_on;
+            if moved_on {
+                say.out(key!("pair-card-next"), &[]);
+            }
             say.out(
                 key!("pair-card"),
                 &[
@@ -630,7 +658,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                 ],
             );
             let question = say.text(key!("pair-card-ask"), &[]);
-            let answer = board.ask(say, &question, &card.pair_id);
+            let answer = board.ask(say, &question, &card.pair_id, moved_on);
             let approval = match answer {
                 CardAnswer::HubGone => return fail_hub(say, "client.unreachable"),
                 CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
@@ -648,10 +676,14 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                     ) {
                         Ok(_) => {
                             say.out(key!("pair-denied-now"), &[]);
+                            board.moved_on = false;
                             continue;
                         }
                         Err(e) => match refused(say, &mut board, &card.pair_id, &e) {
-                            Approval::Refused => continue,
+                            Approval::Refused => {
+                                board.moved_on = false;
+                                continue;
+                            }
                             other => other,
                         },
                     }
@@ -667,6 +699,8 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                     return closed_after_approval(say, board.session);
                 }
                 Approval::Elsewhere(outcome) => {
+                    // The next question comes without a keystroke.
+                    board.moved_on = true;
                     let name = [("name", card.name.as_str().into())];
                     match v1::PairOutcome::try_from(outcome) {
                         Ok(v1::PairOutcome::Approved) => {
@@ -679,7 +713,7 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                         _ => say.out(key!("pair-card-ended"), &name),
                     }
                 }
-                Approval::Refused => {}
+                Approval::Refused => board.moved_on = false,
                 Approval::Stop => return ExitCode::SUCCESS,
                 Approval::HubGone => return fail_hub(say, "client.unreachable"),
             }
@@ -715,7 +749,8 @@ fn approve(say: &Say, board: &mut Board<'_>, card: &v1::PairRequested) -> Approv
                 key!("pair-replace-ask"),
                 &[("name", card.name.as_str().into())],
             );
-            match board.ask(say, &question, &card.pair_id) {
+            // Asked because of a key typed here, so the ordinary rules.
+            match board.ask(say, &question, &card.pair_id, false) {
                 CardAnswer::HubGone => Approval::HubGone,
                 CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
                 CardAnswer::Said(Answer::Gone) => {

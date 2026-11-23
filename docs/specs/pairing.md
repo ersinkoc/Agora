@@ -340,7 +340,14 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   terminal-only discipline, read straight from the terminal and checked every 50 ms), and when the request it asks about ends anywhere else the
   question ends, nothing typed counts, and it says how: approved in a window (then it says the hub is closed again and exits, as after its own
   approval), denied in a window, or ended (ran out, the machine stopped, the hub closed), after which it waits for the next machine. The replace
-  question ends the same way. Ctrl+C leaves the switch open for the rest of its time (run `agora pair close`).
+  question ends the same way. **A question that comes without a keystroke** (the one before ended elsewhere, so the owner may have been typing an
+  answer to it) is set apart: a separator line ("The last request ended without your answer here. A different machine is asking now...") comes
+  before its card, which names the machine and its number, and an answer counts only from **2 seconds** after the question (`NEXT_THINK`,
+  instead of 700 ms). A key sooner than that is thrown away with everything typed before it, said once ("That key came before you could read
+  the new request..."), and the question and its wait start again, as often as it happens: it never counts toward the three tries, so a burst
+  meant for the last request can neither approve nor deny this one. The ordinary first question keeps the 700 ms and three-try rules; an answer
+  typed here makes the next question ordinary again. Tested in `pair_cli.rs` (a `y` typed as the window denies the first machine and 1.2 s
+  after the next question, twice, approves nothing; a `y` after the wait approves it). Ctrl+C leaves the switch open for the rest of its time (run `agora pair close`).
   Browser cards are ignored here: they wait for a window. The owner's windows (section 14) answer without this command.
 - **How `agora pair` reaches the hub.** The switch and the cards are memory of the running hub, so these commands connect to it as the owner with the client token in
   `<hub dir>/token` (the same path as `agora tui` on the hub's machine) over the TLS the hub already serves; `agora_tui::client::Session` now keeps the
