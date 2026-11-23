@@ -165,10 +165,12 @@ Focus + strip:
 - **Layout menu** (title bar): the six presets, Maximize/Restore (the pane in focus), Save layout as…, Saved layouts…
   (use, rename, delete), Export (downloads `layout.json`), Import… (paste or choose a file; errors are shown, nothing changes),
   Reset layout.
-- **Pane bar**: a tab group shows its tabs (drag a tab, arrows/Home/End move, Delete closes); a pane on its own shows the
-  agent's state, name and machine (or the panel's name), and "Follows what needs you" / "Follows the selection" when it does.
-  Buttons: split right, split down, maximize (restore while maximized), **Pane options** (Show…, Move to…, Swap with…, Take out
-  of the tabs, Close), close. The pane in focus has an accent line; one whose agent needs you has an amber one.
+- **Pane bar**: a tab group shows its tabs (drag a tab, arrows/Home/End move, Delete closes), each agent's tab with its avatar,
+  name and state; a pane on its own shows the agent's avatar, name, state and machine (or the panel's name), and "Follows what
+  needs you" / "Follows the selection" when it does. Buttons: split right, split down, maximize (restore while maximized),
+  **Pane options** (Show…, Move to…, Swap with…, Take out of the tabs, Close), close. A narrow pane folds split and then
+  maximize into Pane options, which has them too, and below that shows the avatar alone with the name as its tooltip
+  ([main-window.md](main-window.md), "Narrow panes"). The pane in focus has an accent line; one whose agent needs you has an amber one.
 - **Dragging**: drag a tab or a pane's bar onto another pane: within a quarter of an edge it goes beside, in the middle it
   becomes a tab. The keyboard does the same through Pane options → Move to… and Swap with….
 - **Dividers** are `role=separator` with `aria-orientation`, `aria-valuenow` (the line's place in its split, in percent) and
