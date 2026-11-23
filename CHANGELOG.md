@@ -4,8 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
 - A chat log that follows its newest entry keeps following when the window or its pane is resized (or the composer grows), instead of stopping and showing "Jump to latest" as if you had scrolled away; scrolling up yourself, going to a file's change from Files changed, or opening a fold that takes the log off its bottom still leaves the bottom, and what you opened stays where you clicked it (#1060).
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
+- `agora password set` and `agora password clear` now store the password, sign out every session and remove passkeys added without the password all together or not at all, and say that they failed instead of reporting success when any part could not be done.
 - A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
 - When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
 - A handoff whose receiving agent cannot take it now goes back to the giver even when the giver's machine disconnected first.
@@ -14,6 +16,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A malformed `%` escape in a window link (`#/agent/…`, `#/machines/…`) no longer blanks the page, and a file view no longer stops responding on highlighted text with an unclosed tag.
 - `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
 - A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
+- On a machine set to allow "don't ask" only for confined agents (`skip_permissions = confined_only`), an agent that kept running through a node restart (it was never confined) can no longer be switched to a mode, option or model that acts without asking, even after confinement was turned on.
 - A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version's records (its version and its program's name) as they were, or says `rollback_incomplete` when it could not put them back.
 
 ## 0.3.35

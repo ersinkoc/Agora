@@ -287,7 +287,69 @@ where
             ask_board_join(hub, node, project);
         }
     }
+    // #996: the store refused the end: it is written as soon as the store works, even if nothing else happens on the hub.
+    if hub.has_unrecorded() {
+        record_later(hub);
+    }
     result
+}
+
+/// #996: retries the presence facts the store refused until they are written, waiting longer each time (up to 5 s), at most one
+/// task per hub. Once they are, the board's membership is worked out again, as when a connection's end is recorded at once. The
+/// task holds the hub only during an attempt (a hub dropped meanwhile ends it), and however it ends, a panic included, it lets
+/// the next close start another.
+fn record_later(hub: &Arc<Hub>) {
+    use std::sync::atomic::Ordering;
+    /// Clears `recording_later` when the task ends while it still owns it.
+    struct Owner {
+        hub: std::sync::Weak<Hub>,
+        owns: bool,
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if let (true, Some(hub)) = (self.owns, self.hub.upgrade()) {
+                hub.recording_later.store(false, Ordering::Release);
+            }
+        }
+    }
+    if hub.recording_later.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut owner = Owner {
+        hub: Arc::downgrade(hub),
+        owns: true,
+    };
+    tokio::spawn(async move {
+        let mut wait = Duration::from_millis(100);
+        loop {
+            tokio::time::sleep(wait).await;
+            let Some(hub) = owner.hub.upgrade() else {
+                return;
+            };
+            let recorded = {
+                let hub = Arc::clone(&hub);
+                tokio::task::spawn_blocking(move || hub.record_unrecorded().is_ok())
+                    .await
+                    .unwrap_or(false)
+            };
+            if recorded {
+                for (node, project) in hub.board_membership(now_ms()) {
+                    ask_board_join(&hub, node, project);
+                }
+                owner.owns = false;
+                hub.recording_later.store(false, Ordering::Release);
+                // A connection that ended between the write and the line above found this task still running and left its
+                // facts to it.
+                if !hub.has_unrecorded() || hub.recording_later.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                owner.owns = true;
+                wait = Duration::from_millis(100);
+            } else {
+                wait = (wait * 2).min(Duration::from_secs(5));
+            }
+        }
+    });
 }
 
 /// Sends one frame to a node, but never waits longer than `limit` for it: a node that stopped reading fills the socket's buffer,
@@ -2750,6 +2812,57 @@ mod event_writer_tests {
         beta.close().await;
         let _ = beta_link.await;
         assert!(reverted, "handoff must revert after giver disconnects");
+    }
+
+    /// #996: a machine whose connection ends while the store refuses writes is recorded offline once the store works again, with
+    /// no reconnect, no restart and nothing else happening on the hub. Before, the failed `NodeLink { up: false }` was dropped and
+    /// the machine that had left stayed online in every view until it came back or the hub restarted.
+    #[tokio::test]
+    async fn a_machine_that_leaves_while_the_store_refuses_writes_is_shown_offline_once_it_works() {
+        let path = std::env::temp_dir().join(format!("agora-996-{}.db", std::process::id()));
+        let remove = |path: &std::path::Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+            }
+        };
+        remove(&path);
+        let hub = Arc::new(Hub::open(SqliteStore::open(&path).unwrap()).unwrap());
+        let (mut node, link) = connect(&hub, "n").await;
+        assert!(hub.view().0.nodes["n"].online);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        node.close().await;
+        link.await.unwrap().unwrap();
+        assert!(!hub.router().is_connected("n"));
+        assert!(hub.has_unrecorded());
+        // The retry fails at least once while the store still refuses.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let offline = tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.view().0.nodes["n"].online {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        // The retry task lets go once it is done, so a later close can start another.
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while hub
+                .recording_later
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let rebuilt = crate::projection::View::rebuild(hub.store()).unwrap().0;
+        drop(hub);
+        remove(&path);
+        assert!(offline.is_ok(), "the machine that left stayed online");
+        assert!(released.is_ok(), "the retry task kept its claim");
+        assert!(!rebuilt.nodes["n"].online);
     }
 }
 
