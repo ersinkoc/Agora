@@ -1,8 +1,9 @@
 # 0105. Confined Node.js agents on Windows: keep the restricted token, fix the stdio pipe in libuv
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat, to the question summarising the recommendation: "Accept, we file upstream". The
+project keeps ADR-0050 as it is and files the minimal libuv/Node report itself; #895 stays open until a fixed Node is verified).
 
 Origin: issue #895 (`needs-adr`). The maintainer chose on 2026-11-23 to draft a Proposed ADR, written by the Windows session because
 it needs measurements on a Windows machine. Roadmap M2.3.
@@ -106,7 +107,7 @@ Notes on the table:
 - **Not reached.** The pseudo-console failure of git that ADR-0050 Amendment B recorded for AppContainer (0xC0000008) was not
   reached here, because git stopped earlier.
 
-## Decision (proposed)
+## Decision
 
 1. **ADR-0050 Amendment B stays as it is.** None of (a), (b) or (c) is adopted for #895:
    - **(a)** does not make Node's piped spawn work: libuv's pipes are refused outside `\\.\pipe\LOCAL\`. It also breaks Node,
