@@ -274,8 +274,10 @@ mod tests {
     #[tokio::test]
     async fn a_close_with_a_code_reaches_the_peer_even_while_it_is_still_sending() {
         let (mut s, mut c) = pair().await;
-        // The peer has sent frames the closing side never reads.
-        for _ in 0..50 {
+        // The peer has sent frames the closing side never reads. 64 KiB: enough to leave data unread when the close is
+        // sent, and little enough that every send completes on this one-thread runtime before anything reads (Windows
+        // loopback holds about 188 KiB, so 50 frames hung there, #1094).
+        for _ in 0..16 {
             c.send(&frame(2, &[7; 4096])).await.unwrap();
         }
         let closing = tokio::spawn(async move { s.close_with("protocol.producer_mismatch").await });
