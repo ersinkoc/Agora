@@ -902,14 +902,14 @@ impl Session {
 
     /// The agents a machine can start: `(kind, display name)` of the installed ones.
     /// The folders inside `path` on `node` (ADR-0053 `directory.list`; empty `path` is the home folder there), with this device's
-    /// signature for exactly that folder.
+    /// signature for exactly that folder. Errors keep their parameters (#1044).
     pub fn list_folder(
         &mut self,
         node: &str,
         path: &str,
         authorization: agora_protocol::v1::DirectoryAuthorization,
-    ) -> Result<agora_protocol::v1::DirectoryEntries, String> {
-        let ok = self.command_ok(
+    ) -> Result<agora_protocol::v1::DirectoryEntries, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::DirectoryList(agora_protocol::v1::DirectoryList {
                 path: path.to_string(),
@@ -919,7 +919,10 @@ impl Session {
         )?;
         match ok.result {
             Some(command_ok::Result::DirectoryEntries(e)) => Ok(e),
-            _ => Err("protocol.invalid_message".into()),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -1005,14 +1008,15 @@ impl Session {
         }
     }
 
-    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
+    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project. Errors
+    /// keep their parameters (#1044).
     pub fn inspect_folder(
         &mut self,
         node: &str,
         path: &str,
         authorization: agora_protocol::v1::DirectoryAuthorization,
-    ) -> Result<agora_protocol::v1::DirectoryInfo, String> {
-        let ok = self.command_ok(
+    ) -> Result<agora_protocol::v1::DirectoryInfo, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::DirectoryInspect(agora_protocol::v1::DirectoryInspect {
                 path: path.to_string(),
@@ -1023,7 +1027,10 @@ impl Session {
         )?;
         match ok.result {
             Some(command_ok::Result::DirectoryInfo(i)) => Ok(i),
-            _ => Err("protocol.invalid_message".into()),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -1125,14 +1132,15 @@ impl Session {
         ))
     }
 
-    /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
+    /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id. Errors keep their parameters,
+    /// so a refusal for the person's role can be told from one for this device (#1044).
     pub fn start_agent(
         &mut self,
         node: &str,
         project_id: &str,
         kind: &str,
-    ) -> Result<String, String> {
-        let ok = self.command_ok(
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::AgentStart(agora_protocol::v1::AgentStart {
                 project_id: project_id.to_string(),

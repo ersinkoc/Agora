@@ -20,7 +20,7 @@ export function AttentionSettings() {
   const cannot = perm === 'unsupported' || perm === 'denied';
   const notifyHint = perm === 'unsupported' ? 'attention-notify-unsupported' : perm === 'denied' ? 'attention-notify-blocked' : on ? 'attention-notify-on' : 'attention-notify-hint';
   return (
-    <SettingsCard icon="bell" tone="needs" title={t('attention-settings-title')} description={t('attention-settings-desc')}>
+    <SettingsCard icon="bell" title={t('attention-settings-title')} description={t('attention-settings-desc')}>
       <SettingRow label={t('attention-mode-label')} hint={t('attention-mode-hint')}>
         {(labelId, hintId) => (
           <SegmentedControl labelledBy={labelId} describedBy={hintId} value={mode} onChange={(m) => attentionPrefs.setMode(m)}

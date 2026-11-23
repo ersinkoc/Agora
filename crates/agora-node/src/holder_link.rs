@@ -39,6 +39,14 @@ pub const MAX_AGENT_ID: usize = 256;
 /// The most one agent costs in a `List` (`Agents`) reply: its id (length and bytes), pid, and state (a tag and two optional `i32`s).
 pub const MAX_LIST_ENTRY: usize = 4 + MAX_AGENT_ID + 4 + 1 + 5 + 5;
 
+/// The most agents one holder keeps, terminal and pipe agents together, ended ones not yet released included (#983): every one is an
+/// entry of the one `List` (`Agents`) reply, so this is as many as fit a frame (15,251). A `Start` or `StartPipe` past it is
+/// `Refused(Failed)` and nothing starts; the node then runs the agent itself, as for any start the holder cannot make.
+pub const MAX_HELD_AGENTS: usize = (MAX_FRAME - 1 - 4) / MAX_LIST_ENTRY;
+
+// A `List` reply (tag, count, and every entry at its longest) for a full holder fits a frame.
+const _: () = assert!(1 + 4 + MAX_HELD_AGENTS * MAX_LIST_ENTRY <= MAX_FRAME);
+
 // A `Terminal` frame (tag, entry, buffer-dropped flag, buffer length and the whole buffer) and a `PipeData` frame (tag, entry, dropped,
 // eof, two line counts, and everything kept, whose bound is on its encoded size) fit a frame with any id the holder takes.
 const _: () = assert!(1 + MAX_LIST_ENTRY + 1 + 4 + agora_platform::HELD_BUFFER <= MAX_FRAME);
@@ -104,7 +112,7 @@ pub enum Refusal {
     UnknownAgent = 4,
     AgentExists = 5,
     BadRequest = 6,
-    /// The system refused (the program did not start, the signal was not sent).
+    /// The system refused (the program did not start, the signal was not sent), or the holder already keeps [`MAX_HELD_AGENTS`].
     Failed = 7,
 }
 
@@ -1191,6 +1199,28 @@ impl Client {
 #[allow(clippy::unwrap_used)]
 mod budget_tests {
     use super::*;
+
+    /// #983: a `List` reply for a holder that keeps `MAX_HELD_AGENTS`, every one at its longest, fits a frame (and decodes); one more
+    /// would not, which is why the holder refuses to keep it.
+    #[test]
+    fn a_full_holder_list_fits_a_frame_and_one_more_agent_would_not() {
+        let longest = |n: usize| AgentInfo {
+            agent: format!("{n:0>width$}", width = MAX_AGENT_ID),
+            pid: u32::MAX,
+            state: AgentState::Exited {
+                code: Some(i32::MIN),
+                signal: Some(i32::MAX),
+            },
+        };
+        assert_eq!(MAX_HELD_AGENTS, 15_251);
+        let mut list: Vec<AgentInfo> = (0..MAX_HELD_AGENTS).map(longest).collect();
+        let full = Reply::Agents(list.clone()).encode();
+        assert_eq!(full.len(), 1 + 4 + MAX_HELD_AGENTS * MAX_LIST_ENTRY);
+        assert!(full.len() <= MAX_FRAME);
+        assert_eq!(Reply::decode(&full).unwrap(), Reply::Agents(list.clone()));
+        list.push(longest(MAX_HELD_AGENTS));
+        assert!(Reply::Agents(list).encode().len() > MAX_FRAME);
+    }
 
     #[test]
     fn a_frame_past_its_time_gets_no_receive() {
