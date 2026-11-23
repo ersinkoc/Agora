@@ -1,7 +1,7 @@
 import type { ActionResult } from '../net/refusal';
 import { asksUnderHeader } from '../net/chatView';
 import { ApprovalBanners } from './ApprovalBanner';
-import { requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
+import { Arrangement, requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
@@ -49,6 +49,7 @@ import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
+import { arrangementKey } from '../layout/geometry';
 import { LayoutMenu } from '../layout/LayoutMenu';
 import { subscribePanelRequests, subscribeProjectRequests, subscribeToolRequests, takePanelRequest, takeProjectRequest, takeToolRequests, type ToolRequest } from '../layout/requests';
 import { type ToolPanel, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
@@ -116,10 +117,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
   const fleet = useMemo(() => sortFleet(agents.filter((a) => !(a.closed && cleared.has(a.id)))), [agents, cleared]);
-  // T44 (`useAnswerGuard`, as Home's queue): one guard for every card above a terminal or a composer in this window's panes. Its layout is
-  // every request with what its card shows, so a card that comes, goes or changes in any pane restarts the dwell everywhere; a request is
-  // answered once, whichever pane it was answered in.
-  const banners = useAnswerGuard(approvals.map((x) => x.id), (status) => JSON.stringify(approvals.map((x) => { const a = fleet.find((f) => f.id === x.agentId); return [requestShown(x, a), a ? asksUnderHeader(a) : null, status(x.id)]; })), link !== 'live');
   const groupBy = useGroupBy();
   const spread = useMemo(() => projectSpread(fleet), [fleet]);
   const [now, setNow] = useState(Date.now());
@@ -248,6 +245,13 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const presetAgents = () => [...new Set([...shownAgents, ...fleet.filter((a) => !a.closed).map((a) => a.id)])];
   const resetLayout = () => setStored({ ws: homeWorkspace(), touched: false });
 
+  // Where the panes are drawn (#1048): a move, a split, a resize or another tab in front restarts the dwell of every request card in this
+  // window (`Arrangement`), the side panel's and Home's included; never a pane taking the focus.
+  const arrangement = useMemo(() => arrangementKey(ws, narrow, [showAgents ? leftWidth : 0, showDetails ? rightWidth : 0]), [ws, narrow, showAgents, leftWidth, showDetails, rightWidth]);
+  // T44 (`useAnswerGuard`, as Home's queue): one guard for every card above a terminal or a composer in this window's panes. Its layout is
+  // every request with what its card shows and where the panes are, so a card that comes, goes or changes in any pane, or a pane that moves,
+  // restarts the dwell everywhere; a request is answered once, whichever pane (or other surface: the window's holds) it was answered in.
+  const banners = useAnswerGuard(approvals.map((x) => x.id), (status) => JSON.stringify([arrangement, approvals.map((x) => { const a = fleet.find((f) => f.id === x.agentId); return [requestShown(x, a), a ? asksUnderHeader(a) : null, status(x.id)]; })]), link !== 'live');
   const attention = needsAttention(fleet);
   const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
     .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
@@ -387,6 +391,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const welcome = home;
 
   return (
+    <Arrangement.Provider value={arrangement}>
     <div className="ide">
       <header className="ide-bar min-h-10 flex-wrap border-b py-1 sm:h-10 sm:flex-nowrap sm:py-0">
         <span aria-hidden className="grid size-6 flex-none place-items-center rounded-xs bg-accent text-xs font-bold text-on-accent">A</span>
@@ -433,5 +438,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       {browsing && filesOf && find(browsing) && filesOf(find(browsing) as AgentTileModel) && <FilesDialog agent={find(browsing) as AgentTileModel} files={filesOf(find(browsing) as AgentTileModel) as WorkspaceFiles} load={loadDiff} onClose={() => setBrowsing(undefined)} />}
       {reviewing && loadDiff && find(reviewing) && <DiffDialog agent={find(reviewing) as AgentTileModel} load={loadDiff} read={filesOf?.(find(reviewing) as AgentTileModel)?.read} onClose={() => setReviewing(undefined)} />}
     </div>
+    </Arrangement.Provider>
   );
 }

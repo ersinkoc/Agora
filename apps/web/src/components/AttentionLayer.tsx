@@ -12,6 +12,7 @@ import { needsPanel } from '../net/needsPanel';
 import { kindOf } from './AgentTile';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { AgentAvatar, Button, Tag } from './kit';
+import { useAnswerHolds } from './useAnswerGuard';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
 // this device's choice, a card over the window and a notification while the window is in the background. It holds only memory: what was
@@ -186,14 +187,18 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
     const h = setTimeout(() => setReadyFor(key), ATTENTION_DWELL_MS);
     return () => { clearTimeout(h); setReadyFor(undefined); };
   }, [key, epoch, stale]);
-  // A request is answered once: after one answer its buttons stay dead until it leaves the list or what it shows changes.
+  // A request is answered once: after one answer its buttons stay dead until it leaves the list or what it shows changes. The window's
+  // holds (#1048, `useAnswerGuard`) are shared with every other surface: a request answered, or on its way, from a banner, the side panel
+  // or Home is not answerable here either, and one answered here is held there. The dwell stays this card's own.
+  const holds = useAnswerHolds([]);
   const [answered, setAnswered] = useState<string | undefined>();
-  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet, the link up.
-  const canAnswer = !!x && !!onResolve && readyFor === key && answered !== key && !stale;
+  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet (here or anywhere in the
+  // window), the link up. The holds are read at the press itself.
+  const answerable = () => !!x && !!onResolve && readyFor === key && answered !== key && !stale && holds.status(x.id) === 'open';
+  const canAnswer = answerable();
   const answer = (ok: boolean, always = false) => {
-    if (!canAnswer || !x || !onResolve) return;
-    setAnswered(key);
-    void Promise.resolve(always ? onResolve(x, ok, undefined, true) : onResolve(x, ok));
+    if (!answerable() || !x || !onResolve) return;
+    if (holds.hold(x.id, () => (always ? onResolve(x, ok, undefined, true) : onResolve(x, ok)))) setAnswered(key);
   };
   const content = useRef<HTMLDivElement>(null);
   // Said to a screen reader when the card opens (the card is an alert dialog; this is the short version of why).

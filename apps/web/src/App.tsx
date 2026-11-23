@@ -53,6 +53,7 @@ import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
+import { AnswerHoldsProvider } from './components/useAnswerGuard';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
 import { TOOL_PANELS } from './net/paneTools';
@@ -509,6 +510,9 @@ export function App() {
 
   // What needs the person (the one list the console, the panel and the phone bar show), for the attention layer's card, banner and notice.
   const attention = useMemo(() => attentionList(approvalsNow, agents, pairing.ui?.cards ?? []), [approvalsNow, agents, pairing.ui?.cards]);
+  // T44 (#1048): one set of answer holds for the whole window, so a request answered on one surface (a pane's card, the side panel, Home,
+  // the attention dialog, a switch's card) is held on every other; an answer that went is forgotten when its request leaves this list.
+  const heldIds = useMemo(() => approvalsNow.map((x) => x.id), [approvalsNow]);
   const reviewAttention = useCallback((it: (typeof attention)[number]) => {
     const agent = it.kind === 'pair' ? undefined : it.agent;
     if (agent) { open(agent.id); return; }
@@ -575,6 +579,7 @@ export function App() {
   }
 
   return (
+    <AnswerHoldsProvider listed={heldIds}>
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
@@ -614,6 +619,7 @@ export function App() {
     </ChatActionsContext.Provider>
     </CloseAgentContext.Provider>
     </QuotaProvider>
+    </AnswerHoldsProvider>
   );
 }
 

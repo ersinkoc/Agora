@@ -6,6 +6,7 @@ import { dismissUnknown, isDismissedUnknown, useSkipCapable } from '../net/skipA
 import { visible, type ApprovalModel } from '../net/view';
 import { StateMark } from './StateBadge';
 import { Button } from './kit';
+import { useAnswerHolds } from './useAnswerGuard';
 
 // ADR-0090 Amendment A: a window asked to switch a running agent to a mode or option in which it acts without asking, and the machine
 // wants the owner's signed answer first. Every field is the machine's own rendering of the request (`detail`), shown as it gave it with
@@ -13,15 +14,19 @@ import { Button } from './kit';
 // the answer is signed over are shown beside them. Nothing here is rebuilt from the window's own option labels.
 // The card is answerable only for a machine the window has heard offer this (`approval.skip_permissions`) and only in the shape it expects;
 // any other shape says to update the window and signs nothing.
+// `busy` (a surface that cannot take an answer now: one on its way, the link down) turns both answers off.
 export function SkipApproval({ approval, busy, onResolve }: {
   approval: ApprovalModel;
   busy?: boolean;
-  onResolve?: (approved: boolean) => void;
+  /** What it returns says how the answer went (`AnswerResult`): `false`, a promise of it or one that rejects is a failed answer. */
+  onResolve?: (approved: boolean) => unknown;
 }) {
   const capable = useSkipCapable(approval.node);
   const skip = approval.skip;
   // Allow stays off for a short dwell (as the attention dialog and the phone bar do), restarted whenever what the card says changes, so a
   // click meant for something else never allows it. After a click both answers are off for a few seconds: one click sends one decision.
+  // The window's holds (#1048, `useAnswerGuard`) are shared with every surface: while an answer to this request is on its way, or once it
+  // went, from this card or another, both answers here are off. Deny has no dwell; it is off only while busy, held or answered.
   const wait = `skip-wait-${useId()}`;
   const [ready, setReady] = useState(false);
   const [sent, setSent] = useState(false);
@@ -33,13 +38,16 @@ export function SkipApproval({ approval, busy, onResolve }: {
     return () => clearTimeout(h);
   }, [approval.id, approval.detail]);
   useEffect(() => () => clearTimeout(timer.current), []);
+  // Drawn outside the window's provider (a card alone) it keeps no answer that went, only the one on its way: its own lock says the rest.
+  const holds = useAnswerHolds([]);
+  const held = holds.status(approval.id) !== 'open';
   const answer = (ok: boolean) => {
-    if (once.current || !onResolve) return;
+    if (once.current || busy || !onResolve || holds.status(approval.id) !== 'open') return;
     once.current = true;
     setSent(true);
     clearTimeout(timer.current);
     timer.current = setTimeout(() => { once.current = false; setSent(false); }, 4000); // a failed answer can be tried again
-    onResolve(ok);
+    holds.hold(approval.id, () => onResolve(ok));
   };
   if (!skip) {
     if (isDismissedUnknown(approval.id)) return null;
@@ -77,8 +85,8 @@ export function SkipApproval({ approval, busy, onResolve }: {
       {/* Redesign PR 4: Deny, then Allow, as on every request; this Allow lets the agent act without asking, so it is the danger button
           (ADR-0102). The dwell and "Read it first" are unchanged. */}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</Button>
-        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
+        <Button size="sm" disabled={sent || busy || held || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</Button>
+        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={sent || busy || held || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
           {t('approval-allow')}
           {answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
         </Button>

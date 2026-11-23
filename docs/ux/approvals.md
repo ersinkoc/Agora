@@ -30,12 +30,18 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
   one click away when the short form leaves something out. The row and the dialog offer Allow and Deny only for what `decidableInline`
   shows whole; anything else has **Review**.
 - **Guards (T44):** every list where a request is answered in place (Home's queue, the side panel, the cards above a terminal and above
-  a chat's composer) has the same dwell and per-request holds, from one hook (`useAnswerGuard`, #1045): Allow and Deny do nothing for
-  600 ms after anything the list shows changed or moved (a pane narrow enough to put the buttons under the text included), after the
-  person came back and after the link came back; one answer per request, held while it goes, "Answer sent" once it went, answerable
-  again after a fresh dwell when it failed; off while the link is down, with the reason. A start in a card goes through the same guard.
-  The dialog keeps its own dwell, answered-once and Later; the switch card keeps its own Allow dwell, one-click lock and a Deny that is
-  always available (main-window.md). The component only draws what the surface decided.
+  a chat's composer) has the same dwell, from one hook (`useAnswerGuard`, #1045): Allow and Deny do nothing for 600 ms after anything the
+  list shows changed or moved (a pane narrow enough to put the buttons under the text included), after the panes were rearranged (a
+  move, a split, a resize, a maximize, another tab in front, a side column opened or dragged; a pane taking the focus is not a
+  rearrangement), after the person came back and after the link came back; off while the link is down, with the reason. A start in a
+  card goes through the same guard. Each surface's dwell is its own.
+- **One answer per request, for the whole window (#1048):** the holds are the window's, not a surface's (`AnswerHoldsProvider` in
+  `App`): a request answered, or on its way, from any surface (a card in a pane, the side panel, Home, the attention dialog, a switch's
+  card) is held on every other one. Held while it goes, "Answer sent" once it went, answerable again after a fresh dwell on every surface
+  that lists it when it failed. Closing a surface (the side panel) drops nothing: an answer that went is forgotten only when its request
+  leaves the window's list, one on its way only when it settles. The dialog keeps its own dwell, answered-once and Later; the switch
+  card keeps its own Allow dwell and one-click lock, and its Deny has no dwell (main-window.md): it is off only while the surface is busy
+  (`busy`: an answer on its way, the link down) or the request is held. The component only draws what the surface decided.
 - **Narrow pane:** below 360 px a card in a pane is drawn in the row size with the text across it and the buttons under it, each as wide
   as it can be; nothing of the ask is cut.
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent), not again as a row above it; the corner
