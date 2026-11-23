@@ -14,8 +14,10 @@
 //! one clone per follower per version, one binary search of the ring (at most 500) per update; no per-byte work on terminals.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use agora_adapters::host::{ChatItem, PlanItem, ToolItem};
 use agora_core::AgentId;
@@ -75,7 +77,7 @@ struct Transcript {
     entries: VecDeque<ChatEntry>,
     bytes: usize,
     next_id: u64,
-    followers: Vec<SyncSender<ChatEntry>>,
+    followers: Vec<(u64, SyncSender<ChatEntry>)>,
     /// Tool calls by the agent's id of the call; each points at an entry that is still in the ring.
     calls: HashMap<String, Call>,
     /// The entry of the plan, while it is in the ring: a new plan replaces it in place.
@@ -88,7 +90,46 @@ struct Transcript {
 /// The transcripts of every chat agent on this node.
 #[derive(Default)]
 pub struct ChatBoard {
-    agents: Mutex<HashMap<AgentId, Transcript>>,
+    agents: Arc<Mutex<HashMap<AgentId, Transcript>>>,
+    next_follower_id: AtomicU64,
+}
+
+/// A live chat subscription. Dropping it unregisters its follower even if the transcript stays quiet.
+pub struct ChatSubscription {
+    rx: Receiver<ChatEntry>,
+    agents: Weak<Mutex<HashMap<AgentId, Transcript>>>,
+    agent: AgentId,
+    follower_id: u64,
+}
+
+impl ChatSubscription {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<ChatEntry, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
+    }
+
+    #[cfg(test)]
+    fn try_recv(&self) -> Result<ChatEntry, std::sync::mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    #[cfg(test)]
+    fn try_iter(&self) -> std::sync::mpsc::TryIter<'_, ChatEntry> {
+        self.rx.try_iter()
+    }
+}
+
+impl Drop for ChatSubscription {
+    fn drop(&mut self) {
+        let Some(agents) = self.agents.upgrade() else {
+            return;
+        };
+        let mut agents = agents.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(transcript) = agents.get_mut(&self.agent) {
+            transcript
+                .followers
+                .retain(|(id, _)| *id != self.follower_id);
+        }
+    }
 }
 
 fn cut(text: String) -> String {
@@ -456,8 +497,9 @@ impl Transcript {
     }
 
     fn send(&mut self, entry: &ChatEntry) {
-        // A follower that went away, or fell `FOLLOWER_QUEUE` entries behind, is dropped here.
-        self.followers.retain(|f| f.try_send(entry.clone()).is_ok());
+        // A follower that fell `FOLLOWER_QUEUE` entries behind is dropped here.
+        self.followers
+            .retain(|(_, sender)| sender.try_send(entry.clone()).is_ok());
     }
 
     /// Numbers an entry, keeps it, and hands it to every follower. Returns its id.
@@ -961,12 +1003,22 @@ impl ChatBoard {
 
     /// The transcript so far and a channel with every entry from now on, taken together so none is missed or repeated. A version of
     /// an entry that changed in place arrives as a new `ChatEntry` with the same `entry_id`.
-    pub fn follow(&self, agent: &AgentId) -> (Vec<ChatEntry>, Receiver<ChatEntry>) {
+    pub fn follow(&self, agent: &AgentId) -> (Vec<ChatEntry>, ChatSubscription) {
+        let follower_id = self.next_follower_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = sync_channel(FOLLOWER_QUEUE);
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
-        let (tx, rx) = sync_channel(FOLLOWER_QUEUE);
-        t.followers.push(tx);
-        (t.entries.iter().cloned().collect(), rx)
+        let snapshot = t.entries.iter().cloned().collect();
+        t.followers.push((follower_id, tx));
+        (
+            snapshot,
+            ChatSubscription {
+                rx,
+                agents: Arc::downgrade(&self.agents),
+                agent: agent.clone(),
+                follower_id,
+            },
+        )
     }
 }
 
@@ -974,6 +1026,28 @@ impl ChatBoard {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_subscriptions_removes_their_followers_without_another_entry() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("agent-1");
+        b.push_item(&a, &ChatItem::Text("first".into()), 1);
+        let (_, staying) = b.follow(&a);
+
+        for _ in 0..3 {
+            let (snapshot, closing) = b.follow(&a);
+            assert_eq!(snapshot[0].text, "first");
+            assert_eq!(b.lock()[&a].followers.len(), 2);
+            drop(closing);
+            assert_eq!(b.lock()[&a].followers.len(), 1);
+        }
+
+        b.push_item(&a, &ChatItem::Text("second".into()), 2);
+        assert_eq!(staying.try_recv().unwrap().text, "second");
+        drop(staying);
+        assert!(b.lock()[&a].followers.is_empty());
+        assert_eq!(b.snapshot(&a).len(), 2);
+    }
 
     #[test]
     fn entries_get_increasing_ids_and_followers_see_exactly_what_comes_after() {
