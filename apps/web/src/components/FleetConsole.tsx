@@ -13,7 +13,7 @@ import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile, kindOf } from './AgentTile';
 import { Skeleton } from './EmptyState';
 import { Icon, type IconName } from './Icon';
-import { AgentAvatar, Button, CopyChip, Pill, StatTile } from './kit';
+import { AgentAvatar, Button, CopyChip, Pill, StatTile, stateTone } from './kit';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { Mark } from './StateBadge';
 import { ReviewDialog } from './ReviewRequest';
@@ -42,7 +42,7 @@ export function FleetSummary({ counts, filter, onFilter }: { counts: FleetCounts
         const on = filter === f;
         const press = onFilter && (n > 0 || on) ? () => onFilter(on ? undefined : f) : undefined;
         // The mark's shape beside the word; the word is the name (the mark adds nothing for a screen reader).
-        const mark = <span className={`kit-mark kit-tone-${MARK_TONE[f]}`}><Mark state={f === 'failed' ? 'finished' : f} failed={f === 'failed'} /></span>;
+        const mark = <span className={`kit-mark kit-tone-${f === 'failed' ? 'danger' : stateTone(f)}`}><Mark state={f === 'failed' ? 'finished' : f} failed={f === 'failed'} /></span>;
         return <StatTile key={f} value={n} label={t(FILTER_WORD[f])} mark={mark} tone={f === 'needs-you' ? 'needs' : undefined} pressed={on} onPress={press}
           title={press ? `${t('fleet-filter-hint')}: ${t(FILTER_WORD[f])}` : undefined} />;
       })}
@@ -53,7 +53,6 @@ export function FleetSummary({ counts, filter, onFilter }: { counts: FleetCounts
     </div>
   );
 }
-const MARK_TONE: Record<FleetFilter, string> = { 'needs-you': 'needs', working: 'working', finished: 'finished', failed: 'danger' };
 
 // The one line of what an agent asks: the request's own words, short. Anything long goes through the full card. A start request's title
 // already says it wants to start another agent, so its line is the start of its first prompt (cut: it is only ever reviewed, never answered

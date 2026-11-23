@@ -1,0 +1,33 @@
+{
+  "pos": "42",
+  "recentMessages": [
+    {
+      "pos": "40",
+      "event": {
+        "producerId": "alpha",
+        "seq": "17",
+        "atMs": "1700000600000",
+        "messagePosted": {
+          "messageId": "m-3",
+          "fromAgentId": "agent-1",
+          "to": "beta/agent-2",
+          "body": "ping"
+        }
+      }
+    },
+    {
+      "pos": "41",
+      "event": {
+        "producerId": "beta",
+        "seq": "9",
+        "atMs": "1700000600150",
+        "messagePosted": {
+          "messageId": "m-8",
+          "fromAgentId": "alpha/agent-1",
+          "to": "agent-2",
+          "body": "ping"
+        }
+      }
+    }
+  ]
+}

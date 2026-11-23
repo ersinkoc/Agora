@@ -156,7 +156,7 @@
   .strip { @apply flex items-center gap-3 overflow-x-auto rounded-m border border-line bg-surface-1 p-3; }
   .strip__title { @apply font-semibold whitespace-nowrap; }
 
-  .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); }
   /* An agent as a tile (ADR-0102: colour is a surface, never a stripe). A flat card with one hairline: who it is is its avatar beside the
      name, its state a pill (tint, colour, shape and word). Hover is a stronger hairline and a one-pixel lift, never a shadow. */
   .tile { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink transition-[border-color,transform] duration-150; }
@@ -284,7 +284,7 @@
 
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
-  .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; }
+  .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; grid-template-columns: minmax(0, 1fr); }
 
   .pane .terminal-host { border: 0; }
   /* The element the terminal is mounted in. Never `.terminal`: xterm.js gives its own element that class, and this rule then
@@ -314,7 +314,7 @@
   .terminal-link { @apply pointer-events-none m-0 max-w-full self-start truncate rounded-xs border border-line bg-surface-1 px-2 py-0.5 font-mono text-xs text-ink; }
   .terminal-menu { @apply relative; }
   .terminal-menu__panel { @apply absolute end-0 top-full z-20 mt-1 grid w-64 gap-3 rounded-m border border-line bg-surface-1 p-3 text-xs text-ink; box-shadow: var(--shadow); }
-  .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); }
   .approval { @apply flex flex-col gap-2 rounded-m border border-line bg-surface-1 p-4; }
   .approval__actions { @apply flex flex-wrap gap-3; }
   .machines { @apply m-0 grid list-none gap-3 p-0; }
@@ -535,6 +535,8 @@
   .kit-avatar__dot { @apply absolute rounded-full bg-needs-you; inset-block-start: -3px; inset-inline-end: -3px; width: 0.5625rem; height: 0.5625rem; box-shadow: 0 0 0 2px var(--surface-1); }
 
   .kit-card { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink; }
+  /* What a card holds wraps or truncates inside it: a long row or a wide control never makes the card (or the page) wider (issue 1082). */
+  .kit-card > * { @apply min-w-0; }
   .kit-card--dense { @apply p-3; }
   .kit-card--flush { @apply gap-0 p-0; }
   button.kit-card { @apply transition-[border-color,transform] duration-150; }
@@ -552,11 +554,11 @@
   .kit-setting__text { @apply grid min-w-0 gap-0.5; flex: 1 1 12rem; }
   .kit-setting__label { font-weight: 550; }
   .kit-setting__hint { @apply text-muted; font-size: var(--text-caption); }
-  .kit-setting__control { @apply flex flex-wrap items-center gap-2; }
+  .kit-setting__control { @apply flex max-w-full min-w-0 flex-wrap items-center gap-2; }
 
   /* One segmented control: the chosen item is a raised thumb ringed in the accent (3:1 against the thumb and the track, a test checks
      it) with bolder ink text. */
-  .kit-seg { @apply inline-flex max-w-full gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
+  .kit-seg { @apply inline-flex max-w-full flex-wrap gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
   .kit-seg__item { @apply inline-flex min-w-0 items-center justify-center gap-1.5 truncate rounded-xs px-2.5 font-medium text-muted transition-colors duration-150 hover:text-ink; height: 1.5rem; font-size: var(--text-caption); }
   .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1.5px var(--accent); }
   .kit-seg__item:disabled { @apply cursor-not-allowed opacity-50; }
@@ -615,6 +617,14 @@
   .approval-req--stacked .kit-callout__actions { @apply col-start-1 col-end-4 row-span-1 row-start-auto mt-1; }
   .approval-req--stacked .kit-callout__actions > .kit-btn { flex: 1 1 6rem; }
   .approval-req--stacked > .kit-chip { grid-row: auto; }
+  /* Issue 1082: a request pinned above a chat's composer in a short pane, as one line: the title, cut, and Review at its end (nothing is
+     answered on it, so nothing on it has to be read whole). */
+  .approval-req--bar { @apply items-center; padding-block: 0.5rem; }
+  .approval-req--bar > .kit-chip { grid-row: auto; }
+  .approval-req--bar .kit-callout__actions { @apply col-start-3 col-end-4 row-span-1 row-start-1 mt-0 flex-nowrap self-center; }
+  .approval-req--bar .approval-req__text { @apply flex-nowrap overflow-hidden; }
+  .approval-req--bar .approval-req__ask { @apply truncate; }
+  .approval-req--bar .approval-req__where { @apply hidden; }
   /* An answer waiting out the dwell, held or already sent (T44): it looks off and does nothing. */
   .approval-req .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
   /* The attention dialog is the full density itself: an overlay (the one elevation), the ask scrolls when it is long, the buttons stay. */
@@ -661,7 +671,7 @@
   .kit-dialog { @apply grid gap-4 rounded-l border border-line text-ink; padding: 1.25rem; background: var(--surface-raised); box-shadow: var(--shadow-pop); }
 
   /* My machines (redesign PR 9): a header with Add a machine, request cards, the strip of counts, one card per machine. No diagram. */
-  .machines { @apply grid gap-4; }
+  .machines { @apply grid gap-4; grid-template-columns: minmax(0, 1fr); }
   .machines__head { @apply flex flex-wrap items-center justify-between gap-3; }
   .machines-add { @apply gap-3 outline-none; }
   .machines-add__title { @apply m-0 font-semibold text-ink normal-case tracking-normal; font-size: var(--text-strong); }
@@ -680,7 +690,7 @@
   @media (max-width: 40rem) { .hub-strip__stats { @apply ms-0 grid w-full grid-cols-2 gap-y-3; } .hub-stat { @apply px-0; } .hub-stat + .hub-stat { @apply border-0; } }
   .machines__grid { @apply m-0 grid list-none gap-3 p-0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); }
   .machines__grid > li { @apply grid; }
-  .machine-card { @apply content-start gap-3 outline-none; }
+  .machine-card { @apply min-w-0 content-start gap-3 outline-none; }
   .machine-card--away { @apply border-dashed; }
   .machine-card--add { @apply min-h-40 content-center justify-items-center gap-1.5 border-dashed bg-transparent px-6 text-center; }
   .machine-card--add > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }
@@ -690,8 +700,8 @@
   .machine-card__foot--away { @apply items-center; }
   .machine-card__actions { @apply flex min-w-0 flex-1 flex-wrap items-center gap-2; }
   .os-tile { @apply grid size-9 flex-none place-items-center rounded-s border border-line bg-surface-2 text-muted; }
-  .machine-meter { @apply grid gap-1.5; }
-  .machine-meter__row { @apply flex justify-between gap-3 text-muted; font-size: var(--text-caption); }
+  .machine-meter { @apply grid grid-cols-1 gap-1.5; }
+  .machine-meter__row { @apply flex flex-wrap justify-between gap-x-3 text-muted; font-size: var(--text-caption); }
   .machine-meter__row > span:last-child { @apply whitespace-nowrap; }
   .machine-meter__bar { @apply h-1.5 overflow-hidden rounded-full bg-surface-2; }
   .machine-meter__bar > span { @apply block h-full rounded-full bg-accent; width: var(--share); }
@@ -709,9 +719,9 @@
   .pair-card--wide > .pair-card__who { flex: 1 1 18rem; }
   .pair-card--wide > .pair-card__decide { flex: 0 1 24rem; }
 
-  .kit-gallery { @apply grid gap-4; container-type: inline-size; }
+  .kit-gallery { @apply grid gap-4; grid-template-columns: minmax(0, 1fr); container-type: inline-size; }
   .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }
-  .kit-gallery__group { @apply grid gap-2; }
+  .kit-gallery__group { @apply grid gap-2; grid-template-columns: minmax(0, 1fr); }
   .kit-gallery__row { @apply flex flex-wrap items-center gap-3; }
 
   /* A dialog (an overlay: the raised surface and the one shadow, ADR-0102): an icon chip, a 16 px title, a muted line, the answers at the end. */

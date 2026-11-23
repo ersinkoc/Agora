@@ -430,10 +430,13 @@ not built: nothing to check.
 - **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`. Sign in with its code in browser B (a second
   person: **human**; otherwise a second browser profile). Then `agora hub user projects --hub-dir $RM/home/hub` and grant a project
   by the names the window shows: `agora hub user grant rm-viewer MACHINE/proj --hub-dir $RM/home/hub` (#904); also try
-  `MACHINE/nosuch`. As the viewer try to start an agent. As the owner open Activity.
+  `MACHINE/nosuch`. As the viewer try to start an agent. Then `agora hub user role rm-viewer member --hub-dir $RM/home/hub` and, in
+  browser B, open Start an agent on that machine, browse the project's folder and a folder in it, and start a shell there; type
+  another project's folder or `/` and choose it (#1049). As the member in `agora tui`, press `f` on that machine (#1086). As the owner open Activity.
 - **See:** without a grant the viewer sees no machine and is told no project is theirs yet (no "Connect your first machine");
   `projects` lists `MACHINE/proj` with its folder; `MACHINE/nosuch` is refused with a reason (exit 1); with the grant, the project's
-  agents, and a start is refused; Activity (Person column) lists both people's actions in words, each row with "session <id>".
+  agents, and a start is refused; as a member the project's folders list (no way up from the project's own folder) and the start
+  works, while a folder outside the project is refused in words for the role; in `agora tui` the picker opens at the project's folder (its projects to choose from when several are granted there) and ⌫ goes no higher; Activity (Person column) lists both people's actions in words, each row with "session <id>".
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)

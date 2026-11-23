@@ -105,6 +105,25 @@ fn a_read_timeout_is_set_or_reported_as_the_peer_having_closed() {
 }
 
 #[test]
+fn a_read_timeout_after_the_peer_closed_with_bytes_unread_is_not_an_error() {
+    // macOS refuses the timeout (EINVAL) here too; the stream is hung up while its last bytes wait, so it is `PeerClosed` and the
+    // bytes are still read. Linux sets it.
+    let (w, mut r, dir, _l) = pair("unread");
+    {
+        let mut w = w;
+        w.write_all(b"last").unwrap();
+    }
+    let after = r
+        .set_read_timeout_or_closed(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert!(matches!(after, ReadTimeout::Set | ReadTimeout::PeerClosed));
+    let mut got = Vec::new();
+    std::io::Read::read_to_end(&mut r, &mut got).unwrap();
+    assert_eq!(got, b"last");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_zero_timeout_is_an_error_and_not_a_closed_peer() {
     let (w, _r, dir, _l) = pair("zero");
     let e = w

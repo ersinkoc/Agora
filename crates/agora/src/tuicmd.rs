@@ -332,18 +332,18 @@ fn approve_device(
 const PAIR_ASK_FOR: Duration = Duration::from_secs(120);
 
 /// Asks the hub whether this session is the owner's: `PairStatus` is answered to the owner only. `None` when it could not tell (the
-/// link failed): it is asked again at the next connection.
-fn pair_owner(session: &mut Session) -> Option<agora_tui::pair::Owner> {
+/// link failed): it is asked again at the next connection. The flag is true when the hub refused it (`auth.forbidden`: a member or a
+/// viewer, #1086); a hub that predates pairing says nothing about the role, so its sessions are not taken for a member's.
+fn pair_owner(session: &mut Session) -> Option<(agora_tui::pair::Owner, bool)> {
     use agora_tui::pair::Owner;
     match session.command_info(
         "",
         WireCommand::PairStatus(agora_protocol::v1::PairStatus {}),
         Duration::from_secs(3),
     ) {
-        Ok(_) => Some(Owner::Yes),
-        Err(e) if e.code == "auth.forbidden" || e.code == "protocol.capability_missing" => {
-            Some(Owner::No)
-        }
+        Ok(_) => Some((Owner::Yes, false)),
+        Err(e) if e.code == "auth.forbidden" => Some((Owner::No, true)),
+        Err(e) if e.code == "protocol.capability_missing" => Some((Owner::No, false)),
         Err(_) => None,
     }
 }
@@ -1299,7 +1299,8 @@ fn now_ms() -> u64 {
 
 /// Start an agent in a folder the user picks on a machine (ADR-0053): the machine's folders through `directory.list`, then the chosen
 /// one through `directory.inspect` and `agent.launch`, each signed by this terminal's key for exactly that folder (ADR-0052). Answers
-/// the line to show; empty when the user cancelled.
+/// the line to show; empty when the user cancelled. `limited`: the hub said this session is not the owner's (#1086); set here too when
+/// the hub refuses the home folder for the person's role.
 #[allow(clippy::too_many_lines)] // one dialogue: browse, choose, confirm, launch
 fn start_in_folder(
     say: &Say,
@@ -1308,6 +1309,7 @@ fn start_in_folder(
     selected: &str,
     ask: &mut dyn Asker,
     color: bool,
+    limited: &mut bool,
 ) -> String {
     let Some(device) = device() else {
         return say.text(
@@ -1330,7 +1332,21 @@ fn start_in_folder(
         .find(|a| a.agent_id == selected)
         .and_then(|a| online.iter().position(|n| n.node_id == a.node_id))
         .unwrap_or(0);
-    let mut path = String::new();
+    // #1086: a person the hub said is not the owner may look only inside their projects (ADR-0049 Amendment A), so their picker opens
+    // at their project's folder on the machine (or offers their projects there) and never goes above one; the owner's opens at the
+    // home folder, as before.
+    use agora_tui::picker::{project_roots, At, Nav};
+    let nav_for = |node: &str, limited: bool| {
+        if limited {
+            Nav::projects(project_roots(snapshot, node))
+        } else {
+            Nav::machine()
+        }
+    };
+    let mut nav = nav_for(&online[at].node_id, *limited);
+    let mut target = nav.start();
+    // What was shown before the last step: a step into a folder the hub refuses for the person's role goes back to it.
+    let mut before: Option<(Nav, At, agora_protocol::v1::DirectoryEntries)> = None;
     let mut notice = String::new();
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let chosen = 'browse: loop {
@@ -1340,34 +1356,62 @@ fn start_in_folder(
         } else {
             node.hostname.clone()
         };
-        let Some(auth) =
-            device.authorize(&node.node_id, "list", &path, "", "", false, false, now_ms())
-        else {
-            return say.text(
-                key!("tui-answer-failed"),
-                &[("code", Arg::Str("client.sign".into()))],
-            );
+        let folder = match &target {
+            At::Projects => nav.projects_listing(),
+            At::Folder(path) => {
+                let Some(auth) =
+                    device.authorize(&node.node_id, "list", path, "", "", false, false, now_ms())
+                else {
+                    return say.text(
+                        key!("tui-answer-failed"),
+                        &[("code", Arg::Str("client.sign".into()))],
+                    );
+                };
+                match session.list_folder(&node.node_id, path, auth) {
+                    Ok(f) => f,
+                    Err(e) if e.code == "approval.signature_invalid" => {
+                        return not_trusted(&device, &node.node_id)
+                    }
+                    Err(e) if e.code == "protocol.capability_missing" => {
+                        return say.text(key!("tui-folder-unsupported"), &[])
+                    }
+                    // #1044: the hub does not let this person's role look into this folder.
+                    Err(e) if refused_for_role(&e, "DirectoryList") => {
+                        let roots = project_roots(snapshot, &node.node_id);
+                        if !nav.confined() && path.is_empty() && !roots.is_empty() {
+                            // Not known to be the owner and refused the home folder: a member, who may look in their projects.
+                            *limited = true;
+                            nav = Nav::projects(roots);
+                            target = nav.start();
+                            continue;
+                        }
+                        let Some((back, at_before, shown)) = before.take() else {
+                            return say.text(key!("tui-folder-role"), &[]);
+                        };
+                        // A folder of another project inside theirs, or a link out of it: they stay where they were, told why.
+                        nav = back;
+                        target = at_before;
+                        notice = say.text(key!("tui-folder-role"), &[]);
+                        shown
+                    }
+                    Err(e) => {
+                        // A folder that cannot be listed (gone, a secret one): back to where the picker opens, saying why.
+                        let mut fresh = nav_for(&node.node_id, nav.confined());
+                        let start = fresh.start();
+                        if start == target {
+                            return say
+                                .text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
+                        }
+                        notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
+                        nav = fresh;
+                        target = start;
+                        before = None;
+                        continue;
+                    }
+                }
+            }
         };
-        let folder = match session.list_folder(&node.node_id, &path, auth) {
-            Ok(f) => f,
-            Err(e) if e.code == "approval.signature_invalid" => {
-                return not_trusted(&device, &node.node_id)
-            }
-            Err(e) if e.code == "protocol.capability_missing" => {
-                return say.text(key!("tui-folder-unsupported"), &[])
-            }
-            // #1044: the hub does not let this person's role look into folders; no other folder would do better.
-            Err(e) if refused_for_role(&e, "DirectoryList") => {
-                return say.text(key!("tui-folder-role"), &[])
-            }
-            Err(e) if !path.is_empty() => {
-                // A folder that cannot be listed (gone, a secret one): back to the home folder, saying why.
-                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
-                path.clear();
-                continue;
-            }
-            Err(e) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]),
-        };
+        let projects = target == At::Projects;
         let mut pick = 0usize;
         loop {
             let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
@@ -1376,6 +1420,7 @@ fn start_in_folder(
                 folder: &folder,
                 selected: pick,
                 notice: &notice,
+                projects,
                 color,
                 cols,
                 rows,
@@ -1393,23 +1438,34 @@ fn start_in_folder(
                 b'j' if count > 0 => pick = (pick + 1) % count,
                 b'k' if count > 0 => pick = (pick + count - 1) % count,
                 b'\r' | b'\n' => {
-                    if let Some(e) = folder.entries.get(pick) {
-                        path = agora_tui::picker::child(&folder.path, &e.name);
+                    let back = nav.clone();
+                    let next = if projects {
+                        nav.open_project(pick)
+                    } else {
+                        folder.entries.get(pick).map(|e| nav.open(&folder, &e.name))
+                    };
+                    if let Some(next) = next {
+                        before = Some((back, std::mem::replace(&mut target, next), folder));
                         continue 'browse;
                     }
                 }
-                0x7f | 0x08 | b'h' => {
-                    if !folder.parent.is_empty() {
-                        path = folder.parent.clone();
+                0x7f | 0x08 | b'h' if !projects => {
+                    let back = nav.clone();
+                    if let Some(next) = nav.up(&folder) {
+                        before = Some((back, std::mem::replace(&mut target, next), folder));
                         continue 'browse;
                     }
                 }
                 b'm' if online.len() > 1 => {
                     at = (at + 1) % online.len();
-                    path.clear();
+                    nav = nav_for(&online[at].node_id, nav.confined());
+                    target = nav.start();
+                    before = None;
                     continue 'browse;
                 }
-                b' ' | b'.' => break 'browse (node.node_id.clone(), folder.path.clone()),
+                b' ' | b'.' if !projects => {
+                    break 'browse (node.node_id.clone(), folder.path.clone())
+                }
                 0x1b | b'q' | 3 => return String::new(),
                 _ => {}
             }
@@ -1667,6 +1723,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 links: agora_tui::termio::LinkConfirm::default(),
                 note: Note::default(),
                 pair: agora_tui::pair::Book::default(),
+                limited: false,
                 colors: if color {
                     ColorMode::from_env(
                         None,
@@ -1805,6 +1862,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             }
         }
         let mut dirty_since: Option<Instant> = None;
+        // #1086: learnt from the hub's refusal of the home folder (the plain list does not ask the hub for the role).
+        let mut limited = false;
         // ADR-0057: the `agent.start` requests read whole in the reader, which y may then allow even where the panel cannot show them.
         let mut read_whole: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_refresh = Instant::now();
@@ -1990,6 +2049,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 &selected,
                                 &mut Plain::new(&rx),
                                 color,
+                                &mut limited,
                             );
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
@@ -2246,6 +2306,9 @@ struct Console {
     note: Note,
     /// ADR-0065: the machines that ask to join, for an owner's session. Memory only.
     pair: agora_tui::pair::Book,
+    /// #1086: the hub said this session is not the owner's (or refused it the home folder for its role), so the folder picker stays
+    /// inside the person's projects.
+    limited: bool,
     colors: ColorMode,
     /// ADR-0041: typing into the agent in front was refused until its owner allows it; `g` (from the list: Ctrl-] then g) asks.
     typing_refused: Option<TypingRefused>,
@@ -2390,8 +2453,9 @@ fn console(
     );
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
-        if let Some(owner) = pair_owner(session) {
+        if let Some((owner, limited)) = pair_owner(session) {
             c.pair.set_owner(owner);
+            c.limited = limited;
         }
     }
     let mut pair_seen = c.pair.shown().len();
@@ -4036,9 +4100,11 @@ fn command(
             true
         }
         'f' => {
+            let mut limited = c.limited;
             c.notice = over_console(say, c, session, None, rx, |session, ask| {
-                start_in_folder(say, session, &s, &selected, ask, color)
+                start_in_folder(say, session, &s, &selected, ask, color, &mut limited)
             });
+            c.limited = limited;
             true
         }
         's' => {

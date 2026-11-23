@@ -1286,10 +1286,31 @@ impl Drop for Adapter {
 }
 
 /// ADR-0093 decision 3: what a holder kept of an adapter's output that an earlier node had already taken tells what was still waiting on
-/// the person: the approval requests with no sign after them that the agent went on (a state other than `blocked`). Nothing else is
-/// taken from those lines (the earlier node showed the rest), so a request is asked again, never answered, and nothing shows twice.
+/// the person: the approval requests with no sign after them that the agent went on (a state other than `blocked`). Of the rest, only
+/// the reports that replace the last are taken ([`replay`], ADR-0104), so a request is asked again, never answered, and nothing shows
+/// twice.
 pub fn pending_approvals(lines: &[Vec<u8>]) -> Vec<AdapterEvent> {
-    let mut pending: Vec<AdapterEvent> = Vec::new();
+    replay(lines, "").approvals
+}
+
+/// What a node taking up a held adapter reads from the lines an earlier node had already been given (the holder's `seen`), in one pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replay {
+    /// ADR-0093 decision 3: the requests still waiting on the person (see [`pending_approvals`]).
+    pub approvals: Vec<AdapterEvent>,
+    /// ADR-0104 decision 1: the newest `session/options`, `session/config` and `session/commands` of the session, as the adapter wrote
+    /// them (not yet bounded or judged). `None` when the lines hold no report of that kind. Each report replaces the last, so the newest
+    /// one is the agent's whatever the earlier node made of it; chat, usage and state append and are not taken.
+    pub options: Option<SessionOptions>,
+    pub config: Option<Vec<ConfigOption>>,
+    pub commands: Option<Vec<AdapterCommand>>,
+}
+
+/// Reads `lines` once for [`Replay`]. A report is the session's when it names `session_id` or no session (as an update without one is
+/// read live); one that names another session is not taken.
+pub fn replay(lines: &[Vec<u8>], session_id: &str) -> Replay {
+    let mut out = Replay::default();
+    let ours = |sid: &str| sid.is_empty() || sid == session_id;
     for raw in lines {
         let Ok(text) = std::str::from_utf8(raw) else {
             continue;
@@ -1300,16 +1321,33 @@ pub fn pending_approvals(lines: &[Vec<u8>]) -> Vec<AdapterEvent> {
         match method.as_str() {
             "approval/request" => {
                 if let Some(e @ AdapterEvent::ApprovalRequest { .. }) = to_event(&method, &params) {
-                    pending.push(e);
+                    out.approvals.push(e);
                 }
             }
             "state/update" if agent_state(params.get("state")) != AgentState::Blocked => {
-                pending.clear();
+                out.approvals.clear();
+            }
+            "session/options" | "session/config" | "session/commands" => {
+                match to_event(&method, &params) {
+                    Some(AdapterEvent::Options {
+                        session_id,
+                        options,
+                    }) if ours(&session_id) => out.options = Some(options),
+                    Some(AdapterEvent::Config {
+                        session_id,
+                        options,
+                    }) if ours(&session_id) => out.config = Some(options),
+                    Some(AdapterEvent::Commands {
+                        session_id,
+                        commands,
+                    }) if ours(&session_id) => out.commands = Some(commands),
+                    _ => {}
+                }
             }
             _ => {}
         }
     }
-    pending
+    out
 }
 
 fn read_loop<R: Read>(
@@ -1556,7 +1594,7 @@ mod tests {
     }
 
     /// ADR-0093 decision 3: of the lines an earlier node had, only a request with no sign after it that the agent went on is asked
-    /// again; nothing else is taken from them, and what is not a message is ignored.
+    /// again; no other line makes a request, and what is not a message is ignored.
     #[test]
     fn only_a_request_the_agent_has_not_moved_past_is_rebuilt_from_the_lines_an_earlier_node_had() {
         let blocked = || {
@@ -1608,6 +1646,78 @@ mod tests {
         // Words are not requests, a request is not read from anything else, and bytes that are not text are skipped.
         assert!(ids(&[chat, vec![0xff, 0xfe]]).is_empty());
         assert!(ids(&[]).is_empty());
+    }
+
+    /// ADR-0104 decision 1: of the lines an earlier node had, the newest report of each kind that replaces the last is taken, for the
+    /// agent's session only; a kind with no report is left as `None`, and nothing that appends is taken.
+    #[test]
+    fn the_newest_options_config_and_commands_of_the_session_are_read_from_the_lines_an_earlier_node_had(
+    ) {
+        let options = |sid: &str, mode: &str| {
+            line(
+                "session/options",
+                json!({"sessionId": sid, "modes": [{"id": "default", "name": "Ask"}, {"id": "yolo", "name": "Yolo"}],
+                       "models": [], "currentMode": mode, "currentModel": ""}),
+            )
+        };
+        let config = |sid: &str, current: &str| {
+            line(
+                "session/config",
+                json!({"sessionId": sid, "options": [{"id": "auto_approve", "name": "Auto approve", "type": "boolean",
+                       "current": current}]}),
+            )
+        };
+        let chat = line(
+            "chat/append",
+            json!({"sessionId": "s", "text": {"text": "hello"}}),
+        );
+        let r = replay(
+            &[
+                options("s", "default"),
+                config("s", "false"),
+                chat.clone(),
+                b"not json".to_vec(),
+                vec![0xff, 0xfe],
+                options("s", "yolo"),
+                config("s", "true"),
+                // Another session's report is not this agent's.
+                options("other", "default"),
+                config("other", "false"),
+            ],
+            "s",
+        );
+        assert_eq!(
+            r.options.as_ref().map(|o| o.current_mode.as_str()),
+            Some("yolo")
+        );
+        assert_eq!(r.options.as_ref().map(|o| o.modes.len()), Some(2));
+        assert_eq!(
+            r.config.as_ref().and_then(|c| c.first()).map(|o| (
+                o.id.as_str(),
+                o.current.as_str(),
+                o.boolean
+            )),
+            Some(("auto_approve", "true", true))
+        );
+        // No report of the commands: left to what the node kept.
+        assert_eq!(r.commands, None);
+        assert!(r.approvals.is_empty());
+        // The newest report replaces, even when it is empty; one with no session id is the session's.
+        let r = replay(
+            &[
+                line(
+                    "session/commands",
+                    json!({"sessionId": "s", "commands": [{"name": "review"}]}),
+                ),
+                line("session/commands", json!({"commands": []})),
+            ],
+            "s",
+        );
+        assert_eq!(r.commands, Some(Vec::new()));
+        assert_eq!(r.options, None);
+        assert_eq!(r.config, None);
+        // Nothing to read, nothing taken.
+        assert_eq!(replay(&[chat], "s"), Replay::default());
     }
 
     #[test]

@@ -93,6 +93,15 @@ for (const scheme of ['dark', 'light']) {
   await page.waitForSelector('[data-files-changed]');
   await page.evaluate(() => document.fonts.ready);
   const cdp = await ctx.newCDPSession(page);
+  if (scheme === 'dark') {
+    // #1082: the gallery follows the window down to 300 px (every section wraps or scrolls inside itself), so the width search below
+    // reaches the chats' narrow layouts instead of stopping at the widest section.
+    await page.setViewportSize({ width: 300, height: 844 });
+    await page.waitForTimeout(100);
+    check(await page.evaluate(() => document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth) === 0, 'at 300 px with a mouse the gallery page has no sideways scroll');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(100);
+  }
   const mouse = await layout(page);
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   check(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), `${scheme}: the browser reports a touch screen`);
@@ -129,8 +138,8 @@ for (const scheme of ['dark', 'light']) {
       const i = await page.evaluate(() => [...document.querySelectorAll('[data-touch-probe]')].find((e) => e.textContent === 'redirect notes').getAttribute('data-touch-probe'));
       const m = await measure(page, i);
       m.spans.forEach((s, k) => check(s.h >= TAP, `at ${w} px the link wraps: piece ${k + 1} is ${s.h} px tall to a finger (drawn ${s.drawn.h})`));
-      // What touch must not do at this width: add sideways scroll to the page or to anything in the chats. Compared with the same page
-      // and width with a mouse, since other gallery sections (not chats) may already be wider than a 300 px window.
+      // What touch must not do at this width: add sideways scroll to the page or to anything in the chats, compared with the same page
+      // and width with a mouse.
       await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
       await page.waitForTimeout(100);
       const mouseAt = await layout(page);

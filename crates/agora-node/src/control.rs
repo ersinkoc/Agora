@@ -2083,12 +2083,12 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok((entries, rx)) = outcome {
+        if let Ok((entries, subscription)) = outcome {
             let (writer, alive, stop) = (Arc::clone(writer), Arc::clone(alive), Arc::clone(stop));
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-chat".into())
-                .spawn(move || pump_chat(&writer, stream_id, entries, &rx, &alive, &stop));
+                .spawn(move || pump_chat(&writer, stream_id, entries, subscription, &alive, &stop));
         }
         return true;
     }
@@ -2233,7 +2233,7 @@ fn pump_chat(
     writer: &SharedWriter,
     stream: u32,
     entries: Vec<v1::ChatEntry>,
-    rx: &std::sync::mpsc::Receiver<v1::ChatEntry>,
+    subscription: crate::chat::ChatSubscription,
     alive: &AtomicBool,
     stop: &AtomicBool,
 ) {
@@ -2242,7 +2242,7 @@ fn pump_chat(
         return;
     }
     while alive.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
-        match rx.recv_timeout(POLL) {
+        match subscription.recv_timeout(POLL) {
             Ok(e) => {
                 if send(writer, stream, KIND_CHAT_ENTRY, e.encode_to_vec()).is_err() {
                     return;

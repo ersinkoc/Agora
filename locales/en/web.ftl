@@ -645,7 +645,7 @@ start-identity-change = Associate this folder with its changed project identity
 start-directory-unsupported = This machine needs an update to start agents in selected folders.
 start-directory-failed = The folder could not be selected. Check its path and permissions.
 start-directory-forbidden = This device is limited to other projects on this machine. Choose a folder of a project you work in, or ask the machine's owner.
-start-directory-role = Your role does not let you choose folders on this machine. Ask the owner.
+start-directory-role = Your role does not let you choose this folder. Ask the owner.
 start-role = Your role does not let you start agents here. Ask the owner if you need to.
 workspace-shared = Shared folder · changes belong to the workspace
 filter-project = Project
@@ -1240,8 +1240,6 @@ attention-notify-names-warn = These names come from the agents and machines them
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Usage
 ide-tab-usage = Usage
-usage-empty = Usage appears once an agent has worked.
-usage-empty-title = Nothing to show yet
 # The Usage panel's three totals (stat tiles: a big number over this label).
 usage-stat-tokens = { $count ->
     [one] Token used
@@ -1608,7 +1606,7 @@ kit-sample-notify-hint = Names show only if you choose so.
 kit-sample-ask = { $name } wants to run a command
 kit-sample-offline = This machine is offline
 kit-sample-offline-line = Its agents keep running and report back when it returns.
-kit-sample-joined = The machine joined. It appears in Your machines.
+kit-sample-joined = The machine joined. It appears in My machines.
 
 # The redesign's entry screens (ADR-0102): the sign-in card, the empty Home and the command palette.
 signin-or = or

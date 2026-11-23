@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { createContext, useCallback, useContext, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { t } from '../i18n';
 import { approvalName } from '../net/approvalText';
 import type { ApprovalModel } from '../net/view';
@@ -111,22 +111,93 @@ export function AnswerButtons({ approval: x, size = 'md', off = {}, danger, alwa
 // beside its buttons to one word per line).
 export const NARROW_PX = 360;
 export function useNarrow(ref: RefObject<HTMLElement | null>, below = NARROW_PX): boolean {
-  const [narrow, setNarrow] = useState(false);
-  // Measured before the first paint, so a narrow pane never shows the wide layout for a frame.
+  return useBelow(ref, below, 'width');
+}
+
+// Whether an element is smaller than `below` px along one axis. Unknown (nothing laid out yet, a test without layout) counts as large, and
+// so does everything while `on` is false (nothing is observed then). The last size seen is kept, so a new `below` (a rem gate after the
+// text size changed, `useBelowRem`) is decided at once, without waiting for the element to change size.
+export function useBelow(ref: RefObject<HTMLElement | null>, below: number, axis: 'width' | 'height', on = true): boolean {
+  const [small, setSmall] = useState(false);
+  const seen = useRef(0);
+  // Measured before the first paint, so a small pane never shows the large layout for a frame.
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    const now = el.getBoundingClientRect().width;
-    if (now > 0) setNarrow(now < below);
+    if (!el || !on) return;
+    const now = el.getBoundingClientRect()[axis];
+    if (now > 0) seen.current = now;
+    if (seen.current > 0) setSmall(seen.current < below);
     if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[entries.length - 1]?.contentRect.width ?? el.getBoundingClientRect().width;
-      if (w > 0) setNarrow(w < below);
+    // A callback without entries (a test's observer that only says "something changed") reads the element itself.
+    const ro = new ResizeObserver((entries?: ResizeObserverEntry[]) => {
+      const size = entries?.[entries.length - 1]?.contentRect[axis] ?? el.getBoundingClientRect()[axis];
+      if (size > 0) { seen.current = size; setSmall(size < below); }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref, below]);
-  return narrow;
+  }, [ref, below, axis, on]);
+  return on && small;
+}
+
+// The root font size in px, live. A rem gate in JS must follow it as the CSS `rem` does: the text size (the theme's `--text-scale`, set
+// on the root's style, design/app.css `html { font-size }`) changes it without any element changing size, so the root's attributes are
+// watched. One observer for every gate; the size is read only when the root changes, never per render.
+let rootFont = 0;
+let rootWatch: MutationObserver | undefined;
+const rootListeners = new Set<() => void>();
+function readRootFont(): number {
+  if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return 16;
+  const px = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return px > 0 ? px : 16; // nothing computed (a test without styles): the browsers' default
+}
+function watchRootFont(changed: () => void): () => void {
+  rootListeners.add(changed);
+  if (!rootWatch && typeof MutationObserver !== 'undefined' && typeof document !== 'undefined') {
+    rootWatch = new MutationObserver(() => {
+      const px = readRootFont();
+      if (px === rootFont) return;
+      rootFont = px;
+      for (const l of rootListeners) l();
+    });
+    rootWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class', 'data-theme'] });
+  }
+  rootFont = readRootFont(); // a change before the first watcher came is caught here
+  return () => {
+    rootListeners.delete(changed);
+    if (rootListeners.size === 0) { rootWatch?.disconnect(); rootWatch = undefined; rootFont = 0; }
+  };
+}
+export function useRootFontPx(): number {
+  return useSyncExternalStore(watchRootFont, () => rootFont || (rootFont = readRootFont()), () => 16);
+}
+
+// `useBelow` with the bound in rem, for a gate that mirrors a CSS `@container (… rem)` query: at any text size it is the same width the
+// CSS uses.
+export function useBelowRem(ref: RefObject<HTMLElement | null>, belowRem: number, axis: 'width' | 'height', on = true): boolean {
+  return useBelow(ref, belowRem * useRootFontPx(), axis, on);
+}
+
+// #1082: a chat pane shorter than this (the whole pane, header and composer included, which the card's own size never changes) draws the
+// request pinned above its composer as one row, so the conversation keeps its room. The pane says so through `PinnedShort`.
+export const SHORT_PANE_PX = 400;
+// The row has Deny and Allow beside the ask only from this width of the card up (rem: 480 px at the default 16 px text size, 600 px at
+// 125 %): narrower, the callout puts its buttons under the text (`.kit-callout__actions`, `@container (max-width: 28rem)`, whose container
+// is the card's host, `.approval-req-host`, with no padding or border, the element measured) and the title wraps, so the row would be as
+// tall as the card; there it is the title and Review. In rem because the CSS breakpoint is: in px the two parted at a larger text size.
+export const PINNED_ANSWERS_REM = 30;
+export const PinnedShort = createContext(false);
+
+// A card pinned above a chat's composer: whether it is drawn as the short row now, and the press that opens it to the whole card in place.
+// The row offers Allow and Deny only for what `decidableInline` shows whole and only where they fit beside it (else Review, which opens
+// the card); "always" is never answered from it (ADR-0101, as Home's row). The row and the card put the buttons in different places, so
+// every change between them (the pane getting short or tall, Review opening the card) restarts the surface's dwell (`restart`, T44).
+export function usePinnedRow(restart: () => void): { short: boolean; row: boolean; open: () => void } {
+  const short = useContext(PinnedShort);
+  const [opened, setOpened] = useState(false);
+  const row = short && !opened;
+  const drawn = useRef(row);
+  useLayoutEffect(() => { if (drawn.current !== row) { drawn.current = row; restart(); } }, [row, restart]);
+  return { short, row, open: useCallback(() => setOpened(true), []) };
 }
 
 // A card in a pane (`narrowable`): whether it is drawn narrow now. The buttons move under the text when the pane gets narrow (and back): a

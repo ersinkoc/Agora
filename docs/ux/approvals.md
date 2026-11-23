@@ -14,7 +14,7 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 | Size | Where | Shape |
 |---|---|---|
 | **row** | Home's queue; the phone's list and its bar (stacked: the buttons under the text, each as wide as it can be) | who, where and how long on one line, the ask under it, the buttons at the end |
-| **card** | the side panel, above a terminal, above a chat's composer | the ask whole under the title, the buttons under it (at the end of the first line when the card is wide); a start or a switch in short, with Review ([below](#start-and-switch-requests)) |
+| **card** | the side panel, above a terminal, above a chat's composer | the ask whole under the title, the buttons under it (at the end of the first line when the card is wide); a start or a switch in short, with Review ([below](#start-and-switch-requests)); above the composer of a chat pane shorter than 400 px, the row (below) |
 | **full** | the attention dialog; Review's dialog | larger; the title is the ask, the machine a tag; Later (or Close) before the answers |
 
 - **Buttons:** **Deny** (secondary), then **Allow always** where ADR-0101 offers it beside a single answer (secondary), then **Allow**
@@ -29,6 +29,16 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **Never decided on cut text:** where Allow is offered the ask is one mono chip that wraps, never truncated; the agent's whole request is
   one click away when the short form leaves something out. The row and the dialog offer Allow and Deny only for what `decidableInline`
   shows whole; anything else has **Review**.
+- **A short chat pane (#1082):** a pane shorter than 400 px (header and composer included; the card never changes that height) draws
+  the request pinned above its composer as one row, so the conversation keeps its room. The row follows Home's: Deny and Allow only beside
+  the ask shown whole, for what `decidableInline` allows and where the pane is wide enough for them; never "always" (ADR-0101: it is in
+  the card). Anything else is the title, cut, and **Review**, which opens the whole card in place (a start or a switch: Review's dialog).
+  The row and the card put the buttons in different places, so every swap (the pane getting short or tall, Review opening the card)
+  starts the dwell again; answers go through the same guard and the window's holds. The buttons sit beside the ask only where the card
+  is at least 30rem wide (480 px at the default text size, 600 px at 125 %; narrower, the callout would put them under the text at its
+  28rem breakpoint and the row would be as tall as the card; the gate follows the text size as that breakpoint does). Screens:
+  `docs/ux/screens/polish-redesign-chat-short-{dark,light}.png` (the row with Deny and Allow) and
+  `polish-redesign-chat-short-phone-{dark,light}.png` (the title and Review).
 - **Guards (T44):** every surface where a request is answered in place (Home's queue, the side panel, the cards above a terminal and
   above a chat's composer, the attention dialog, the phone's list and its bar for what needs you) has the same dwell, from one hook (`useAnswerGuard`, #1045, #1052): Allow and Deny do
   nothing for 600 ms after anything the surface shows changed or moved (a pane narrow enough to put the buttons under the text

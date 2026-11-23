@@ -107,7 +107,8 @@ hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an au
 `node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
 its waiting approvals and its terminals; a resync announcement then re-adds what still runs. A node that takes up agents its terminal
 holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline` the same way (`AgentStarted`, `AgentStateChanged`, the
-session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`).
+session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`). Both say `AgentStarted.same_process`, so the hub
+keeps the agent's counters (section "A kept agent's counters", ADR-0104).
 
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
 a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
@@ -500,6 +501,21 @@ New error codes: `mesh.folder_not_allowed` (`folder`), `mesh.helper_limit` (`rul
 (`approval_id`).
 
 `Snapshot.tasks` (8) and `Snapshot.leases` (9), ADR-0040: the shared boards' tasks and held paths, so a client that connects sees them before the next change.
+
+`Snapshot.recent_messages` (12), ADR-0103: the newest mesh messages the window may see, oldest first, each the stored event as it is
+(`PositionedEvent`: its log position, at or before the snapshot's `pos`, and the `Event` with its producer, time and `MessagePosted`
+body). The hub keeps, per project (`<node>/<project>`), the newest 50 `MessagePosted` events and at most 256 KiB of them encoded,
+whichever is smaller, and at most 8 MiB over all projects (the oldest goes first; one message larger than 256 KiB alone is not kept).
+A message goes to the ring of `<producer>/<from_agent_id>`'s project when that is an agent the hub knows (the sender's own copy), else
+to the ring of `<producer>/<to>`'s project when that is one (a receiver's copy, each `#channel` copy), else to a ring that only the
+owner reads; the hub never resolves an already-qualified `from` to another machine's agent. The rings are memory only, folded from the
+events the hub applies, so a hub rebuilds them from its log at start. A window is sent the newest 50 it may see, then fewer until they
+encode to at most 256 KiB together: the owner every ring, a member or viewer only the copies placed by their sender in a granted
+project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
+forgotten machine recorded (they come back with the machine). Copies are sent as stored: the window pairs the two copies of a message
+between machines as it does live. A client folds them in as it folds a live `MessagePosted`, not by the position rule (their
+positions are not after the snapshot's), each position once, and ignores any other body. No capability: an older window ignores the
+field, an older hub sends none. These limits are hub constants, not policy.
 
 ### Notices, modes and models, context and cost (ADR-0058)
 
@@ -1194,6 +1210,24 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   passed the access check, also one the node then refuses (`task.dispatch_limited`, `limit`); one dispatch per task at a time follows from
   the claim. A command sent on a node's own control socket is not counted (it never reaches the hub).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.TaskDispatch*.*`, `agora.v1.TaskDispatched.*` and `schema/fixtures/task-dispatch/`.
+
+### A kept agent's counters (ADR-0104)
+
+One appended field; nothing published changed. No capability.
+
+- `AgentStarted.same_process` (8): this `AgentStarted` re-states an agent whose current process the node has announced before under the
+  same id: one it took up from the holder after its restart (ADR-0079, ADR-0093), or one a resync announcement re-states (ADR-0054,
+  ADR-0055, `Announce::Present` and `Announce::Restart`). It is false for a new start, a resume (ADR-0060) and a restart after a crash.
+- **The hub** keeps, when it is set and the agent is already listed from that producer (the key is `<producer>/<agent>`), what it summed
+  for the agent: `input_tokens`, `output_tokens`, `model`, the context level and size, and its own reported cost and currency
+  (`AgentSnapshot` fields 18-21). Everything else starts again as for any start: the session's options, config, commands and always
+  answers (the node re-states them right after), its session id, state and interruption. Usage reported after it adds to the kept
+  totals, so `usage.report` keeps the agent's earlier usage too. A view rebuilt from the log folds the same totals.
+- **The window** folds it the same way: the agent's tokens, context level, own cost and the time it saw the agent start stay.
+- **Compatibility.** An older hub ignores the field and starts the counters again from 0, as before. An older node never sets it, so a
+  newer hub does the same. The window is served by its hub. The terminal client draws the hub's snapshot, which carries the kept totals.
+- Golden fixture: `schema/fixtures/same-process/` (`crates/agora-protocol/tests/same_process.rs`); the published `AgentStarted`
+  fixture is unchanged and reads as `same_process` false.
 
 ### Allowing a structured agent always for its session (ADR-0101)
 Schema step approved with ADR-0101 by the maintainer on 2026-11-22. Handled by every node of this build, which advertises `approval.always`;

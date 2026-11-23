@@ -13,6 +13,7 @@ import { closeAsk, isCloseCommand } from '../net/closeAgent';
 import { ChatActionsContext, type PromptResult, type PromptSend } from './chatActions';
 import { IME_GRACE_MS, sendsOnEnter } from './composer';
 import { Icon } from './Icon';
+import { PinnedShort, SHORT_PANE_PX, useBelow } from './ApprovalRequest';
 import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
 import { SessionBar } from './SessionBar';
@@ -62,6 +63,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const log = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLTextAreaElement>(null);
   const pinned = useRef<HTMLDivElement>(null);
+  // #1082: a pane too short for a request card and the conversation draws what it waits on as one row (`PinnedShort`).
+  const pane = useRef<HTMLDivElement>(null);
+  const short = useBelow(pane, SHORT_PANE_PX, 'height');
   const caretTo = useRef<number | undefined>(undefined);
   const seen = useRef(0);
   // Older entries are being drawn above the reader: the height before, and the diff to scroll to once they are in.
@@ -247,7 +251,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, arrived, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-0">
+    <div ref={pane} className="flex h-full min-h-0 flex-col bg-surface-0">
       {/* Keyed by the agent: another agent on screen gets a fresh bar, so nothing left open carries over; usage updates keep it. */}
       <div className="flex-none border-b border-line bg-surface-1 px-4 py-2" data-chat-header>
         <SessionBar key={agent.id} part="status" agentKey={agent.id} session={agent.session ?? NO_SESSION} startedMs={agent.startedMs} disabled={agent.closed} state={agent.closed ? undefined : agent.state} tokens={agent.tokens} />
@@ -277,7 +281,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         )}
       </div>
       <div className="flex flex-none flex-col gap-2 px-4 pt-2 pb-3.5">
-      {approvals && <div ref={pinned} tabIndex={-1} className="mx-auto max-h-[40vh] w-full max-w-195 overflow-y-auto outline-none" data-pinned-approvals>{approvals}</div>}
+      {approvals && <div ref={pinned} tabIndex={-1} className="mx-auto max-h-[40vh] w-full max-w-195 overflow-y-auto outline-none" data-pinned-approvals><PinnedShort.Provider value={short}>{approvals}</PinnedShort.Provider></div>}
       {queue.waiting.length > 0 && !agent.closed && (
         <div className="mx-auto flex w-full max-w-195 flex-col gap-1.5" data-queue>
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted">

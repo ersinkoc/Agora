@@ -148,7 +148,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <PolishGallery />
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       {/* ADR-0101: "Allow always" beside Allow and Deny, in the place of Allow when it is all the agent offers, and "Asks less". */}
-      <div data-always className="grid max-w-3xl gap-3">
+      <div data-always className="grid max-w-3xl grid-cols-1 gap-3">
         <div className="approvals"><ApprovalCard approval={demoAlwaysApproval} onResolve={() => {}} /><ApprovalCard approval={demoAlwaysOnlyApproval} onResolve={() => {}} /></div>
         <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
         <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
@@ -163,7 +163,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
       {/* Redesign PR 5: a start and a switch to act without asking as short cards with Review (a long prompt, settings, a start that
           would not ask, a switch, a pane narrower than 360 px), and the whole request as Review shows it. */}
-      <div data-start-cards className="grid max-w-3xl gap-3">
+      <div data-start-cards className="grid max-w-3xl grid-cols-1 gap-3">
         <div className="approvals">
           <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
           <ApprovalCard approval={demoStartSettingsApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />

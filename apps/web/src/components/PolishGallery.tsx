@@ -57,10 +57,15 @@ const quota: QuotaObs[] = [
 
 export function PolishGallery() {
   return (
-    <div data-polish className="grid gap-4">
+    <div data-polish className="grid grid-cols-1 gap-4">
       <div data-polish-chat="idle" className="h-[22rem] max-w-2xl"><PromptBox agent={chatAgent({})} source={idle} choose={async () => true} /></div>
       {/* Taller on a phone: the pinned request card is taller there, and the log above it still shows an entry whole. */}
       <div data-polish-chat="needs-you" className="h-[26rem] max-w-2xl max-md:h-[32rem]">
+        <PromptBox agent={chatAgent({ id: 'polish/needs', state: 'needs-you' })} source={asking} choose={async () => true} approvals={<ApprovalBanner approval={ask} onResolve={() => {}} pinned />} />
+      </div>
+      {/* #1082: a pane too short for the card and the conversation: the request is one row (Allow and Deny beside the whole ask where it
+          fits; on a phone the title and Review, which opens the card). A little taller on a phone, still short, so its log shows an entry. */}
+      <div data-polish-chat="short" className="h-[20rem] max-w-2xl max-md:h-[24rem]">
         <PromptBox agent={chatAgent({ id: 'polish/needs', state: 'needs-you' })} source={asking} choose={async () => true} approvals={<ApprovalBanner approval={ask} onResolve={() => {}} pinned />} />
       </div>
       <div data-polish-chat="acts-freely" className="h-[24rem] max-w-2xl"><PromptBox agent={chatAgent({ id: 'polish/free', session: session('bypassPermissions') })} source={free} choose={async () => true} /></div>

@@ -2319,6 +2319,207 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
     let _ = std::fs::remove_dir_all(&pick);
 }
 
+/// ADR-0049 Amendment A (#1049), with a real node: a member granted one of the machine's projects lists its folder and a folder in it,
+/// chooses one and starts an agent there (the project the machine answers for the folder is the one the grant names). Another project's
+/// folder, the home folder and a link inside the project that leads to the other project are refused for the person's role (the link
+/// after the machine followed it); the way up stops at the project's folder. The terminal client's picker opens there, at the project's
+/// folder from the member's own snapshot (#1086).
+#[test]
+fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine() {
+    use agora_hub::users::{Access, Role};
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED || cfg!(windows) {
+        return;
+    }
+    struct Member(Arc<Mutex<BTreeSet<String>>>);
+    impl ClientAuth for Member {
+        fn check(&self, token: &str) -> bool {
+            token == "client-token"
+        }
+        fn access(&self, token: &str) -> Option<Access> {
+            self.check(token).then(|| Access {
+                role: Role::Member,
+                user: "eda".into(),
+                projects: Some(self.0.lock().unwrap().clone()),
+                session: String::new(),
+            })
+        }
+    }
+    let granted = Arc::new(Mutex::new(BTreeSet::new()));
+    let mut hub = hubside("laptop");
+    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Member(Arc::clone(&granted)));
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("member-folder");
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    // Two projects of the machine; a link inside the member's project leads into the other one.
+    let pick = std::fs::canonicalize({
+        let p = tmp("member-folder-pick");
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    })
+    .unwrap();
+    for name in ["app", "other"] {
+        let repo = pick.join(name);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", name]);
+    }
+    agora_platform::link_dir(&pick.join("other"), &pick.join("app").join("out")).unwrap();
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![pick.join("app"), pick.join("other")],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    let project_of = |name: &str| {
+        let folder = pick.join(name).to_string_lossy().into_owned();
+        hub.state
+            .hub
+            .view()
+            .0
+            .checkouts
+            .values()
+            .find(|(_, _, path)| *path == folder)
+            .map(|(_, project, _)| project.clone())
+    };
+    wait("both projects in the hub", || {
+        project_of("app").is_some() && project_of("other").is_some()
+    });
+    let app_project = project_of("app").unwrap();
+    granted
+        .lock()
+        .unwrap()
+        .insert(format!("laptop/{app_project}"));
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    // #1086: the terminal client's folder picker opens where the member may look, from what the hub showed them: their project's
+    // folder on that machine (the other project is not in their snapshot), never the home folder.
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match session.next(Duration::from_millis(200)) {
+            Update::Snapshot(s) => break *s,
+            Update::Closed => panic!("the hub closed the member's connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    let roots = agora_tui::picker::project_roots(&snapshot, "laptop");
+    assert_eq!(roots, [pick.join("app").to_string_lossy().into_owned()]);
+    let mut nav = agora_tui::picker::Nav::projects(roots);
+    let agora_tui::picker::At::Folder(start) = nav.start() else {
+        panic!("one project opens in its folder")
+    };
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let sign = |op: &str, path: &str, kind: &str, project: &str| {
+        device
+            .authorize("laptop", op, path, kind, project, false, false, now())
+            .unwrap()
+    };
+    let app = pick.join("app").to_string_lossy().into_owned();
+    let listed = session
+        .list_folder("laptop", &start, sign("list", &start, "", ""))
+        .unwrap();
+    assert_eq!(listed.path, app);
+    assert_eq!(listed.parent, "", "no way up out of the project");
+    assert_eq!(nav.up(&listed), None, "the picker goes no higher either");
+    let names: Vec<&str> = listed.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["src"], "a link is never listed");
+    let src = agora_tui::picker::child(&listed.path, "src");
+    let inside = session
+        .list_folder("laptop", &src, sign("list", &src, "", ""))
+        .unwrap();
+    assert_eq!(inside.parent, app);
+    let refused =
+        |r: Result<agora_protocol::v1::DirectoryEntries, agora_protocol::v1::ErrorInfo>| {
+            let e = r.unwrap_err();
+            (e.code, e.params["action"].value.clone())
+        };
+    let forbidden = (
+        "auth.forbidden".to_string(),
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "DirectoryList".into(),
+        )),
+    );
+    let out = agora_tui::picker::child(&app, "out");
+    let other = pick.join("other").to_string_lossy().into_owned();
+    for path in [out.as_str(), other.as_str(), ""] {
+        assert_eq!(
+            refused(session.list_folder("laptop", path, sign("list", path, "", ""))),
+            forbidden,
+            "{path:?}"
+        );
+    }
+    // Chosen: the machine names the folder's project as the grant does, and the agent starts there.
+    let info = session
+        .inspect_folder("laptop", &src, sign("inspect", &src, "", ""))
+        .unwrap();
+    assert_eq!(
+        (info.path.as_str(), info.project_id.as_str()),
+        (src.as_str(), app_project.as_str())
+    );
+    let launch = |path: &str, project: &str| agora_protocol::v1::AgentLaunch {
+        path: path.into(),
+        project_id: project.into(),
+        kind: "shell".into(),
+        separate_worktree: false,
+        authorization: Some(sign("launch", path, "shell", project)),
+        accept_identity_change: false,
+        launch_options: Vec::new(),
+        confirmed_launch_options: Vec::new(),
+        settings: Vec::new(),
+    };
+    let other_project = project_of("other").unwrap();
+    assert_eq!(
+        session.launch_in("laptop", launch(&other, &other_project)),
+        Err("auth.forbidden".to_string())
+    );
+    let agent = session
+        .launch_in("laptop", launch(&info.path, &info.project_id))
+        .unwrap();
+    wait("the agent to appear in the hub", || {
+        hub.state.hub.view().0.agents.contains_key(&agent)
+    });
+    drop(node);
+    let _ = std::fs::remove_dir_all(&pick);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR-0066: launch settings (model, effort) through a real hub and node. A launch the user's device signed over its settings starts with
 /// exactly them; a hub that adds, changes or drops one (here: a client that sends other settings than it signed) gets
 /// `approval.signature_invalid` and nothing starts; unknown or invalid ones are refused before anything starts. An agent's `agent_start`
@@ -3048,4 +3249,133 @@ fn a_message_between_agents_on_one_machine_reaches_the_hub_and_a_window_on_its_o
         }
     });
     assert!(seen, "the window did not get the message live within 2 s");
+}
+
+/// #1020, ADR-0103: a message sent before a window opens is in the window's snapshot. Agents message each other with no window open;
+/// a window that opens afterwards gets the stored message, with its position, producer and time, in `Snapshot.recent_messages`.
+#[test]
+fn a_window_that_opens_after_agents_messaged_each_other_gets_the_message_in_its_snapshot() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_hub::store::EventStore;
+    use agora_mesh::broker::AgentInfo;
+    use agora_protocol::frame::{kinds, STREAM_EVENTS};
+    use agora_protocol::v1::event::Body;
+    use prost::Message as _;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("history-message");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "alpha".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _up = spawn(Arc::clone(&node.events), link).unwrap();
+    let register = |id: &str| {
+        node.mesh
+            .register(AgentInfo {
+                id: AgentId::new(id),
+                kind: "shell".into(),
+                node: "alpha".into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap()
+    };
+    let a_sock = register("a1");
+    let _b_sock = register("a2");
+    wait("the node to be online", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("alpha")
+            .is_some_and(|x| x.online)
+    });
+    let mut conn = agora_platform::local_connect(&a_sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let sent = mcp(
+        &mut conn,
+        2,
+        "tools/call",
+        serde_json::json!({"name": "send_message", "arguments": {"to": "a2", "body": "before you came"}}),
+    );
+    assert_ne!(sent["isError"], true, "{sent}");
+    // Stored by the hub before any window is open.
+    let stored = || {
+        hub.state
+            .hub
+            .store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .into_iter()
+            .find_map(|e| {
+                let ev = agora_protocol::v1::Event::decode(e.payload.as_slice()).ok()?;
+                matches!(&ev.body, Some(Body::MessagePosted(m)) if m.body == "before you came")
+                    .then_some(e.pos)
+            })
+    };
+    wait("the hub to store the message", || stored().is_some());
+    let at = stored().unwrap();
+    // Now a window opens.
+    let mut window = hub.client(addr);
+    let snapshot = hub.rt.block_on(async {
+        window
+            .send(&agora_protocol::Frame {
+                stream_id: STREAM_EVENTS,
+                kind: kinds::SUBSCRIBE,
+                seq: None,
+                payload: agora_protocol::v1::Subscribe::default().encode_to_vec(),
+            })
+            .await
+            .unwrap();
+        loop {
+            let f = next_frame(&mut window).await;
+            if f.kind == kinds::SNAPSHOT {
+                break agora_protocol::v1::Snapshot::decode(f.payload.as_slice()).unwrap();
+            }
+        }
+    });
+    let got: Vec<_> = snapshot
+        .recent_messages
+        .iter()
+        .filter_map(|p| {
+            let e = p.event.as_ref()?;
+            match &e.body {
+                Some(Body::MessagePosted(m)) => Some((
+                    p.pos,
+                    e.producer_id.as_str(),
+                    m.from_agent_id.as_str(),
+                    m.to.as_str(),
+                    m.body.as_str(),
+                    e.at_ms > 0,
+                )),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [(at, "alpha", "a1", "a2", "before you came", true)],
+        "the window's snapshot holds the message sent before it opened"
+    );
+    assert!(at <= snapshot.pos);
 }
