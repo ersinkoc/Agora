@@ -202,6 +202,7 @@ pub fn register(
     client_data: &[u8],
     now_ms: u64,
     user: Option<&str>,
+    vouched: bool,
 ) -> Result<(), PasskeyError> {
     let id_ok = !id.is_empty()
         && id.len() <= 1024
@@ -224,21 +225,27 @@ pub fn register(
     let Some(key) = key else {
         return Err(PasskeyError::Refused);
     };
-    let conn = store.lock()?;
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM passkeys", [], |r| r.get(0))?;
+    let mut conn = store.lock()?;
+    // The passkey and its vouch (whether the screen password was given or not needed, `crate::password::vouch_passkey`) are one
+    // transaction: a passkey is never kept without the record a password change reads (Codex review of #1027).
+    let tx = crate::store::write_tx(&mut conn)?;
+    let n: i64 = tx.query_row("SELECT COUNT(*) FROM passkeys", [], |r| r.get(0))?;
     if n >= MAX_PASSKEYS {
         return Err(PasskeyError::Refused);
     }
-    let added = conn.execute(
+    let added = tx.execute(
         "INSERT OR IGNORE INTO passkeys (id, public_key, sign_count, created_ms, user_id) VALUES (?1, ?2, 0, ?3, ?4)",
         params![id, key, i64::try_from(now_ms).unwrap_or(i64::MAX), user],
     )?;
     // An id that already exists is not replaced: nobody can swap the key of a known passkey.
-    if added == 1 {
-        Ok(())
-    } else {
-        Err(PasskeyError::Refused)
+    if added != 1 {
+        return Err(PasskeyError::Refused);
     }
+    // The id is new, so a vouch left under it by a removed passkey is forgotten unless this one is vouched for itself.
+    crate::password::set_vouch_in(&tx, id, vouched)
+        .map_err(|e| PasskeyError::Store(format!("{e:?}")))?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Ids of the passkeys the browser may offer.
@@ -371,7 +378,7 @@ mod tests {
     fn enroll(store: &SqliteStore, ch: &Challenges, d: &Device, id: &str) {
         let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        register(store, ch, HOST, id, &d.spki(), &cd, 1, None).unwrap();
+        register(store, ch, HOST, id, &d.spki(), &cd, 1, None, true).unwrap();
     }
 
     fn attempt(
@@ -495,10 +502,10 @@ mod tests {
         let other = Device::new();
         let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        assert!(register(&store, &ch, HOST, "c", &other.spki(), &cd, 1, None).is_err());
+        assert!(register(&store, &ch, HOST, "c", &other.spki(), &cd, 1, None, true).is_err());
         let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        assert!(register(&store, &ch, HOST, "d", b"not a key", &cd, 1, None).is_err());
+        assert!(register(&store, &ch, HOST, "d", b"not a key", &cd, 1, None, true).is_err());
     }
 
     /// A passkey belongs to the person whose session added it: signing in with it gives that person's session, never the owner's.

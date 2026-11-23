@@ -754,6 +754,327 @@ fn a_key_that_comes_too_soon_after_the_question_is_not_an_answer() {
     nothing_stored(&machine);
 }
 
+/// An owner's window on the hub (the web window and `agora tui` use the same owner commands and cards).
+fn window(hub: &Hub) -> agora_tui::client::Session {
+    let token = std::fs::read_to_string(hub.dir.join("token")).unwrap();
+    let addr = agora_tui::client::Hub {
+        addr: format!("localhost:{}", hub.port),
+        ca_pem: std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap(),
+    };
+    agora_tui::client::Session::connect(&addr, token.trim()).unwrap()
+}
+
+/// The window's card for `name`.
+fn window_card(
+    w: &mut agora_tui::client::Session,
+    name: &str,
+) -> agora_protocol::v1::PairRequested {
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        let _ = w.next(Duration::from_millis(250));
+        for n in w.take_pair_notes() {
+            if let agora_tui::client::PairNote::Requested(c) = n {
+                if c.name == name {
+                    return c;
+                }
+            }
+        }
+    }
+    panic!("no card for {name:?} in the window");
+}
+
+/// #942 (RM-07): the owner answers in a window while `agora pair open` is asking about the same machine. The terminal's question
+/// ends and says it was answered in a window: a deny leaves the screen waiting for the next machine with the hub still open; an
+/// approval closes the hub to new machines (one machine per opening, whoever approves) and the screen ends.
+#[test]
+fn an_answer_from_a_window_ends_the_question_at_the_terminal() {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    let root = tmp("window");
+    let hub = hub(&root);
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut screen = hub.open(&owner_home);
+    let mut w = window(&hub);
+    let wait = Duration::from_secs(5);
+    let open = |w: &mut agora_tui::client::Session| match w
+        .command_info("", Cmd::PairStatus(v1::PairStatus {}), wait)
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::PairStatus(s)) => s.open,
+        other => panic!("{other:?}"),
+    };
+
+    // A deny from the window: the terminal stops asking about that machine and waits for the next; the hub stays open.
+    let first = root.join("first");
+    let mut m = join(
+        &first,
+        &format!("localhost:{}", hub.port),
+        &["--id", "rm-join2"],
+    );
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    screen.wait_for("[y/N]");
+    let card = window_card(&mut w, "rm-join2");
+    w.command_info(
+        "",
+        Cmd::PairDeny(v1::PairDeny {
+            pair_id: card.pair_id,
+        }),
+        wait,
+    )
+    .unwrap();
+    let (ok, text) = m.finish();
+    assert!(!ok && text.contains("The owner said no"), "{text}");
+    screen.wait_for("Answered in a window: \"rm-join2\" was denied");
+    assert!(open(&mut w), "a deny closed the hub");
+
+    // An approval from the window: the machine joins, the terminal's question ends, and the hub is closed to new machines again.
+    let second = root.join("second");
+    let mut m = join(
+        &second,
+        &format!("localhost:{}", hub.port),
+        &["--id", "rm-join3"],
+    );
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    screen.wait_for("[y/N]");
+    let card = window_card(&mut w, "rm-join3");
+    w.command_info(
+        "",
+        Cmd::PairApprove(v1::PairApprove {
+            pair_id: card.pair_id,
+            replace: false,
+        }),
+        wait,
+    )
+    .unwrap();
+    let (ok, joined) = m.finish();
+    assert!(
+        ok && joined.contains("Joined. This machine is \"rm-join3\""),
+        "{joined}"
+    );
+    screen.wait_for("Answered in a window: \"rm-join3\" was approved");
+    let (ok, text) = screen.finish();
+    assert!(ok, "{text}");
+    assert!(text.contains("closed to new machines again"), "{text}");
+    assert!(
+        !open(&mut w),
+        "the hub stayed open after the window approved"
+    );
+    let status = hub.pair(&owner_home, &["status"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("Closed"),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+/// The owner's screen asking about machine "rm-a" while machine "rm-b" waits its turn; the window holds both cards.
+struct TwoWaiting {
+    _hub: Hub,
+    screen: Screen,
+    _a: Live,
+    b: Live,
+    b_home: PathBuf,
+    window: agora_tui::client::Session,
+    card_a: agora_protocol::v1::PairRequested,
+}
+
+fn two_waiting(root: &Path) -> TwoWaiting {
+    let hub = hub(root);
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut screen = hub.open(&owner_home);
+    let mut w = window(&hub);
+    let addr = format!("localhost:{}", hub.port);
+    let mut a = join(&root.join("a"), &addr, &["--id", "rm-a"]);
+    a.wait_for("Number ");
+    screen.wait_for("\"rm-a\"");
+    screen.wait_for("[y/N]");
+    let b_home = root.join("b");
+    let mut b = join(&b_home, &addr, &["--id", "rm-b"]);
+    b.wait_for("Number ");
+    let card_a = window_card(&mut w, "rm-a");
+    window_card(&mut w, "rm-b");
+    TwoWaiting {
+        _hub: hub,
+        screen,
+        _a: a,
+        b,
+        b_home,
+        window: w,
+        card_a,
+    }
+}
+
+/// #942 Codex review: an `agora pair open` that falls behind (paused here) while the owner approves its machine in a window and then
+/// opens a new round from that window must not close the new round when it catches up: it closes only the opening it made itself, and
+/// on a hub that closed itself at the approval it closes nothing. It says the hub was opened again elsewhere and leaves it so.
+#[cfg(unix)]
+#[test]
+fn a_terminal_that_falls_behind_never_closes_a_round_opened_again_in_a_window() {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    let root = tmp("behind");
+    let TwoWaiting {
+        _hub,
+        screen,
+        _a,
+        b: _b,
+        window: mut w,
+        card_a,
+        ..
+    } = two_waiting(&root);
+    let wait = Duration::from_secs(5);
+    let pid = screen.pty.pid().to_string();
+    let signal = |sig: &str| {
+        assert!(Command::new("kill")
+            .args([sig, pid.as_str()])
+            .status()
+            .unwrap()
+            .success());
+    };
+    let status = |w: &mut agora_tui::client::Session| match w
+        .command_info("", Cmd::PairStatus(v1::PairStatus {}), wait)
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::PairStatus(s)) => s,
+        other => panic!("{other:?}"),
+    };
+    let first = status(&mut w);
+    assert!(first.open);
+    // The terminal stops while it asks about "rm-a"; meanwhile the window approves "rm-a" and opens a new round.
+    signal("-STOP");
+    w.command_info(
+        "",
+        Cmd::PairApprove(v1::PairApprove {
+            pair_id: card_a.pair_id.clone(),
+            replace: false,
+        }),
+        wait,
+    )
+    .unwrap();
+    assert!(!status(&mut w).open, "the approval did not close the hub");
+    std::thread::sleep(Duration::from_millis(20));
+    w.command_info("", Cmd::PairOpen(v1::PairOpen {}), wait)
+        .unwrap();
+    let round = status(&mut w);
+    assert!(round.open && round.closes_at_ms != first.closes_at_ms);
+    signal("-CONT");
+    let (ok, text) = screen.finish();
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("Answered in a window: \"rm-a\" was approved"),
+        "{text}"
+    );
+    let after = status(&mut w);
+    assert!(
+        after.open && after.closes_at_ms == round.closes_at_ms,
+        "the terminal closed the round the window opened: {after:?}"
+    );
+    assert!(
+        text.contains("opened for new machines again somewhere else"),
+        "{text}"
+    );
+    assert!(!text.contains("closed to new machines again"), "{text}");
+}
+
+fn deny_in_window(w: &mut agora_tui::client::Session, card: &agora_protocol::v1::PairRequested) {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    w.command_info(
+        "",
+        Cmd::PairDeny(v1::PairDeny {
+            pair_id: card.pair_id.clone(),
+        }),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+/// #942 review: when the question moves to another machine without a keystroke (the one asked about was answered in a window), a
+/// `y` meant for the first one never approves the next. The next card is set apart by a line and shows its own name and number; keys
+/// typed just before the move and within two seconds after it are thrown away (the wait starts again, and nothing is denied).
+#[test]
+fn a_key_meant_for_a_request_answered_in_a_window_never_approves_the_next_machine() {
+    let root = tmp("moved");
+    let TwoWaiting {
+        _hub,
+        mut screen,
+        _a,
+        mut b,
+        b_home,
+        window: mut w,
+        card_a,
+    } = two_waiting(&root);
+    // The owner had read "rm-a" and is typing yes when the window denies it: the key lands on "rm-a" or on the next question.
+    std::thread::sleep(Duration::from_millis(1500));
+    deny_in_window(&mut w, &card_a);
+    screen.pty.write_input(b"y\r").unwrap();
+    // The next question is set apart and names the next machine with its number.
+    screen.wait_for("A different machine is asking now");
+    let card = screen.wait_for("[y/N]");
+    assert!(
+        card.contains("\"rm-b\"") && card.contains(". Number "),
+        "{card}"
+    );
+    // A yes typed soon after it appeared (later than the 700 ms an ordinary question asks for, sooner than two seconds) is thrown
+    // away, again and again.
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(1200));
+        screen.pty.write_input(b"y\r").unwrap();
+        screen.wait_for("[y/N]");
+    }
+    assert!(
+        screen
+            .seen
+            .contains("That key came before you could read the new request"),
+        "{}",
+        screen.seen
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        b.child.0.try_wait().unwrap().is_none(),
+        "the next machine was answered by a key meant for the one before: {:#?}",
+        b.seen
+    );
+    assert!(!screen.seen.contains("Approved."), "{}", screen.seen);
+    nothing_stored(&b_home);
+}
+
+/// #942 review: after the longer wait, a yes typed for the next machine approves it, and the hub closes as after any approval.
+#[test]
+fn after_the_wait_a_yes_approves_the_machine_the_question_moved_to() {
+    let root = tmp("movedyes");
+    let TwoWaiting {
+        _hub,
+        mut screen,
+        _a,
+        b,
+        window: mut w,
+        card_a,
+        ..
+    } = two_waiting(&root);
+    deny_in_window(&mut w, &card_a);
+    screen.wait_for("Answered in a window: \"rm-a\" was denied");
+    screen.wait_for("A different machine is asking now");
+    let card = screen.wait_for("[y/N]");
+    assert!(card.contains("\"rm-b\""), "{card}");
+    std::thread::sleep(Duration::from_millis(2500));
+    screen.pty.write_input(b"y\r").unwrap();
+    let (ok, joined) = b.finish();
+    assert!(
+        ok && joined.contains("Joined. This machine is \"rm-b\""),
+        "{joined}"
+    );
+    let (ok, text) = screen.finish();
+    assert!(
+        ok && text.contains("Approved. \"rm-b\" is joining"),
+        "{text}"
+    );
+    assert!(text.contains("closed to new machines again"), "{text}");
+}
+
 /// Audit F890: `agora join` looks at "already joined" before it waits for the owner, and again before it stores: a link this machine
 /// got meanwhile (`agora` enrolling with its own hub, `agora node enroll`, another join) is kept unless `--replace` was given. Each
 /// join has a hub of its own (a hub limits pairing attempts per address per minute); the link is planted only after the number is
