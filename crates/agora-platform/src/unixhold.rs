@@ -973,8 +973,10 @@ mod tests {
             !hung_up(e.as_raw_fd()).unwrap(),
             "only this end's writing shut"
         );
-        e.shutdown(std::net::Shutdown::Both).unwrap();
-        assert!(hung_up(e.as_raw_fd()).unwrap(), "this end shut both ways");
+        // A fresh pair: macOS refuses a second shutdown of a half-shut socket (`ENOTCONN`).
+        let (g, _h) = UnixStream::pair().unwrap();
+        g.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(hung_up(g.as_raw_fd()).unwrap(), "this end shut both ways");
     }
 
     #[test]
