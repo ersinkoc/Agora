@@ -408,6 +408,51 @@ describe('request cards: an answer in flight, by request (Codex re-review of #10
   });
 });
 
+describe('request cards: holds across a refreshed list, and an acknowledgement restarts the dwell (Codex on d170a6df)', () => {
+  type Resolve = (a: ApprovalModel, ok: boolean) => unknown;
+  const fleet = [agent('a', { state: 'needs-you' }), agent('b', { state: 'needs-you' })];
+  const render = (approvals: ApprovalModel[], onResolve: Resolve) =>
+    act(() => root.render(<AttentionQueue items={attentionList(approvals, fleet)} machines={[]} now={NOW} onOpen={() => {}} onResolve={onResolve as never} />));
+  const allowFor = (name: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="Allow: ${name}"]`) as HTMLButtonElement;
+  const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
+
+  it('keeps an answer on its way held when the list drops its request and brings it back', () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    const onResolve = (x: ApprovalModel) => { sent.push(x.id); return new Promise(() => {}); };
+    const a = ask('r1', 'a');
+    const b = ask('r2', 'b');
+    render([a, b], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · a').click());
+    render([b], onResolve);
+    render([a, b], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    expect(allowFor('claude · a').getAttribute('aria-disabled')).toBe('true');
+    act(() => allowFor('claude · a').click());
+    expect(sent).toEqual(['r1']);
+  });
+  it('starts the dwell again when an acknowledgement adds "Answer sent" and Review to a card, so B is not pressed by accident', async () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    let settle: (v: boolean) => void = () => {};
+    const onResolve = (x: ApprovalModel) => { sent.push(x.id); return x.id === 'r1' ? new Promise<boolean>((r) => { settle = r; }) : undefined; };
+    render([ask('r1', 'a'), ask('r2', 'b')], onResolve);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · a').click());
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    expect(allowFor('claude · b').hasAttribute('aria-disabled')).toBe(false); // B is armed while A's answer is on its way
+    settle(true);
+    await flush();
+    expect(host.textContent).toContain(t('attention-sent'));
+    act(() => allowFor('claude · b').click());
+    expect(sent).toEqual(['r1']);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => allowFor('claude · b').click());
+    expect(sent).toEqual(['r1', 'r2']);
+  });
+});
+
 describe('Group by is the shared segmented control', () => {
   it('is a radio group named Group by, chosen with a click or the arrow keys', () => {
     const seen: string[] = [];

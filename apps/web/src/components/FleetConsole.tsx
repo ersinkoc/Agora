@@ -134,9 +134,23 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       agentId: agent?.id,
     };
   };
+  // Answers, by request (its id: stable across layouts, focus and the dwell). Two sets, each with its own way out:
+  // - `inFlight`: from the accepted press until that answer's own callback settles. Nothing else releases it: not a new layout, not the
+  //   request leaving the list and coming back, not the person coming back to the window.
+  // - `sent`: an answer that went (the window signed it and the machine took it). The card says "Answer sent" and never asks for a second
+  //   answer while the request is listed (T44: answered once; a card that stays is the list catching up). Forgotten when it leaves the list.
+  // A failed answer (`false`, or a promise that rejects) is in neither, so the request is answerable again after a fresh dwell. Each card's
+  // status is part of the layout below, so an answer settling (a status line and a Review button appearing) restarts the queue's dwell.
+  // Other requests stay answerable meanwhile. The click handler and the buttons ask the same question, `canAnswer`.
+  const inFlight = useRef(new Set<string>());
+  const sent = useRef(new Set<string>());
+  const shownIds = useRef(new Set<string>());
+  shownIds.current = new Set(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])));
+  for (const id of sent.current) if (!shownIds.current.has(id)) sent.current.delete(id);
+  const statusOf = (id: string): string => (sent.current.has(id) ? 'sent' : inFlight.current.has(id) ? 'held' : 'open');
   const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
     ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
-    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
+    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail, statusOf(it.approval.id)] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
   const layout = JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
     : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
 
@@ -162,33 +176,24 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     return () => clearTimeout(h);
   }, [layout, epoch]);
 
-  // Answers, by request (its id: stable across layouts, focus and the dwell). A request is held from the accepted press: while its answer is
-  // on the way, and, once it went (the window signed it and the machine took it), for as long as the request is on the list, so the card
-  // says "Answer sent" and never asks for a second answer (T44: answered once; a card that stays is the list catching up). Only a failed
-  // answer (`false`, or a promise that rejects) frees it, with a fresh dwell; a new layout or the person coming back never does. Other
-  // requests stay answerable meanwhile. The click handler and the buttons ask the same question, `canAnswer`.
-  const held = useRef(new Set<string>());
-  const sent = useRef(new Set<string>());
-  const shownIds = useRef(new Set<string>());
-  shownIds.current = new Set(items.flatMap((it) => (it.kind === 'approval' ? [it.approval.id] : [])));
-  // A request that left the list is forgotten (its id is never reused for another request).
-  for (const id of held.current) if (!shownIds.current.has(id)) { held.current.delete(id); sent.current.delete(id); }
-  const canAnswer = (id: string) => !stale && ready.current === layout && !held.current.has(id);
-  // The guard is here as well as on the buttons: a press during the dwell, on a held request, or from an older drawing sends nothing.
+  const canAnswer = (id: string) => !stale && ready.current === layout && !inFlight.current.has(id) && !sent.current.has(id);
+  // The guard is here as well as on the buttons: a press during the dwell, on a held or answered request, or from an older drawing sends nothing.
   const answer = (a: ApprovalModel, ok: boolean) => {
     if (!canAnswer(a.id)) return;
-    held.current.add(a.id);
+    inFlight.current.add(a.id);
     redraw((n) => n + 1);
     const done = (v: unknown) => {
-      if (v !== false) { if (held.current.has(a.id)) { sent.current.add(a.id); redraw((n) => n + 1); } return; }
-      if (!held.current.delete(a.id)) return;
-      if (shownIds.current.has(a.id)) restart(); else redraw((n) => n + 1);
+      inFlight.current.delete(a.id);
+      if (v !== false && shownIds.current.has(a.id)) sent.current.add(a.id);
+      // Either way what the card shows changed, and the dwell starts again (also for a failure that came back before any redraw).
+      restart();
     };
     let result: unknown;
     try { result = onResolve?.(a, ok); } catch { result = false; }
     if (result && typeof (result as PromiseLike<unknown>).then === 'function') (result as PromiseLike<unknown>).then(done, () => done(false));
     else done(result);
   };
+
 
   // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.
   const reviewPair = (key: string, id: string) => {
