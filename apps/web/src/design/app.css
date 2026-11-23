@@ -311,6 +311,13 @@
   /* The widget kit's controls; the switch keeps its look and grows an invisible target around it. */
   .kit-btn, .kit-row, .kit-seg__item, button.kit-stat { min-height: var(--tap); }
   .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
+  /* A small control among other content that keeps its drawn size (a chat's file chip, a link in a sentence, an underlined text button):
+     the same invisible target, centred on it, grown to --tap in each direction it falls short. It never moves the text around it. */
+  .tap-target { position: relative; }
+  .tap-target::before { content: ''; position: absolute; inset-block: min(0px, calc((100% - var(--tap)) / 2)); inset-inline: min(0px, calc((100% - var(--tap)) / 2)); }
+  /* A link in a sentence may wrap onto two lines, where one box around it would be wrong: each of its pieces grows by padding above and
+     below instead (padding on an inline never changes the height of a line), drawn above the text around it. */
+  .tap-inline { position: relative; padding-block: calc(var(--tap) / 2 - 0.5em); }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }

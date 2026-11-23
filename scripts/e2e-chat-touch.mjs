@@ -137,14 +137,30 @@ for (const scheme of ['dark', 'light']) {
 
   if (shots) {
     mkdirSync(shots, { recursive: true });
+    // The gallery draws everything twice, in its dark and its light panel: each theme's shots come from its own panel.
     for (const [name, sel] of [['files', '[data-files-changed]'], ['link', '[role=log] a[href]']]) {
-      const el = page.locator(sel).first();
-      await el.scrollIntoViewIfNeeded();
-      await page.evaluate((s) => document.querySelector(s).scrollIntoView({ block: 'center' }), sel);
+      await page.evaluate((s) => document.querySelector(s).scrollIntoView({ block: 'center' }), `.theme-panel[data-theme=${scheme}] ${sel}`);
       await page.waitForTimeout(100);
       await page.screenshot({ path: join(shots, `chat-touch-${name}-${scheme}.png`) });
     }
   }
+  await ctx.close();
+}
+// A link in the last row of a table in a reply (the gallery's table has none, so one of its links is copied there): its hit area reaches
+// past the row, and that must not make the table scroll up and down (it may reach past the table's box, which clips it).
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce' });
+  const page = await ctx.newPage();
+  await page.goto(`${base}#/gallery`);
+  await page.waitForSelector('[data-files-changed]');
+  await (await ctx.newCDPSession(page)).send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const extra = await page.evaluate(() => {
+    const box = document.querySelector('[role=log] .overflow-x-auto');
+    box.querySelector('tr:last-child td:last-child').append(' ', document.querySelector('[role=log] a[href]').cloneNode(true));
+    const y = getComputedStyle(box).overflowY;
+    return y === 'hidden' || y === 'clip' ? 0 : box.scrollHeight - box.clientHeight;
+  });
+  check(extra === 0, `a link in a table's last row does not make the table scroll up and down (${extra} px)`);
   await ctx.close();
 }
 await browser.close();
