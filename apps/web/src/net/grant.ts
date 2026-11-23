@@ -23,7 +23,7 @@ export function commandName(key: string): string {
 }
 
 // What the dialog says it allows (#810): one kind per refused command, so the question is exactly what gets signed.
-export type GrantKind = 'typing' | 'prompt' | 'stop' | 'interrupt' | 'settings' | 'resize' | 'start' | 'task' | 'other';
+export type GrantKind = 'typing' | 'prompt' | 'stop' | 'interrupt' | 'settings' | 'resize' | 'watch' | 'start' | 'task' | 'other';
 
 export interface GrantAsk {
   scope: string;
@@ -40,6 +40,9 @@ const AGENT_KINDS: { [key: string]: GrantKind | undefined } = {
   agentStop: 'stop',
   terminalInput: 'typing',
   terminalResize: 'resize',
+  // Watching a terminal or following a conversation names its agent: a grant for that agent, not for the machine.
+  terminalSubscribe: 'watch',
+  chatSubscribe: 'watch',
   // ADR-0095: giving a board task claims it for one agent and prompts that agent: a grant for that agent, not for the machine.
   taskDispatch: 'task',
 };
