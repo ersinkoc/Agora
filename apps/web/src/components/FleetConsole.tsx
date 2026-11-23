@@ -22,6 +22,9 @@ import { PairRequest } from './PairRequest';
 import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
+// How long a card that was answered keeps its buttons off while it is still on the list (the answer may have been lost, or the machine
+// refused it). Then it re-arms with a fresh dwell; an answer whose promise has not settled is never joined by a second one.
+export const ANSWER_REARM_MS = 5_000;
 export type LinkState = 'connecting' | 'live' | 'offline';
 
 // What one filter chip says, in the state words the rest of the window uses.
@@ -77,7 +80,7 @@ interface RowModel {
   project?: string;
   ask: string;
   inline: boolean; // Allow and Deny are on the card
-  when?: string; // "Asked 3 minutes ago", when the queue shows it
+  when?: string; // "Asked 3 minutes ago", when the queue shows it (drawn in a box of its own width: not part of the dwell's identity)
   action: 'answer' | 'agent' | 'panel' | 'none';
   agentId?: string;
 }
@@ -90,7 +93,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   machines: readonly MachineModel[];
   now: number;
   onOpen: (agentId: string) => void;
-  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  // What it returns says how the answer went: `false` (or a promise of it, or one that rejects) is a failed answer.
+  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void | boolean | PromiseLike<void | boolean>;
   // Where a request is read in full when this window does not list its agent (so there is no agent to open).
   onReview?: () => void;
   // The link is not live: an answer cannot be signed to a machine through it, so Allow and Deny wait, with the reason shown.
@@ -135,14 +139,15 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   };
   const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
     ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
-    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail] : '', model(it, inlineOk)]));
+    : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
   const layout = JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
     : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
 
   // Readiness is a ref, checked and used up in the click handler itself, so it is right even before React has drawn the change: `ready` holds
   // the layout it was earned for, and each timer only sets it for the generation it was started in. A new layout (seen in render), the
   // person coming back to the window (focus, or the tab shown again) and the link changing all clear it at once and start a new generation.
-  // An answer uses it up: one answer per card, and both its buttons stay off until the list changes. (The state below only redraws.)
+  // An answer uses it up: one answer at a time, and the buttons stay off until the list changes, or until the answer failed, or until
+  // ANSWER_REARM_MS passed with the card still there and the answer settled; then a fresh dwell. (The state below only redraws.)
   const ready = useRef<string | undefined>(undefined);
   const generation = useRef(0);
   const seenLayout = useRef(layout);
@@ -163,12 +168,35 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     return () => clearTimeout(h);
   }, [layout, epoch]);
   const live = ready.current === layout && answered !== layout && !stale;
+  const answerToken = useRef(0);
+  const rearmTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(rearmTimer.current), []);
   // The guard is here, not only on the button: a press during the dwell, a second press and a press from an older drawing send nothing.
   const answer = (a: ApprovalModel, ok: boolean) => {
     if (stale || ready.current !== layout) return;
     ready.current = undefined;
     setAnswered(layout);
-    onResolve?.(a, ok);
+    const token = ++answerToken.current;
+    const at = layout;
+    let settled = false;
+    let failed = false;
+    let waited = false;
+    // Only the latest answer re-arms, and only while the list is as it was (a list that changed has started its own dwell).
+    const rearm = () => {
+      if (!settled || !(failed || waited) || answerToken.current !== token || seenLayout.current !== at) return;
+      answerToken.current += 1;
+      ready.current = undefined;
+      generation.current += 1;
+      setAnswered(undefined);
+      setEpoch((n) => n + 1);
+    };
+    clearTimeout(rearmTimer.current);
+    rearmTimer.current = setTimeout(() => { waited = true; rearm(); }, ANSWER_REARM_MS);
+    const done = (v: unknown) => { settled = true; failed = v === false; rearm(); };
+    let result: unknown;
+    try { result = onResolve?.(a, ok); } catch { result = false; }
+    if (result && typeof (result as PromiseLike<unknown>).then === 'function') (result as PromiseLike<unknown>).then(done, () => done(false));
+    else done(result);
   };
 
   // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.

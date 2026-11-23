@@ -261,6 +261,89 @@ describe('request cards: the dwell after Codex review of #1028 (T44)', () => {
   });
 });
 
+describe('request cards: re-arming and the clock (merger review of #1028)', () => {
+  const button = (name: string) => [...host.querySelectorAll('button')].find((b) => b.textContent === name) as HTMLButtonElement;
+  type Resolve = (a: ApprovalModel, ok: boolean) => unknown;
+  const render = (fleet: AgentTileModel[], approvals: ApprovalModel[], onResolve: Resolve, now = NOW) =>
+    act(() => root.render(<AttentionQueue items={attentionList(approvals, fleet)} machines={[]} now={now} onOpen={() => {}} onResolve={onResolve as never} />));
+  const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
+
+  it('re-arms with a fresh dwell when the answer fails (false, or a rejected promise), never before the dwell', async () => {
+    vi.useFakeTimers();
+    for (const fail of [() => Promise.resolve(false), () => Promise.reject(new Error('refused')), () => false]) {
+      const sent: string[] = [];
+      render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); return fail(); });
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      act(() => button('Allow').click());
+      await flush();
+      act(() => button('Allow').click()); // the fresh dwell has not passed
+      expect(sent).toEqual(['r1']);
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      expect(button('Allow').hasAttribute('aria-disabled')).toBe(false);
+      act(() => button('Allow').click());
+      expect(sent).toEqual(['r1', 'r1']);
+      act(() => root.render(<></>));
+    }
+  });
+  it('re-arms after ANSWER_REARM_MS when the answered card is still there, and keeps an answer in flight the only one', async () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    render([agent('a', { state: 'needs-you' })], [ask('r1', 'a')], (x) => { sent.push(x.id); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    act(() => { vi.advanceTimersByTime(4_000); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1']);
+    act(() => { vi.advanceTimersByTime(1_000); }); // ANSWER_REARM_MS: the card is still there, so a fresh dwell starts
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1']);
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1', 'r1']);
+    // An answer still on its way (its promise has not settled) is never joined by a second one, however long it takes.
+    let settle: (v: boolean) => void = () => {};
+    render([agent('b', { state: 'needs-you' })], [ask('r2', 'b')], (x) => { sent.push(x.id); return new Promise<boolean>((r) => { settle = r; }); });
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Allow').click());
+    act(() => { vi.advanceTimersByTime(30_000); });
+    act(() => button('Deny').click());
+    expect(sent).toEqual(['r1', 'r1', 'r2']);
+    settle(true);
+    await flush();
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    act(() => button('Deny').click());
+    expect(sent).toEqual(['r1', 'r1', 'r2', 'r2']);
+  });
+  it('does not start again when only the "Asked …" time changes, and does when the machine, project or ask does', () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    const onResolve = (x: ApprovalModel) => { sent.push(x.id); };
+    const waiting = (over: Partial<AgentTileModel> = {}) => [agent('a', { state: 'needs-you', since: NOW - 15_000, ...over })];
+    const x = ask('r1', 'a');
+    render(waiting(), [x], onResolve);
+    expect(host.querySelector('.fleet-ask__time')?.textContent).toBe('Asked 15 seconds ago');
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+    render(waiting(), [x], onResolve, NOW + 30_000);
+    expect(host.querySelector('.fleet-ask__time')?.textContent).toBe('Asked 45 seconds ago');
+    act(() => button('Allow').click());
+    expect(sent).toEqual(['r1']);
+    // Each of these does restart it: a press right after the change sends nothing, a press after a fresh dwell does.
+    const changes: [string, AgentTileModel[], ApprovalModel][] = [['machine', waiting({ machine: 'server' }), x], ['project', waiting({ project: 'api' }), x], ['ask', waiting(), { ...x, detail: '+13 −3' }]];
+    for (const [what, fleet, changed] of changes) {
+      act(() => root.render(<></>));
+      sent.length = 0;
+      render(waiting(), [x], onResolve);
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      render(fleet, [changed], onResolve);
+      act(() => button('Allow').click());
+      expect(sent, what).toEqual([]);
+      act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); });
+      act(() => button('Allow').click());
+      expect(sent, what).toEqual(['r1']);
+    }
+  });
+});
+
 describe('Group by is the shared segmented control', () => {
   it('is a radio group named Group by, chosen with a click or the arrow keys', () => {
     const seen: string[] = [];

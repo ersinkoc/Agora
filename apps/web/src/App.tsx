@@ -228,33 +228,36 @@ export function App() {
     return out;
   }, [api]);
   // `always` (ADR-0101): the person pressed "Allow always"; sent so only for a request that offers it (`answerPlan`), never otherwise.
-  const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice, always = false) => {
-    if (!api || !device) { setNotice('approval-failed'); return; }
+  // It says whether the answer went (Home's request cards re-arm at once after a failed one).
+  const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice, always = false): Promise<boolean> => {
+    if (!api || !device) { setNotice('approval-failed'); return false; }
     setNotice(undefined);
-    if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return; }
+    if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return false; }
     try {
       // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
       const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
       const helpersMayStart = !!(a.start && approved && choice?.nested);
       // ADR-0090 Amendment A: a switch to a mode that skips permission questions is signed over its own domain, only for a machine heard
       // to offer it and only in the shape the window expects; any other shape is never signed.
-      if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return; }
-      if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return; }
+      if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return false; }
+      if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return false; }
       // ADR-0101: an "always" answer over its own bytes with scope ALWAYS; any other over its own message, with no scope.
       const fields = await answerFields(device, a, approved, always, () => (a.skip
         ? signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
         : a.start
           ? signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
           : signApproval(device, a.node, a.localId, approved)));
-      if (!fields) { setNotice('approval-scope-unavailable'); return; }
+      if (!fields) { setNotice('approval-scope-unavailable'); return false; }
       const { signature } = fields;
       // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
       if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart, ...(fields.scope ? { scope: fields.scope } : {}) } });
+      return true;
     } catch (e) {
       forgetSkipAnswer(a.id);
       const code = (e as { code?: string }).code;
       setNotice(approvalFailureKey(code));
+      return false;
     }
   }, [api, device]);
   // ADR-0057: an agent's live helper grants, as its machine lists them, and revoking one (no signature: ending access is always allowed).
