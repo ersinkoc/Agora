@@ -13,6 +13,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A malformed `%` escape in a window link (`#/agent/…`, `#/machines/…`) no longer blanks the page, and a file view no longer stops responding on highlighted text with an unclosed tag.
 - `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
 - A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
+- On a machine set to allow "don't ask" only for confined agents (`skip_permissions = confined_only`), an agent that kept running through a node restart (it was never confined) can no longer be switched to a mode, option or model that acts without asking, even after confinement was turned on.
 - A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version's records (its version and its program's name) as they were, or says `rollback_incomplete` when it could not put them back.
 
 ## 0.3.35

@@ -525,6 +525,89 @@ fn a_kept_structured_agent_is_not_counted_confined_by_a_node_that_now_confines()
     assert!(!decided, "an always answer is refused");
 }
 
+/// #1009: the same holder-run (unconfined) agent under a node that now confines with `skip_permissions = confined_only` is refused a
+/// switch to a mode or an option value that makes it act without asking (`agent.option_forbidden`, `policy: confined_only`), on the
+/// owner's own control socket: no approval is raised for it. (The node's sandbox setting alone, which the switch checks read before,
+/// says confined, and the switch became an `agent.approval_needed` card.)
+#[test]
+fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that_skips_permissions()
+{
+    use agora_node::supervisor::Confinement;
+    if !agora_platform::sandbox_supported() {
+        return;
+    }
+    let _serial = serial();
+    let rig = Rig::with_args("confmode", &["--modes"]);
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    let pid = pid_of(&node, &id);
+    drop(node);
+    std::thread::sleep(Duration::from_millis(500));
+    std::fs::write(
+        rig.root.join("data/policy"),
+        "sandbox = worktree\nskip_permissions = confined_only\n",
+    )
+    .expect("policy");
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid, "a new process stands for it");
+    let (level, enforceable, confinement) = {
+        let sup = node.supervisor.lock().unwrap();
+        (
+            sup.sandbox_policy().level,
+            sup.sandbox_policy().enforceable(),
+            sup.confinement(&agent),
+        )
+    };
+    assert_eq!(level, agora_node::sandbox::Level::Worktree);
+    assert!(enforceable, "the new node confines agents");
+    assert_eq!(confinement, Some(Confinement::Unconfined));
+
+    let mut c = Client::connect(node.socket().unwrap()).expect("control");
+    let set_mode = |c: &mut Client, mode: &str| {
+        c.call(Cmd::AgentSetMode(v1::AgentSetMode {
+            agent_id: id.clone(),
+            mode: mode.into(),
+        }))
+        .unwrap()
+    };
+    // The agent's modes are known to the new node: a mode that keeps asking is applied.
+    wait_for("a mode that asks to be applied", || {
+        set_mode(&mut c, "default").is_ok()
+    });
+    let policy = |e: &v1::ErrorInfo| {
+        e.params
+            .get("policy")
+            .and_then(|p| p.value.clone())
+            .map(|v| match v {
+                v1::param_value::Value::Str(s) => s,
+                other => format!("{other:?}"),
+            })
+    };
+    let refused = set_mode(&mut c, "bypassPermissions").expect_err("a mode that skips was applied");
+    assert_eq!(refused.code, "agent.option_forbidden", "{refused:?}");
+    assert_eq!(policy(&refused).as_deref(), Some("confined_only"));
+    let refused = c
+        .call(Cmd::AgentSetConfig(v1::AgentSetConfig {
+            agent_id: id.clone(),
+            config_id: "auto_approve".into(),
+            value: "true".into(),
+        }))
+        .unwrap()
+        .expect_err("an option value that skips was applied");
+    assert_eq!(refused.code, "agent.option_forbidden", "{refused:?}");
+    assert_eq!(policy(&refused).as_deref(), Some("confined_only"));
+    assert!(
+        !node
+            .supervisor
+            .lock()
+            .unwrap()
+            .skips_permissions_now(&agent),
+        "the agent acts without asking"
+    );
+}
+
 #[test]
 fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipping_after_its_node_restarts(
 ) {
