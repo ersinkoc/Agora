@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- `agora agent list` keeps listing the agents that ended (stopped, with their last state and folder) after the node restarts, for as long as the node keeps them (14 days), whatever folder they ran in; before, a restarted node said it had no agents although it still kept them (#1120).
 
 ## 0.3.36
 

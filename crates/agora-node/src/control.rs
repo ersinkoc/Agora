@@ -715,12 +715,32 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             if !l.node_id.is_empty() && l.node_id != ctx.node_id {
                 return Err(Error::new(ErrorCode::NodeOffline).with("node_id", l.node_id.as_str()));
             }
+            // #1120: the agents an earlier process of this node ran that ended and are still kept (ADR-0060), read before the
+            // supervisor's lock is taken (never both at once). Listed as that process listed them: stopped, in their folder.
+            let kept = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.ended(crate::daemon::now_ms()))
+                .unwrap_or_default();
             // One lock for the whole answer (the mutex is not reentrant).
             let sup = ctx.sup();
-            let agents = sup
-                .list()
+            let views = sup.list();
+            let earlier: Vec<v1::AgentSummary> = kept
                 .into_iter()
-                .map(|v| {
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| v1::AgentSummary {
+                    state: crate::ledger::proto_state(&e.last_state) as i32,
+                    agent_id: e.agent_id,
+                    kind: e.kind,
+                    worktree_id: e.folder,
+                    terminal_id: String::new(),
+                    running: false,
+                    restarts: 0,
+                })
+                .collect();
+            let mut agents: Vec<v1::AgentSummary> = earlier
+                .into_iter()
+                .chain(views.into_iter().map(|v| {
                     let has_terminal = sup.terminal(&v.id).is_some();
                     v1::AgentSummary {
                         agent_id: v.id.as_str().to_string(),
@@ -741,8 +761,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         running: v.running,
                         restarts: v.restarts,
                     }
-                })
+                }))
                 .collect();
+            // One list in id order (`agent-2` before `agent-10`), whether a row comes from the ledger or the supervisor (#1122 review).
+            agents.sort_by_key(|a| {
+                (
+                    crate::ledger::id_number(&a.agent_id).unwrap_or(u64::MAX),
+                    a.agent_id.clone(),
+                )
+            });
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
             })
