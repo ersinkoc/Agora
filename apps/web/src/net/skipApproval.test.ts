@@ -6,7 +6,7 @@ import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { setLanguage } from '../i18n';
-import { ApprovalBanner } from '../components/ApprovalBanner';
+import { SkipApproval } from '../components/SkipApproval';
 import { approvalFailureKey, thisDevice, toHex, type KeyStore } from './approval';
 import { failure } from './refusal';
 import { approvedHere, forgetSkipCapable, isSkipCapable, markSkipCapable, recordSkipAnswer, skipAnswerOf, parseSkipDetail, signSkip, skipOf, skipSignedMessage } from './skipApproval';
@@ -160,6 +160,7 @@ describe('what the window heard from the machine', () => {
   });
 });
 
+// The whole card (Review's dialog, the phone): a pane and the side panel show it in short, with Deny and Review (`ReviewRequest`).
 describe('the card', () => {
   let host: HTMLElement;
   let root: ReturnType<typeof createRoot>;
@@ -177,14 +178,14 @@ describe('the card', () => {
     vi.useFakeTimers();
     markSkipCapable('laptop');
     const answers: boolean[] = [];
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); } })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(), onResolve: (ok) => { answers.push(ok); } })));
     const text = host.textContent ?? '';
     expect(text).toContain('Let claude · amber act without asking?');
     expect(text).toContain('/home/dev/code/login-fix');
     expect(text).toContain('Bypass Permissions');
     expect(text).toContain('bypassPermissions'); // the real value id
     expect(text).toContain('session only');
-    expect(buttons().map((b) => b.textContent?.replace('Read it first, then you can allow.', ''))).toEqual(['Allow', 'Deny']);
+    expect(buttons().map((b) => b.textContent?.replace('Read it first, then you can allow.', ''))).toEqual(['Deny', 'Allow']);
     expect(host.contains(document.activeElement) && document.activeElement?.tagName === 'BUTTON').toBe(false); // nothing is focused for you
     await dwell();
     act(() => named('Allow').click());
@@ -195,7 +196,7 @@ describe('the card', () => {
     vi.useFakeTimers();
     markSkipCapable('laptop');
     const answers: boolean[] = [];
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); } })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(), onResolve: (ok) => { answers.push(ok); } })));
     expect(named('Allow').disabled).toBe(true);
     expect(named('Deny').disabled).toBe(false);
     expect(host.textContent).toContain('Read it first');
@@ -216,30 +217,30 @@ describe('the card', () => {
   it('the dwell starts again when the card says something else', async () => {
     vi.useFakeTimers();
     markSkipCapable('laptop');
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: () => {} })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(), onResolve: () => {} })));
     await dwell();
     expect(named('Allow').disabled).toBe(false);
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ value: 'other' })), onResolve: () => {} })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(detail({ value: 'other' })), onResolve: () => {} })));
     expect(named('Allow').disabled).toBe(true);
     vi.useRealTimers();
   });
   it('a config option shows its own id too, and hidden characters in the agent\'s words are written out', () => {
     markSkipCapable('laptop');
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ option_type: 'config', option: 'auto_approve', option_name: 'Auto‮approve', value: 'true', value_name: 'On' })), onResolve: () => {} })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(detail({ option_type: 'config', option: 'auto_approve', option_name: 'Auto‮approve', value: 'true', value_name: 'On' })), onResolve: () => {} })));
     const text = host.textContent ?? '';
     expect(text).toContain('auto_approve');
     expect(text).toContain('\\u{202e}');
     expect(text).not.toContain('‮');
   });
   it('for a machine the window has not heard offer it, nothing can be answered (and the card says why)', () => {
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: () => { throw new Error('answered'); } })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(), onResolve: () => { throw new Error('answered'); } })));
     expect(buttons().every((b) => b.disabled)).toBe(true);
     expect(host.textContent).toContain('has not heard this machine offer it');
   });
   it('an unknown shape says to update the window and can only be dismissed here: nothing is signed or sent', () => {
     markSkipCapable('laptop');
     const onResolve = vi.fn();
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ skips: false })), onResolve })));
+    act(() => root.render(createElement(SkipApproval, { approval: card(detail({ skips: false })), onResolve })));
     expect(buttons().map((b) => b.textContent)).toEqual(['Dismiss']);
     expect(host.textContent).toContain('Update your window');
     expect(host.textContent).toContain('Nothing was signed');

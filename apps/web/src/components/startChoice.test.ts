@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectChoice } from '../net/view';
-import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
+import { isBareName, machineFor, missingNote, shortBinary, trustCommand } from './startChoice';
 
 const project = (node: string): ProjectChoice => ({ node, projectId: `p-${node}`, path: `/work/${node}`, label: node });
 
@@ -24,16 +24,12 @@ describe('machineFor', () => {
 });
 
 // ADR-0069: what the start window says about a missing program, and the trust command when the machine's program is off its PATH.
-describe('missingPrograms', () => {
-  it('names each missing program once, and asks for the general sentence only for a kind that names none', () => {
-    expect(missingPrograms([
-      { installed: true, program: 'claude' },
-      { installed: false, program: 'codex' },
-      { installed: false, program: 'codex' },
-      { installed: false, program: 'gemini' },
-    ])).toEqual({ programs: ['codex', 'gemini'], general: false });
-    expect(missingPrograms([{ installed: false }, { installed: false, program: 'codex' }])).toEqual({ programs: ['codex'], general: true });
-    expect(missingPrograms([{ installed: true }])).toEqual({ programs: [], general: false });
+describe('missingNote', () => {
+  it('says why only for a kind the machine cannot find: its program by name, or the general sentence when the machine names none', () => {
+    expect(missingNote({ installed: false, program: 'codex' })).toEqual(['start-not-installed-program', { program: 'codex' }]);
+    expect(missingNote({ installed: false })).toEqual(['start-not-installed-why']);
+    expect(missingNote({ installed: true, program: 'claude' })).toBeUndefined();
+    expect(missingNote(undefined)).toBeUndefined();
   });
 });
 

@@ -12,6 +12,7 @@ import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
 import { clipboardOffer, sanitizePaste } from './clipboard';
 import { enhancedKey, KeyboardProtocols, registerKeyboardProtocols, shortcut } from './keys';
 import { openLink } from './links';
+import { searchDecorations, toHex } from './searchColours';
 import { followMouseEncoding } from './mouse';
 import { TouchScroll, Wheel, type WheelAction } from './wheel';
 
@@ -75,10 +76,22 @@ function theme() {
   const accent = hex6('--accent', '#8b93ff');
   return { background: token('--surface-0'), foreground: token('--text'), cursor: token('--accent'), selectionBackground: `${accent}66`, selectionInactiveBackground: `${accent}33`, ...palette() };
 }
+// A token as the browser computed it (a theme may write any CSS colour, and the page's variables are what is drawn): a hidden probe takes
+// the colour and its computed `rgb(…)` is read back as `#rrggbb`.
+let probe: HTMLSpanElement | undefined;
+function computedHex(name: string, fallback: string): string {
+  if (!probe?.isConnected) {
+    probe = document.createElement('span');
+    probe.hidden = true;
+    document.body.append(probe);
+  }
+  probe.style.color = `var(${name}, ${fallback})`;
+  return toHex(getComputedStyle(probe).color) ?? toHex(token(name)) ?? fallback;
+}
+// Search matches in the theme's accent mixed toward the terminal's background (searchColours.ts), read again for every search and on
+// every theme change, so they follow the theme.
 function searchColors() {
-  const hit = hex6('--state-needs-you', '#fbbf24');
-  const here = hex6('--accent', '#8b93ff');
-  return { matchBackground: hit, matchOverviewRuler: hit, activeMatchBackground: here, activeMatchColorOverviewRuler: here };
+  return searchDecorations(computedHex('--accent', '#8b93ff'), computedHex('--surface-0', '#09090b'), computedHex('--text', '#f4f4f5'));
 }
 const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
@@ -95,6 +108,7 @@ export class XtermRenderer implements TerminalRenderer {
   private copyOnSelect = false;
   private clipboardCb: ((text: string) => void) | undefined;
   private findCb: (() => void) | undefined;
+  private findText: string | undefined;
   private scrollCb: ((atBottom: boolean) => void) | undefined;
   private lastAtBottom = true;
   private hoverCb: ((url: string | undefined) => void) | undefined;
@@ -211,6 +225,12 @@ export class XtermRenderer implements TerminalRenderer {
 
   private repaint = () => {
     this.term.options.theme = theme();
+    // Matches on show take the new theme's colours: drawn again and found again from the current match, as the addon itself does when
+    // the screen changes (an incremental findPrevious keeps the current match in place).
+    if (this.findText) {
+      this.searchAddon.clearDecorations();
+      this.searchAddon.findPrevious(this.findText, { decorations: searchColors(), incremental: true });
+    }
     const font = terminalFontFamily(token('--font-mono'));
     if (font !== this.term.options.fontFamily) this.term.options.fontFamily = font;
   };
@@ -344,12 +364,14 @@ export class XtermRenderer implements TerminalRenderer {
   onFindRequest(cb: () => void): void { this.findCb = cb; }
 
   find(text: string, backwards: boolean): boolean {
+    this.findText = text || undefined;
     if (!text) { this.searchAddon.clearDecorations(); return false; }
     const opts = { decorations: searchColors(), incremental: false };
     return backwards ? this.searchAddon.findPrevious(text, opts) : this.searchAddon.findNext(text, opts);
   }
 
   clearFind(): void {
+    this.findText = undefined;
     this.searchAddon.clearDecorations();
   }
 

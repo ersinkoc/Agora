@@ -133,6 +133,18 @@ describe('widget kit', () => {
     expect(seen.at(-1)).toBe('b');
   });
 
+  it('a segmented control can be off as a whole, and is red when its chosen item lets an agent act without asking', () => {
+    const items = [{ value: 'ask', label: 'Ask' }, { value: 'skip', label: "Don't ask" }];
+    render(<SegmentedControl label="How it acts" value="skip" risk disabled onChange={() => {}} items={items} />);
+    const group = q('[role=radiogroup]');
+    expect(group.className).toBe('kit-seg kit-seg--risk');
+    expect(group.getAttribute('aria-disabled')).toBe('true');
+    for (const r of Array.from(host.querySelectorAll<HTMLButtonElement>('[role=radio]'))) expect(r.disabled).toBe(true);
+    render(<SegmentedControl label="How it acts" value="ask" onChange={() => {}} items={items} />);
+    expect(q('[role=radiogroup]').className).toBe('kit-seg');
+    expect(q('[role=radiogroup]').hasAttribute('aria-disabled')).toBe(false);
+  });
+
   it('a stat tile is a pressable filter only when it filters; a zero is not tinted', () => {
     render(<><StatTile value={2} tone="needs" label="Needs you" /><StatTile value={0} tone="needs" label="Needs you" /><StatTile value={3} label="Working" pressed onPress={() => {}} /></>);
     const [two, zero] = Array.from(host.querySelectorAll('div.kit-stat'));

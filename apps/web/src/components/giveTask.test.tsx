@@ -455,7 +455,8 @@ describe('start a new agent for the task', () => {
     expect(button('Start', win)).toBeUndefined();
     click(button('Use this folder', win));
     await flush();
-    const radios = [...startWindow()!.querySelectorAll('[role=radiogroup] [role=radio]')].map((r) => r.textContent);
+    // An agent card is named by the kind's name alone (its letter and its Terminal or Chat tag are not part of the name).
+    const radios = [...startWindow()!.querySelectorAll('[role=radiogroup] [role=radio]')].map((r) => r.getAttribute('aria-label') ?? r.textContent);
     expect(radios).toContain('Claude Code');
     expect(radios).not.toContain('Shell'); // a plain terminal cannot take a task
   });

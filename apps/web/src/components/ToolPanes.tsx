@@ -75,7 +75,7 @@ export function ToolChooser({ panel, fleet, onPick, onNewTerminal }: { panel: To
                     <Icon name={panel === 'terminal' ? 'terminal' : 'folder'} className="size-3.5 text-muted" />
                     <span className="min-w-0 flex-1 truncate">{panel === 'terminal' ? f.agent.name : f.agent.workspace}</span>
                     <span className="truncate text-xs text-muted">{f.agent.machine}</span>
-                    {f.changed > 0 && <span className="flex-none text-xs text-needs-you">{t('changes-files', { count: f.changed })}</span>}
+                    {f.changed > 0 && <span className="kit-tag flex-none">{t('changes-files', { count: f.changed })}</span>}
                   </button>
                 </li>
               ))}

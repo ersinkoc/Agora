@@ -130,6 +130,14 @@ impl<S: Deref<Target: EventStore>> NodeSession<S> {
 
     /// Decode and store one event payload from this node.
     pub fn event(&mut self, payload: &[u8]) -> Result<Ingest, SessionError> {
+        self.event_stored(payload).map(|(outcome, _)| outcome)
+    }
+
+    /// Decode, clamp, and store one event payload, also returning the rewritten bytes when clamping changed them.
+    pub(crate) fn event_stored(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<(Ingest, Option<Vec<u8>>), SessionError> {
         if self.phase != Phase::Ready {
             return Err(invalid("event"));
         }
@@ -166,7 +174,7 @@ impl<S: Deref<Target: EventStore>> NodeSession<S> {
                 .store
                 .append(&self.producer, ev.seq, ev.at_ms, payload)?,
         };
-        Ok(match appended {
+        let ingest = match appended {
             Append::Applied { pos } => {
                 // The first event above the ack ends the resync, jump or not: it is allowed once.
                 self.resync_at_ms = None;
@@ -192,7 +200,8 @@ impl<S: Deref<Target: EventStore>> NodeSession<S> {
                 acked: self.store.acked(&self.producer)?,
             },
             Append::Gap { expected } => Ingest::Gap { expected },
-        })
+        };
+        Ok((ingest, bounded))
     }
 }
 

@@ -3,7 +3,7 @@
 // event takes to reach a person after a hub restart. The hub stays down for a different time in each round (HUB_DOWN_MS, a
 // comma-separated list cycled through; default 0..20 s), since a node's redial schedule depends on how long it has been failing.
 // Each round must be under LIMIT_MS (default 3000). ROUNDS sets how many (default 8). The time until the window no longer says
-// "Hub unreachable" or "Connecting" is printed too. DIAG=1 (Linux, needs `ss`) also prints when each process reconnected. Only
+// "Cannot reach your Agora" or "Connecting" is printed too. DIAG=1 (Linux, needs `ss`) also prints when each process reconnected. Only
 // shells are used; see browser-harness.mjs for prerequisites.
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -50,7 +50,7 @@ try {
       for (const m of out.matchAll(/\(\("([^"]+)",pid=(\d+)/g)) if (!firsts.has(m[2])) firsts.set(m[2], `${m[1]}:${m[2]}@${Date.now() - up}`);
     }, 20) : undefined;
     // The window's own link, timed on its own: when it no longer says the hub is unreachable or that it is connecting.
-    const banner = page.waitForFunction(() => !/Hub unreachable|Connecting to your hub/.test(document.body.innerText), null, { timeout: 60000, polling: 50 })
+    const banner = page.waitForFunction(() => !/Cannot reach your Agora|Connecting to your Agora/.test(document.body.innerText), null, { timeout: 60000, polling: 50 })
       .then(() => Date.now() - up, () => -1);
     // Both agents start at once; each is timed from the hub's start to when the window shows it.
     const seen = await Promise.all(machines.map(async (m, i) => {

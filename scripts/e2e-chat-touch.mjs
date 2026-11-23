@@ -129,7 +129,16 @@ for (const scheme of ['dark', 'light']) {
       const i = await page.evaluate(() => [...document.querySelectorAll('[data-touch-probe]')].find((e) => e.textContent === 'redirect notes').getAttribute('data-touch-probe'));
       const m = await measure(page, i);
       m.spans.forEach((s, k) => check(s.h >= TAP, `at ${w} px the link wraps: piece ${k + 1} is ${s.h} px tall to a finger (drawn ${s.drawn.h})`));
-      check((await layout(page)).page === 0, `at ${w} px the page does not scroll sideways`);
+      // What touch must not do at this width: add sideways scroll to the page or to anything in the chats. Compared with the same page
+      // and width with a mouse, since other gallery sections (not chats) may already be wider than a 300 px window.
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+      await page.waitForTimeout(100);
+      const mouseAt = await layout(page);
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await page.waitForTimeout(100);
+      const touchAt = await layout(page);
+      check(touchAt.page === mouseAt.page && JSON.stringify(touchAt.sideways) === JSON.stringify(mouseAt.sideways),
+        `at ${w} px touch adds no sideways scroll to the page or to the chats (page ${touchAt.page} px, ${mouseAt.page} px with a mouse)`);
     }
     check(wrapped, 'a width between 300 and 430 px wraps the "redirect notes" link over two lines');
     await page.setViewportSize({ width: 390, height: 844 });

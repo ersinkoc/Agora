@@ -18,7 +18,7 @@ describe('i18n', () => {
       for (const m of readFileSync(f, 'utf8').matchAll(/\bt\('([a-z0-9-]+)'/g)) keys.add(m[1] as string);
     }
     expect(keys.size).toBeGreaterThan(5);
-    for (const k of keys) expect(t(k, { machine: 'm', id: 'i', name: 'n', count: 1, online: 1, total: 1, when: 'w', code: 1, reason: 'r', amount: '$1', date: 'd', kind: 'k', agentKind: 'a', node: 'n', percent: 1, used: 'u', size: 's', stderr_tail: 't', detail: 'd', rpc_code: 'r', stage: 's', minutes: 5, days: 2, hours: 3, kinds: 'k', min: 8, fingerprint: 'f', machines: 'm', max: 1, field: 'f', token: 't', base: 'b', label: 'l', fg: 'f', bg: 'b', ratio: 1, scheme: 's', program: 'p', value: 'v', settings: 's', where: 'w', file: 'f', address: 'a', os: 'o', what: 'w', state: 's', time: 't', short: 's', done: 1, title: 't', agent: 'a', project: 'p' }), k).not.toBe(k);
+    for (const k of keys) expect(t(k, { machine: 'm', id: 'i', name: 'n', count: 1, online: 1, total: 1, when: 'w', code: 1, reason: 'r', amount: '$1', date: 'd', kind: 'k', agentKind: 'a', node: 'n', percent: 1, used: 'u', size: 's', stderr_tail: 't', detail: 'd', rpc_code: 'r', stage: 's', minutes: 5, days: 2, hours: 3, kinds: 'k', min: 8, fingerprint: 'f', machines: 'm', max: 1, field: 'f', token: 't', base: 'b', label: 'l', fg: 'f', bg: 'b', ratio: 1, scheme: 's', program: 'p', value: 'v', settings: 's', where: 'w', file: 'f', address: 'a', os: 'o', what: 'w', state: 's', time: 't', day: 'd', short: 's', done: 1, title: 't', agent: 'a', project: 'p', colour: 'c', control: 'c' }), k).not.toBe(k);
   });
   it('has no message id twice in a locale file (the second would silently win or lose)', () => {
     for (const lang of readdirSync('../../locales')) {

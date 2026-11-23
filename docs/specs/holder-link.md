@@ -43,7 +43,8 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    between the two). Terminals are never read by the holder while a node is attached, and it never writes to them.
 4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. An agent id
    that is empty or longer than `MAX_AGENT_ID` (256 bytes) is `Refused(BadRequest)` and nothing starts (#929), so every reply that names
-   an agent fits a frame (below, "Limits of the holder itself"). (The
+   an agent fits a frame (below, "Limits of the holder itself"). A holder that already keeps `MAX_HELD_AGENTS` agents (15,251, terminal
+   and pipe agents together) answers a `Start` or `StartPipe` for a new id `Refused(Failed)` and starts nothing (#983). (The
    confinement a node builds is not carried yet; a later step adds it as a new tag.)
 5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
    then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
@@ -75,11 +76,14 @@ next frame's.
   (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
   larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and
   the whole 1 MiB buffer) and a `PipeData` frame (one id and everything kept) always fit (checked at compile time and tested), and one
-  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`. **Not bounded: the number of agents.** `List` (one frame for every agent)
-  fits up to 15,251 agents in one holder; a holder holding more could not send it (`write_frame` refuses a frame larger than `MAX_FRAME`
-  and the holder drops the node, which then sees the link fail). That is far past what a machine runs (every terminal agent is a PTY,
-  every pipe agent two threads of the holder), so no count is enforced and `List` is not paged; doing either is a new rule for a later
-  step.
+  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`.
+- **The number of agents** is at most `MAX_HELD_AGENTS`, as many as one `List` reply (one frame naming every agent) can carry:
+  `(MAX_FRAME - 5) / MAX_LIST_ENTRY`, 15,251 (#983; checked at compile time and tested). Every agent the holder keeps counts: terminal
+  and pipe agents, running ones and ended ones not yet released (`Release` frees the place). A `Start` or `StartPipe` for a new id
+  past it is `Refused(Failed)` before anything starts (an id it already keeps is still `AgentExists`), so `List` is never larger than
+  a frame and is not paged. Before, nothing bounded the count: a holder holding more could not send `List` (`write_frame` refuses a
+  frame larger than `MAX_FRAME`) and dropped the node on every try. The bound is far past what a machine runs (every terminal agent
+  is a PTY, every pipe agent two threads of the holder).
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -110,7 +114,8 @@ next frame's.
   a holder it started would refuse it and idle.
 - **What goes through it:** only an agent the node does not confine (`cfg.sandbox` is `None`). A confined agent (Landlock, Seatbelt) is
   started by the node as before: the holder does not carry a confinement yet, and `Start` is unchanged. A start the holder refuses
-  (`Failed`: the program is not there; `AgentExists`) is the node's own start's to report.
+  (`Failed`: the program is not there, or the holder is full; `AgentExists`) is the node's own start's to report: on `Failed` the node
+  runs the agent itself, so an agent past `MAX_HELD_AGENTS` still starts, it just does not outlive the node.
 - **Agent ids:** the node sends no id the holder would refuse (`holder_link::agent_id_fits`): an agent whose id is longer than
   `MAX_AGENT_ID` (none the node makes; a resumed agent keeps its id from the ledger, which takes up to 4 KiB) is run by the node itself, terminal or adapter, never refused.
 - **Environment:** the node sends the complete environment `spawn` would have given the agent (its own, minus the removed names,

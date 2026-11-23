@@ -182,7 +182,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     {moreItems.length > 0 && <Menu label={t('session-more')} items={moreItems} align="start" className="ide-chip h-7 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink"><span>{t('session-more')}</span><Icon name="chevronDown" className="size-3" /></Menu>}
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
     {waits.some((w) => w.state === 'asking') && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
-    {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
+    {failed && <span role="status" className="text-xs text-danger">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';
   const status = <>
