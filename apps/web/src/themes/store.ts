@@ -16,7 +16,7 @@ export const MAX_USER_THEMES = 20;
 
 type KV = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 export interface ThemeState { mode: Mode; choice: Record<Scheme, string>; user: readonly Theme[] }
-// `warnings`: the theme was saved, but some of its text is hard to read on a coloured background (tokens.ts `tintIssues`).
+// `warnings`: the theme was saved, but some of its text or controls are hard to see in the kit's colours (tokens.ts `themeWarnings`).
 export type Saved = { ok: true; theme: Theme; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] } | { ok: false; full: true };
 
 function read(kv: KV | undefined, key: string): string | null {
