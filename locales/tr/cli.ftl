@@ -20,7 +20,7 @@ cli-usage =
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
-      agora hub user projects | grant ID MACHINE/PROJECT | revoke ID MACHINE/PROJECT [--hub-dir DIR]
+      agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]

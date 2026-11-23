@@ -712,9 +712,9 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
     let view = || {
         agora_hub::projection::View::rebuild(&store)
             .map(|(v, _)| v.shown().into_owned())
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())
     };
-    let folders = || agora_hub::project_names::folders(&view());
+    let folders = || view().map(|v| agora_hub::project_names::folders(&v));
     let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["add", name] => {
@@ -746,7 +746,10 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Ok(list) => {
-                let known = folders();
+                let known = match folders() {
+                    Ok(f) => f,
+                    Err(e) => return fail(e),
+                };
                 for u in list {
                     say.out(
                         key!("cli-hub-user-line"),
@@ -766,10 +769,15 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                         match path {
                             Some(path) => say.out(
                                 key!("cli-hub-user-project-path"),
-                                &[("project", project.into()), ("path", path.into())],
+                                &[
+                                    ("project", node_text(&project).into()),
+                                    ("path", node_text(&path).into()),
+                                ],
                             ),
-                            None => say
-                                .out(key!("cli-hub-user-project"), &[("project", project.into())]),
+                            None => say.out(
+                                key!("cli-hub-user-project"),
+                                &[("project", node_text(&project).into())],
+                            ),
                         }
                     }
                 }
@@ -791,7 +799,10 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             }
         }
         ["projects"] => {
-            let list = folders();
+            let list = match folders() {
+                Ok(f) => f,
+                Err(e) => return fail(e),
+            };
             if list.is_empty() {
                 say.out(key!("cli-hub-user-projects-none"), &[]);
             }
@@ -818,10 +829,14 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 }
                 Err(e) => return fail(e.to_string()),
             }
+            let view = match view() {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
             if *verb == "grant" {
-                grant_by_name(say, &users, &view(), id, machine, project)
+                grant_by_name(say, &users, &view, id, machine, project)
             } else {
-                revoke_by_name(say, &users, &view(), id, machine, project)
+                revoke_by_name(say, &users, &view, id, machine, project)
             }
         }
         ["remove", id] => match users.remove(id) {
@@ -850,13 +865,21 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// A host name, folder or project name a machine reported, for the owner's terminal: every control or hidden character (a line break
+/// too, so one entry cannot pass for two) written as a visible escape, never sent to the terminal as it is.
+fn node_text(s: &str) -> String {
+    agora_core::text::visible(s)
+        .replace('\n', "\\u{a}")
+        .replace('\t', "\\u{9}")
+}
+
 /// One line of `agora hub user projects` (or of the choice a name that fits several projects gives): what to type, the folder, and the
 /// machine's host name where what to type is its id.
 fn project_line(say: &Say, f: &agora_hub::project_names::Folder, err: bool) {
     let args = [
-        ("name", f.shown().into()),
-        ("path", f.path.clone().into()),
-        ("host", f.host.clone().into()),
+        ("name", node_text(&f.shown()).into()),
+        ("path", node_text(&f.path).into()),
+        ("host", node_text(&f.host).into()),
     ];
     let k = if f.host.is_empty() || f.host == f.machine {
         key!("cli-hub-user-projects-line")
@@ -917,7 +940,7 @@ fn grant_by_name(
 fn ambiguous(say: &Say, id: &str, project: &str, candidates: &[agora_hub::project_names::Folder]) {
     let (machine, path) = candidates
         .first()
-        .map(|f| (f.machine.clone(), f.path.clone()))
+        .map(|f| (node_text(&f.machine), node_text(&f.path)))
         .unwrap_or_default();
     say.err(
         key!("cli-hub-user-ambiguous-project"),
@@ -3030,5 +3053,16 @@ mod password_message_tests {
             let two = tr.text(id, &[("count", 2i64.into())]);
             assert!(two.ends_with(" Açık 2 oturum kapatıldı."), "{two}");
         }
+    }
+}
+
+#[cfg(test)]
+mod node_text_tests {
+    #[test]
+    fn what_a_machine_reported_reaches_the_owners_terminal_as_visible_text() {
+        let shown = super::node_text("ops\u{1b}]0;owned\u{7}\nlaptop/web\t\u{202e}x");
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+        assert_eq!(super::node_text("/home/a/web"), "/home/a/web");
     }
 }

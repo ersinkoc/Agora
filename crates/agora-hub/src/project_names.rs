@@ -78,6 +78,11 @@ fn hosts(view: &View) -> BTreeMap<String, String> {
     for w in view.workspaces.values() {
         out.entry(w.node_id.clone()).or_default();
     }
+    for key in view.agents.keys() {
+        if let Some((node, _)) = split_key(key) {
+            out.entry(node.to_string()).or_default();
+        }
+    }
     out
 }
 
@@ -167,6 +172,41 @@ pub fn resolve(view: &View, machine: &str, project: &str) -> Resolved {
         .copied()
         .filter(|f| f.project == project)
         .collect();
+    // ADR-0060: a project the hub knows only from an agent (one it never saw start, its folder never reported) is still a project
+    // `Scope` places, so its exact id is accepted; it has no folder, hence no name.
+    if by_id.is_empty() {
+        let from_agents: BTreeSet<&str> = view
+            .agents
+            .iter()
+            .filter_map(|(k, a)| {
+                let (node, _) = split_key(k)?;
+                (nodes.contains(node) && a.project_id == project).then_some(node)
+            })
+            .collect();
+        if from_agents.len() == 1 {
+            let node = from_agents.into_iter().next().unwrap_or_default();
+            return Resolved::One {
+                node: node.into(),
+                project: project.into(),
+            };
+        }
+        if from_agents.len() > 1 {
+            let labels = machine_labels(&hosts);
+            return Resolved::Ambiguous(
+                from_agents
+                    .into_iter()
+                    .map(|node| Folder {
+                        machine: labels.get(node).cloned().unwrap_or_else(|| node.into()),
+                        name: project.into(),
+                        path: String::new(),
+                        host: hosts.get(node).cloned().unwrap_or_default(),
+                        node: node.into(),
+                        project: project.into(),
+                    })
+                    .collect(),
+            );
+        }
+    }
     let matching: Vec<&Folder> = if by_id.is_empty() {
         on.iter()
             .copied()
@@ -358,6 +398,38 @@ mod tests {
         };
         assert_eq!(resolve(&v, "laptop", "lib"), one("n1", "#q"));
         assert_eq!(resolve(&v, "n9", "lib"), Resolved::UnknownProject);
+    }
+
+    #[test]
+    fn a_project_known_only_from_an_agent_is_granted_by_its_exact_id() {
+        let started = |node: &str, project: &str| {
+            ev(
+                node,
+                Body::AgentStarted(v1::AgentStarted {
+                    agent_id: "a1".into(),
+                    project_id: project.into(),
+                    node_id: node.into(),
+                    kind: "codex".into(),
+                    ..Default::default()
+                }),
+            )
+        };
+        let v = view(&[online("n1", "laptop"), started("n1", "#lost")]);
+        assert_eq!(resolve(&v, "laptop", "#lost"), one("n1", "#lost"));
+        assert_eq!(resolve(&v, "laptop", "lost"), Resolved::UnknownProject);
+        let v = view(&[
+            online("n2", "box"),
+            started("n2", "#p"),
+            online("n3", "box"),
+            started("n3", "#p"),
+        ]);
+        let Resolved::Ambiguous(c) = resolve(&v, "box", "#p") else {
+            panic!("two machines are called box")
+        };
+        assert_eq!(
+            c.iter().map(|f| f.machine.as_str()).collect::<Vec<_>>(),
+            ["n2", "n3"]
+        );
     }
 
     #[test]
