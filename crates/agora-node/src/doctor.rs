@@ -601,7 +601,10 @@ fn manifests(
     let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
     let (mut registry, mut registry_ready, mut denied) = (0usize, 0usize, 0usize);
     for l in loaded {
-        if registry_policy.refusal(&l.manifest.kind).is_some() {
+        // By origin: a hand-made kind is never switched off by the registry policy, whatever its name.
+        if l.source == crate::manifests::Source::Registry
+            && registry_policy.refusal(&l.manifest.kind).is_some()
+        {
             denied += 1;
             continue;
         }

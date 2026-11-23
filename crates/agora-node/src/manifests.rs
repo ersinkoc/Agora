@@ -216,6 +216,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
 /// The prefix of every registry kind: `registry-<registry id>` (`agora_adapters::registry_convert`).
 pub const REGISTRY_PREFIX: &str = "registry-";
 
+/// Whether `name` is the kind of one of the registry manifests compiled into this program (`registry-<file stem>`).
+pub fn is_registry_kind_name(name: &str) -> bool {
+    name.strip_prefix(REGISTRY_PREFIX).is_some_and(|id| {
+        REGISTRY
+            .iter()
+            .any(|(file, _)| file.strip_suffix(".toml") == Some(id))
+    })
+}
+
 /// The built-in terminal kind: the user's own shell (`agora_platform::default_shell`), so a fresh node can always start something.
 /// It is made at load time, not from a file, because the shell differs per machine; a folder file of this kind replaces it.
 pub const SHELL_KIND: &str = "shell";
@@ -384,37 +393,25 @@ pub fn shadowing(loaded: &[Loaded]) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Package runners: a program that fetches the package it is given and runs it (ADR-0092 decision 1 starts registry agents through
-/// `npx --yes PACKAGE@VERSION` or `uvx PACKAGE==VERSION`).
-const PACKAGE_RUNNERS: &[&str] = &["npx", "uvx", "pnpx", "bunx", "pipx"];
-
-/// Whether a kind's program is a package runner, so starting it fetches code (whatever extension a platform gives the runner).
+/// Whether a kind's program is a package runner (`agora_adapters::registry_convert::PACKAGE_RUNNERS`, the converter's list), so
+/// starting it fetches code.
 pub fn fetches_at_start(m: &Manifest) -> bool {
-    let Some(program) = program(m) else {
-        return false;
-    };
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let mut stem = file.to_ascii_lowercase();
-    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1"]
-        .iter()
-        .find_map(|x| stem.strip_suffix(x))
-    {
-        stem = bare.to_string();
-    }
-    PACKAGE_RUNNERS.contains(&stem.as_str())
+    program(m).is_some_and(agora_adapters::registry_convert::is_package_runner)
 }
 
-/// The maintainer's answer on #1133 ("startable, but always signed"): a registry kind (`registry-<id>`) that starts through a package
-/// runner is started only by a start a person's trusted device signed (a routed `AgentLaunch`, or a helper start the person approved) or
-/// from this machine's own control socket, never by a routed unsigned `AgentStart`, whatever `signed_commands` says. A hand-made kind is
-/// not affected, whatever its program; a registry kind that runs its own program (one the owner installed) is not either.
-pub fn needs_signed_start(m: &Manifest) -> bool {
-    m.kind.starts_with(REGISTRY_PREFIX) && fetches_at_start(m)
+/// The maintainer's answer on #1133 ("startable, but always signed"): a kind loaded from the ACP registry (`from_registry`, its origin:
+/// [`Source::Registry`]) that starts through a package runner is started only by a start a person's trusted device signed (a routed
+/// `AgentLaunch`, or a helper start the person approved) or from this machine's own control socket, never by a routed unsigned
+/// `AgentStart`, whatever `signed_commands` says. A hand-made kind is not affected, whatever its name or program; a registry kind that
+/// runs its own program (one the owner installed) is not either.
+pub fn needs_signed_start(m: &Manifest, from_registry: bool) -> bool {
+    from_registry && fetches_at_start(m)
 }
 
 /// The node's policy for the ACP registry's kinds (ADR-0092; the maintainer's answer on #1133): `agents.registry = off` switches them
 /// all off on this machine, `agents.registry.deny = registry-a, registry-b` some of them. A kind switched off is neither offered nor
-/// started (`node.policy_denied`, rule `registry_off` or `registry_denied`). Hand-made kinds are never affected.
+/// started (`node.policy_denied`, rule `registry_off` or `registry_denied`). Applied to kinds of registry origin only (the supervisor
+/// and doctor check the origin): hand-made kinds are never affected, whatever their name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegistryPolicy {
     pub off: bool,
@@ -549,17 +546,17 @@ mod tests {
             r#""C:\\n\\npx.CMD""#,
             r#""/usr/bin/pnpx""#,
         ] {
-            assert!(needs_signed_start(&m("registry-x", argv)), "{argv}");
+            assert!(needs_signed_start(&m("registry-x", argv), true), "{argv}");
             assert!(
-                !needs_signed_start(&m("by-hand", argv)),
+                !needs_signed_start(&m("registry-x", argv), false),
                 "{argv}: a hand-made kind is not affected"
             );
         }
         assert!(
-            !needs_signed_start(&m("registry-x", r#""goose", "acp""#)),
+            !needs_signed_start(&m("registry-x", r#""goose", "acp""#), true),
             "its own program"
         );
-        assert!(!needs_signed_start(&m("registry-x", r#""npx-like""#)));
+        assert!(!needs_signed_start(&m("registry-x", r#""npx-like""#), true));
         // The shipped registry: every npx or uvx one needs it, every binary one does not.
         let (loaded, _) = load(Path::new(""));
         let registry: Vec<_> = loaded
@@ -568,13 +565,13 @@ mod tests {
             .collect();
         let signed = registry
             .iter()
-            .filter(|l| needs_signed_start(&l.manifest))
+            .filter(|l| needs_signed_start(&l.manifest, true))
             .count();
         assert_eq!(signed, 23);
         for l in registry {
             let first = program(&l.manifest).unwrap();
             assert_eq!(
-                needs_signed_start(&l.manifest),
+                needs_signed_start(&l.manifest, true),
                 first == "npx" || first == "uvx",
                 "{}",
                 l.manifest.kind

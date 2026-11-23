@@ -35,7 +35,7 @@ One entry per agent program and installer kind. Unknown fields are refused. `nam
 | `publisher` | an id declared in `publishers` |
 | `version` | the one exact version this entry installs: `major.minor.patch`, optional `-pre`/`+build`; no tags, ranges or carets |
 | `version_policy` | `pin`: exactly `version`. `track`: `version` is the newest the list names (a new list moves it). `range`: also `min` and `max` (exact), and `min <= version <= max` compared on major.minor.patch. `min`/`max` on `pin` or `track` are refused |
-| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell or interpreter name under any extension (`.exe`, `.cmd`, `.bat`, `.ps1`, `.com`, case-insensitive, repeated: `node.exe`, `pwsh.ps1`, `bash.exe.bat`), and the same rule applies to `cmd` and to the converter |
+| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell, interpreter or package-runner name (`registry_convert::PACKAGE_RUNNERS`) under any extension (`.exe`, `.cmd`, `.bat`, `.ps1`, `.com`, case-insensitive, repeated: `node.exe`, `pwsh.ps1`, `bash.exe.bat`), and the same rule applies to `cmd` and to the converter |
 | `verify` | `{ "args": [...], "regex": "..." }`. `args`: at most 4, each at most 32 characters of `A-Za-z0-9._=-` (so `--version` is fine; a space, quote, `$`, `;`, `|`, `&`, `/` is not). `regex`: at most 200 bytes, compiled by the `regex` crate (linear-time, no backreferences) with a 100 000-byte compile limit and nest limit 20; a pattern that matches the empty string is refused because it would verify nothing. A pattern that matches any non-empty output is still allowed, so a `verify` match alone proves little: a passing `verify` also requires the executable named in `provides` to exist in the agent directory (rung 3 checks both). The version output is matched on its first 4096 bytes only |
 | `installer` | one of the four below |
 
@@ -75,7 +75,11 @@ agent list yet, so nothing in the repository is a signed entry). Two shapes of r
 `provides = [<registry id>]`, the one name the installer leaves on the path for all of them, and the manifest runs that name (the
 arguments must still be the same on every platform, else `registry.inconsistent_command`). An entry the registry's own
 `quarantine.json` names is skipped (`registry.quarantined`), and a `repository`, `website` or `license_url` that is not an `https://`
-address under the URL rule above refuses the entry (`registry.bad_url`). The maintainer's answers on #1133: quarantined entries stay
+address under the URL rule above refuses the entry (`registry.bad_url`). A `binary` entry whose program (or, with per-platform names,
+whose registry id) is a package runner or fetcher (`registry_convert::PACKAGE_RUNNERS`: `npm`, `pnpm`, `yarn`, `uv`, `uvx`, `npx`,
+`pipx`, `bunx`, `go`, `docker`, `podman`, `corepack` and more) is refused (`registry.forbidden_executable`); the same rule refuses such a
+name in a signed-list entry's `provides` and `cmd`. The registry's `quarantine.json` is required: a clone without it is not converted.
+The maintainer's answers on #1133: quarantined entries stay
 skipped (not shown); a per-platform program is named by the registry id as is (`poolside`); an npx or uvx entry is "not installable
 from the window" and its kind starts only on a signed start (`docs/specs/protocol.md`, "ACP registry kinds"), and a node's policy can
 switch registry kinds off.

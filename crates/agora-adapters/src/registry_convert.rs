@@ -252,8 +252,79 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
     })
 }
 
-/// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable.
+/// Package runners, package managers and fetchers: given a package, image or module name they download it and run it (`npx`,
+/// `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`, `go run x@v`, `docker run`). The converter writes `npx`/`uvx` launches itself
+/// (ADR-0092 decision 1, exact version); a `binary` entry may never name one, and the node starts a registry kind whose program is
+/// one only on a signed start (`agora_node::manifests::needs_signed_start`). One list for both.
+pub const PACKAGE_RUNNERS: &[&str] = &[
+    "npx",
+    "npm",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "yarnpkg",
+    "bun",
+    "bunx",
+    "corepack",
+    "uv",
+    "uvx",
+    "pip",
+    "pip3",
+    "pipx",
+    "poetry",
+    "pdm",
+    "hatch",
+    "conda",
+    "mamba",
+    "micromamba",
+    "go",
+    "cargo",
+    "rustup",
+    "gem",
+    "bundle",
+    "bundler",
+    "composer",
+    "dotnet",
+    "java",
+    "jbang",
+    "mvn",
+    "gradle",
+    "docker",
+    "podman",
+    "nerdctl",
+    "kubectl",
+    "nix",
+    "nix-shell",
+    "brew",
+    "curl",
+    "wget",
+    "git",
+];
+
+/// An executable's name without its folder and the extensions a platform runs it by (`npm.cmd`, `C:\\x\\node.exe`), lower-case.
+pub fn bare_executable(exe: &str) -> String {
+    let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    let mut e = file.to_ascii_lowercase();
+    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]
+        .iter()
+        .find_map(|x| e.strip_suffix(x))
+    {
+        e = bare.to_string();
+    }
+    e
+}
+
+/// Whether `exe` (any path, any extension) is one of [`PACKAGE_RUNNERS`].
+pub fn is_package_runner(exe: &str) -> bool {
+    PACKAGE_RUNNERS.contains(&bare_executable(exe).as_str())
+}
+
+/// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable; nor a
+/// package runner ([`PACKAGE_RUNNERS`]), which would fetch whatever its arguments name, unpinned and unreviewed.
 pub(crate) fn forbidden_executable(exe: &str) -> bool {
+    if is_package_runner(exe) {
+        return true;
+    }
     // Whatever extension a platform runs it by is the same program: `node.exe`, `bash.exe`, `powershell.exe -c` are a shell too.
     let mut e = exe.to_ascii_lowercase();
     while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]

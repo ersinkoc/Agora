@@ -2413,7 +2413,7 @@ fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_one
         ),
         (
             "registry-deny",
-            "agents.registry.deny = registry-gemini\n",
+            "agents.registry.deny = registry-gemini-mine, registry-gemini\n",
             vec!["registry-gemini"],
             vec!["registry-goose"],
         ),
@@ -2421,6 +2421,12 @@ fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_one
         let e = env(name);
         std::fs::create_dir_all(e.dir.join("data")).unwrap();
         std::fs::write(e.dir.join("data").join("policy"), line).unwrap();
+        // Review F5: a hand-made description whose name looks like a registry kind's is the owner's own, never switched off.
+        std::fs::write(
+            e.dir.join("manifests").join("mine.toml"),
+            "kind = \"registry-gemini-mine\"\ndisplay_name = \"Mine\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+        )
+        .unwrap();
         let n = node(&e, NodeLimits::default());
         let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
         let listed = kinds(&mut c);
@@ -2443,9 +2449,12 @@ fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_one
         for k in &kept {
             assert!(listed.iter().any(|x| x == k), "{name}: {k} stays offered");
         }
-        // A hand-made kind still starts.
-        let s = started(ok(c.call(start_cmd("shell"))));
-        assert!(!s.agent_id.is_empty());
+        // Hand-made kinds still start, also one named like a registry kind.
+        assert!(listed.iter().any(|x| x == "registry-gemini-mine"), "{name}");
+        for k in ["shell", "registry-gemini-mine"] {
+            let s = started(ok(c.call(start_cmd(k))));
+            assert!(!s.agent_id.is_empty(), "{name}: {k}");
+        }
         drop(n);
         let _ = std::fs::remove_dir_all(&e.dir);
     }

@@ -3423,8 +3423,10 @@ fn a_window_that_opens_after_agents_messaged_each_other_gets_the_message_in_its_
 /// ADR-0092 (the maintainer's answer on #1133, "startable, but always signed"): a registry kind that starts through a package runner
 /// (`npx`, `uvx`) fetches and runs code when it starts, so the node accepts a start of one only with a person's device signature, whatever
 /// its `signed_commands` policy says. Here, with no policy file at all: the hub's unsigned `AgentStart` of such a kind is refused with
-/// `node.policy_denied` (rule `registry_signed_start`); the same start signed by a trusted device (`AgentLaunch`) starts it; a hand-made
-/// kind with the very same command is not affected. The "npx" here is a local stub that runs the fake ACP agent: no network, no real npx.
+/// `node.policy_denied` (rule `registry_signed_start`); the same start signed by a trusted device (`AgentLaunch`) starts it. Decided by
+/// origin (review F5): hand-made kinds with the very same command are not affected, also one named `registry-*`. A `registry-*` kind
+/// the node has not read yet is held to it until it has (review F6). The "npx" here is a local stub that runs the fake ACP agent: no
+/// network, no real npx; the registry kind is registered as the node registers the converted ones.
 #[cfg(unix)]
 #[test]
 fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
@@ -3476,8 +3478,8 @@ fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
             npx.to_string_lossy()
         )
     };
-    std::fs::write(manifests.join("registry-stub.toml"), acp("registry-stub")).unwrap();
     std::fs::write(manifests.join("by-hand.toml"), acp("stub-by-hand")).unwrap();
+    std::fs::write(manifests.join("lookalike.toml"), acp("registry-lookalike")).unwrap();
     let pick = tmp("registry-signed-start-pick");
     std::fs::create_dir_all(pick.join("app")).unwrap();
     git(&pick.join("app"), &["init", "-q", "-b", "main"]);
@@ -3501,6 +3503,10 @@ fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
         limits: Default::default(),
     };
     let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    node.supervisor
+        .lock()
+        .unwrap()
+        .register_from_registry(agora_adapters::Manifest::parse(&acp("registry-stub")).unwrap());
     let mut link = hub.link(addr);
     link.commands = Some(cfg.socket.clone());
     link.grants = Some(Arc::clone(&node.grants));
@@ -3534,11 +3540,23 @@ fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
         Some("registry_signed_start"),
         "{refused:?}"
     );
-    // A hand-made kind with the same command is not affected.
-    let by_hand = session
-        .start_agent("laptop", &project, "stub-by-hand")
-        .unwrap();
-    assert!(!by_hand.is_empty());
+    // Hand-made kinds with the same command are not affected, also one whose name looks like a registry kind's.
+    for kind in ["stub-by-hand", "registry-lookalike"] {
+        let by_hand = session.start_agent("laptop", &project, kind).unwrap();
+        assert!(!by_hand.is_empty(), "{kind}");
+    }
+    // A `registry-*` description added after the node read its folder: unknown where the start is judged, so held to a signature;
+    // once the node has read it (here: its agent list was asked for) it is a hand-made kind like the others.
+    std::fs::write(cfg.manifests_dir.join("late.toml"), acp("registry-late")).unwrap();
+    let late = session
+        .start_agent("laptop", &project, "registry-late")
+        .unwrap_err();
+    assert_eq!(late.code, "node.policy_denied", "{late:?}");
+    let _ = session.agent_kinds_all("laptop").unwrap();
+    assert!(!session
+        .start_agent("laptop", &project, "registry-late")
+        .unwrap()
+        .is_empty());
     // Signed by a trusted device: it starts.
     let now = || {
         u64::try_from(

@@ -12,7 +12,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_adapters::host::AdapterEvent;
-use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
 use agora_protocol::v1::{self, event::Body};
 use prost::Message;
@@ -1453,6 +1452,16 @@ fn private_node_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A policy value without the quotes an owner may put around it (`"off"`, `'off'`), and without spaces around it.
+fn unquote(v: &str) -> &str {
+    let v = v.trim();
+    v.strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+        .unwrap_or(v)
+        .trim()
+}
+
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
     let text = match std::fs::read_to_string(path) {
@@ -1563,7 +1572,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         }
                     }
                 }
-                "agents.registry" => match v.trim() {
+                "agents.registry" => match unquote(v) {
                     "on" => p.registry.off = false,
                     "off" => p.registry.off = true,
                     _ => {
@@ -1571,13 +1580,20 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         p.problems.push(line.chars().take(80).collect());
                     }
                 },
+                // Every deny line adds to the list (a second line never undoes the first), each name quoted or not. A name that is
+                // not one of this program's registry kinds is a policy problem: it may be a typo of one the owner meant to switch off.
                 "agents.registry.deny" => {
-                    p.registry.deny = v
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect();
+                    for name in v.split(',').map(unquote).filter(|s| !s.is_empty()) {
+                        if !crate::manifests::is_registry_kind_name(name) {
+                            p.problems.push(
+                                format!("agents.registry.deny {name}")
+                                    .chars()
+                                    .take(80)
+                                    .collect(),
+                            );
+                        }
+                        p.registry.deny.insert(name.to_string());
+                    }
                 }
                 "sandbox.trust_manifest" => {
                     p.sandbox.trusted_kinds = v
@@ -1750,8 +1766,8 @@ impl Node {
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         sup.set_registry_policy(read_policy(&cfg.data_dir.join(POLICY_FILE)).registry);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
-        for m in found {
-            sup.register(m);
+        for l in found {
+            sup.register_loaded(l);
         }
 
         let mut projects = Vec::new();
@@ -2735,7 +2751,7 @@ fn deliver_held(
 /// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
 /// name or adds one; see `crate::manifests`), and each file that could not be read or parsed with the reason.
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
-pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
+pub fn load_manifests(dir: &Path) -> (Vec<crate::manifests::Loaded>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
     for (kind, file) in crate::manifests::shadowing(&loaded) {
         eprintln!(
@@ -2743,7 +2759,7 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
             file.display()
         );
     }
-    (loaded.into_iter().map(|l| l.manifest).collect(), problems)
+    (loaded, problems)
 }
 
 /// The state a ledger entry last knew (its `last_state` word), or `None` for one that is not a state worth showing again.
@@ -3553,6 +3569,22 @@ mod announce_tests {
         let deny = reg("agents.registry.deny = registry-gemini, registry-goose\n").registry;
         assert!(!deny.off);
         assert_eq!(deny.deny.len(), 2);
+        // #1133 review F4: quotes are taken off, a second line adds to the first, and a name that is no registry kind is a problem.
+        let quoted = reg("agents.registry.deny = \"registry-gemini\"\nagents.registry.deny = 'registry-goose'\nagents.registry = \"off\"\n");
+        assert!(quoted.problems.is_empty(), "{:?}", quoted.problems);
+        assert!(quoted.registry.off);
+        assert_eq!(
+            quoted
+                .registry
+                .deny
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["registry-gemini", "registry-goose"]
+        );
+        let unknown = reg("agents.registry.deny = registry-gemni\n");
+        assert_eq!(unknown.problems.len(), 1, "{:?}", unknown.problems);
+        assert!(unknown.registry.deny.contains("registry-gemni"));
         assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
         assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
         assert_eq!(

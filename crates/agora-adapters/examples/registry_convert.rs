@@ -62,10 +62,13 @@ fn clear(out: &Path) -> std::io::Result<()> {
 fn run(src: &Path, out: &Path, commit: &str, date: &str) -> std::io::Result<()> {
     fs::create_dir_all(out.join("icons"))?;
     clear(out)?;
-    let quarantine = match fs::read_to_string(src.join("quarantine.json")) {
-        Ok(text) => quarantine_list(&text).map_err(|r| std::io::Error::other(r.code()))?,
-        Err(_) => Default::default(),
-    };
+    // Required: without it the entries the registry itself holds back would be converted (#1133 review F8).
+    let text = fs::read_to_string(src.join("quarantine.json")).map_err(|e| {
+        std::io::Error::other(format!(
+            "the registry clone has no readable quarantine.json: {e}"
+        ))
+    })?;
+    let quarantine = quarantine_list(&text).map_err(|r| std::io::Error::other(r.code()))?;
     let mut dirs: Vec<_> = fs::read_dir(src)?
         .filter_map(Result::ok)
         .map(|e| e.path())

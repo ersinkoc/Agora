@@ -215,8 +215,8 @@ impl ControlContext {
         };
         let (found, _) = crate::daemon::load_manifests(dir);
         let mut sup = self.sup();
-        for m in found {
-            sup.register(m);
+        for l in found {
+            sup.register_loaded(l);
         }
     }
 

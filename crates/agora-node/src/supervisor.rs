@@ -982,6 +982,8 @@ pub struct Supervisor {
     skip_permissions: SkipPermissions,
     /// ADR-0092 (#1133): the owner's `agents.registry` policy; a registry kind it switches off is neither listed nor started.
     registry: crate::manifests::RegistryPolicy,
+    /// The kinds registered from the ACP registry's converted manifests (by origin, not by name).
+    registry_kinds: BTreeSet<String>,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
     /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
@@ -1006,6 +1008,7 @@ impl Supervisor {
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             registry: crate::manifests::RegistryPolicy::default(),
+            registry_kinds: BTreeSet::new(),
             holder: None,
             kept_launch: BTreeSet::new(),
         }
@@ -1267,17 +1270,31 @@ impl Supervisor {
         self.registry = policy;
     }
 
-    /// #1133: whether a start of `kind` must be signed by a person's device (a registry kind started through a package runner). Read
-    /// where the hub's commands enter the node; an unknown kind is not (its start fails as unknown).
+    /// #1133: whether a start of `kind` must be signed by a person's device: a kind from the ACP registry started through a package
+    /// runner. Read where the hub's commands enter the node. A kind not known yet whose name says it is a registry one (`registry-*`, a
+    /// manifest added after the node read its folder) is held to it too: its description is read only after this check (review F6).
     pub fn start_needs_signature(&self, kind: &str) -> bool {
-        self.kinds
-            .get(kind)
-            .is_some_and(|k| crate::manifests::needs_signed_start(&k.manifest))
+        match self.kinds.get(kind) {
+            Some(k) => {
+                self.registry_kinds.contains(kind)
+                    && crate::manifests::fetches_at_start(&k.manifest)
+            }
+            None => kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+        }
+    }
+
+    /// The owner's registry policy for `kind`: why it is switched off, for a kind from the registry only.
+    fn registry_refusal(&self, kind: &str) -> Option<&'static str> {
+        if self.registry_kinds.contains(kind) {
+            self.registry.refusal(kind)
+        } else {
+            None
+        }
     }
 
     /// #1133: a registry kind the owner's policy switches off is not started, by any path.
     fn refuse_registry(&self, kind: &str) -> Result<(), SupervisorError> {
-        match self.registry.refusal(kind) {
+        match self.registry_refusal(kind) {
             Some(rule) => Err(SupervisorError::RegistryRefused(kind.to_string(), rule)),
             None => Ok(()),
         }
@@ -1615,6 +1632,28 @@ impl Supervisor {
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
     pub fn register(&mut self, manifest: Manifest) {
+        // A hand-made description of a kind replaces a registry one of the same name: it is no longer the registry's (#1133 F5).
+        self.registry_kinds.remove(&manifest.kind);
+        self.register_kind(manifest);
+    }
+
+    /// [`Self::register`] for a kind converted from the ACP registry (ADR-0092, `manifests::Source::Registry`): the owner's
+    /// `agents.registry` policy and the signed-start rule apply to it, by its origin, never by its name alone.
+    pub fn register_from_registry(&mut self, manifest: Manifest) {
+        self.registry_kinds.insert(manifest.kind.clone());
+        self.register_kind(manifest);
+    }
+
+    /// [`Self::register`] or [`Self::register_from_registry`], by where the description came from.
+    pub fn register_loaded(&mut self, loaded: crate::manifests::Loaded) {
+        if loaded.source == crate::manifests::Source::Registry {
+            self.register_from_registry(loaded.manifest);
+        } else {
+            self.register(loaded.manifest);
+        }
+    }
+
+    fn register_kind(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
         let ready = Detector::ready(&manifest);
         let typed = Detector::typed(&manifest);
@@ -4188,7 +4227,7 @@ impl Supervisor {
         self.kinds
             .values()
             // #1133: a registry kind the owner's policy switches off is not offered.
-            .filter(|k| self.registry.refusal(&k.manifest.kind).is_none())
+            .filter(|k| self.registry_refusal(&k.manifest.kind).is_none())
             .map(|k| {
                 let m = &k.manifest;
                 let acp = m.structured.as_ref().and_then(|s| s.acp.as_ref());

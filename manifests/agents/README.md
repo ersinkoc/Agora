@@ -22,7 +22,7 @@ them through Agora. A hand-made kind of the same `kind`, or one named by the reg
 converted; left out: `agoragentic-acp`, `deepagents`, `minion-code` and `vtcode` (`registry.quarantined`: the registry holds them back
 itself) and `antigravity-acp` (`registry.inconsistent_command`: its arguments differ per platform; the hand-made `antigravity-acp`
 covers it). `registry-opencode` runs the same `opencode acp` as the hand-made `opencode-acp`; both are listed. The maintainer's
-answers (#1133): quarantined entries stay skipped; `poolside` keeps its registry id as its program name; the npx and uvx kinds start
+answers (#1133): quarantined entries stay skipped (the conversion refuses a clone without `quarantine.json`); `poolside` keeps its registry id as its program name; the npx and uvx kinds start
 only on a start a person's device signed; a node's policy line `agents.registry = off` (or `agents.registry.deny = ...`) switches the
 registry kinds off there (`docs/specs/protocol.md`, "ACP registry kinds").
 
