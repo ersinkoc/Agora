@@ -626,6 +626,8 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
                 &[("restarts", p("restarts"))],
             ),
         },
+        // ADR-0089: the node could not write this conversation to its disk.
+        "chat.history_not_saved" => t(key!("tui-notice-history_not_saved"), &[]),
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
@@ -1227,6 +1229,11 @@ mod tests {
             said.contains("tui-notice-gave_up-no_code[restarts=5]"),
             "{said}"
         );
+        // ADR-0089: the node could not save the conversation.
+        let mut not_saved = entry(ChatRole::Agent, ChatKind::Notice, "");
+        not_saved.code = "chat.history_not_saved".into();
+        let said = render_chat(&[not_saved], "a", "", (160, 24), false, &t).join("\n");
+        assert!(said.contains("tui-notice-history_not_saved"), "{said}");
         let a = AgentSnapshot {
             modes: vec![agora_protocol::v1::SessionOption {
                 id: "plan".into(),

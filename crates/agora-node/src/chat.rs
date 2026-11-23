@@ -1,8 +1,13 @@
 //! What agents without a terminal say (ADR-0038): a bounded transcript per agent that clients can read and follow.
 //!
 //! The adapter host reports chat items to the node; the node keeps the latest of them, plus the requests users sent, in a
-//! ring per agent (like a terminal's screen, kept in memory and gone when the node restarts). A subscriber gets the ring
-//! first and every entry after it. Nothing here touches the hub's event store.
+//! ring per agent (like a terminal's screen). A subscriber gets the ring first and every entry after it. Nothing here touches the
+//! hub's event store.
+//!
+//! ADR-0089, ADR-0104 C1: on a board that saves ([`ChatBoard::saving`]), each change marks its entry for the transcript writer
+//! ([`crate::transcript`]), which takes the marked entries once a second off the chat path and appends them to the agent's file. A
+//! node that takes an agent up from the holder, or resumes it, fills its ring from that file ([`ChatBoard::seed_from_disk`]) and
+//! numbers on from the file's highest id, so the conversation and its ids survive a node restart.
 //!
 //! ADR-0090: a tool call and a plan are ONE entry the node changes in place (a later version carries the same `entry_id`, which a
 //! client that knows the capability `chat.rich` replaces); the node measures a call's duration, enforces every size cap before an
@@ -25,6 +30,8 @@ use agora_protocol::v1::{
     ChatEntry, ChatKind, ChatRole, PermissionOutcome, PlanPriority, PlanStep, ToolKind,
     ToolLocation, ToolStatus,
 };
+
+use crate::transcript::{Batch, Line, Seed, Side, Store, Wake};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
 pub const MAX_ENTRIES: usize = 500;
@@ -56,6 +63,8 @@ pub const NODE_NOTICES: &[&str] = &[
     "adapter.output_dropped",
     // ADR-0101: the node refused an always-only request under its policy.
     "approval.always_only_forbidden",
+    // ADR-0089: the agent's history could not be written to the node's disk.
+    crate::transcript::NOT_SAVED,
 ];
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
@@ -85,6 +94,65 @@ struct Transcript {
     /// When each entry that changes in place was last sent, and which ones hold a change not yet sent.
     sent_ms: HashMap<u64, u64>,
     dirty: BTreeSet<u64>,
+    /// ADR-0089, ADR-0104 C1: what is not on disk yet, on a board that saves (`None` otherwise).
+    save: Option<Save>,
+}
+
+/// The most bytes of changed entries that left the ring before a batch took them, kept for that batch (a flood between two batches);
+/// older ones beyond it are not written.
+const EVICTED_MAX: usize = 1024 * 1024;
+
+/// What of one transcript the writer has not taken yet. The chat path only marks ids here; the writer clones the entries when it takes
+/// a batch, so an entry that changed many times is written once, as it is then.
+struct Save {
+    wake: Arc<Wake>,
+    /// Entries in the ring that changed since the last batch.
+    dirty: BTreeSet<u64>,
+    /// Changed entries that left the ring before the batch took them, with what was kept beside them.
+    evicted: VecDeque<(ChatEntry, Side)>,
+    evicted_bytes: usize,
+    /// Entries taken back out of the transcript (a prompt not sent, queued prompts dropped).
+    removed: Vec<u64>,
+    /// About how many bytes changed since the last batch; at [`crate::transcript::BATCH_BYTES`] the writer is woken.
+    bytes: usize,
+    woken: bool,
+    /// `chat.history_not_saved` was said in this conversation.
+    said: bool,
+}
+
+impl Save {
+    fn new(wake: Arc<Wake>) -> Self {
+        Self {
+            wake,
+            dirty: BTreeSet::new(),
+            evicted: VecDeque::new(),
+            evicted_bytes: 0,
+            removed: Vec::new(),
+            bytes: 0,
+            woken: false,
+            said: false,
+        }
+    }
+
+    fn grew(&mut self, bytes: usize) {
+        self.bytes += bytes;
+        if self.bytes >= crate::transcript::BATCH_BYTES && !self.woken {
+            self.woken = true;
+            self.wake.notify();
+        }
+    }
+}
+
+/// An agent's transcript, made saving when the board saves.
+fn slot<'a>(
+    g: &'a mut HashMap<AgentId, Transcript>,
+    agent: &AgentId,
+    wake: Option<&Arc<Wake>>,
+) -> &'a mut Transcript {
+    g.entry(agent.clone()).or_insert_with(|| Transcript {
+        save: wake.map(|w| Save::new(Arc::clone(w))),
+        ..Default::default()
+    })
 }
 
 /// The transcripts of every chat agent on this node.
@@ -92,6 +160,9 @@ struct Transcript {
 pub struct ChatBoard {
     agents: Arc<Mutex<HashMap<AgentId, Transcript>>>,
     next_follower_id: AtomicU64,
+    /// ADR-0089, ADR-0104 C1: where the transcripts are saved, and what wakes their writer; `None` on a board that keeps memory only.
+    store: Option<Arc<Store>>,
+    wake: Option<Arc<Wake>>,
 }
 
 /// A live chat subscription. Dropping it unregisters its follower even if the transcript stays quiet.
@@ -476,8 +547,146 @@ impl Transcript {
                 break;
             };
             self.bytes = self.bytes.saturating_sub(Self::size(&old));
+            self.keep_unsaved(&old);
             self.forget(&old);
         }
+    }
+
+    /// What is kept beside an entry for the file: its call's tool and arguments, and whether it is the plan.
+    fn side(&self, e: &ChatEntry) -> Side {
+        Side {
+            tool: (!e.call_id.is_empty())
+                .then(|| self.calls.get(&e.call_id))
+                .flatten()
+                .filter(|c| c.entry == e.entry_id)
+                .map(|c| (c.tool.clone(), c.args.clone())),
+            plan: self.plan == Some(e.entry_id),
+        }
+    }
+
+    /// An entry leaves the ring: one with a change not written yet goes to the next batch as it is (bounded, oldest dropped first).
+    fn keep_unsaved(&mut self, old: &ChatEntry) {
+        if !self
+            .save
+            .as_ref()
+            .is_some_and(|s| s.dirty.contains(&old.entry_id))
+        {
+            return;
+        }
+        let side = self.side(old);
+        let size = Self::size(old);
+        if let Some(s) = &mut self.save {
+            s.dirty.remove(&old.entry_id);
+            s.evicted_bytes += size;
+            s.evicted.push_back((old.clone(), side));
+            while s.evicted_bytes > EVICTED_MAX {
+                let Some((e, _)) = s.evicted.pop_front() else {
+                    break;
+                };
+                s.evicted_bytes = s.evicted_bytes.saturating_sub(Self::size(&e));
+            }
+        }
+    }
+
+    /// An entry changed (or is new): the next batch writes it.
+    fn changed(&mut self, id: u64, bytes: usize) {
+        if let Some(s) = &mut self.save {
+            s.dirty.insert(id);
+            s.grew(bytes);
+        }
+    }
+
+    /// Takes the entry at `i` out of the transcript (a new subscriber never sees it, and the file says it went).
+    fn take_out(&mut self, i: usize) {
+        if let Some(old) = self.entries.remove(i) {
+            self.bytes = self.bytes.saturating_sub(Self::size(&old));
+            self.forget(&old);
+            if let Some(s) = &mut self.save {
+                s.dirty.remove(&old.entry_id);
+                s.removed.push(old.entry_id);
+                s.grew(16);
+            }
+        }
+    }
+
+    /// [`ChatBoard::drop_queued`] on this transcript.
+    fn drop_queued(&mut self, entry_ids: &[u64], now_ms: u64) {
+        for id in entry_ids {
+            if let Some(i) = self.index(*id) {
+                self.take_out(i);
+            }
+        }
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = "adapter.queue_dropped".into();
+        let ids: Vec<String> = entry_ids.iter().map(u64::to_string).collect();
+        n.params = HashMap::from([
+            ("count".to_string(), entry_ids.len().to_string()),
+            ("entries".to_string(), ids.join(",")),
+        ]);
+        self.add(n, now_ms);
+    }
+
+    /// ADR-0104 C1: fills an empty transcript (one that never gave an id) from what its file gave back, and numbers on from the
+    /// highest id the file shows. Rebuilds the calls and the plan that change in place; a permission entry still pending is shown
+    /// cancelled (this node holds no approval of the node before it: a request still open is asked again under a new id), and a
+    /// prompt still queued is dropped as the queue that held it ended with that node. Followers (a window that already follows a
+    /// resumed agent) get the entries. False when the transcript already gave ids.
+    fn seed(&mut self, seed: Seed, now_ms: u64) -> bool {
+        if self.next_id > 0 || !self.entries.is_empty() {
+            return false;
+        }
+        let high = seed
+            .high
+            .max(seed.entries.last().map_or(0, |(e, _)| e.entry_id));
+        for (e, side) in seed.entries {
+            if let (Some((tool, args)), false) = (side.tool, e.call_id.is_empty()) {
+                self.calls.insert(
+                    e.call_id.clone(),
+                    Call {
+                        entry: e.entry_id,
+                        tool,
+                        args,
+                    },
+                );
+            }
+            if side.plan {
+                self.plan = Some(e.entry_id);
+            }
+            self.bytes += Self::size(&e);
+            self.entries.push_back(e);
+        }
+        self.next_id = high;
+        self.evict();
+        if !self.followers.is_empty() {
+            let all: Vec<ChatEntry> = self.entries.iter().cloned().collect();
+            for e in &all {
+                self.send(e);
+            }
+        }
+        let pending: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.kind == ChatKind::Permission as i32
+                    && e.permission_outcome == PermissionOutcome::Pending as i32
+            })
+            .map(|e| e.entry_id)
+            .collect();
+        for id in pending {
+            self.modify(id, now_ms, false, |e| {
+                e.permission_outcome = PermissionOutcome::Cancelled as i32;
+            });
+        }
+        let queued: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|e| e.queued)
+            .map(|e| e.entry_id)
+            .collect();
+        if !queued.is_empty() {
+            self.drop_queued(&queued, now_ms);
+        }
+        true
     }
 
     fn forget(&mut self, e: &ChatEntry) {
@@ -509,6 +718,7 @@ impl Transcript {
         self.bytes += Self::size(&entry);
         self.entries.push_back(entry.clone());
         self.sent_ms.insert(entry.entry_id, now_ms);
+        self.changed(entry.entry_id, Self::size(&entry));
         self.evict();
         self.send(&entry);
         entry.entry_id
@@ -530,6 +740,7 @@ impl Transcript {
         f(&mut self.entries[i]);
         let entry = self.entries[i].clone();
         self.bytes = (self.bytes + Self::size(&entry)).saturating_sub(before);
+        self.changed(id, Self::size(&entry));
         let due = self
             .sent_ms
             .get(&id)
@@ -560,6 +771,113 @@ fn entry(role: ChatRole, kind: ChatKind, text: String, at_ms: u64) -> ChatEntry 
 impl ChatBoard {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// ADR-0089, ADR-0104 C1: a board whose transcripts are saved to `store` by its writer ([`crate::transcript::spawn_writer`]).
+    pub fn saving(store: Arc<Store>) -> Self {
+        Self {
+            store: Some(store),
+            wake: Some(Arc::new(Wake::default())),
+            ..Self::default()
+        }
+    }
+
+    pub fn store(&self) -> Option<Arc<Store>> {
+        self.store.clone()
+    }
+
+    pub fn wake(&self) -> Option<Arc<Wake>> {
+        self.wake.clone()
+    }
+
+    /// ADR-0104 C1: fills the agent's transcript from `seed` when it has given no id yet (see `Transcript::seed`).
+    pub fn seed(&self, agent: &AgentId, seed: Seed, now_ms: u64) -> bool {
+        let mut g = self.lock();
+        slot(&mut g, agent, self.wake.as_ref()).seed(seed, now_ms)
+    }
+
+    /// ADR-0104 C1: [`Self::seed`] from the agent's file (read before the board's lock is taken), when the node takes the agent up
+    /// from the holder or resumes it. A missing or unreadable file seeds nothing.
+    pub fn seed_from_disk(&self, agent: &AgentId, now_ms: u64) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let seed = store.read(agent.as_str());
+        if seed.high == 0 {
+            return false;
+        }
+        self.seed(agent, seed, now_ms)
+    }
+
+    /// ADR-0089 decision 5: a fresh start of the agent ("Start again") begins a new file; its ids go on after the earlier session's.
+    pub fn begin_fresh(&self, agent: &AgentId, now_ms: u64) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let high = store.begin_fresh(agent.as_str());
+        high > 0
+            && self.seed(
+                agent,
+                Seed {
+                    entries: Vec::new(),
+                    high,
+                },
+                now_ms,
+            )
+    }
+
+    /// ADR-0089 decision 1: what changed since the last batch, per agent: the entries as they are now (each once), the changed ones
+    /// that left the ring meanwhile, and the ids taken out. Only marks are kept on the chat path: the clones are made here.
+    pub fn take_unsaved(&self) -> Vec<Batch> {
+        let mut g = self.lock();
+        let mut out = Vec::new();
+        for (agent, t) in g.iter_mut() {
+            let Some(s) = &mut t.save else {
+                continue;
+            };
+            if s.dirty.is_empty() && s.evicted.is_empty() && s.removed.is_empty() {
+                continue;
+            }
+            let dirty = std::mem::take(&mut s.dirty);
+            let evicted = std::mem::take(&mut s.evicted);
+            let removed = std::mem::take(&mut s.removed);
+            (s.bytes, s.evicted_bytes, s.woken) = (0, 0, false);
+            let mut lines: Vec<Line> = evicted
+                .into_iter()
+                .map(|(e, side)| Line::Entry(Box::new(e), side))
+                .collect();
+            for id in dirty {
+                if let Some(i) = t.index(id) {
+                    let e = &t.entries[i];
+                    lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
+                }
+            }
+            if !removed.is_empty() {
+                lines.push(Line::Removed(removed));
+            }
+            out.push(Batch {
+                agent: agent.clone(),
+                high: t.next_id,
+                lines,
+            });
+        }
+        out
+    }
+
+    /// ADR-0089 decision 1: the agent's history could not be written. Said once in its conversation (`chat.history_not_saved`, a
+    /// node notice); the agent is not touched and its entries stay in the ring.
+    pub fn not_saved(&self, agent: &AgentId, now_ms: u64) {
+        let mut g = self.lock();
+        let Some(t) = g.get_mut(agent) else {
+            return;
+        };
+        match &mut t.save {
+            Some(s) if !s.said => s.said = true,
+            _ => return,
+        }
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = crate::transcript::NOT_SAVED.into();
+        t.add(n, now_ms);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Transcript>> {
@@ -594,10 +912,7 @@ impl ChatBoard {
     pub fn retract(&self, agent: &AgentId, entry_id: u64) {
         if let Some(t) = self.lock().get_mut(agent) {
             if let Some(i) = t.index(entry_id) {
-                if let Some(old) = t.entries.remove(i) {
-                    t.bytes = t.bytes.saturating_sub(Transcript::size(&old));
-                    t.forget(&old);
-                }
+                t.take_out(i);
             }
         }
     }
@@ -613,7 +928,8 @@ impl ChatBoard {
     /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower. Returns its id.
     fn insert(&self, agent: &AgentId, e: ChatEntry) -> u64 {
         let at = e.at_ms;
-        self.lock().entry(agent.clone()).or_default().add(e, at)
+        let mut g = self.lock();
+        slot(&mut g, agent, self.wake.as_ref()).add(e, at)
     }
 
     /// What an adapter said. A notice whose code has the wrong shape is dropped (ADR-0058).
@@ -699,7 +1015,7 @@ impl ChatBoard {
         let terminal = status == ToolStatus::Completed || status == ToolStatus::Failed;
 
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         let known = t
             .calls
             .get(&item.call_id)
@@ -794,7 +1110,7 @@ impl ChatBoard {
             .collect::<Vec<_>>()
             .join("\n"));
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         if let Some(id) = t.plan.filter(|id| t.index(*id).is_some()) {
             let (text, steps) = (text.clone(), steps.clone());
             if t.modify(id, now_ms, true, move |e| {
@@ -849,6 +1165,7 @@ impl ChatBoard {
             if let Some(i) = t.index(entry_id) {
                 if t.entries[i].queued {
                     t.entries[i].at_ms = sent_ms;
+                    t.changed(entry_id, 0);
                 }
             }
         }
@@ -870,23 +1187,7 @@ impl ChatBoard {
             return;
         }
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
-        for id in entry_ids {
-            if let Some(i) = t.index(*id) {
-                if let Some(old) = t.entries.remove(i) {
-                    t.bytes = t.bytes.saturating_sub(Transcript::size(&old));
-                    t.forget(&old);
-                }
-            }
-        }
-        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
-        n.code = "adapter.queue_dropped".into();
-        let ids: Vec<String> = entry_ids.iter().map(u64::to_string).collect();
-        n.params = HashMap::from([
-            ("count".to_string(), entry_ids.len().to_string()),
-            ("entries".to_string(), ids.join(",")),
-        ]);
-        t.add(n, now_ms);
+        slot(&mut g, agent, self.wake.as_ref()).drop_queued(entry_ids, now_ms);
     }
 
     /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code
@@ -896,7 +1197,7 @@ impl ChatBoard {
     /// the agent named it, bounded like a permission entry's.
     pub fn refused_request(&self, agent: &AgentId, code: &'static str, action: &str, now_ms: u64) {
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = code.into();
         n.params = HashMap::from([(
@@ -908,7 +1209,7 @@ impl ChatBoard {
 
     pub fn output_dropped(&self, agent: &AgentId, bytes: u64, now_ms: u64) {
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = "adapter.output_dropped".into();
         n.params = HashMap::from([("bytes".to_string(), bytes.to_string())]);
@@ -926,7 +1227,7 @@ impl ChatBoard {
         now_ms: u64,
     ) {
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = code.into();
         n.params = params
@@ -1007,7 +1308,7 @@ impl ChatBoard {
         let follower_id = self.next_follower_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = sync_channel(FOLLOWER_QUEUE);
         let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
+        let t = slot(&mut g, agent, self.wake.as_ref());
         let snapshot = t.entries.iter().cloned().collect();
         t.followers.push((follower_id, tx));
         (
@@ -2086,5 +2387,316 @@ mod tests {
         let n = b.snapshot(&a).last().unwrap().clone();
         assert_eq!(n.params["entries"], format!("{},{}", q[0], q[2]));
         accounted(&b, &a);
+    }
+
+    // ---- ADR-0089, ADR-0104 C1: the transcript on disk ----
+
+    fn store(tag: &str) -> (std::path::PathBuf, Arc<Store>) {
+        let dir =
+            std::env::temp_dir().join(format!("agora-chat-save-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Arc::new(Store::new(&dir, crate::transcript::Limits::default(), None));
+        (dir, s)
+    }
+
+    /// Writes what the board has not saved yet, as the writer does.
+    fn save(b: &ChatBoard) {
+        let store = b.store().unwrap();
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_board_that_does_not_save_marks_nothing() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Text("x".into()), 1);
+        assert!(b.take_unsaved().is_empty());
+        assert!(b.lock().get(&a).unwrap().save.is_none());
+    }
+
+    #[test]
+    fn a_batch_holds_each_changed_entry_once_as_it_is_now_and_the_ids_taken_out() {
+        let (_dir, s) = store("batch");
+        let b = ChatBoard::saving(s);
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Text("one".into()), 1);
+        let mut t = tool("c1");
+        t.tool = Some("read".into());
+        t.arguments_json = Some("{\"p\":1}".into());
+        t.status = "in_progress".into();
+        b.push_item(&a, &ChatItem::Tool(t), 2);
+        for i in 0..5 {
+            let mut u = tool("c1");
+            u.output = Some(format!("line {i}"));
+            b.push_item(&a, &ChatItem::Tool(u), 3 + i);
+        }
+        let p = b.push_user(&a, "not sent".into(), 9);
+        b.retract(&a, p);
+        let batches = b.take_unsaved();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.high, 3);
+        let lines: Vec<String> = batch
+            .lines
+            .iter()
+            .map(|l| match l {
+                Line::Entry(e, side) => format!("{}:{}:{:?}", e.entry_id, e.output, side.tool),
+                Line::Removed(ids) => format!("removed {ids:?}"),
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "1::None".to_string(),
+                "2:line 4:Some((\"read\", \"{\\\"p\\\":1}\"))".to_string(),
+                "removed [3]".to_string(),
+            ]
+        );
+        // Nothing new: nothing to write.
+        assert!(b.take_unsaved().is_empty());
+        // A change marks only that entry.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                ..tool("c1")
+            }),
+            20,
+        );
+        let again = b.take_unsaved();
+        assert_eq!(again[0].lines.len(), 1);
+    }
+
+    #[test]
+    fn an_entry_that_leaves_the_ring_before_the_batch_is_still_written() {
+        let (_dir, s) = store("flood");
+        let b = ChatBoard::saving(s);
+        let a = AgentId::new("a");
+        for i in 0..(MAX_ENTRIES + 50) {
+            b.push_item(&a, &ChatItem::Text(format!("m{i}")), 1);
+        }
+        let batch = b.take_unsaved().pop().unwrap();
+        assert_eq!(batch.lines.len(), MAX_ENTRIES + 50);
+        let ids: Vec<u64> = batch
+            .lines
+            .iter()
+            .map(|l| match l {
+                Line::Entry(e, _) => e.entry_id,
+                Line::Removed(_) => 0,
+            })
+            .collect();
+        assert_eq!(ids, (1..=(MAX_ENTRIES as u64 + 50)).collect::<Vec<_>>());
+    }
+
+    /// #931: a node that takes the agent up gets its earlier turns back, numbers on after them, and a tool call that finishes after
+    /// the restart (an update that carries only its status) changes its one entry in place, its text still naming the tool.
+    #[test]
+    fn a_new_board_seeded_from_the_file_shows_the_earlier_turns_and_continues_them() {
+        let (_dir, s) = store("seed");
+        let a = AgentId::new("agent-3");
+        let old = ChatBoard::saving(Arc::clone(&s));
+        old.push_user(&a, "hello".into(), 1);
+        old.push_item(&a, &ChatItem::Text("hi".into()), 2);
+        let mut t = tool("c1");
+        t.tool = Some("read".into());
+        t.arguments_json = Some("{\"path\":\"a.rs\"}".into());
+        t.status = "in_progress".into();
+        old.push_item(&a, &ChatItem::Tool(t), 3);
+        old.push_item(
+            &a,
+            &ChatItem::PlanSteps(vec![PlanItem {
+                text: "step".into(),
+                ..PlanItem::default()
+            }]),
+            4,
+        );
+        old.push_permission(&a, "node-ap-1", "run ls", 5);
+        let queued = old.push_queued(&a, "later".into(), 6);
+        save(&old);
+        // Given after the last batch and never written (a kill loses up to one batch): the next node numbers past what the file shows.
+        old.push_item(&a, &ChatItem::Text("lost".into()), 7);
+        let before = old.snapshot(&a);
+
+        let new = ChatBoard::saving(Arc::clone(&s));
+        assert!(new.seed_from_disk(&a, 100));
+        let seeded = new.snapshot(&a);
+        assert_eq!(
+            seeded
+                .iter()
+                .take(5)
+                .map(|e| e.entry_id)
+                .collect::<Vec<_>>(),
+            before
+                .iter()
+                .take(5)
+                .map(|e| e.entry_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(seeded[0].text, "hello");
+        assert_eq!(seeded[1].text, "hi");
+        // The permission the old node asked is shown ended: this node never holds that approval.
+        assert_eq!(
+            seeded[4].permission_outcome,
+            PermissionOutcome::Cancelled as i32
+        );
+        // The queued prompt died with the old node's queue: it is gone and a notice names it.
+        assert!(seeded.iter().all(|e| e.entry_id != queued));
+        let notice = seeded.last().unwrap();
+        assert_eq!(notice.code, "adapter.queue_dropped");
+        assert_eq!(notice.params["entries"], queued.to_string());
+        assert_eq!(
+            notice.entry_id,
+            queued + 1,
+            "the notice numbers on from the file's highest id"
+        );
+        // Seeding never goes over a ring that gave ids.
+        assert!(!new.seed_from_disk(&a, 100));
+
+        // The call finishes after the restart: one entry, the same id, updated in place.
+        let call_id = seeded[2].entry_id;
+        let (_, rx) = new.follow(&a);
+        new.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                output: Some("done".into()),
+                ..tool("c1")
+            }),
+            200,
+        );
+        let after = new.snapshot(&a);
+        let calls: Vec<&ChatEntry> = after.iter().filter(|e| e.call_id == "c1").collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].entry_id, call_id);
+        assert_eq!(calls[0].status, ToolStatus::Completed as i32);
+        assert_eq!(calls[0].output, "done");
+        assert!(
+            calls[0].text.contains("\"tool\":\"read\"") && calls[0].text.contains("a.rs"),
+            "{}",
+            calls[0].text
+        );
+        assert_eq!(rx.try_recv().unwrap().entry_id, call_id);
+        // A new plan replaces the seeded one in place.
+        let plan_id = seeded[3].entry_id;
+        new.push_item(
+            &a,
+            &ChatItem::PlanSteps(vec![PlanItem {
+                text: "step 2".into(),
+                ..PlanItem::default()
+            }]),
+            201,
+        );
+        let plans: Vec<ChatEntry> = new
+            .snapshot(&a)
+            .into_iter()
+            .filter(|e| e.kind == ChatKind::Plan as i32)
+            .collect();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            (plans[0].entry_id, plans[0].text.as_str()),
+            (plan_id, "step 2")
+        );
+        // The next new entry continues after everything given so far.
+        new.push_item(&a, &ChatItem::Text("next".into()), 202);
+        assert_eq!(
+            new.snapshot(&a).last().unwrap().entry_id,
+            notice.entry_id + 1
+        );
+        accounted(&new, &a);
+
+        // What the new board changed is written too, and a third board sees it.
+        save(&new);
+        let third = ChatBoard::saving(Arc::clone(&s));
+        assert!(third.seed_from_disk(&a, 300));
+        assert_eq!(third.snapshot(&a), new.snapshot(&a));
+    }
+
+    #[test]
+    fn a_window_that_already_follows_a_resumed_agent_gets_the_earlier_entries() {
+        let (_dir, s) = store("follow");
+        let a = AgentId::new("a");
+        let old = ChatBoard::saving(Arc::clone(&s));
+        old.push_item(&a, &ChatItem::Text("x".into()), 1);
+        save(&old);
+        let new = ChatBoard::saving(Arc::clone(&s));
+        let (so_far, rx) = new.follow(&a);
+        assert!(so_far.is_empty());
+        assert!(new.seed_from_disk(&a, 2));
+        assert_eq!(rx.try_recv().unwrap().text, "x");
+    }
+
+    #[test]
+    fn a_fresh_start_begins_a_new_file_and_numbers_after_the_earlier_session() {
+        let (_dir, s) = store("fresh");
+        let a = AgentId::new("a");
+        let old = ChatBoard::saving(Arc::clone(&s));
+        old.push_item(&a, &ChatItem::Text("x".into()), 1);
+        old.push_item(&a, &ChatItem::Text("y".into()), 1);
+        save(&old);
+        let new = ChatBoard::saving(Arc::clone(&s));
+        assert!(new.begin_fresh(&a, 2));
+        assert!(new.snapshot(&a).is_empty());
+        new.push_item(&a, &ChatItem::Text("z".into()), 3);
+        assert_eq!(new.snapshot(&a)[0].entry_id, 3);
+        save(&new);
+        let seed = s.read("a");
+        assert_eq!(seed.entries.len(), 1);
+        assert_eq!(seed.entries[0].0.text, "z");
+    }
+
+    /// ADR-0089 decision 1: a history that cannot be written (here a folder where the file would be, as a full disk would refuse it)
+    /// never touches the agent: its entries stay in the ring, and its conversation says so once, however many batches fail.
+    #[test]
+    fn a_write_that_fails_says_so_once_and_keeps_the_ring() {
+        let (dir, s) = store("fail");
+        let a = AgentId::new("a");
+        std::fs::create_dir_all(s.path("a").unwrap()).unwrap();
+        let b = Arc::new(ChatBoard::saving(Arc::clone(&s)));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = crate::transcript::spawn_writer(
+            Arc::clone(&b),
+            Box::new(Default::default),
+            Arc::clone(&stop),
+        )
+        .unwrap()
+        .unwrap();
+        let notices = || {
+            b.snapshot(&a)
+                .iter()
+                .filter(|e| e.code == crate::transcript::NOT_SAVED)
+                .count()
+        };
+        for i in 0..3 {
+            b.push_item(&a, &ChatItem::Text(format!("m{i}")), i);
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while b
+                .lock()
+                .get(&a)
+                .is_some_and(|t| t.save.as_ref().is_some_and(|s| !s.dirty.is_empty()))
+            {
+                assert!(
+                    std::time::Instant::now() < end,
+                    "the writer never took the batch"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        // Give the writer one more round with the notice itself to write.
+        std::thread::sleep(crate::transcript::BATCH_INTERVAL + Duration::from_millis(300));
+        assert_eq!(notices(), 1);
+        let texts: Vec<String> = b
+            .snapshot(&a)
+            .iter()
+            .filter(|e| e.kind == ChatKind::Text as i32)
+            .map(|e| e.text.clone())
+            .collect();
+        assert_eq!(texts, ["m0", "m1", "m2"]);
+        stop.store(true, Ordering::Release);
+        b.wake().unwrap().notify();
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

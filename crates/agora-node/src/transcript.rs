@@ -1,0 +1,1007 @@
+//! ADR-0089 decisions 1 to 3 and 7, and ADR-0104 C1: the chat transcript of every structured agent, on the node's own disk, so the
+//! conversation is still there after the node restarts (#931). The window reads it as it always did: the node fills the agent's ring
+//! ([`crate::chat::ChatBoard`]) from the tail of the file when it takes the agent up from the holder or resumes it, and the ring
+//! snapshot a subscriber gets is that ring. No schema: paging (`chat.history`) is ADR-0089's later step.
+//!
+//! **Where.** `<data>/transcripts/<agent id>.jsonl`, the folder `0700` and each file `0600` (an owner-only ACL on Windows), made through
+//! `agora-platform` (`ensure_private_dir`, `open_append_private`, `write_private`). Never sent to the hub or the holder. The folder is
+//! inside the node's data folder, which every confined agent's profile protects (`node_private_paths`).
+//!
+//! **Format.** JSON lines. The first line says the format and its version (and, after the oldest entries were dropped, that it was
+//! truncated). Every other line is one version of one entry, or the ids of entries taken back out (a prompt that was not sent, queued
+//! prompts that were dropped):
+//! ```text
+//! {"format":"chat-transcript","version":1}
+//! {"n":12,"entry":{"entry_id":12,"at_ms":...,"role":2,"kind":2,"text":"..."},"tool":"read","args":"{...}"}
+//! {"n":14,"removed":[13]}
+//! ```
+//! `entry` holds every field of the protocol's `ChatEntry` under its proto name (enums as their numbers), defaults left out. A tool
+//! call's line also keeps its tool name and arguments (`tool`, `args`; the entry's text joins them and may be cut), and the plan's
+//! line `"plan":true`, so a call that finishes after a restart updates its one entry in place. `n` is the highest entry id the
+//! node had given the agent when the line was written: ids continue from the highest `n` (ADR-0089 decision 4), also past entries
+//! that were given an id and never written. An entry that changes in place (ADR-0090) is written again with the same id; the last
+//! line of an id is the entry (ADR-0090 open question 3), and a reader skips a line it cannot parse (a torn last line).
+//!
+//! **Writes.** Off every agent's path: the chat path only marks which entries changed (an id in a set); the writer thread
+//! ([`spawn_writer`]) takes the changed entries under the board's lock once a second, or as soon as 64 KiB of them wait, and encodes,
+//! redacts and appends them after letting it go. A write that fails (a full disk, a folder that cannot be made) drops that batch:
+//! the entries stay in the ring, the agent is not touched, and its conversation says once `chat.history_not_saved`. A node that is
+//! killed loses at most the last batch (up to a second or 64 KiB).
+//!
+//! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, lowered (or raised up to 256 MiB) by the node policy
+//! `chat.history_max_bytes` (0 writes nothing); over it, the newest half is written to a new file that replaces the old one (whole
+//! lines, a header that says `truncated`). The file of an agent that does not run is removed once it was not written for
+//! `chat.history_days` (30 by default, never more); a fresh start ("Start again") moves the earlier file aside as `<id>.earlier.jsonl`,
+//! which ages the same way. Over 2 GiB in all, the files of agents that do not run go, oldest first. Checked when the node starts and
+//! every hour. `agora history purge` removes the folder.
+//!
+//! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, ADR-0084) are replaced by
+//! `<redacted>` in every text of a line before it is written. A secret the node does not hold cannot be found in what an agent or a
+//! tool printed; the file is as sensitive as the terminal, and its mode is what protects it.
+//!
+//! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
+//! remove the file; retention does.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use agora_core::AgentId;
+use agora_protocol::v1::{ChatEntry, PlanStep, ToolLocation};
+use serde_json::{json, Map, Value};
+
+use crate::credentials::SecretStore;
+
+/// The folder of transcripts in the node's data folder.
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
+/// The format the first line names, and its version.
+pub const FORMAT: &str = "chat-transcript";
+pub const VERSION: u64 = 1;
+/// ADR-0089 decision 2: per agent, by default and at most; per node.
+pub const DEFAULT_MAX_BYTES: u64 = 32 << 20;
+pub const HARD_MAX_BYTES: u64 = 256 << 20;
+pub const NODE_MAX_BYTES: u64 = 2 << 30;
+/// ADR-0089 decision 2: days a file is kept after it was last written, by default and at most (the policy only lowers it).
+pub const DEFAULT_DAYS: u64 = 30;
+/// ADR-0089 decision 1: a batch at most once per this long, or as soon as this many bytes of entries wait.
+pub const BATCH_INTERVAL: Duration = Duration::from_secs(1);
+pub const BATCH_BYTES: usize = 64 * 1024;
+/// The most of a file's end that seeding reads (the ring keeps at most 256 KiB of text; a line is larger than its text).
+pub const TAIL_READ: u64 = 4 << 20;
+/// How often retention is checked while the node runs.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
+/// The notice an agent's conversation gets, once, when its history could not be written.
+pub const NOT_SAVED: &str = "chat.history_not_saved";
+/// What a secret's value is replaced by on disk.
+pub const REDACTED: &str = "<redacted>";
+/// Shorter secret values are not looked for (they would match ordinary words).
+const MIN_SECRET: usize = 4;
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The bounds the node policy sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Per agent; 0 writes nothing.
+    pub max_bytes: u64,
+    /// Days after the last write a file of an agent that does not run is kept.
+    pub days: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_MAX_BYTES,
+            days: DEFAULT_DAYS,
+        }
+    }
+}
+
+impl Limits {
+    /// `chat.history_max_bytes`: a number of bytes, at most [`HARD_MAX_BYTES`]. `None` for a value that is not a number.
+    pub fn parse_max_bytes(v: &str) -> Option<u64> {
+        v.trim().parse::<u64>().ok().map(|b| b.min(HARD_MAX_BYTES))
+    }
+
+    /// `chat.history_days`: a number of days, at most [`DEFAULT_DAYS`] (the policy lowers it). `None` for a value that is not a number.
+    pub fn parse_days(v: &str) -> Option<u64> {
+        v.trim().parse::<u64>().ok().map(|d| d.min(DEFAULT_DAYS))
+    }
+}
+
+/// What the node keeps beside an entry so it can change it in place after a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Side {
+    /// A tool call's tool name and arguments, as the node holds them apart from the entry's text.
+    pub tool: Option<(String, String)>,
+    /// This entry is the plan a new plan replaces in place.
+    pub plan: bool,
+}
+
+/// One line after the header.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Line {
+    Entry(Box<ChatEntry>, Side),
+    Removed(Vec<u64>),
+}
+
+/// What one agent's transcript adds to its file in one write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Batch {
+    pub agent: AgentId,
+    /// The highest entry id given to the agent so far.
+    pub high: u64,
+    pub lines: Vec<Line>,
+}
+
+/// What the file gives back: the newest version of each entry still in it, oldest first, and the highest id ever given.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Seed {
+    pub entries: Vec<(ChatEntry, Side)>,
+    pub high: u64,
+}
+
+/// The transcripts folder of one node.
+pub struct Store {
+    dir: PathBuf,
+    limits: Limits,
+    secrets: Option<SecretStore>,
+    /// The secret values last read, longest first, and when their folder last changed.
+    known: Mutex<(Option<SystemTime>, Vec<String>)>,
+}
+
+/// The file name of an agent: its id when that is a plain name, never a path.
+fn file_stem(agent: &str) -> Option<&str> {
+    (!agent.is_empty()
+        && agent.len() <= 128
+        && !agent.starts_with('.')
+        && agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+    .then_some(agent)
+}
+
+fn header(truncated: bool) -> Vec<u8> {
+    let mut v = json!({"format": FORMAT, "version": VERSION});
+    if truncated {
+        v["truncated"] = Value::Bool(true);
+    }
+    let mut out = v.to_string().into_bytes();
+    out.push(b'\n');
+    out
+}
+
+fn put_str(m: &mut Map<String, Value>, k: &str, v: &str) {
+    if !v.is_empty() {
+        m.insert(k.into(), Value::String(v.into()));
+    }
+}
+
+fn put_u64(m: &mut Map<String, Value>, k: &str, v: u64) {
+    if v != 0 {
+        m.insert(k.into(), Value::from(v));
+    }
+}
+
+fn put_i32(m: &mut Map<String, Value>, k: &str, v: i32) {
+    if v != 0 {
+        m.insert(k.into(), Value::from(v));
+    }
+}
+
+fn put_bool(m: &mut Map<String, Value>, k: &str, v: bool) {
+    if v {
+        m.insert(k.into(), Value::Bool(true));
+    }
+}
+
+/// Every field of a `ChatEntry` under its proto name, defaults left out.
+pub fn entry_json(e: &ChatEntry) -> Value {
+    let mut m = Map::new();
+    put_u64(&mut m, "entry_id", e.entry_id);
+    put_u64(&mut m, "at_ms", e.at_ms);
+    put_i32(&mut m, "role", e.role);
+    put_i32(&mut m, "kind", e.kind);
+    put_str(&mut m, "text", &e.text);
+    put_str(&mut m, "path", &e.path);
+    put_str(&mut m, "code", &e.code);
+    if !e.params.is_empty() {
+        let params: BTreeMap<&String, &String> = e.params.iter().collect();
+        m.insert("params".into(), json!(params));
+    }
+    put_str(&mut m, "call_id", &e.call_id);
+    put_i32(&mut m, "tool_kind", e.tool_kind);
+    put_i32(&mut m, "status", e.status);
+    if !e.paths.is_empty() {
+        m.insert(
+            "paths".into(),
+            Value::Array(
+                e.paths
+                    .iter()
+                    .map(|p| json!({"path": p.path, "line": p.line}))
+                    .collect(),
+            ),
+        );
+    }
+    put_str(&mut m, "output", &e.output);
+    put_bool(&mut m, "output_truncated", e.output_truncated);
+    put_u64(&mut m, "started_ms", e.started_ms);
+    put_u64(&mut m, "ended_ms", e.ended_ms);
+    if !e.plan_steps.is_empty() {
+        m.insert(
+            "plan_steps".into(),
+            Value::Array(
+                e.plan_steps
+                    .iter()
+                    .map(|s| json!({"text": s.text, "status": s.status, "priority": s.priority}))
+                    .collect(),
+            ),
+        );
+    }
+    put_bool(&mut m, "queued", e.queued);
+    put_str(&mut m, "approval_id", &e.approval_id);
+    put_i32(&mut m, "permission_outcome", e.permission_outcome);
+    put_bool(&mut m, "permission_always", e.permission_always);
+    Value::Object(m)
+}
+
+fn get_str(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn get_u64(v: &Value, k: &str) -> u64 {
+    v.get(k).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn get_i32(v: &Value, k: &str) -> i32 {
+    v.get(k)
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+fn get_bool(v: &Value, k: &str) -> bool {
+    v.get(k).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The entry a line's `entry` holds; `None` without an id.
+pub fn entry_from_json(v: &Value) -> Option<ChatEntry> {
+    let entry_id = get_u64(v, "entry_id");
+    if entry_id == 0 {
+        return None;
+    }
+    Some(ChatEntry {
+        entry_id,
+        at_ms: get_u64(v, "at_ms"),
+        role: get_i32(v, "role"),
+        kind: get_i32(v, "kind"),
+        text: get_str(v, "text"),
+        path: get_str(v, "path"),
+        code: get_str(v, "code"),
+        params: v
+            .get("params")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        call_id: get_str(v, "call_id"),
+        tool_kind: get_i32(v, "tool_kind"),
+        status: get_i32(v, "status"),
+        paths: v
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|p| ToolLocation {
+                        path: get_str(p, "path"),
+                        line: u32::try_from(get_u64(p, "line")).unwrap_or(0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        output: get_str(v, "output"),
+        output_truncated: get_bool(v, "output_truncated"),
+        started_ms: get_u64(v, "started_ms"),
+        ended_ms: get_u64(v, "ended_ms"),
+        plan_steps: v
+            .get("plan_steps")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|s| PlanStep {
+                        text: get_str(s, "text"),
+                        status: get_i32(s, "status"),
+                        priority: get_i32(s, "priority"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        queued: get_bool(v, "queued"),
+        approval_id: get_str(v, "approval_id"),
+        permission_outcome: get_i32(v, "permission_outcome"),
+        permission_always: get_bool(v, "permission_always"),
+    })
+}
+
+/// One line, encoded (with its line break).
+pub fn encode_line(high: u64, line: &Line) -> Vec<u8> {
+    let v = match line {
+        Line::Entry(e, side) => {
+            let mut m = Map::new();
+            m.insert("n".into(), Value::from(high));
+            m.insert("entry".into(), entry_json(e));
+            if let Some((tool, args)) = &side.tool {
+                m.insert("tool".into(), Value::String(tool.clone()));
+                m.insert("args".into(), Value::String(args.clone()));
+            }
+            if side.plan {
+                m.insert("plan".into(), Value::Bool(true));
+            }
+            Value::Object(m)
+        }
+        Line::Removed(ids) => json!({"n": high, "removed": ids}),
+    };
+    let mut out = v.to_string().into_bytes();
+    out.push(b'\n');
+    out
+}
+
+/// One line read back with its `n`; `None` for the header and for a line that cannot be read (a torn last line).
+pub fn decode_line(text: &str) -> Option<(u64, Line)> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let n = get_u64(&v, "n");
+    if let Some(e) = v.get("entry") {
+        let e = entry_from_json(e)?;
+        let tool = match (v.get("tool"), v.get("args")) {
+            (Some(Value::String(t)), Some(Value::String(a))) => Some((t.clone(), a.clone())),
+            _ => None,
+        };
+        let side = Side {
+            tool,
+            plan: get_bool(&v, "plan"),
+        };
+        return Some((n, Line::Entry(Box::new(e), side)));
+    }
+    let removed = v.get("removed")?.as_array()?;
+    Some((
+        n,
+        Line::Removed(removed.iter().filter_map(Value::as_u64).collect()),
+    ))
+}
+
+/// The newest version of each entry in `text` (whole lines; a first partial line is the caller's to skip) and the highest id given.
+pub fn fold(text: &str) -> Seed {
+    let mut by_id: BTreeMap<u64, (ChatEntry, Side)> = BTreeMap::new();
+    let mut high = 0;
+    for line in text.lines() {
+        let Some((n, line)) = decode_line(line) else {
+            continue;
+        };
+        high = high.max(n);
+        match line {
+            Line::Entry(e, side) => {
+                high = high.max(e.entry_id);
+                by_id.insert(e.entry_id, (*e, side));
+            }
+            Line::Removed(ids) => {
+                for id in ids {
+                    high = high.max(id);
+                    by_id.remove(&id);
+                }
+            }
+        }
+    }
+    Seed {
+        entries: by_id.into_values().collect(),
+        high,
+    }
+}
+
+fn redact(s: &mut String, known: &[String]) {
+    for k in known {
+        if s.contains(k.as_str()) {
+            *s = s.replace(k.as_str(), REDACTED);
+        }
+    }
+}
+
+/// `line` with every known secret value replaced in each text it holds.
+fn redacted(line: &Line, known: &[String]) -> Line {
+    let mut line = line.clone();
+    if known.is_empty() {
+        return line;
+    }
+    if let Line::Entry(e, side) = &mut line {
+        for s in [
+            &mut e.text,
+            &mut e.path,
+            &mut e.output,
+            &mut e.call_id,
+            &mut e.approval_id,
+        ] {
+            redact(s, known);
+        }
+        for v in e.params.values_mut() {
+            redact(v, known);
+        }
+        for p in &mut e.paths {
+            redact(&mut p.path, known);
+        }
+        for s in &mut e.plan_steps {
+            redact(&mut s.text, known);
+        }
+        if let Some((tool, args)) = &mut side.tool {
+            redact(tool, known);
+            redact(args, known);
+        }
+    }
+    line
+}
+
+impl Store {
+    /// The store of a node whose data folder is `data_dir`; `secrets` are the values to keep out of the files.
+    pub fn new(data_dir: &Path, limits: Limits, secrets: Option<SecretStore>) -> Self {
+        Self {
+            dir: data_dir.join(TRANSCRIPTS_DIR),
+            limits,
+            secrets,
+            known: Mutex::new((None, Vec::new())),
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// The file of an agent; `None` for an id that is not a plain name.
+    pub fn path(&self, agent: &str) -> Option<PathBuf> {
+        file_stem(agent).map(|s| self.dir.join(format!("{s}.jsonl")))
+    }
+
+    fn earlier_path(&self, agent: &str) -> Option<PathBuf> {
+        file_stem(agent).map(|s| self.dir.join(format!("{s}.earlier.jsonl")))
+    }
+
+    /// The secret values to replace, read again only when their folder changed.
+    fn known_secrets(&self) -> Vec<String> {
+        let Some(store) = &self.secrets else {
+            return Vec::new();
+        };
+        let changed = std::fs::metadata(store.dir())
+            .and_then(|m| m.modified())
+            .ok();
+        let mut g = self.known.lock().unwrap_or_else(|e| e.into_inner());
+        if g.0 != changed || changed.is_none() {
+            let mut values: Vec<String> = store
+                .list()
+                .iter()
+                .filter_map(|n| store.get(n))
+                .map(|s| s.expose().to_string())
+                .filter(|v| v.len() >= MIN_SECRET)
+                .collect();
+            values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+            values.dedup();
+            *g = (changed, values);
+        }
+        g.1.clone()
+    }
+
+    /// Appends a batch to its agent's file (made private, with its header, when new), then keeps the file within its bound.
+    pub fn write(&self, batch: &Batch) -> io::Result<()> {
+        if self.limits.max_bytes == 0 || batch.lines.is_empty() {
+            return Ok(());
+        }
+        let path = self
+            .path(batch.agent.as_str())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        agora_platform::ensure_private_dir(&self.dir)?;
+        let known = self.known_secrets();
+        let mut out = Vec::new();
+        for line in &batch.lines {
+            out.extend(encode_line(batch.high, &redacted(line, &known)));
+        }
+        let mut f = agora_platform::open_append_private(&path)?;
+        let len = f.metadata()?.len();
+        if len == 0 {
+            f.write_all(&header(false))?;
+        }
+        f.write_all(&out)?;
+        f.flush()?;
+        if len + out.len() as u64 > self.limits.max_bytes {
+            drop(f);
+            self.rotate(&path)?;
+        }
+        Ok(())
+    }
+
+    /// ADR-0089 decision 2: the newest half of the bound, whole lines, in a new file that replaces the old one and says it was cut.
+    fn rotate(&self, path: &Path) -> io::Result<()> {
+        let mut f = agora_platform::open_read_no_follow(path)?;
+        let len = f.metadata()?.len();
+        let keep = self.limits.max_bytes / 2;
+        let start = len.saturating_sub(keep);
+        f.seek(SeekFrom::Start(start))?;
+        let mut tail = Vec::new();
+        f.take(keep).read_to_end(&mut tail)?;
+        let from = if start == 0 {
+            0
+        } else {
+            tail.iter()
+                .position(|b| *b == b'\n')
+                .map_or(tail.len(), |i| i + 1)
+        };
+        let mut out = header(true);
+        out.extend_from_slice(&tail[from..]);
+        agora_platform::write_private(path, &out)
+    }
+
+    /// The newest entries the end of an agent's file holds (at most [`TAIL_READ`] of it). A missing or unreadable file gives nothing.
+    pub fn read(&self, agent: &str) -> Seed {
+        self.path(agent)
+            .and_then(|p| read_tail(&p).ok())
+            .unwrap_or_default()
+    }
+
+    /// ADR-0089 decision 5: a fresh start of the agent ("Start again"): its file is moved aside as the earlier session's, and the
+    /// highest id it gave is returned, so the new session's ids go on after it.
+    pub fn begin_fresh(&self, agent: &str) -> u64 {
+        let (Some(path), Some(earlier)) = (self.path(agent), self.earlier_path(agent)) else {
+            return 0;
+        };
+        let high = read_tail(&path).map(|s| s.high).unwrap_or(0);
+        if high > 0 {
+            if let Err(e) = std::fs::rename(&path, &earlier) {
+                // Operational log, not UI text. The new session is written after the earlier one in the same file then.
+                eprintln!("transcripts: {agent}: the earlier session was not moved aside: {e}");
+            }
+        }
+        high
+    }
+
+    /// ADR-0089 decision 2: removes the files of agents that do not run (`running` holds the ids that do) not written for
+    /// [`Limits::days`], then, over [`NODE_MAX_BYTES`] in all, the oldest files of agents that do not run. Returns how many went.
+    pub fn sweep(&self, running: &HashSet<String>, now: SystemTime) -> usize {
+        let Ok(dir) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let keep_ms = self.limits.days.saturating_mul(DAY_MS);
+        let mut files: Vec<(SystemTime, u64, PathBuf, bool)> = Vec::new();
+        let mut removed = 0;
+        for item in dir.flatten() {
+            let name = item.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            let (agent, earlier) = match stem.strip_suffix(".earlier") {
+                Some(a) => (a, true),
+                None => (stem, false),
+            };
+            let Ok(meta) = item.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let modified = meta.modified().unwrap_or(now);
+            let live = !earlier && running.contains(agent);
+            let age = now
+                .duration_since(modified)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            if !live && age >= keep_ms {
+                if std::fs::remove_file(item.path()).is_ok() {
+                    removed += 1;
+                }
+                continue;
+            }
+            files.push((modified, meta.len(), item.path(), live));
+        }
+        let mut total: u64 = files.iter().map(|f| f.1).sum();
+        files.sort_by_key(|f| f.0);
+        for (_, len, path, live) in files {
+            if total <= NODE_MAX_BYTES {
+                break;
+            }
+            if !live && std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
+fn read_tail(path: &Path) -> io::Result<Seed> {
+    let mut f = agora_platform::open_read_no_follow(path)?;
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let start = meta.len().saturating_sub(TAIL_READ);
+    f.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    f.take(TAIL_READ).read_to_end(&mut bytes)?;
+    let from = if start == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |i| i + 1)
+    };
+    Ok(fold(&String::from_utf8_lossy(&bytes[from..])))
+}
+
+/// ADR-0089 decision 3: `agora history purge`: every transcript of the node whose data folder is `data_dir`. Fine when there is none.
+pub fn purge_all(data_dir: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(data_dir.join(TRANSCRIPTS_DIR)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Wakes the writer early (64 KiB waiting, or the node stopping).
+#[derive(Default)]
+pub struct Wake {
+    due: Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Wake {
+    pub fn notify(&self) {
+        *self.due.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.cv.notify_one();
+    }
+
+    /// Waits until woken or `timeout` passed.
+    pub fn wait(&self, timeout: Duration) {
+        let mut due = self.due.lock().unwrap_or_else(|e| e.into_inner());
+        if !*due {
+            due = self
+                .cv
+                .wait_timeout(due, timeout)
+                .map(|(g, _)| g)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+        *due = false;
+    }
+}
+
+/// Runs the writer of `board` until `stop`: a batch once per [`BATCH_INTERVAL`] or when woken, and retention at its start and every
+/// [`SWEEP_EVERY`] (`running` names the agents that run). A failed write is said once in that agent's conversation. Nothing is
+/// written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
+pub fn spawn_writer(
+    board: Arc<crate::chat::ChatBoard>,
+    running: Box<dyn Fn() -> HashSet<String> + Send>,
+    stop: Arc<AtomicBool>,
+) -> io::Result<Option<std::thread::JoinHandle<()>>> {
+    let (Some(store), Some(wake)) = (board.store(), board.wake()) else {
+        return Ok(None);
+    };
+    std::thread::Builder::new()
+        .name("agora-transcripts".into())
+        .spawn(move || {
+            let mut swept: Option<std::time::Instant> = None;
+            let mut failed: HashMap<AgentId, ()> = HashMap::new();
+            while !stop.load(Ordering::Acquire) {
+                if swept.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
+                    store.sweep(&running(), SystemTime::now());
+                    swept = Some(std::time::Instant::now());
+                }
+                wake.wait(BATCH_INTERVAL);
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                for batch in board.take_unsaved() {
+                    match store.write(&batch) {
+                        Ok(()) => {
+                            failed.remove(&batch.agent);
+                        }
+                        Err(e) => {
+                            if failed.insert(batch.agent.clone(), ()).is_none() {
+                                // Operational log, not UI text; the person is told by the notice.
+                                eprintln!(
+                                    "transcripts: {}: history not written: {e}",
+                                    batch.agent.as_str()
+                                );
+                            }
+                            board.not_saved(&batch.agent, crate::daemon::now_ms());
+                        }
+                    }
+                }
+            }
+        })
+        .map(Some)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use agora_protocol::v1::{ChatKind, ChatRole};
+    use prost::Message;
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-tr-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn text(id: u64, t: &str) -> Line {
+        Line::Entry(
+            Box::new(ChatEntry {
+                entry_id: id,
+                at_ms: id * 10,
+                role: ChatRole::Agent as i32,
+                kind: ChatKind::Text as i32,
+                text: t.into(),
+                ..Default::default()
+            }),
+            Side::default(),
+        )
+    }
+
+    fn batch(agent: &str, high: u64, lines: Vec<Line>) -> Batch {
+        Batch {
+            agent: AgentId::new(agent),
+            high,
+            lines,
+        }
+    }
+
+    /// Every field set, so a field the line leaves out shows as a difference in the encoded protobuf.
+    fn full() -> ChatEntry {
+        ChatEntry {
+            entry_id: 7,
+            at_ms: 1_700_000_000_000,
+            role: 2,
+            kind: 3,
+            text: "t \"q\" \n é".into(),
+            path: "src/a.rs".into(),
+            code: "adapter.x".into(),
+            params: [("a".to_string(), "1".to_string()), ("b".into(), "2".into())].into(),
+            call_id: "c1".into(),
+            tool_kind: 4,
+            status: 2,
+            paths: vec![ToolLocation {
+                path: "p".into(),
+                line: 9,
+            }],
+            output: "out".into(),
+            output_truncated: true,
+            started_ms: 5,
+            ended_ms: 6,
+            plan_steps: vec![PlanStep {
+                text: "s".into(),
+                status: 1,
+                priority: 2,
+            }],
+            queued: true,
+            approval_id: "ap".into(),
+            permission_outcome: 3,
+            permission_always: true,
+        }
+    }
+
+    #[test]
+    fn every_field_of_an_entry_survives_its_line() {
+        let side = Side {
+            tool: Some(("read".into(), "{\"p\":1}".into())),
+            plan: true,
+        };
+        let line = encode_line(9, &Line::Entry(Box::new(full()), side.clone()));
+        let text = String::from_utf8(line).unwrap();
+        assert!(text.ends_with('\n') && text.matches('\n').count() == 1);
+        let (n, back) = decode_line(text.trim_end()).unwrap();
+        assert_eq!(n, 9);
+        let Line::Entry(e, s) = back else {
+            panic!("an entry line")
+        };
+        // Compared whole (the params map has no order on the wire, so not byte for byte).
+        assert_eq!(*e, full());
+        assert_eq!(e.encoded_len(), full().encoded_len());
+        assert_eq!(s, side);
+        // The proto's field count: a field added to `ChatEntry` must be added to the line (and to `full`) too.
+        let fields = entry_json(&full()).as_object().unwrap().len();
+        assert_eq!(fields, 21);
+    }
+
+    #[test]
+    fn the_last_version_of_an_id_wins_removed_ids_go_and_ids_continue_past_both() {
+        let dir = temp("fold");
+        let store = Store::new(&dir, Limits::default(), None);
+        store
+            .write(&batch(
+                "agent-1",
+                3,
+                vec![text(1, "a"), text(2, "b"), text(3, "c")],
+            ))
+            .unwrap();
+        store
+            .write(&batch(
+                "agent-1",
+                6,
+                vec![text(2, "b2"), Line::Removed(vec![3, 5])],
+            ))
+            .unwrap();
+        let seed = store.read("agent-1");
+        let got: Vec<(u64, &str)> = seed
+            .entries
+            .iter()
+            .map(|(e, _)| (e.entry_id, e.text.as_str()))
+            .collect();
+        assert_eq!(got, [(1, "a"), (2, "b2")]);
+        // 6 was given (and never written): the next id is 7, not 3 or 4.
+        assert_eq!(seed.high, 6);
+        assert!(store.read("agent-2").entries.is_empty());
+        assert_eq!(store.read("agent-2").high, 0);
+    }
+
+    #[test]
+    fn a_torn_last_line_and_a_foreign_line_are_skipped() {
+        let dir = temp("torn");
+        let store = Store::new(&dir, Limits::default(), None);
+        store
+            .write(&batch("a", 2, vec![text(1, "x"), text(2, "y")]))
+            .unwrap();
+        let path = store.path("a").unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"not json\n{\"n\":3,\"entry\":{\"entry_id\":3,\"te")
+            .unwrap();
+        let seed = store.read("a");
+        assert_eq!(seed.entries.len(), 2);
+        assert_eq!(seed.high, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_and_the_file_are_the_owners_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("mode");
+        let store = Store::new(&dir, Limits::default(), None);
+        store.write(&batch("a", 1, vec![text(1, "x")])).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(store.dir()), 0o700);
+        assert_eq!(mode(&store.path("a").unwrap()), 0o600);
+        let first = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(first.starts_with("{\"format\":\"chat-transcript\",\"version\":1}\n"));
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_plain_name_has_no_file() {
+        let store = Store::new(Path::new("/nonexistent"), Limits::default(), None);
+        for bad in ["", "../x", "a/b", ".hidden", "a\\b"] {
+            assert!(store.path(bad).is_none(), "{bad}");
+        }
+        assert!(store.path("agent-7").is_some());
+    }
+
+    #[test]
+    fn over_its_bound_a_file_keeps_its_newest_whole_lines_and_says_it_was_cut() {
+        let dir = temp("rotate");
+        let limits = Limits {
+            max_bytes: 8 * 1024,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        for i in 1..=200u64 {
+            store
+                .write(&batch("a", i, vec![text(i, &"z".repeat(100))]))
+                .unwrap();
+        }
+        let path = store.path("a").unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert!(len <= limits.max_bytes, "{len}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.starts_with("{\"format\":\"chat-transcript\",\"truncated\":true,\"version\":1}\n")
+                || body.starts_with(
+                    "{\"format\":\"chat-transcript\",\"version\":1,\"truncated\":true}\n"
+                ),
+            "{}",
+            &body[..80]
+        );
+        let seed = store.read("a");
+        assert_eq!(seed.high, 200);
+        assert_eq!(seed.entries.last().unwrap().0.entry_id, 200);
+        assert!(
+            seed.entries.first().unwrap().0.entry_id > 1,
+            "the oldest went"
+        );
+        // Every line after the header is whole.
+        assert!(body.lines().skip(1).all(|l| decode_line(l).is_some()));
+        // 0 writes nothing at all.
+        let none = Store::new(
+            &dir,
+            Limits {
+                max_bytes: 0,
+                days: 30,
+            },
+            None,
+        );
+        none.write(&batch("b", 1, vec![text(1, "x")])).unwrap();
+        assert!(!none.path("b").unwrap().exists());
+    }
+
+    #[test]
+    fn the_nodes_own_secret_values_never_reach_the_file() {
+        let dir = temp("secret");
+        let secrets = SecretStore::in_data(&dir);
+        secrets
+            .set(
+                "TOKEN",
+                &crate::credentials::Secret::new("sk-very-secret-1234").unwrap(),
+            )
+            .unwrap();
+        let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)));
+        let mut e = full();
+        e.output = "the key is sk-very-secret-1234.".into();
+        e.params.insert("v".into(), "sk-very-secret-1234".into());
+        let side = Side {
+            tool: Some(("sh".into(), "echo sk-very-secret-1234".into())),
+            plan: false,
+        };
+        store
+            .write(&batch("a", 7, vec![Line::Entry(Box::new(e), side)]))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(!body.contains("sk-very-secret-1234"));
+        assert_eq!(body.matches(REDACTED).count(), 3, "{body}");
+    }
+
+    #[test]
+    fn retention_removes_what_does_not_run_and_was_not_written_for_its_days() {
+        let dir = temp("sweep");
+        let store = Store::new(
+            &dir,
+            Limits {
+                max_bytes: 1 << 20,
+                days: 2,
+            },
+            None,
+        );
+        for a in ["old", "running", "fresh"] {
+            store.write(&batch(a, 1, vec![text(1, "x")])).unwrap();
+        }
+        assert_eq!(store.begin_fresh("fresh"), 1);
+        assert!(store.earlier_path("fresh").unwrap().exists());
+        assert!(!store.path("fresh").unwrap().exists());
+        let running: HashSet<String> = ["running".to_string()].into();
+        // Nothing is old yet.
+        assert_eq!(store.sweep(&running, SystemTime::now()), 0);
+        // Three days on: everything but the running agent's file goes, the earlier session's too.
+        let later = SystemTime::now() + Duration::from_secs(3 * 24 * 3600);
+        assert_eq!(store.sweep(&running, later), 2);
+        assert!(store.path("running").unwrap().exists());
+        assert!(!store.path("old").unwrap().exists());
+        assert!(!store.earlier_path("fresh").unwrap().exists());
+        purge_all(&dir).unwrap();
+        assert!(!store.dir().exists());
+        purge_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn policy_values_are_bounded() {
+        assert_eq!(Limits::parse_max_bytes("1000"), Some(1000));
+        assert_eq!(
+            Limits::parse_max_bytes("999999999999"),
+            Some(HARD_MAX_BYTES)
+        );
+        assert_eq!(Limits::parse_max_bytes("lots"), None);
+        assert_eq!(Limits::parse_days("7"), Some(7));
+        assert_eq!(Limits::parse_days("90"), Some(DEFAULT_DAYS));
+        assert_eq!(Limits::parse_days("-1"), None);
+    }
+}

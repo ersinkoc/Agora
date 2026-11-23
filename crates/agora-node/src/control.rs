@@ -1560,6 +1560,13 @@ pub(crate) fn resume_agent(
                 .ok_or_else(folder_changed)
         })
         .transpose()?;
+    // ADR-0089 decision 5, ADR-0104 C1: a resume continues the conversation its file holds (read before the agent says anything new),
+    // and a fresh start begins a new file, numbering on after the earlier session's ids. Neither touches a ring that already gave ids.
+    if new_session {
+        ctx.chat.begin_fresh(&id, crate::daemon::now_ms());
+    } else {
+        ctx.chat.seed_from_disk(&id, crate::daemon::now_ms());
+    }
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),

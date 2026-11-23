@@ -6,6 +6,7 @@
 
 pub mod footprint;
 pub mod history;
+pub mod transcript;
 
 use std::sync::mpsc;
 use std::thread;

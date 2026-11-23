@@ -89,6 +89,7 @@ tui-notice-output_dropped = (the agent kept running while Agora restarted; { $by
 tui-notice-restarting = (the agent stopped unexpectedly; Agora is starting it again, attempt { $attempt })
 tui-notice-gave_up = (the agent stopped unexpectedly again after { $restarts } restarts, last exit code { $exit_code }; Agora stopped starting it again)
 tui-notice-gave_up-no_code = (the agent stopped unexpectedly again after { $restarts } restarts; Agora stopped starting it again)
+tui-notice-history_not_saved = (this conversation could not be saved on its machine; the agent keeps working, but later turns may be missing after a restart)
 tui-notice-other = (the agent reported { $code })
 tui-option-switched = Switched.
 tui-option-unknown = The agent does not offer { $id }. It offers: { $ids }

@@ -1336,6 +1336,9 @@ pub struct Policy {
     pub credentials: std::collections::BTreeMap<String, Vec<String>>,
     /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
     pub credentials_malformed: Vec<String>,
+    /// ADR-0089 decision 2: how much of each structured agent's chat history the node keeps on its disk (`chat.history_max_bytes`,
+    /// at most 256 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
+    pub history: crate::transcript::Limits,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1395,6 +1398,7 @@ impl Default for Policy {
             credentials: std::collections::BTreeMap::new(),
             credentials_malformed: Vec::new(),
             problems: Vec::new(),
+            history: crate::transcript::Limits::default(),
         }
     }
 }
@@ -1476,6 +1480,15 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
+                // ADR-0089: a value that is not a number keeps the default and is a line the node did not understand.
+                "chat.history_max_bytes" => match crate::transcript::Limits::parse_max_bytes(v) {
+                    Some(b) => p.history.max_bytes = b,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
+                "chat.history_days" => match crate::transcript::Limits::parse_days(v) {
+                    Some(d) => p.history.days = d,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
                 "signed_commands" => {
                     p.signed_commands = crate::grants::SignedCommands(
                         v.split(',')
@@ -1631,6 +1644,8 @@ pub struct Node {
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
     pub devices: Arc<crate::device_trust::DeviceTrust>,
     devices_watch: Option<JoinHandle<()>>,
+    /// ADR-0089: writes the chat history of structured agents (`crate::transcript`).
+    transcript_writer: Option<JoinHandle<()>>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1914,7 +1929,19 @@ impl Node {
                 }
             }));
         }
-        let chat = Arc::new(crate::chat::ChatBoard::new());
+        // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
+        // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
+        let history = read_policy(&cfg.data_dir.join(POLICY_FILE)).history;
+        let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::new(
+            crate::transcript::Store::new(
+                &cfg.data_dir,
+                history,
+                Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
+            ),
+        )));
+        for (id, _) in &taken_up {
+            chat.seed_from_disk(id, now_ms());
+        }
         let git_wake = Arc::new(AtomicBool::new(false));
         // ADR-0057: agents may ask to start helpers; every start needs a decision a trusted device signed.
         let spawner = Arc::new(
@@ -2429,6 +2456,28 @@ impl Node {
                     }
                 })?
         };
+        // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
+        let transcript_writer = {
+            let sup = Arc::clone(&supervisor);
+            crate::transcript::spawn_writer(
+                Arc::clone(&chat),
+                Box::new(move || {
+                    sup.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .list()
+                        .into_iter()
+                        .filter(|v| v.running)
+                        .map(|v| v.id.as_str().to_string())
+                        .collect()
+                }),
+                Arc::clone(&stop),
+            )
+            .unwrap_or_else(|e| {
+                // Operational log, not UI text.
+                eprintln!("transcripts: the writer did not start: {e}");
+                None
+            })
+        };
         // Started last, after every step that can fail: a node that did not start leaves nothing resuming behind it.
         let resume_wait = if waiting.is_empty() {
             None
@@ -2467,6 +2516,7 @@ impl Node {
             chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),
+            transcript_writer,
             node_id: cfg.node_id.clone(),
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
@@ -2629,6 +2679,12 @@ impl Drop for Node {
             let _ = t.join();
         }
         if let Some(t) = self.devices_watch.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
             let _ = t.join();
         }
         if self.crashed {
@@ -3517,6 +3573,55 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0089 decision 2: the history bounds come from the policy, never past their caps; a value that is not a number keeps the
+    /// default and is a line the node did not understand.
+    #[test]
+    fn read_policy_bounds_the_chat_history() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-test-history-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        assert_eq!(
+            read_policy(&file).history,
+            crate::transcript::Limits::default()
+        );
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 1048576
+chat.history_days = 7
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!((p.history.max_bytes, p.history.days), (1 << 20, 7));
+        assert!(p.problems.is_empty());
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 99999999999
+chat.history_days = 365
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.history.max_bytes, p.history.days),
+            (
+                crate::transcript::HARD_MAX_BYTES,
+                crate::transcript::DEFAULT_DAYS
+            )
+        );
+        std::fs::write(
+            &file,
+            "chat.history_days = a week
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(p.history.days, crate::transcript::DEFAULT_DAYS);
+        assert_eq!(p.problems.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1133,3 +1133,157 @@ fn a_kept_agents_usage_counters_survive_its_node_restarting() {
     let agent = &view.agents[&key];
     assert_eq!((agent.input_tokens, agent.output_tokens), (20, 16));
 }
+
+/// ADR-0089: the agent's transcript on the node's disk.
+fn transcript_file(rig: &Rig, id: &str) -> PathBuf {
+    rig.root
+        .join("data/transcripts")
+        .join(format!("{id}.jsonl"))
+}
+
+fn on_disk(rig: &Rig, id: &str, needle: &str) -> bool {
+    std::fs::read_to_string(transcript_file(rig, id)).is_ok_and(|t| t.contains(needle))
+}
+
+fn chat(node: &Node, id: &str) -> Vec<v1::ChatEntry> {
+    node.chat.snapshot(&AgentId::new(id))
+}
+
+/// ADR-0104 C1 (#931): a kept agent's conversation is written to its node's disk, and the next node, which takes the agent up from the
+/// holder, shows the earlier turns with the same ids and numbers what comes after past them. The node here stops the way a killed one
+/// does for the transcript: nothing is flushed when it goes (the test waits until the writer, which runs once a second, has written).
+#[test]
+fn a_kept_agents_conversation_and_its_ids_survive_its_node_restarting() {
+    let _serial = serial();
+    let rig = Rig::new("convo");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    prompt(&node, &id, "hello-1");
+    wait_for("the first answer", || said(&node, &id, "hello-1"));
+    prompt(&node, &id, "hello-2");
+    wait_for("the second answer", || said(&node, &id, "hello-2"));
+    wait_for("both turns on disk", || {
+        on_disk(&rig, &id, "hello-1") && on_disk(&rig, &id, "hello-2")
+    });
+    let before = chat(&node, &id);
+    let high = before.iter().map(|e| e.entry_id).max().expect("entries");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&transcript_file(&rig, &id)), 0o600);
+        assert_eq!(mode(&rig.root.join("data/transcripts")), 0o700);
+    }
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    // Shown at once: the ring was filled from the file before the node read anything new.
+    let seeded = chat(&node, &id);
+    let texts = |c: &[v1::ChatEntry]| {
+        c.iter()
+            .filter(|e| e.text.starts_with("hello"))
+            .map(|e| (e.entry_id, e.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        texts(&seeded),
+        texts(&before),
+        "the earlier turns, with their ids"
+    );
+    prompt(&node, &id, "after");
+    wait_for("the answer after the restart", || said(&node, &id, "after"));
+    let after = chat(&node, &id);
+    let new = after
+        .iter()
+        .find(|e| e.text == "after")
+        .expect("the new turn");
+    assert!(
+        new.entry_id > high,
+        "id {} reuses one up to {high}",
+        new.entry_id
+    );
+    let mut ids: Vec<u64> = after.iter().map(|e| e.entry_id).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), after.len(), "one entry per id");
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids increase: {ids:?}");
+}
+
+/// ADR-0104 C1: a tool call that started before the node restarted and finishes after it is ONE entry, updated in place: the next
+/// node rebuilt the call from the file, so an update that carries only the status and the output changes that entry, whose text still
+/// names the tool and its arguments.
+#[test]
+fn a_tool_call_that_finishes_after_its_node_restarts_is_one_entry_updated_in_place() {
+    let _serial = serial();
+    let rig = Rig::new("tool");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    prompt(&node, &id, "later-tool");
+    let running_call = |node: &Node| {
+        chat(node, &id)
+            .into_iter()
+            .find(|e| e.call_id == "t1" && e.status == v1::ToolStatus::InProgress as i32)
+    };
+    wait_for("the call to run", || running_call(&node).is_some());
+    wait_for("the call on disk", || on_disk(&rig, &id, "\"t1\""));
+    let call = running_call(&node).expect("the call");
+    drop(node);
+
+    let node = rig.node();
+    let seeded = running_call(&node).expect("the running call, seeded");
+    assert_eq!(seeded.entry_id, call.entry_id);
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
+    wait_for("the adapter to finish", || {
+        rig.folder.join("later.txt").exists()
+    });
+    wait_for("the rest of the turn", || said(&node, &id, "tool-done"));
+    wait_for("the call to finish", || {
+        chat(&node, &id)
+            .iter()
+            .any(|e| e.call_id == "t1" && e.status == v1::ToolStatus::Completed as i32)
+    });
+    let calls: Vec<v1::ChatEntry> = chat(&node, &id)
+        .into_iter()
+        .filter(|e| e.call_id == "t1")
+        .collect();
+    assert_eq!(calls.len(), 1, "{calls:#?}");
+    assert_eq!(calls[0].entry_id, call.entry_id);
+    assert_eq!(calls[0].output, "done");
+    assert!(
+        calls[0].text.contains("\"tool\":\"read\"") && calls[0].text.contains("a.rs"),
+        "{}",
+        calls[0].text
+    );
+    // The finished call reaches the file too.
+    wait_for("the finished call on disk", || {
+        on_disk(&rig, &id, "\"output\":\"done\"")
+    });
+}
+
+/// ADR-0089 decision 1: a node that cannot write any history (here a file where its transcripts folder would be, which refuses every
+/// write as a full disk does) runs its agents as before, keeps their conversation in memory, and says once in it that it is not saved.
+#[test]
+fn a_node_that_cannot_write_history_runs_its_agent_and_says_so_once() {
+    let _serial = serial();
+    let rig = Rig::new("nodisk");
+    std::fs::write(rig.root.join("data/transcripts"), "not a folder").expect("block");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let notices = |node: &Node| {
+        chat(node, &id)
+            .iter()
+            .filter(|e| e.code == "chat.history_not_saved")
+            .count()
+    };
+    for word in ["one", "two", "three"] {
+        prompt(&node, &id, word);
+        wait_for("the answer", || said(&node, &id, word));
+        wait_for("the notice", || notices(&node) >= 1);
+        // A batch after this answer was taken (the writer runs once a second).
+        std::thread::sleep(Duration::from_millis(1300));
+    }
+    assert_eq!(notices(&node), 1);
+    assert_eq!(state_of(&node, &id), Some(AgentState::Idle));
+}
