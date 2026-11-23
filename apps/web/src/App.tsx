@@ -53,6 +53,7 @@ import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
+import { AnswerHoldsProvider } from './components/useAnswerGuard';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
 import { TOOL_PANELS } from './net/paneTools';
@@ -228,33 +229,36 @@ export function App() {
     return out;
   }, [api]);
   // `always` (ADR-0101): the person pressed "Allow always"; sent so only for a request that offers it (`answerPlan`), never otherwise.
-  const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice, always = false) => {
-    if (!api || !device) { setNotice('approval-failed'); return; }
+  // It says whether the answer went (Home's request cards re-arm at once after a failed one).
+  const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice, always = false): Promise<boolean> => {
+    if (!api || !device) { setNotice('approval-failed'); return false; }
     setNotice(undefined);
-    if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return; }
+    if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return false; }
     try {
       // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
       const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
       const helpersMayStart = !!(a.start && approved && choice?.nested);
       // ADR-0090 Amendment A: a switch to a mode that skips permission questions is signed over its own domain, only for a machine heard
       // to offer it and only in the shape the window expects; any other shape is never signed.
-      if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return; }
-      if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return; }
+      if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return false; }
+      if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return false; }
       // ADR-0101: an "always" answer over its own bytes with scope ALWAYS; any other over its own message, with no scope.
       const fields = await answerFields(device, a, approved, always, () => (a.skip
         ? signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
         : a.start
           ? signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
           : signApproval(device, a.node, a.localId, approved)));
-      if (!fields) { setNotice('approval-scope-unavailable'); return; }
+      if (!fields) { setNotice('approval-scope-unavailable'); return false; }
       const { signature } = fields;
       // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
       if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart, ...(fields.scope ? { scope: fields.scope } : {}) } });
+      return true;
     } catch (e) {
       forgetSkipAnswer(a.id);
       const code = (e as { code?: string }).code;
       setNotice(approvalFailureKey(code));
+      return false;
     }
   }, [api, device]);
   // ADR-0057: an agent's live helper grants, as its machine lists them, and revoking one (no signature: ending access is always allowed).
@@ -506,6 +510,9 @@ export function App() {
 
   // What needs the person (the one list the console, the panel and the phone bar show), for the attention layer's card, banner and notice.
   const attention = useMemo(() => attentionList(approvalsNow, agents, pairing.ui?.cards ?? []), [approvalsNow, agents, pairing.ui?.cards]);
+  // T44 (#1048): one set of answer holds for the whole window, so a request answered on one surface (a pane's card, the side panel, Home,
+  // the attention dialog, a switch's card) is held on every other; an answer that went is forgotten when its request leaves this list.
+  const heldIds = useMemo(() => approvalsNow.map((x) => x.id), [approvalsNow]);
   const reviewAttention = useCallback((it: (typeof attention)[number]) => {
     const agent = it.kind === 'pair' ? undefined : it.agent;
     if (agent) { open(agent.id); return; }
@@ -572,6 +579,7 @@ export function App() {
   }
 
   return (
+    <AnswerHoldsProvider listed={heldIds}>
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
@@ -585,17 +593,17 @@ export function App() {
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
-        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
+        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
         ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui}
+          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'}
           onStart={hub && api && live ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={startWindow} pairing={pairing.ui} />}
+          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
@@ -611,6 +619,7 @@ export function App() {
     </ChatActionsContext.Provider>
     </CloseAgentContext.Provider>
     </QuotaProvider>
+    </AnswerHoldsProvider>
   );
 }
 

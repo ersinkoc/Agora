@@ -1,4 +1,4 @@
-// Visual regression: the component gallery and the sign-in page, in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, Home (the demo window's fleet console) and the sign-in page, in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -32,11 +32,31 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}/`;
 
+// `quiet`: the attention dialog stays shut (its own setting, as a person can choose), so Home is captured as it is under it.
 const pages = [
   { name: 'gallery', hash: '#/gallery', ready: '.gallery' },
+  { name: 'home', hash: '#/demo', ready: '.fleet-summary', quiet: true },
   { name: 'signin', hash: '', ready: 'form' },
 ];
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
+
+// A page is captured once it has settled, so two runs of the same UI match: its fonts have loaded, every dwell has passed (an approval's
+// Allow waits ATTENTION_DWELL_MS, 600 ms, and its "read it first" hint then goes, which moves everything below it: SkipApproval in the
+// gallery), and its height has stopped changing. The real dwell is never shortened; this only waits for it.
+const DWELLS_MS = 600;
+async function settle(page) {
+  await page.evaluate(() => document.fonts.ready);
+  const start = Date.now();
+  let last = -1;
+  let same = 0;
+  while (same < 3 || Date.now() - start < DWELLS_MS + 400) {
+    await page.waitForTimeout(150);
+    const h = await page.evaluate(() => document.documentElement.scrollHeight);
+    same = h === last ? same + 1 : 0;
+    last = h;
+    if (Date.now() - start > 10_000) break; // a page that never settles is compared as it is, and its difference will say so
+  }
+}
 
 mkdirSync(join(visual, 'diff'), { recursive: true });
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--font-render-hinting=none'] });
@@ -46,10 +66,11 @@ for (const p of pages) {
     for (const scheme of ['dark', 'light']) {
       const name = `${p.name}-${vname}-${scheme}`;
       const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce' });
+      if (p.quiet) await ctx.addInitScript(() => { try { localStorage.setItem('agora.attention.mode', 'off'); } catch { /* captured as it is */ } });
       const page = await ctx.newPage();
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
-      await page.waitForTimeout(300);
+      await settle(page);
       const shot = await page.screenshot({ fullPage: true, animations: 'disabled' });
       await ctx.close();
       const file = join(visual, `${name}.png`);
