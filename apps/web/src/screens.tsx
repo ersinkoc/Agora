@@ -38,7 +38,7 @@ import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -158,11 +158,21 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
-      <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
-      <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartNoAskApproval} start={demoStartNoAskApproval.start} onResolve={() => {}} />
+      {/* Redesign PR 5: a start and a switch to act without asking as short cards with Review (a long prompt, settings, a start that
+          would not ask, a switch, a pane narrower than 360 px), and the whole request as Review shows it. */}
+      <div data-start-cards className="grid max-w-3xl gap-3">
+        <div className="approvals">
+          <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartSettingsApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoSkipApproval as ApprovalModel} agent={demoRichAgent} onResolve={() => {}} onOpen={() => {}} />
+        </div>
+        <ApprovalBanner approval={demoStartApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned />
+        <div data-start-narrow className="w-[12.5rem]"><ApprovalBanner approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned /></div>
+        <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
+        <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
+      </div>
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />

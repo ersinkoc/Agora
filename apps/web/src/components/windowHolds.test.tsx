@@ -307,18 +307,26 @@ describe('a pane rearranged starts the dwell again (#1048)', () => {
 
 describe('a switch\'s card honours busy (#1048)', () => {
   const skip = (): ApprovalModel => ask('s1', '', { action: 'agent.skip_permissions', detail: '{}', skip: { node: 'n1', agent: 'n1/a', agentKind: 'claude-acp', folder: '/w', optionType: 'mode', option: 'mode', optionName: '', value: 'yolo', valueName: 'Bypass' } });
-  const named = (name: string) => [...host.querySelectorAll('[data-skip-approval] button')].find((b) => b.textContent === name) as HTMLButtonElement;
+  // The whole card (itself, or in Review's dialog, which is drawn over the window) and the short card's own Deny.
+  const named = (name: string) => [...document.querySelectorAll('[data-skip-approval] button')].find((b) => b.textContent === name) as HTMLButtonElement;
+  const short = (name: string) => [...document.querySelectorAll('[data-review-card] button')].find((b) => b.textContent === name) as HTMLButtonElement;
   it('Allow and Deny are off while busy, a press sends nothing, and both come back when it is not', () => {
     markSkipCapable('n1');
     const on = vi.fn();
-    for (const el of [(busy: boolean) => <SkipApproval approval={skip()} busy={busy} onResolve={on} />, (busy: boolean) => <ApprovalCard approval={skip()} busy={busy} onResolve={on} />]) {
+    for (const [el, review] of [[(busy: boolean) => <SkipApproval approval={skip()} busy={busy} onResolve={on} />, false], [(busy: boolean) => <ApprovalCard approval={skip()} busy={busy} onResolve={on} />, true]] as const) {
       draw(el(true));
+      if (review) {
+        expect(short('Deny').disabled).toBe(true);
+        act(() => short('Deny').click());
+        act(() => short('Review').click()); // Review is never an answer: it opens while busy too
+      }
       dwell(ATTENTION_DWELL_MS * 2);
       expect(named('Deny').disabled).toBe(true);
       expect(named('Allow').disabled).toBe(true);
       act(() => { named('Deny').click(); named('Allow').click(); });
       expect(on).not.toHaveBeenCalled();
       draw(el(false));
+      if (review) expect(short('Deny').disabled).toBe(false);
       expect(named('Deny').disabled).toBe(false);
       expect(named('Allow').disabled).toBe(false);
       act(() => root.render(<></>));

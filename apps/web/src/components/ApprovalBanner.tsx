@@ -1,7 +1,7 @@
 import type { ApprovalModel } from '../net/view';
 import { PlainRequest, useOwnGuard, type RequestAgent } from './ApprovalCard';
-import { StartApproval, type StartChoice } from './StartApproval';
-import { SkipApproval } from './SkipApproval';
+import { ReviewableRequest } from './ReviewRequest';
+import type { StartChoice } from './StartApproval';
 import type { AnswerGuard, AnswerResult } from './useAnswerGuard';
 
 // What one agent waits on, in its pane: above the terminal, or (`pinned`) above a chat's composer. The same request card as the side
@@ -17,14 +17,15 @@ export function ApprovalBanner({ approval: x, agent, guard, onResolve, pinned }:
   const own = useOwnGuard(x, agent);
   const g = guard ?? own;
   const send = (go: () => AnswerResult) => g.answer(x.id, go);
-  // ADR-0057: a request to start an agent shows everything it asks for (read-only where it cannot be answered).
-  if (x.start) return <StartApproval approval={x} start={x.start} busy={!onResolve || !g.canAnswer(x.id)} onResolve={(ok, choice) => onResolve && send(() => onResolve(x, ok, choice))} />;
-  // A switch keeps its own guards (its Allow dwell and one-click lock, and Deny always available: main-window.md), not the surface's.
-  if (x.skip || x.skipUnknown) return <SkipApproval approval={x} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />;
-  const card = <PlainRequest approval={x} density="card" surface="banner" agent={agent} alert narrowable guard={g}
+  // ADR-0057 and ADR-0090 Amendment A (redesign PR 5): a start, or a switch to act without asking, is a short card with Review, which
+  // shows the whole request (read-only where it cannot be answered). A switch keeps its own guards (its Allow dwell and one-click lock,
+  // and Deny always available: main-window.md), not the surface's.
+  const card = x.start || x.skip || x.skipUnknown
+    ? <ReviewableRequest approval={x} agent={agent} guard={g} alert narrowable onResolve={onResolve ? (ok, choice) => onResolve(x, ok, choice) : undefined} />
+    : <PlainRequest approval={x} density="card" surface="banner" agent={agent} alert narrowable guard={g}
     onAnswer={onResolve ? (ok, always) => send(() => (always ? onResolve(x, true, undefined, true) : onResolve(x, ok))) : undefined} />;
   // Above a terminal it sits in the pane with a margin of its own; above a composer the composer's column holds it.
-  return pinned ? card : <div className="px-2 pt-2">{card}</div>;
+  return pinned ? card : <div className="px-2 pt-2 empty:hidden">{card}</div>;
 }
 
 // Every banner one surface draws (a pane, the full-size screen), under that surface's guard.

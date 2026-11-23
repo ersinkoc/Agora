@@ -104,6 +104,14 @@ start-approval-options-once = Only this one can be allowed: your answer covers t
 start-approval-does-not-ask = If you allow it, this helper runs commands and changes files without asking you first, for as long as it runs.
 start-approval-more = Up to { $count } { $kind } agents in this folder while { $name } runs, without asking again
 start-approval-nested = Its helpers may ask to start helpers too (you answer each)
+approval-review = Review
+approval-review-for = Read the whole request from { $name }
+approval-review-close = Close
+start-summary-outside = outside its folder
+start-summary-more = { $count ->
+    [one] 1 more line
+   *[other] { $count } more lines
+}
 helper-started-by = started by { $name }
 helper-grants = Helper permissions
 helper-grant-line = Can still start { $count } { $kind } without asking in

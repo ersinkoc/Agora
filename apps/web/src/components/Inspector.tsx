@@ -140,9 +140,10 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
   useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
-  // An agent is listed once: by its request's card when it has one (the card opens the agent), else by its row (it waits in its terminal).
-  // A start or a switch to act without asking keeps the row until those cards can open the agent themselves (redesign PR 5).
-  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.start && !x.skip && !x.skipUnknown);
+  // An agent is listed once: by its request's card when it has one (the card opens the agent: a start's and a switch's too, redesign PR 5),
+  // else by its row (it waits in its terminal). A switch's card of a shape this window does not understand can be dismissed here, so its
+  // agent keeps its row.
+  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.skipUnknown);
   const agentOf = (id: string) => fleet.find((a) => a.id === id) ?? attention.find((a) => a.id === id);
   // T44 (`useAnswerGuard`, as Home's queue): the cards' answers do nothing for a short dwell after anything on this list moved or changed
   // (the rows, the notice and the machines asking to join above the cards; a card's request, agent and status), after the person came

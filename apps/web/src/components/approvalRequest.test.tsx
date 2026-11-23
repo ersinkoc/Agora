@@ -126,37 +126,46 @@ describe('card: the side panel, above a terminal, above a composer', () => {
     expect(host.querySelector('section.approval-req')!.getAttribute('data-density')).toBe('card');
   });
 
+  // Redesign PR 5: a start and a switch are short cards with Review; their Allow is in Review's dialog, where all of it is shown.
+  const dialog = () => document.querySelector('[data-review-dialog]') as HTMLElement;
   it('a switch to act without asking keeps its dwell and "Read it first", and its Allow is the danger button', async () => {
     vi.useFakeTimers();
     markSkipCapable(demoSkipApproval.node);
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalBanner approval={demoSkipApproval as ApprovalModel} onResolve={onResolve} />));
-    const allow = button('Allow')!;
+    expect(buttons(host).map((b) => b.textContent)).toEqual(['Deny', 'Review']);
+    act(() => button('Review', host)!.click());
+    const allow = button('Allow', dialog())!;
     expect(allow.className).toContain('kit-btn--danger');
-    expect(buttons()[0]!.textContent).toBe('Deny');
+    expect(buttons(dialog()).map((b) => b.textContent)).toEqual(['Close', 'Deny', 'Allow']);
     expect(allow.disabled).toBe(true);
-    expect(host.textContent).toContain('Read it first');
+    expect(dialog().textContent).toContain('Read it first');
     act(() => allow.click());
     expect(onResolve).not.toHaveBeenCalled();
     await wait(ATTENTION_DWELL_MS + 10);
-    act(() => button('Allow')!.click());
-    expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: demoSkipApproval.id }), true);
+    act(() => button('Allow', dialog())!.click());
+    expect(onResolve).toHaveBeenCalledWith(expect.objectContaining({ id: demoSkipApproval.id }), true, undefined);
   });
 
   it('a start that would not ask has a danger Allow that still asks for the confirmation first; a plain start keeps the primary', () => {
     vi.useFakeTimers();
     const onResolve = vi.fn();
     act(() => root.render(<ApprovalCard approval={demoStartNoAskApproval as ApprovalModel} onResolve={onResolve} />));
-    expect(buttons().map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
-    expect(button('Allow')!.className).toContain('kit-btn--danger');
-    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); }); // #1045: the card's T44 dwell
-    act(() => button('Allow')!.click());
+    expect(buttons(host).map((b) => b.textContent)).toEqual(['Deny', 'Review']);
+    act(() => button('Review', host)!.click());
+    expect(buttons(dialog()).map((b) => b.textContent)).toEqual(['Close', 'Deny', 'Allow']);
+    expect(button('Allow', dialog())!.className).toContain('kit-btn--danger');
+    act(() => { vi.advanceTimersByTime(ATTENTION_DWELL_MS); }); // Review's own T44 dwell
+    act(() => button('Allow', dialog())!.click());
     expect(onResolve).not.toHaveBeenCalled();
-    expect(host.querySelector('[role=alertdialog]')).not.toBeNull();
+    expect(dialog().querySelector('[role=alertdialog]')).not.toBeNull();
     expect(document.activeElement?.textContent).toBe('Keep asking'); // T15: the primary, focused answer keeps asking
+    act(() => button('Start without asking', dialog())!.click());
+    expect(onResolve).toHaveBeenCalledWith(true, { grant: 0, nested: false });
     act(() => root.render(<ApprovalCard approval={demoStartApproval as ApprovalModel} onResolve={onResolve} />));
-    expect(button('Allow')!.className).toContain('kit-btn--primary');
-    expect(button('Allow')!.className).not.toContain('kit-btn--danger');
+    act(() => button('Review', host)!.click());
+    expect(button('Allow', dialog())!.className).toContain('kit-btn--primary');
+    expect(button('Allow', dialog())!.className).not.toContain('kit-btn--danger');
   });
 });
 
@@ -199,8 +208,17 @@ describe('one copy of each request', () => {
     expect(onOpen).toHaveBeenCalledWith('n1/a1');
   });
 
-  it('a start request keeps its agent\'s row until its card can open the agent (redesign PR 5)', () => {
-    act(() => root.render(details([{ ...(demoStartApproval as ApprovalModel), agentId: agent.id }], [agent])));
+  it('a start and a switch are listed once too: by their cards, which open the agent; a switch this window cannot read keeps the row', () => {
+    markSkipCapable(demoSkipApproval.node);
+    const onOpen = vi.fn();
+    for (const x of [demoStartApproval, demoStartNoAskApproval, demoSkipApproval]) {
+      act(() => root.render(details([{ ...(x as ApprovalModel), agentId: agent.id }], [agent], onOpen)));
+      expect(host.querySelectorAll('.ide-row')).toHaveLength(0);
+      expect(host.querySelectorAll('[data-review-card]')).toHaveLength(1);
+      act(() => (host.querySelector('.approval-req__open') as HTMLButtonElement).click());
+    }
+    expect(onOpen.mock.calls).toEqual([[agent.id], [agent.id], [agent.id]]);
+    act(() => root.render(details([ask({ action: 'agent.skip_permissions', detail: '{}', skipUnknown: true })], [agent])));
     expect([...host.querySelectorAll('.ide-row')].map((r) => r.textContent)).toEqual([expect.stringContaining('codex · teal')]);
   });
 
