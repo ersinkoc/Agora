@@ -55,6 +55,8 @@ const MAX_DETAIL: usize = 300;
 /// The bytes of the agent's stderr kept for an exit report, and the most of them a report carries (after secrets are removed).
 const STDERR_KEEP: usize = 4096;
 const STDERR_TAIL: usize = 400;
+/// The longest path of a tool call's location the bridge passes on (the node keeps 1 KiB of it).
+const PATH_MAX: usize = 4096;
 const STDERR_LINES: usize = 5;
 /// What stands in for a run of text that looks like a secret.
 const REDACTED: &str = "[redacted]";
@@ -524,19 +526,7 @@ fn halve(v: &mut Value) -> bool {
 
 /// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
 fn head_tail(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let half = max / 2;
-    let mut head = half;
-    while !s.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = s.len() - half;
-    while !s.is_char_boundary(tail) {
-        tail += 1;
-    }
-    format!("{}{}", &s[..head], &s[tail..])
+    crate::text::cap_middle(s.to_string(), max).0
 }
 
 /// ADR-0090: ACP `configOptions` as adapter-protocol options (`session/config`): `{id, name, description, category, type, current,
@@ -648,66 +638,36 @@ fn tool_output(u: &Value) -> Option<String> {
     Some(bounded_output(&text))
 }
 
-/// What the bridge sends of a tool's output: its escape sequences and control characters removed first (the node removes them
-/// anyway), then cut to `OUTPUT_MAX` (head and tail kept), then what looks like a secret replaced. Removed before the cut, so the
-/// node, which keeps less of it (16 KiB, head and tail), never keeps the place this cut joins: a value of the node's secrets cut
-/// there would otherwise leave a piece on each side that the node cannot place (review of #1103, N1).
+/// What the bridge sends of a tool's output: cleaned as the node cleans it (`crate::text`, as prose), what looks like a secret
+/// replaced, then cut to `OUTPUT_MAX` (head and tail kept). Cleaned and redacted before the cut, so nothing after it changes the
+/// output's length: the node, which keeps less of it (16 KiB, head and tail) and cleans it to the same text, never keeps the place
+/// this cut joins, where a value of the node's secrets would leave a piece on each side (review of #1103, rounds 2 and 3).
 pub fn bounded_output(text: &str) -> String {
-    redact(&head_tail(&without_escapes(text), OUTPUT_MAX))
+    let clean = crate::text::strip_controls(text, crate::text::Style::Prose);
+    cut_kept(redact(&clean), OUTPUT_MAX)
 }
 
-/// `text` without escape sequences (CSI, OSC, DCS, ... with their payload), control characters other than line breaks and tabs,
-/// and the characters that override a direction (U+202A to U+202E): what the node removes from a tool's output.
-fn without_escapes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                let kind = match c {
-                    '\u{1b}' => chars.next(),
-                    '\u{9b}' => Some('['),
-                    '\u{9d}' => Some(']'),
-                    _ => Some('P'),
-                };
-                match kind {
-                    Some('[') => {
-                        for c in chars.by_ref() {
-                            if ('@'..='~').contains(&c) {
-                                break;
-                            }
-                        }
-                    }
-                    Some(']' | 'P' | '_' | '^' | 'X') => {
-                        // As the node: a sequence never closed ends at a line break or after 4096 characters.
-                        let mut taken = 0;
-                        while let Some(&c) = chars.peek() {
-                            if c == '\n' || taken >= 4096 {
-                                break;
-                            }
-                            chars.next();
-                            taken += 1;
-                            if c == '\u{7}' || c == '\u{9c}' {
-                                break;
-                            }
-                            if c == '\u{1b}' {
-                                if chars.peek() == Some(&'\\') {
-                                    chars.next();
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            '\n' | '\t' | '\r' => out.push(c),
-            c if c.is_control() => {}
-            '\u{202a}'..='\u{202e}' => {}
-            c => out.push(c),
-        }
-    }
-    out
+/// A tool call's arguments as the bridge sends them: cleaned as the node cleans arguments (as code), then cut to `ARGUMENTS_MAX`,
+/// for the same reason as [`bounded_output`].
+fn bounded_arguments(raw: &str) -> String {
+    cut_kept(
+        crate::text::strip_controls(raw, crate::text::Style::Code),
+        ARGUMENTS_MAX,
+    )
+}
+
+/// A plan step as the bridge sends it: cleaned as the node cleans a step, then cut to `max` (the node keeps 512 bytes of it, head
+/// and tail, so it never keeps this cut's place; `usize::MAX`: not cut).
+fn bounded_step(text: &str, max: usize) -> String {
+    cut_kept(
+        crate::text::strip_controls(text, crate::text::Style::Step),
+        max,
+    )
+}
+
+/// [`crate::text::cap_middle`]: a cut whose place the node is sure to drop (see [`bounded_output`]), so it is not reported.
+fn cut_kept(text: String, max: usize) -> String {
+    crate::text::cap_middle(text, max).0
 }
 
 /// A notice's parameters: a reason's parameters with every value as a string.
@@ -2094,7 +2054,7 @@ impl<W: Write> Bridge<W> {
                     .unwrap_or("tool");
                 let args = u
                     .get("rawInput")
-                    .map(|v| head_tail(&v.to_string(), ARGUMENTS_MAX))
+                    .map(|v| bounded_arguments(&v.to_string()))
                     .unwrap_or_default();
                 self.chat(
                     json!({"toolCall": {"tool": title, "argumentsJson": args}}),
@@ -2119,7 +2079,7 @@ impl<W: Write> Bridge<W> {
                             .filter_map(|e| {
                                 e.get("content")
                                     .and_then(Value::as_str)
-                                    .map(|c| head_tail(c, text_max))
+                                    .map(|c| bounded_step(c, text_max))
                             })
                             .take(most)
                             .collect()
@@ -2134,7 +2094,7 @@ impl<W: Write> Bridge<W> {
                         .map(|a| a
                             .iter()
                             .filter_map(|e| {
-                                Some(json!({"text": head_tail(e.get("content")?.as_str()?, PLAN_TEXT_MAX),
+                                Some(json!({"text": bounded_step(e.get("content")?.as_str()?, PLAN_TEXT_MAX),
                                             "status": clip(e.get("status").and_then(Value::as_str).unwrap_or(""), 40),
                                             "priority": clip(e.get("priority").and_then(Value::as_str).unwrap_or(""), 40)}))
                             })
@@ -2186,7 +2146,7 @@ impl<W: Write> Bridge<W> {
             t["tool"] = json!(title);
         }
         if let Some(raw) = u.get("rawInput").filter(|v| !v.is_null()) {
-            t["argumentsJson"] = json!(head_tail(&raw.to_string(), ARGUMENTS_MAX));
+            t["argumentsJson"] = json!(bounded_arguments(&raw.to_string()));
         } else if create {
             t["argumentsJson"] = json!("");
         }
@@ -2204,7 +2164,13 @@ impl<W: Write> Bridge<W> {
             t["locations"] = json!(a
                 .iter()
                 .filter_map(|l| {
-                    Some(json!({"path": clip(l.get("path")?.as_str()?, 1024),
+                    // Cleaned as the node cleans a path and cut in its middle beyond what the node keeps (1 KiB, head and tail),
+                    // so the node never keeps this cut's place.
+                    let path = crate::text::strip_controls(
+                        l.get("path")?.as_str()?,
+                        crate::text::Style::Label,
+                    );
+                    Some(json!({"path": cut_kept(path, PATH_MAX),
                                 "line": l.get("line").and_then(Value::as_u64).unwrap_or(0)}))
                 })
                 .take(LOCATIONS_MAX)
@@ -2274,7 +2240,7 @@ impl<W: Write> Bridge<W> {
             let old = c.get("oldText").and_then(Value::as_str);
             self.flush_text()?;
             self.chat(
-                json!({"diff": {"path": path, "unifiedDiff": head_tail(&replace_diff(path, old, new), DIFF_MAX)}}),
+                json!({"diff": {"path": path, "unifiedDiff": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),
                 replay_id,
             )?;
         }
@@ -3384,11 +3350,9 @@ mod tests {
             let plan = &v["params"]["plan"];
             let steps = plan["steps"].as_array().ok_or("no steps")?;
             assert!(!steps.is_empty(), "rich={rich}");
-            // What is kept is the plan's own text, from its start.
-            assert!(steps[0]
-                .as_str()
-                .ok_or("step")?
-                .starts_with("\"\\\u{1}\"\\"));
+            // What is kept is the plan's own text, from its start, cleaned as the node cleans a step (review of #1103: the control
+            // character goes before any cut, as the node would take it out).
+            assert!(steps[0].as_str().ok_or("step")?.starts_with("\"\\\"\\"));
             if rich {
                 let kept = plan["entries"].as_array().ok_or("no entries")?;
                 assert!(!kept.is_empty());
@@ -3396,7 +3360,7 @@ mod tests {
             } else {
                 // A plain plan carries each text once, which cannot outgrow the agent's line: nothing is cut.
                 assert_eq!(steps.len(), PLAN_ENTRIES_MAX);
-                assert!(steps.iter().all(|s| s == &json!(text)));
+                assert!(steps.iter().all(|s| s == &json!(text.replace('\u{1}', ""))));
             }
         }
         Ok(())

@@ -1390,43 +1390,48 @@ fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the
     assert_eq!(logged_usage(&node, &id), (10, 7), "the usage of the turn");
 }
 
-/// ADR-0104 O2: a clean stop writes what the conversation's writer (once a second) and the usage merge (5 s) still held: an answer
-/// shown a moment before the stop is in the file after it, and its usage is in the log.
+/// ADR-0104 O2: a clean stop writes what the conversation's writer and the usage merge (5 s) still held: words the agent said in a turn
+/// still open (held back, as the node holds a secret value: #1103's writer releases them at the turn's end or a stop) are in the file
+/// after it, and the usage of the turn before, still being gathered, is in the log.
 #[test]
 fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
     let _serial = serial();
     let rig = Rig::new("flush");
+    agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new("SECRETVALUE-ABCDEFGH-XYZ").unwrap(),
+        )
+        .unwrap();
     let node = rig.node();
     let id = started(&rig, &node);
-    // A turn whose answer is shown and not yet written (the writer may have run just after it: then another turn).
-    let mut caught = None;
-    for n in 0..20 {
-        let word = format!("last-{n}");
-        prompt(&node, &id, &word);
-        wait_for("the answer", || agent_said(&node, &id, &word));
-        if !on_disk(&rig, &id, &word) {
-            caught = Some(word);
-            break;
-        }
-    }
-    let word = caught.expect("every answer was on disk before the stop");
+    prompt(&node, &id, "counted");
+    wait_for("the answer", || agent_said(&node, &id, "counted"));
+    // The turn's usage is gathered for 5 s before it is logged: what follows is well within that.
     let gathered = logged_usage(&node, &id);
+    assert_eq!(gathered, (0, 0), "the usage was logged before the stop");
+    prompt(&node, &id, "hold:the last words");
+    wait_for("the last words", || {
+        agent_said(&node, &id, "the last words")
+    });
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    assert!(
+        !on_disk(&rig, &id, "the last words"),
+        "written while the turn was open: the test no longer shows the stop's flush"
+    );
     drop(node);
     assert!(
-        on_disk(&rig, &id, &word),
-        "the last answer is not in the file"
+        on_disk(&rig, &id, "the last words"),
+        "the last words are not in the file"
     );
     let node = rig.node();
-    let logged = logged_usage(&node, &id);
-    assert!(
-        logged.0 > gathered.0,
-        "the usage still being gathered was lost: {gathered:?} then {logged:?}"
+    assert_eq!(
+        logged_usage(&node, &id),
+        (10, 7),
+        "the usage still being gathered was lost"
     );
-    let turns = chat(&node, &id)
-        .iter()
-        .filter(|e| e.role == v1::ChatRole::Agent as i32 && e.text.starts_with("last-"))
-        .count() as u64;
-    assert_eq!(logged.0, 10 * turns, "one usage report per turn");
 }
 
 /// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);
@@ -1727,4 +1732,103 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
         }
         drop(node);
     }
+}
+
+/// Review of #1103, round 3: on a node that holds a secret, the agent's newest words are held back while its turn runs, and reach the
+/// file when it ends (no stop needed), with the node's value replaced.
+#[test]
+fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value() {
+    let _serial = serial();
+    let rig = Rig::new("secret");
+    let value = "SECRETVALUE-ABCDEFGH-XYZ";
+    agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let words = format!("my token is {value} ok");
+    prompt(&node, &id, &format!("hold:{words}"));
+    wait_for("the words", || said(&node, &id, &words));
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    // The writer ran (it does each second): the turn is open, so the words wait.
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert!(
+        !on_disk(&rig, &id, "my token is"),
+        "written while the turn was open"
+    );
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
+    wait_for("the agent to be idle", || {
+        state_of(&node, &id) == Some(AgentState::Idle)
+    });
+    wait_for("the words on disk", || on_disk(&rig, &id, "my token is"));
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
+    assert!(!body.contains(value), "{body}");
+    assert!(body.contains("my token is <redacted> ok"), "{body}");
+}
+
+/// ADR-0104 O2 with #1103's held-back words: the node stops while the agent's words end inside a secret value. The stop writes what it
+/// held, the end of the open words taken as an edge, so the start of the value there is masked; the agent goes on under the holder and
+/// the next node writes the rest. No piece of the value of 4 bytes or more is ever on disk.
+#[test]
+fn a_stop_in_the_middle_of_a_secret_value_leaves_no_piece_of_it_on_disk() {
+    let _serial = serial();
+    let rig = Rig::new("secret-stop");
+    let value = "SECRETVALUE-ABCDEFGH-XYZ";
+    agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaked = |body: &str| -> Vec<String> {
+        pieces
+            .iter()
+            .filter(|p| body.contains(**p))
+            .map(|p| (*p).to_string())
+            .collect()
+    };
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    prompt(&node, &id, "hold:my token is SECRETVA|LUE-ABCDEFGH-XYZ ok");
+    wait_for("the first words", || {
+        chat(&node, &id)
+            .iter()
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text.ends_with("SECRETVA"))
+    });
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap_or_default();
+    assert!(
+        body.contains("my token is"),
+        "the stop did not write the held words: {body}"
+    );
+    assert!(
+        leaked(&body).is_empty(),
+        "{:?} on disk after the stop: {body}",
+        leaked(&body)
+    );
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
+    wait_for("the agent to be idle", || {
+        state_of(&node, &id) == Some(AgentState::Idle)
+    });
+    wait_for("the rest on disk", || on_disk(&rig, &id, " ok"));
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
+    assert!(
+        leaked(&body).is_empty(),
+        "{:?} on disk after the rest: {body}",
+        leaked(&body)
+    );
 }

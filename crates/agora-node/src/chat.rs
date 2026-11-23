@@ -31,7 +31,8 @@ use agora_protocol::v1::{
     ToolLocation, ToolStatus,
 };
 
-use crate::transcript::{Batch, Cuts, Line, Run, Seed, Side, Store, Wake};
+use crate::transcript::{Batch, Cuts, Line, Run, RunPart, Seed, Side, Store, Wake};
+use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
 pub const MAX_ENTRIES: usize = 500;
@@ -98,6 +99,18 @@ struct Transcript {
     save: Option<Save>,
     /// Review of #1103 (N1): where the node cut something out of an entry's texts, for the transcript writer (on a board that saves).
     cuts: HashMap<u64, Cuts>,
+    /// Review of #1103, round 3: the agent's words (its text and thinking, whatever other entries lie between) as a stream. `carry`:
+    /// the last bytes of it written to the file, as said (in memory only, at most the longest secret value less one byte), so a value
+    /// that begins in written words and ends in new ones is found whole. `carry_open`: the stream was written by an earlier node
+    /// (taken up or resumed), whose last words this node does not have: the start of the next words written is a place a value may
+    /// have been cut. `working`: the agent is in a turn (its last reported state); `closed_upto`: words up to this id were said
+    /// before it last left one.
+    carry: String,
+    carry_open: bool,
+    /// Edges inside `carry` (where a session's or an earlier node's words begin or end), while the carry still reaches back to them.
+    carry_edges: Vec<usize>,
+    working: bool,
+    closed_upto: u64,
 }
 
 /// The most bytes of changed entries that left the ring before a batch took them, kept for that batch (a flood between two batches);
@@ -208,48 +221,14 @@ impl Drop for ChatSubscription {
     }
 }
 
+/// [`cap_end`] at the longest text of one entry, the place dropped.
 fn cut(text: String) -> String {
-    cut_to(text, MAX_ENTRY_BYTES)
+    cap_end(text, MAX_ENTRY_BYTES).0
 }
 
-/// [`cut`], and where the text was cut (its new end) when it was.
+/// [`cap_end`] at the longest text of one entry.
 fn cut_at(text: String) -> (String, Option<usize>) {
-    let long = text.len() > MAX_ENTRY_BYTES;
-    let text = cut(text);
-    let end = long.then_some(text.len());
-    (text, end)
-}
-
-fn cut_to(mut text: String, max: usize) -> String {
-    if text.len() > max {
-        let mut end = max;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
-    text
-}
-
-/// `text` as is when it fits `max` bytes; otherwise its first and its last bytes (cut on character boundaries, `max` in all), with
-/// where the head ends (the place a value may be cut in two, in what is kept) and where the kept tail began
-/// in `text`; `None` when nothing was cut.
-fn head_and_tail_at(text: String, max: usize) -> (String, Option<(usize, usize)>) {
-    if text.len() <= max {
-        return (text, None);
-    }
-    let mut head = max / 2;
-    while !text.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = text.len() - (max - head);
-    while !text.is_char_boundary(tail) {
-        tail += 1;
-    }
-    (
-        format!("{}{}", &text[..head], &text[tail..]),
-        Some((head, tail)),
-    )
+    cap_end(text, MAX_ENTRY_BYTES)
 }
 
 /// The text of a tool call entry: the tool and its arguments as JSON (what an old client shows). The transcript writer makes it
@@ -264,6 +243,16 @@ pub(crate) fn tool_text(tool: &str, arguments_json: &str) -> String {
             arguments_json
         }
     ))
+}
+
+/// The text of a plan entry: its steps' lines joined (what an old client shows). The transcript writer makes it again from the
+/// redacted steps.
+pub(crate) fn plan_text(steps: &[PlanStep]) -> String {
+    cut(steps
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// What an adapter's chat item looks like as an entry (kind, text, path).
@@ -338,7 +327,7 @@ pub fn notice(
         .iter()
         .filter(|(k, _)| k.len() <= MAX_PARAM_KEY && word(k))
         .take(MAX_PARAMS)
-        .map(|(k, v)| (k.clone(), cut_to(v.clone(), MAX_PARAM_BYTES)))
+        .map(|(k, v)| (k.clone(), cap_end(v.clone(), MAX_PARAM_BYTES).0))
         .collect();
     Some((code.to_string(), params))
 }
@@ -360,136 +349,6 @@ fn json_string(s: &str) -> String {
     out
 }
 
-/// How a text is shown, which decides what is kept of it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Style {
-    /// Prose over several lines (thinking, tool output): line breaks and tabs stay; the direction marks of Arabic and Hebrew text
-    /// (LRM, RLM, ALM) stay, and so do isolates (U+2066 to U+2069) when each one is closed.
-    Prose,
-    /// Prose on one line (a plan step): as `Prose`, with line breaks as spaces.
-    Step,
-    /// Code on several lines (a tool's arguments): line breaks stay, every direction control goes.
-    Code,
-    /// A name, a path or a label on one line: every direction control goes, since there they only serve to make one thing read as
-    /// another (`gpj.exe` written as `exe.jpg`).
-    Label,
-}
-
-impl Style {
-    fn multiline(self) -> bool {
-        matches!(self, Self::Prose | Self::Code)
-    }
-    fn keeps_marks(self) -> bool {
-        matches!(self, Self::Prose | Self::Step)
-    }
-}
-
-/// The longest payload an unterminated OSC, DCS, ... sequence may swallow: to the next line break or this many characters.
-const ESCAPE_PAYLOAD_MAX: usize = 4096;
-
-/// Removes what would act on a terminal or a reader instead of being shown: escape sequences (CSI, OSC, DCS, ...) with their payload
-/// (a sequence that is never closed swallows at most to the next line break or `ESCAPE_PAYLOAD_MAX` characters, never the rest of the
-/// text), every control character (C0, DEL, C1) and, always, the characters that override or embed a direction (U+202A to U+202E:
-/// the ones that spoof). Other direction marks are kept or removed by the [`Style`]. A bare carriage return is a line break in
-/// multi-line text and a space otherwise; `\r\n` is one line break.
-fn strip_controls(s: &str, style: Style) -> String {
-    balanced(strip_core(s, style), style)
-}
-
-/// [`strip_controls`] without the isolates' balance (done once over a whole text that was stripped in parts).
-fn strip_core(s: &str, style: Style) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                let kind = match c {
-                    '\u{1b}' => chars.next(),
-                    '\u{9b}' => Some('['),
-                    '\u{9d}' => Some(']'),
-                    _ => Some('P'),
-                };
-                match kind {
-                    Some('[') => {
-                        for c in chars.by_ref() {
-                            if ('@'..='~').contains(&c) {
-                                break;
-                            }
-                        }
-                    }
-                    Some(']' | 'P' | '_' | '^' | 'X') => {
-                        let mut taken = 0;
-                        while let Some(&c) = chars.peek() {
-                            // A line break ends a sequence that was never closed (it is left for the text).
-                            if c == '\n' || taken >= ESCAPE_PAYLOAD_MAX {
-                                break;
-                            }
-                            chars.next();
-                            taken += 1;
-                            if c == '\u{7}' || c == '\u{9c}' {
-                                break;
-                            }
-                            if c == '\u{1b}' {
-                                if chars.peek() == Some(&'\\') {
-                                    chars.next();
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    continue;
-                }
-                out.push(if style.multiline() { '\n' } else { ' ' });
-            }
-            '\n' | '\t' if style.multiline() => out.push(c),
-            '\n' | '\t' => out.push(' '),
-            c if c.is_control() => {}
-            // Override and embedding controls: the spoofing risk, never kept.
-            '\u{202a}'..='\u{202e}' => {}
-            // LRM, RLM, ALM and the isolates: Arabic and Hebrew need them in prose.
-            '\u{200e}' | '\u{200f}' | '\u{61c}' | '\u{2066}'..='\u{2069}'
-                if !style.keeps_marks() => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn balanced(out: String, style: Style) -> String {
-    if style.keeps_marks() && out.contains(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']) {
-        return balance_isolates(&out);
-    }
-    out
-}
-
-/// Keeps an isolate (FSI, LRI, RLI) only with the PDI that closes it, and a PDI only after its opener: an unclosed one would reorder
-/// everything that follows it in the page.
-fn balance_isolates(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut keep = vec![true; chars.len()];
-    let mut open: Vec<usize> = Vec::new();
-    for (i, c) in chars.iter().enumerate() {
-        match c {
-            '\u{2066}'..='\u{2068}' => open.push(i),
-            '\u{2069}' if open.pop().is_none() => keep[i] = false,
-            _ => {}
-        }
-    }
-    for i in open {
-        keep[i] = false;
-    }
-    chars
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(c, k)| k.then_some(c))
-        .collect()
-}
-
 /// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
 /// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
 fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
@@ -502,17 +361,16 @@ fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
 /// known however much cleaning took away; then the `max` cut. A place the isolates' balance moved by a character or two is found
 /// by the writer, which looks a few bytes around each.
 fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>) {
-    let (bounded, first) = head_and_tail_at(text.to_string(), PRE_BOUND);
+    let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);
     let (cleaned, mut seams) = match first {
         Some((h, _)) => {
             let head = strip_core(&bounded[..h], style);
-            let tail = strip_core(&bounded[h..], style);
             let seam = head.len();
-            (balanced(head + &tail, style), vec![seam])
+            (head + &strip_core(&bounded[h..], style), vec![seam])
         }
-        None => (strip_controls(&bounded, style), Vec::new()),
+        None => (strip_core(&bounded, style), Vec::new()),
     };
-    let (out, last) = head_and_tail_at(cleaned, max);
+    let (out, last) = cap_middle(cleaned, max);
     if let Some((h, dropped)) = last {
         // A place in the dropped middle is gone; one in the kept tail moves with it.
         seams = seams
@@ -527,7 +385,26 @@ fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>)
         seams.sort_unstable();
         seams.dedup();
     }
-    (out, first.is_some() || last.is_some(), seams)
+    // Isolates are balanced last, in each part between two places apart (review of #1103, B6): what the balance removes cannot move a
+    // place, and the whole is balanced as each part is.
+    if seams.is_empty() {
+        return (
+            balanced(out, style),
+            first.is_some() || last.is_some(),
+            seams,
+        );
+    }
+    let mut joined = String::with_capacity(out.len());
+    let mut kept = Vec::with_capacity(seams.len());
+    let mut at = 0;
+    for &seam in seams.iter().chain(std::iter::once(&out.len())) {
+        joined.push_str(&balanced(out[at..seam].to_string(), style));
+        if seam < out.len() {
+            kept.push(joined.len());
+        }
+        at = seam;
+    }
+    (joined, true, kept)
 }
 
 /// ACP `ToolKind` as the protocol's; a word this build does not know is `UNSPECIFIED`.
@@ -620,24 +497,32 @@ impl Transcript {
                 .filter(|c| c.entry == e.entry_id)
                 .map(|c| (c.tool.clone(), c.args.clone())),
             plan: self.plan == Some(e.entry_id),
-            cuts: self.cuts.get(&e.entry_id).cloned().unwrap_or_default(),
+            cuts: {
+                let mut c = self.cuts.get(&e.entry_id).cloned().unwrap_or_default();
+                // A tool call still running: its output and arguments may stop inside a value the next version completes.
+                c.provisional = e.kind == ChatKind::ToolCall as i32 && !finished(e.status);
+                Box::new(c)
+            },
         }
     }
 
-    /// Review of #1103 (N1): the entries of the agent's open stream of text and thoughts (the run at the end of the ring) that the
-    /// writer holds back at `now`: each with fewer than `span - 1` bytes after it in the run, where `span` is the longest value of
-    /// the node's secrets, so a value that starts in it is whole in the ring before any piece of it is written. Nothing is held once
-    /// another entry ends the run, or once its newest piece is [`HOLD_MS`] old (a kill loses at most that much more).
-    fn held(&self, now: u64, span: usize) -> BTreeSet<u64> {
+    /// Review of #1103 (rounds 2 and 3): the words the writer holds back: while the agent is in a turn, each of its words said since it
+    /// last left one with fewer than `span - 1` bytes of words after it, where `span` is the longest secret value. A value that starts
+    /// in a word is then whole before any part of it is written. Nothing is held when the agent is not in a turn: words it says then
+    /// are written at the next batch, and the end of what is written counts as a place cut (see `take`). A kill loses what is held.
+    fn held(&self, span: usize) -> BTreeSet<u64> {
         let mut held = BTreeSet::new();
-        let Some(newest) = self.entries.back().filter(|e| in_run(e)) else {
-            return held;
-        };
-        if now.saturating_sub(newest.at_ms) >= HOLD_MS {
+        if !self.working {
             return held;
         }
         let mut after = 0usize;
-        for e in self.entries.iter().rev().take_while(|e| in_run(e)) {
+        for e in self
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| in_run(e))
+            .take_while(|e| e.entry_id > self.closed_upto)
+        {
             if after + 1 >= span {
                 break;
             }
@@ -652,7 +537,7 @@ impl Transcript {
         if self.save.is_some() {
             let c = self.cuts.entry(id).or_default();
             f(c);
-            if c.text.is_empty() && c.output.is_empty() && c.args.is_empty() {
+            if c.is_empty() {
                 self.cuts.remove(&id);
             }
         }
@@ -760,6 +645,23 @@ impl Transcript {
             self.entries.push_back(e);
         }
         self.next_id = high;
+        // The earlier node's words are all written; whether its last ones ended inside a value is not known here. Its last words
+        // as written (redacted, with up to 3 bytes of a value beside a mark or an edge) become the carry, and their end an edge:
+        // what this node writes next is looked at together with them (review of #1103, round 3).
+        self.closed_upto = high;
+        let written: String = self
+            .entries
+            .iter()
+            .filter(|e| in_run(e))
+            .map(|e| e.text.as_str())
+            .collect();
+        self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);
+        // Its end is where this node takes over, and its start, when it is the file's first words, where a session began.
+        self.carry_edges = vec![self.carry.len()];
+        if self.carry.len() == written.len() {
+            self.carry_edges.insert(0, 0);
+        }
+        self.carry_open = false;
         self.evict();
         if !self.followers.is_empty() {
             let all: Vec<ChatEntry> = self.entries.iter().cloned().collect();
@@ -864,88 +766,19 @@ impl Transcript {
     }
 }
 
-/// Review of #1103 (N1): how long the newest piece of an agent's streamed text is held back from the file at most.
-pub const HOLD_MS: u64 = 5_000;
-
-/// An entry of the agent's streamed words: its text or its thinking, which an agent sends in pieces.
+/// An entry of the agent's words: its text or its thinking, which an agent sends in pieces.
 fn in_run(e: &ChatEntry) -> bool {
     e.role == ChatRole::Agent as i32
         && (e.kind == ChatKind::Text as i32 || e.kind == ChatKind::Thought as i32)
 }
 
-/// One entry of a batch's sequence, for [`runs_of`]: its text, whether it is of a run, and its line in the batch when it is written.
-struct RunItem<'a> {
-    text: &'a str,
-    run: bool,
-    line: Option<usize>,
-}
-
-impl<'a> RunItem<'a> {
-    const BREAK: RunItem<'static> = RunItem {
-        text: "",
-        run: false,
-        line: None,
-    };
-
-    fn of(e: &'a ChatEntry, line: Option<usize>) -> Self {
-        Self {
-            text: &e.text,
-            run: in_run(e),
-            line,
-        }
+/// The last `keep` bytes of `s`, from a character boundary.
+fn tail_of(s: &str, keep: usize) -> String {
+    let mut from = s.len().saturating_sub(keep);
+    while !s.is_char_boundary(from) {
+        from += 1;
     }
-}
-
-/// The runs of streamed words a batch writes a piece of, each joined with up to `span - 1` bytes of the pieces before and after it
-/// (written already, or held back), so the writer finds a value split between pieces whole (review of #1103, N1).
-fn runs_of(items: &[RunItem<'_>], span: usize) -> Vec<Run> {
-    let reach = span.saturating_sub(1);
-    let mut runs = Vec::new();
-    let mut i = 0;
-    while i < items.len() {
-        if !items[i].run {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < items.len() && items[i].run {
-            i += 1;
-        }
-        let group = &items[start..i];
-        let Some(first) = group.iter().position(|x| x.line.is_some()) else {
-            continue;
-        };
-        let last = group
-            .iter()
-            .rposition(|x| x.line.is_some())
-            .unwrap_or(first);
-        let offsets: Vec<usize> = group
-            .iter()
-            .scan(0, |at, x| {
-                let here = *at;
-                *at += x.text.len();
-                Some(here)
-            })
-            .collect();
-        let from = offsets[first].saturating_sub(reach);
-        let to = offsets[last] + group[last].text.len() + reach;
-        let mut run = Run::default();
-        for (k, x) in group.iter().enumerate() {
-            let (a, b) = (offsets[k], offsets[k] + x.text.len());
-            if b <= from || a >= to {
-                continue;
-            }
-            let at = run.text.len();
-            run.text.push_str(x.text);
-            run.parts.push(crate::transcript::RunPart {
-                line: x.line,
-                start: at,
-                end: run.text.len(),
-            });
-        }
-        runs.push(run);
-    }
-    runs
+    s[from..].to_string()
 }
 
 /// The highest entry id seeding takes from a file (2^52): ids stay exact in the window (a JavaScript number) and can never reach the
@@ -1002,7 +835,7 @@ fn seeded_entry(mut e: ChatEntry, mut side: Side) -> Option<(ChatEntry, Side)> {
     e.status = ToolStatus::try_from(e.status).map_or(0, |k| k as i32);
     e.permission_outcome =
         PermissionOutcome::try_from(e.permission_outcome).map_or(0, |k| k as i32);
-    e.approval_id = cut_to(std::mem::take(&mut e.approval_id), MAX_CALL_ID);
+    e.approval_id = cap_end(std::mem::take(&mut e.approval_id), MAX_CALL_ID).0;
     side.tool = side
         .tool
         .filter(|_| kind == ChatKind::ToolCall)
@@ -1128,19 +961,43 @@ impl ChatBoard {
     /// changed ones that left the ring meanwhile, and the ids taken out. Nothing is held back: what a node stopping writes, and what
     /// tests write. Only marks are kept on the chat path: the clones are made here.
     pub fn take_unsaved(&self) -> Vec<Batch> {
-        self.take(None)
+        self.take(true)
     }
 
-    /// [`Self::take_unsaved`] as the writer takes it at `now_ms`: the newest of the agent's streamed text and thoughts is held back
-    /// while a value of the node's secrets could still continue in what comes next (review of #1103, N1; see `Transcript::held`).
-    pub fn take_due(&self, now_ms: u64) -> Vec<Batch> {
-        self.take(Some(now_ms))
+    /// [`Self::take_unsaved`] as the writer takes it: while an agent is in a turn and the node holds a secret value, its newest
+    /// words are held back until a value starting in them is whole (review of #1103; see `Transcript::held`).
+    pub fn take_due(&self, _now_ms: u64) -> Vec<Batch> {
+        self.take(false)
     }
 
-    fn take(&self, now: Option<u64>) -> Vec<Batch> {
+    /// Review of #1103, round 3: the agent's state, from what it reports. Leaving a turn closes the words said in it: what is held is
+    /// written at the next batch, and their end is not a place cut. Words said outside a turn are written at the next batch with their
+    /// end counted as a place cut (the agent may go on with them).
+    pub fn set_working(&self, agent: &AgentId, working: bool) {
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        if t.working && !working {
+            t.closed_upto = t.next_id;
+            if let Some(s) = &t.save {
+                s.wake.notify();
+            }
+        }
+        t.working = working;
+    }
+
+    /// [`Self::set_working`] for agents that have a transcript only (the supervision tick says every agent's state each round, as a
+    /// backstop for a change no event carried).
+    pub fn set_working_if_known(&self, agent: &AgentId, working: bool) {
+        if self.lock().contains_key(agent) {
+            self.set_working(agent, working);
+        }
+    }
+
+    fn take(&self, force: bool) -> Vec<Batch> {
         // The longest value looked for, read before the lock (the store caches it): 0 when the node holds none, and then nothing is
         // held back and no context gathered.
         let span = self.store.as_ref().map_or(0, |s| s.longest_secret());
+        let reach = span.saturating_sub(1);
         let mut g = self.lock();
         let mut out = Vec::new();
         for (agent, t) in g.iter_mut() {
@@ -1154,9 +1011,10 @@ impl ChatBoard {
             {
                 continue;
             }
-            let held = match now {
-                Some(now) if span > 0 => t.held(now, span),
-                _ => BTreeSet::new(),
+            let held = if !force && span > 0 {
+                t.held(span)
+            } else {
+                BTreeSet::new()
             };
             let Some(s) = &mut t.save else {
                 continue;
@@ -1172,8 +1030,8 @@ impl ChatBoard {
                 .partition(|id| held.contains(id) && fresh.is_none_or(|h| *id > h));
             s.dirty.extend(back);
             // A fresh start splits what is taken by id: up to the earlier session's highest id goes to its file before it is moved
-            // aside, the rest to the new one (review of #1103, probe 5).
-            // Each part: which ids it takes, and the fresh start's mark it carries.
+            // aside, the rest to the new one (review of #1103, probe 5). Each part: which ids it takes, the fresh start's mark it
+            // carries, and its highest id.
             let parts: Vec<(std::ops::RangeInclusive<u64>, Option<u64>, u64)> = match fresh {
                 None => vec![(0..=u64::MAX, None, t.next_id)],
                 Some(h) => vec![
@@ -1184,30 +1042,21 @@ impl ChatBoard {
             for (ids, mark, high) in parts {
                 let mine = |id: u64| ids.contains(&id);
                 let mut lines: Vec<Line> = Vec::new();
-                // The sequence the runs are found in: only when the node holds a value to look for.
-                let mut items: Vec<RunItem> = Vec::new();
+                // The agent's words written now, in order (the ones that left the ring first), with their line.
+                let mut words: Vec<(u64, usize)> = Vec::new();
                 for (e, side) in evicted.iter().filter(|(e, _)| mine(e.entry_id)) {
-                    if span > 0 {
-                        items.push(RunItem::of(e, Some(lines.len())));
+                    if span > 0 && in_run(e) {
+                        words.push((e.entry_id, lines.len()));
                     }
                     lines.push(Line::Entry(Box::new(e.clone()), side.clone()));
                 }
-                // The evicted ones and the ring are not one sequence (written entries may lie between).
-                if span > 0 {
-                    items.push(RunItem::BREAK);
-                    for e in t.entries.iter().filter(|e| mine(e.entry_id)) {
-                        let line = dirty.contains(&e.entry_id).then(|| {
-                            lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
-                            lines.len() - 1
-                        });
-                        items.push(RunItem::of(e, line));
-                    }
-                } else {
-                    for id in dirty.iter().filter(|id| mine(**id)) {
-                        if let Some(i) = t.index(*id) {
-                            let e = &t.entries[i];
-                            lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
+                for id in dirty.iter().copied().filter(|id| mine(*id)) {
+                    if let Some(i) = t.index(id) {
+                        let e = &t.entries[i];
+                        if span > 0 && in_run(e) {
+                            words.push((id, lines.len()));
                         }
+                        lines.push(Line::Entry(Box::new(e.clone()), t.side(e)));
                     }
                 }
                 let gone: Vec<u64> = removed.iter().copied().filter(|id| mine(*id)).collect();
@@ -1217,11 +1066,76 @@ impl ChatBoard {
                 if lines.is_empty() && mark.is_none() {
                     continue;
                 }
-                let runs = if span > 0 {
-                    runs_of(&items, span)
-                } else {
-                    Vec::new()
-                };
+                let mut runs = Vec::new();
+                if let Some(&(last_id, _)) = words.last() {
+                    if mark.is_some() {
+                        // A new session's words do not continue the earlier one's; the start of the first ones still counts as a
+                        // place cut, as after a take-up.
+                        t.carry.clear();
+                        t.carry_open = true;
+                        t.carry_edges.clear();
+                    }
+                    // One stream: what was written of it (the carry), the words written now, then the words held after them.
+                    let mut run = Run::default();
+                    run.text.push_str(&t.carry);
+                    if !run.text.is_empty() {
+                        run.parts.push(RunPart {
+                            line: None,
+                            start: 0,
+                            end: run.text.len(),
+                        });
+                    } else if t.carry_open {
+                        t.carry_edges = vec![0];
+                    }
+                    run.edges.extend(t.carry_edges.iter().copied());
+                    for &(_, line) in &words {
+                        let at = run.text.len();
+                        if let Some(Line::Entry(e, _)) = lines.get(line) {
+                            run.text.push_str(&e.text);
+                        }
+                        run.parts.push(RunPart {
+                            line: Some(line),
+                            start: at,
+                            end: run.text.len(),
+                        });
+                    }
+                    let written = run.text.len();
+                    let mut ahead = 0usize;
+                    for e in t
+                        .entries
+                        .iter()
+                        .filter(|e| in_run(e) && e.entry_id > last_id && mine(e.entry_id))
+                    {
+                        if ahead >= reach {
+                            break;
+                        }
+                        let at = run.text.len();
+                        run.text.push_str(&e.text);
+                        ahead += e.text.len();
+                        run.parts.push(RunPart {
+                            line: None,
+                            start: at,
+                            end: run.text.len(),
+                        });
+                    }
+                    // Written without a value's length of words after it: what comes next may continue a value, so this end counts
+                    // as a place cut, whatever ended the hold (a turn's end, a stop's flush, words said outside a turn, words that
+                    // left the ring, the earlier session at a fresh start). Even a turn's end: an adapter may say it is idle before
+                    // its last words.
+                    if ahead < reach {
+                        run.edges.push(written);
+                    }
+                    t.carry = tail_of(&run.text[..written], reach);
+                    // The earlier node's edge stays while the carry reaches back to it (review of #1103, round 3).
+                    let from = written - t.carry.len();
+                    t.carry_edges = t
+                        .carry_edges
+                        .iter()
+                        .filter_map(|e| e.checked_sub(from))
+                        .collect();
+                    t.carry_open = false;
+                    runs.push(run);
+                }
                 out.push(Batch {
                     agent: agent.clone(),
                     high,
@@ -1360,10 +1274,13 @@ impl ChatBoard {
             return;
         }
         // Everything that costs work in proportion to the text (cleaning, cutting, formatting, cloning) is done here, before the lock.
-        let tool_in = item
-            .tool
-            .as_ref()
-            .map(|x| tidy(x, MAX_PATH_BYTES, Style::Label).0);
+        let (tool_in, tool_cuts) = match item.tool.as_ref() {
+            Some(x) => {
+                let (t, _, c) = tidy_cuts(x, MAX_PATH_BYTES, Style::Label);
+                (Some(t), Some(c))
+            }
+            None => (None, None),
+        };
         let (args_in, args_cuts) = match item.arguments_json.as_ref() {
             Some(x) => {
                 let (a, _, c) = tidy_cuts(x, MAX_ENTRY_BYTES, Style::Code);
@@ -1373,15 +1290,18 @@ impl ChatBoard {
         };
         let kind = tool_kind(&item.kind);
         let status = tool_status(&item.status);
+        let mut path_cuts = Vec::new();
         let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
             l.iter()
                 .take(MAX_PATHS)
-                .map(|(path, line)| ToolLocation {
-                    path: tidy(path, MAX_PATH_BYTES, Style::Label).0,
-                    line: *line,
+                .map(|(path, line)| {
+                    let (path, _, c) = tidy_cuts(path, MAX_PATH_BYTES, Style::Label);
+                    path_cuts.push(c);
+                    ToolLocation { path, line: *line }
                 })
                 .collect()
         });
+        let path_cuts = paths.as_ref().map(|_| path_cuts);
         let secret_path = paths.as_ref().is_some_and(|p| {
             p.iter()
                 .any(|p| agora_core::secrets::is_secret_path(&p.path))
@@ -1470,6 +1390,12 @@ impl ChatBoard {
                         if let Some(o) = output_cuts {
                             c.output = o;
                         }
+                        if let Some(x) = tool_cuts {
+                            c.tool = x;
+                        }
+                        if let Some(p) = path_cuts {
+                            c.paths = p;
+                        }
                     });
                 }
             }
@@ -1482,6 +1408,8 @@ impl ChatBoard {
                 t.note_cuts(id, |c| {
                     c.args = args_cuts.unwrap_or_default();
                     c.output = output_cuts.unwrap_or_default();
+                    c.tool = tool_cuts.unwrap_or_default();
+                    c.paths = path_cuts.unwrap_or_default();
                 });
                 t.calls.insert(
                     call_id,
@@ -1498,20 +1426,21 @@ impl ChatBoard {
     /// ADR-0090: the plan with each step's status. A plan replaces the earlier one in the same entry while that is still in the ring;
     /// at most 64 steps of 512 bytes; `text` stays the step lines joined for old clients.
     fn upsert_plan(&self, agent: &AgentId, steps: &[PlanItem], now_ms: u64) {
+        let mut step_cuts = Vec::new();
         let steps: Vec<PlanStep> = steps
             .iter()
             .take(MAX_PLAN_STEPS)
-            .map(|s| PlanStep {
-                text: tidy(&s.text, MAX_PLAN_STEP_BYTES, Style::Step).0,
-                status: plan_status(&s.status) as i32,
-                priority: plan_priority(&s.priority) as i32,
+            .map(|s| {
+                let (text, _, cuts) = tidy_cuts(&s.text, MAX_PLAN_STEP_BYTES, Style::Step);
+                step_cuts.push(cuts);
+                PlanStep {
+                    text,
+                    status: plan_status(&s.status) as i32,
+                    priority: plan_priority(&s.priority) as i32,
+                }
             })
             .collect();
-        let text = cut(steps
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"));
+        let text = plan_text(&steps);
         let mut g = self.lock();
         let t = slot(&mut g, agent, self.wake.as_ref());
         if let Some(id) = t.plan.filter(|id| t.index(*id).is_some()) {
@@ -1520,12 +1449,14 @@ impl ChatBoard {
                 e.text = text;
                 e.plan_steps = steps;
             }) {
+                t.note_cuts(id, |c| c.steps = step_cuts);
                 return;
             }
         }
         let mut e = entry(ChatRole::Agent, ChatKind::Plan, text, now_ms);
         e.plan_steps = steps;
         let id = t.add(e, now_ms);
+        t.note_cuts(id, |c| c.steps = step_cuts);
         t.plan = Some(id);
     }
 
@@ -1603,11 +1534,10 @@ impl ChatBoard {
         let t = slot(&mut g, agent, self.wake.as_ref());
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = code.into();
-        n.params = HashMap::from([(
-            "action".to_string(),
-            tidy(action, MAX_PERMISSION_BYTES, Style::Label).0,
-        )]);
-        t.add(n, now_ms);
+        let (label, _, cuts) = tidy_cuts(action, MAX_PERMISSION_BYTES, Style::Label);
+        n.params = HashMap::from([("action".to_string(), label)]);
+        let id = t.add(n, now_ms);
+        t.note_cuts(id, |c| c.params = vec![("action".to_string(), cuts)]);
     }
 
     pub fn output_dropped(&self, agent: &AgentId, bytes: u64, now_ms: u64) {
@@ -1644,15 +1574,11 @@ impl ChatBoard {
     /// adapter's own id and never text from the agent); `action` is the label the approvals list shows, cut. The entry holds no
     /// decision: it starts `pending` and only [`Self::set_permission`] changes it, from the node's approval state.
     pub fn push_permission(&self, agent: &AgentId, approval_id: &str, action: &str, now_ms: u64) {
-        let mut e = entry(
-            ChatRole::Agent,
-            ChatKind::Permission,
-            tidy(action, MAX_PERMISSION_BYTES, Style::Label).0,
-            now_ms,
-        );
+        let (label, _, cuts) = tidy_cuts(action, MAX_PERMISSION_BYTES, Style::Label);
+        let mut e = entry(ChatRole::Agent, ChatKind::Permission, label, now_ms);
         e.approval_id = approval_id.to_string();
         e.permission_outcome = PermissionOutcome::Pending as i32;
-        self.insert(agent, e);
+        self.insert_cut(agent, e, cuts);
     }
 
     /// ADR-0090: how the approval of a permission entry ended, from the node's own approval state: the user's verified decision, or
@@ -1730,6 +1656,7 @@ impl ChatBoard {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use agora_adapters::text::{strip_controls, ESCAPE_PAYLOAD_MAX};
 
     #[test]
     fn closing_subscriptions_removes_their_followers_without_another_entry() {
@@ -3320,12 +3247,13 @@ mod review2 {
     }
 
     /// The writer drains while the pieces still come (a slow model): the newest pieces are held back until the value is whole, so no
-    /// piece of it is written early; once the stream is quiet for `HOLD_MS` the last one goes too.
+    /// piece of it is written early; once the turn ends the last one goes too.
     #[test]
     fn pieces_written_while_a_value_still_streams_are_held_until_it_is_whole() {
         let (_d, s, b) = board("hold", SECRET);
         let a = AgentId::new("a");
         let (p1, p2, p3) = (&SECRET[..20], &SECRET[20..40], &SECRET[40..]);
+        b.set_working(&a, true);
         b.push_item(&a, &text(&format!("key: {p1}")), 1_000);
         save_due(&b, 1_100);
         b.push_item(&a, &text(p2), 1_200);
@@ -3336,11 +3264,16 @@ mod review2 {
         );
         b.push_item(&a, &text(&format!("{p3} and more words after it")), 1_400);
         save_due(&b, 1_500);
-        // Not quiet yet: the pieces within a value's length of the stream's end wait (the last two); the first went, redacted.
+        // Still in the turn: the pieces within a value's length of the stream's end wait (the last two); the first went, redacted.
         let f = body(&s, "a");
         assert!(!f.contains(p1) && !f.contains(p2), "{f}");
         assert_eq!(s.read("a").entries.len(), 1);
-        save_due(&b, 1_400 + HOLD_MS);
+        // However long it stays quiet: nothing is released by time.
+        save_due(&b, 1_000_000);
+        assert_eq!(s.read("a").entries.len(), 1);
+        // The turn ends: the rest is written.
+        b.set_working(&a, false);
+        save_due(&b, 1_000_001);
         let f = body(&s, "a");
         assert!(!f.contains(p3) && !f.contains(p2) && !f.contains(p1), "{f}");
         assert_eq!(s.read("a").entries.len(), 3);
@@ -3520,5 +3453,1121 @@ mod review2 {
         save(&b2);
         let f2 = body(&s2, "a");
         assert!(!f2.contains(&mb[..cut]) && !f2.contains(&mb[cut..]), "{f2}");
+    }
+}
+
+/// Review of #1103, round 3 (advisor): after a take-up, the start of the next words stays an edge while the carry reaches back to it,
+/// not only for the first batch.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod take_up_edge {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store};
+
+    #[test]
+    fn a_value_cut_by_a_stop_and_finished_over_two_batches_after_the_take_up_stays_off_the_disk() {
+        let v = "SK-ANT-API-ABCDEFGHIJKLMNOPQRSTUVWXYZ-QWERTY";
+        let dir = std::env::temp_dir().join(format!("agora-take-up-edge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        SecretStore::in_data(&dir)
+            .set("T", &Secret::new(v).unwrap())
+            .unwrap();
+        let open = || {
+            let s = Arc::new(Store::new(
+                &dir,
+                Limits::default(),
+                Some(SecretStore::in_data(&dir)),
+            ));
+            (Arc::clone(&s), ChatBoard::saving(s))
+        };
+        let write = |s: &Store, b: &ChatBoard, full: bool| {
+            let batches = if full {
+                b.take_unsaved()
+            } else {
+                b.take_due(0)
+            };
+            for x in batches {
+                s.write(&x).unwrap();
+            }
+        };
+        let a = AgentId::new("a");
+        let (s, b) = open();
+        b.push_item(&a, &ChatItem::Text(format!("key {}", &v[..25])), 1);
+        write(&s, &b, true);
+        let (s, b) = open();
+        assert!(b.seed_from_disk(&a, 2));
+        b.push_item(&a, &ChatItem::Text(v[25..35].to_string()), 3);
+        write(&s, &b, false);
+        b.push_item(&a, &ChatItem::Text(format!("{} done", &v[35..])), 4);
+        write(&s, &b, false);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        for piece in [&v[..25], &v[25..35], &v[35..]] {
+            assert!(!f.contains(piece), "{piece} on disk: {f}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Review of #1103, round 3: the reviewer's probes, as regression tests (adapted: no quiet timer any more, so its `HOLD_MS` is a
+/// plain 5 s; the bridge and pre-bound cases assert instead of printing; the measurements are ignored by default).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review3 {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store};
+
+    const SECRET: &str = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+
+    fn board(tag: &str, secrets: &[&str]) -> (std::path::PathBuf, Arc<Store>, ChatBoard) {
+        let dir = std::env::temp_dir().join(format!("agora-review3-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, v) in secrets.iter().enumerate() {
+            SecretStore::in_data(&dir)
+                .set(&format!("T{i}"), &Secret::new(v).unwrap())
+                .unwrap();
+        }
+        let s = Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        ));
+        (dir, Arc::clone(&s), ChatBoard::saving(s))
+    }
+    fn save(b: &ChatBoard) {
+        let store = b.store().unwrap();
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+    }
+    fn save_due(b: &ChatBoard, now: u64) {
+        let store = b.store().unwrap();
+        for batch in b.take_due(now) {
+            store.write(&batch).unwrap();
+        }
+    }
+    fn body(s: &Store, a: &str) -> String {
+        std::fs::read_to_string(s.path(a).unwrap()).unwrap_or_default()
+    }
+    fn text(t: &str) -> ChatItem {
+        ChatItem::Text(t.into())
+    }
+    /// The longest piece (>= 6 bytes) of `v` that appears in `f`.
+    fn leaked(f: &str, v: &str) -> Option<String> {
+        let b = v.as_bytes();
+        for n in (6..=b.len()).rev() {
+            for i in 0..=b.len() - n {
+                if let Ok(p) = std::str::from_utf8(&b[i..i + n]) {
+                    if f.contains(p) {
+                        return Some(p.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn r3_queued_prompt_mid_value() {
+        let (_d, s, b) = board("queued", &[SECRET]);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("the key is {}", &SECRET[..25])), 1_000);
+        save_due(&b, 1_100);
+        b.push_queued(&a, "and then run the tests".into(), 1_150);
+        b.push_item(&a, &text(&format!("{} done", &SECRET[25..])), 1_200);
+        save_due(&b, 1_300);
+        save_due(&b, 9_000);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+    }
+
+    #[test]
+    fn r3_quiet_release_mid_value() {
+        let (_d, s, b) = board("quiet", &[SECRET]);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("the key is {}", &SECRET[..25])), 1_000);
+        save_due(&b, 1_000 + 5_000);
+        b.push_item(&a, &text(&format!("{} done", &SECRET[25..])), 7_000);
+        save_due(&b, 13_000);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+    }
+
+    #[test]
+    fn r3_stop_flush_mid_value_then_continue() {
+        let (dir, s, b) = board("stop", &[SECRET]);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("the key is {}", &SECRET[..25])), 1_000);
+        save(&b); // the stop's flush: take_unsaved
+                  // a new node takes the agent up and the rest arrives
+        let s2 = Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        ));
+        let b2 = ChatBoard::saving(Arc::clone(&s2));
+        assert!(b2.seed_from_disk(&a, 2_000));
+        b2.push_item(&a, &text(&format!("{} done", &SECRET[25..])), 2_100);
+        save(&b2);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+    }
+
+    #[test]
+    fn r3_many_way_split_with_writer_ticks() {
+        for step in [1usize, 2, 3, 7] {
+            let (_d, s, b) = board(&format!("many{step}"), &[SECRET]);
+            let a = AgentId::new("a");
+            let mut t = 1_000;
+            b.push_item(&a, &text("pre "), t);
+            let mut i = 0;
+            while i < SECRET.len() {
+                let j = (i + step).min(SECRET.len());
+                t += 200;
+                b.push_item(&a, &text(&SECRET[i..j]), t);
+                save_due(&b, t + 100);
+                i = j;
+            }
+            t += 200;
+            b.push_item(&a, &text(" post"), t);
+            save_due(&b, t + 100);
+            save_due(&b, t + 5_000 + 1);
+            let f = body(&s, "a");
+            // pieces < 6 bytes are allowed by the checker; ensure no 6+ byte piece
+            assert_eq!(leaked(&f, SECRET), None, "step {step}: {f}");
+            assert_eq!(s.read("a").entries.len(), SECRET.len().div_ceil(step) + 2);
+        }
+    }
+
+    #[test]
+    fn r3_substring_secret_and_overlaps() {
+        let short = &SECRET[13..35];
+        let (_d, s, b) = board("sub", &[SECRET, short]);
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("x {}", &SECRET[..20])), 1_000);
+        b.push_item(
+            &a,
+            &ChatItem::Thought(format!("{} y {}", &SECRET[20..], &short[..10])),
+            1_100,
+        );
+        b.push_item(&a, &text(&format!("{} z", &short[10..])), 1_200);
+        save_due(&b, 1_300);
+        save_due(&b, 1_200 + 5_000);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+        assert_eq!(leaked(&f, short), None, "{f}");
+        // periodic secret, overlapping occurrences
+        let per = "abcabcabcabc";
+        let (_d, s, b) = board("per", &[per]);
+        b.push_item(&a, &text("abcabcab"), 1_000);
+        b.push_item(&a, &text("cabcabcab"), 1_100);
+        save(&b);
+        let f = body(&s, "a");
+        // Overlapping occurrences: every one is found, so no piece of the value is left beside a replaced one.
+        assert_eq!(leaked(&f, per), None, "{f}");
+    }
+
+    #[test]
+    fn r3_multibyte_many_way() {
+        let mb = "çok-gizli-anahtar-ğüşİö-ışık";
+        let (_d, s, b) = board("mb", &[mb]);
+        let a = AgentId::new("a");
+        let mut t = 1_000;
+        for (k, c) in mb.chars().enumerate() {
+            t += 100;
+            b.push_item(&a, &text(&c.to_string()), t);
+            if k % 3 == 0 {
+                save_due(&b, t);
+            }
+        }
+        b.push_item(&a, &text(" end"), t + 100);
+        save_due(&b, t + 100 + 5_000);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, mb), None, "{f}");
+    }
+
+    #[test]
+    fn r3_json_escaped_on_args_cut() {
+        let v = "pa\"ss\\word-abcdefghij-0123456789";
+        let (_d, s, b) = board("esc", &[v]);
+        let a = AgentId::new("a");
+        let esc = serde_json::to_string(v).unwrap();
+        let esc = &esc[1..esc.len() - 1];
+        let half = MAX_ENTRY_BYTES / 2;
+        let pre = "a".repeat(half - 12 - 15);
+        let args = format!(
+            "{{\"content\":\"{pre}{esc}{}\"}}",
+            "b".repeat(MAX_ENTRY_BYTES)
+        );
+        let mut t = ToolItem {
+            call_id: "c1".into(),
+            ..ToolItem::default()
+        };
+        t.tool = Some("write".into());
+        t.arguments_json = Some(args);
+        b.push_item(&a, &ChatItem::Tool(t), 1);
+        save(&b);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, esc), None, "{}", &f[..200.min(f.len())]);
+    }
+
+    #[test]
+    fn r3_permission_label_cut() {
+        let (_d, s, b) = board("perm", &[SECRET]);
+        let a = AgentId::new("a");
+        let half = MAX_PERMISSION_BYTES / 2;
+        let action = format!("curl -H 'Authorization: Bearer {}' {}", "", "");
+        let _ = action;
+        let pre = format!("curl {} -H 'Authorization: Bearer ", "-s ".repeat(100));
+        let pre = &pre[pre.len() - (half - 20)..];
+        let action = format!("{pre}{SECRET}' {}", "https://example.com/x ".repeat(30));
+        b.push_permission(&a, "ap1", &action, 1);
+        save(&b);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+    }
+
+    #[test]
+    fn r3_intermediate_tool_output_version() {
+        let (_d, s, b) = board("outv", &[SECRET]);
+        let a = AgentId::new("a");
+        let mut t = ToolItem {
+            call_id: "c1".into(),
+            ..ToolItem::default()
+        };
+        t.tool = Some("sh".into());
+        t.status = "in_progress".into();
+        t.output = Some(format!("TOKEN={}", &SECRET[..30]));
+        b.push_item(&a, &ChatItem::Tool(t.clone()), 1_000);
+        save_due(&b, 1_100);
+        t.status = "completed".into();
+        t.output = Some(format!("TOKEN={}\n", SECRET));
+        b.push_item(&a, &ChatItem::Tool(t), 2_000);
+        save_due(&b, 2_100);
+        let f = body(&s, "a");
+        assert_eq!(leaked(&f, SECRET), None, "{f}");
+    }
+
+    #[test]
+    fn r3_bridge_seam_with_unclosed_isolates() {
+        let value = "Tr0ub4dor&3-horse!battery#staple";
+        for (tag, filler) in [("ctl-space", " "), ("iso", "\u{2066}")] {
+            let (_d, s, b) = board(&format!("iso-{tag}"), &[value]);
+            let a = AgentId::new("a");
+            let half = 32 * 1024;
+            let (n, d) = (12, 6);
+            let count = (half - n) / filler.len();
+            let head = format!(
+                "{}{}{}",
+                filler.repeat(count),
+                " ".repeat(half - n - count * filler.len()),
+                &value[..n]
+            );
+            let rest = format!("{} ZZZZ", &value[n + d..]);
+            let tail = format!("{rest}{}", " ".repeat(half - rest.len()));
+            let raw = format!("{head}{}{tail}", &value[n..n + d]);
+            let mut t = ToolItem {
+                call_id: "c1".into(),
+                ..ToolItem::default()
+            };
+            t.tool = Some("sh".into());
+            t.status = "completed".into();
+            t.output = Some(agora_adapters::acp::bounded_output(&raw));
+            b.push_item(&a, &ChatItem::Tool(t), 1);
+            save(&b);
+            let f = body(&s, "a");
+            assert_eq!(leaked(&f, value), None, "bridge {tag}");
+        }
+    }
+
+    #[test]
+    fn r3_prebound_seam_moved_by_isolates() {
+        for lris in [0usize, 1, 2, 20] {
+            let (_d, s, b) = board(&format!("pbiso{lris}"), &[SECRET]);
+            let a = AgentId::new("a");
+            let esc = "\u{1b}[0m";
+            // p2b exactly, with `lris` unclosed isolates in place of escapes' bytes before the value
+            let n_esc = (32 * 1024 - 2 - 30 - lris * 3) / 4;
+            let pad = 32 * 1024 - 2 - 30 - lris * 3 - n_esc * 4;
+            let head = format!(
+                "{}{}{}xx{}",
+                esc.repeat(n_esc),
+                " ".repeat(pad),
+                "\u{2066}".repeat(lris),
+                &SECRET[..30]
+            );
+            assert_eq!(head.len(), 32 * 1024);
+            let tail = format!("ZZZZ{}", esc.repeat(8191));
+            let mut t = ToolItem {
+                call_id: "c1".into(),
+                ..ToolItem::default()
+            };
+            t.tool = Some("sh".into());
+            t.output = Some(format!("{head}{}{tail}", "M".repeat(1000)));
+            b.push_item(&a, &ChatItem::Tool(t), 1);
+            save(&b);
+            let f = body(&s, "a");
+            assert_eq!(leaked(&f, SECRET), None, "prebound lris={lris}");
+        }
+    }
+
+    #[test]
+    fn r3_intermediate_output_via_bridge_and_growing_args() {
+        let value = "Tr0ub4dor&3-horse!battery#staple";
+        let (_d, s, b) = board("outv2", &[value]);
+        let a = AgentId::new("a");
+        let mut t = ToolItem {
+            call_id: "c1".into(),
+            ..ToolItem::default()
+        };
+        t.tool = Some("sh".into());
+        t.status = "in_progress".into();
+        t.output = Some(agora_adapters::acp::bounded_output(&format!(
+            "PASSWORD={}",
+            &value[..20]
+        )));
+        t.arguments_json = Some(format!("{{\"command\":\"login --password {}", &value[..18]));
+        b.push_item(&a, &ChatItem::Tool(t.clone()), 1_000);
+        save_due(&b, 1_100);
+        t.status = "completed".into();
+        t.output = Some(agora_adapters::acp::bounded_output(&format!(
+            "PASSWORD={value}\n"
+        )));
+        t.arguments_json = Some(format!("{{\"command\":\"login --password {value}\"}}"));
+        b.push_item(&a, &ChatItem::Tool(t), 2_000);
+        save_due(&b, 2_100);
+        let f = body(&s, "a");
+        eprintln!("outv2 file:\n{f}");
+        assert_eq!(leaked(&f, value), None);
+    }
+
+    #[test]
+    #[ignore = "a measurement (review of #1103, round 3): cargo test -- --ignored r3_perf"]
+    fn r3_perf_long_stream() {
+        let (_d, s, b) = board("perf", &[SECRET, "another-secret-value-xyz"]);
+        let a = AgentId::new("a");
+        let start = std::time::Instant::now();
+        let mut t = 1_000u64;
+        let mut written = 0usize;
+        for i in 0..20_000u64 {
+            t += 10;
+            b.push_item(&a, &text(&format!("word{i} ")), t);
+            if i % 100 == 0 {
+                save_due(&b, t);
+                written += 1;
+            }
+        }
+        save_due(&b, t + 5_000);
+        let el = start.elapsed();
+        eprintln!(
+            "perf: 20k pieces, {written} batches: {el:?}, file {} bytes",
+            body(&s, "a").len()
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review3perf {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store};
+
+    fn run(tag: &str, secrets: Vec<String>, piece: usize, n: u64, every: u64) {
+        let dir = std::env::temp_dir().join(format!("agora-review3p-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, v) in secrets.iter().enumerate() {
+            SecretStore::in_data(&dir)
+                .set(&format!("T{i}"), &Secret::new(v).unwrap())
+                .unwrap();
+        }
+        let s = Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        ));
+        let b = ChatBoard::saving(Arc::clone(&s));
+        let a = AgentId::new("a");
+        let chunk = "w".repeat(piece - 1) + " ";
+        let mut t = 1_000u64;
+        let mut take = std::time::Duration::ZERO;
+        let mut write = std::time::Duration::ZERO;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            t += 10;
+            b.push_item(&a, &ChatItem::Text(chunk.clone()), t);
+            if i % every == 0 {
+                let t0 = std::time::Instant::now();
+                let batches = b.take_due(t);
+                take += t0.elapsed();
+                let t1 = std::time::Instant::now();
+                for x in batches {
+                    s.write(&x).unwrap();
+                }
+                write += t1.elapsed();
+            }
+        }
+        eprintln!(
+            "{tag}: total {:?} take {:?} write {:?}",
+            start.elapsed(),
+            take,
+            write
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "a measurement (review of #1103, round 3): cargo test -- --ignored r3p"]
+    fn r3p() {
+        run("none", vec![], 40, 20_000, 10);
+        run(
+            "small",
+            vec!["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".into()],
+            40,
+            20_000,
+            10,
+        );
+        run(
+            "pem4k",
+            vec!["Q".to_string() + &"abcdefghij".repeat(400)],
+            40,
+            20_000,
+            10,
+        );
+        run(
+            "pem8k",
+            vec!["Q".to_string() + &"abcdefghij".repeat(800)],
+            40,
+            20_000,
+            10,
+        );
+        run("aaaa8k", vec!["a".repeat(8_000)], 40, 5_000, 10);
+        run(
+            "tiny-pieces",
+            vec!["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".into()],
+            2,
+            50_000,
+            1,
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review3b {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store};
+
+    /// Round 3, B2: the bridge's own shape check replaces only part of a value; the node finds the rest beside its mark.
+    #[test]
+    fn r3_bridge_redact_splits_value() {
+        for (v, line) in [
+            (
+                "Tr0ub4dor&3-horse!battery#staple",
+                "PASSWORD=Tr0ub4dor&3-horse!battery#staple\n",
+            ),
+            (
+                "Tr0ub4dor&3-horse!battery#staple",
+                "export DB_PASSWORD='Tr0ub4dor&3-horse!battery#staple'\n",
+            ),
+            (
+                "ghp_AbCdEfGhIj0123456789xyzXYZ_abcdefgh",
+                "token: ghp_AbCdEfGhIj0123456789xyzXYZ_abcdefgh\n",
+            ),
+            (
+                "correct horse battery staple 42!",
+                "password = correct horse battery staple 42!\n",
+            ),
+        ] {
+            let out = agora_adapters::acp::bounded_output(line);
+            let dir = std::env::temp_dir().join(format!(
+                "agora-review3b-{}-{}",
+                v.len(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            SecretStore::in_data(&dir)
+                .set("T", &Secret::new(v).unwrap())
+                .unwrap();
+            let s = Arc::new(Store::new(
+                &dir,
+                Limits::default(),
+                Some(SecretStore::in_data(&dir)),
+            ));
+            let b = ChatBoard::saving(Arc::clone(&s));
+            let a = AgentId::new("a");
+            let mut t = ToolItem {
+                call_id: "c1".into(),
+                ..ToolItem::default()
+            };
+            t.tool = Some("sh".into());
+            t.status = "completed".into();
+            t.output = Some(out.clone());
+            b.push_item(&a, &ChatItem::Tool(t), 1);
+            for batch in b.take_unsaved() {
+                s.write(&batch).unwrap();
+            }
+            let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+            for n in (4..v.len()).rev() {
+                for i in 0..=v.len() - n {
+                    if let Some(p) = v.get(i..i + n) {
+                        assert!(!f.contains(p), "{line:?} -> {out:?}: {p:?} on disk");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Review of #1103, round 3: the acceptance gate for ADR-0089 decision 7. Seeded random cases through the real path (adapter items
+/// into the board, the bridge's `bounded_output` for some tool outputs, the writer's timed and full takes into the file, restarts
+/// that seed a new board from it), with secrets drawn from an alphabet the rest of the text never uses (upper case, punctuation,
+/// quotes, backslashes, Turkish capitals; no digits or lower case), so any piece of a secret in the file came from the secret. The
+/// check: no piece of 4 bytes or more of any secret, raw or as JSON escapes it, in any field of any line, nor in the agent's words
+/// joined in order; and every case's own marker word reached the file (nothing is simply held back for ever).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod property {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{decode_line, Limits, Line as FileLine, Store};
+    use std::collections::BTreeMap;
+
+    /// The cases run (each a few dozen to a few hundred steps); `AGORA_PROPERTY_CASES` sets another number.
+    const CASES: u64 = 600;
+
+    /// How many cases reached each scenario (reported by the test).
+    const SCENARIOS: [&str; 12] = [
+        "words in pieces",
+        "a stop's flush mid-words",
+        "a take-up mid-words",
+        "a turn begins or ends mid-words",
+        "Start again mid-words",
+        "a tool call in versions",
+        "an output over 64 KiB through the bridge",
+        "a secret in a tool name or path",
+        "a permission label",
+        "a plan step",
+        "a user prompt or a notice parameter with a secret",
+        "a writer batch mid-words",
+    ];
+    static HITS: [std::sync::atomic::AtomicUsize; 12] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 12];
+
+    fn hit(seen: &mut [bool; 12], i: usize) {
+        if !seen[i] {
+            seen[i] = true;
+            HITS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+        fn chance(&mut self, percent: usize) -> bool {
+            self.below(100) < percent
+        }
+        fn pick(&mut self, of: &[char]) -> char {
+            of[self.below(of.len())]
+        }
+    }
+
+    const TOKEN: &[char] = &[
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T',
+        'U', 'V', 'W', 'X', 'Y', 'Z', '_', '-',
+    ];
+    const PUNCT: &[char] = &[
+        'A', 'B', 'C', 'X', 'Y', 'Z', '!', '#', '&', '%', '"', '\\', '-', '*', '@',
+    ];
+    const WIDE: &[char] = &['Ç', 'Ğ', 'İ', 'Ö', 'Ş', 'Ü', 'K', 'M', 'R'];
+    const FILLER: &[char] = &[
+        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't',
+        'u', 'v', 'w', ' ', ' ', '.',
+    ];
+
+    fn secret(r: &mut Rng) -> String {
+        let (alphabet, len) = match r.below(3) {
+            0 => (TOKEN, 24 + r.below(30)),
+            1 => (PUNCT, 10 + r.below(16)),
+            _ => (WIDE, 8 + r.below(10)),
+        };
+        (0..len).map(|_| r.pick(alphabet)).collect()
+    }
+
+    fn filler(r: &mut Rng, len: usize) -> String {
+        (0..len).map(|_| r.pick(FILLER)).collect()
+    }
+
+    /// Splits `s` into pieces of 1 to `most` characters.
+    fn pieces(r: &mut Rng, s: &str, most: usize) -> Vec<String> {
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let n = 1 + r.below(most);
+            out.push(chars[i..(i + n).min(chars.len())].iter().collect());
+            i += n;
+        }
+        out
+    }
+
+    /// A text with secrets in it: filler, a secret, filler, ...
+    fn message(r: &mut Rng, secrets: &[String]) -> String {
+        let n = 1 + r.below(30);
+        let mut m = filler(r, n);
+        for _ in 0..1 + r.below(2) {
+            m.push_str(&secrets[r.below(secrets.len())]);
+            let n = r.below(25);
+            m.push_str(&filler(r, n));
+        }
+        m
+    }
+
+    /// The shortest pieces of `v` of `min` bytes or more from each character (on character boundaries): any longer piece holds one,
+    /// so finding none of these finds none at all.
+    fn pieces_of(v: &str, min: usize) -> Vec<&str> {
+        let bounds: Vec<usize> = v.char_indices().map(|(i, _)| i).chain([v.len()]).collect();
+        let mut out = Vec::new();
+        for (x, &a) in bounds.iter().enumerate() {
+            if let Some(&z) = bounds[x + 1..].iter().find(|&&z| z - a >= min) {
+                out.push(&v[a..z]);
+            }
+        }
+        out
+    }
+
+    struct Case {
+        dir: std::path::PathBuf,
+        store: Arc<Store>,
+        board: ChatBoard,
+    }
+
+    impl Case {
+        fn write(&self, full: bool) {
+            let batches = if full {
+                self.board.take_unsaved()
+            } else {
+                self.board.take_due(0)
+            };
+            for b in batches {
+                self.store.write(&b).unwrap();
+            }
+        }
+    }
+
+    /// What the files hold: every string of every line, and the agent's words joined in order (per file).
+    fn on_disk(dir: &std::path::Path) -> (Vec<String>, Vec<String>, String) {
+        let mut fields = Vec::new();
+        let mut streams = Vec::new();
+        let mut raw = String::new();
+        for item in std::fs::read_dir(dir.join("transcripts"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let text = std::fs::read_to_string(item.path()).unwrap_or_default();
+            raw.push_str(&text);
+            let mut words: BTreeMap<u64, String> = BTreeMap::new();
+            for line in text.lines() {
+                let Some((_, FileLine::Entry(e, side))) = decode_line(line) else {
+                    continue;
+                };
+                if in_run(&e) {
+                    words.insert(e.entry_id, e.text.clone());
+                }
+                fields.extend([e.text, e.output, e.path, e.approval_id, e.call_id]);
+                fields.extend(e.params.into_values());
+                fields.extend(e.paths.into_iter().map(|p| p.path));
+                fields.extend(e.plan_steps.into_iter().map(|s| s.text));
+                if let Some((tool, args)) = side.tool {
+                    fields.extend([tool, args]);
+                }
+            }
+            streams.push(words.into_values().collect::<String>());
+        }
+        (fields, streams, raw)
+    }
+
+    fn run_case(seed: u64) -> Result<(), String> {
+        let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let dir =
+            std::env::temp_dir().join(format!("agora-property-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secrets: Vec<String> = (0..1 + r.below(3)).map(|_| secret(&mut r)).collect();
+        for (i, v) in secrets.iter().enumerate() {
+            SecretStore::in_data(&dir)
+                .set(&format!("S{i}"), &Secret::new(v).unwrap())
+                .unwrap();
+        }
+        let open = |dir: &std::path::Path| {
+            let store = Arc::new(Store::new(
+                dir,
+                Limits::default(),
+                Some(SecretStore::in_data(dir)),
+            ));
+            let board = ChatBoard::saving(Arc::clone(&store));
+            (store, board)
+        };
+        let (store, board) = open(&dir);
+        let mut c = Case {
+            dir: dir.clone(),
+            store,
+            board,
+        };
+        let a = AgentId::new("agent-1");
+        // A word only this case writes, in lower case, said last in a turn: it must reach the file once the turn ends (a Start again
+        // replaces an older earlier session's file, so it is said at the end).
+        let marker = format!("marker{}", filler(&mut r, 6).replace([' ', '.'], "q"));
+        let mut calls = 0;
+        let mut seen = [false; 12];
+        for _ in 0..10 + r.below(40) {
+            match r.below(13) {
+                // The agent's words, in pieces, with other entries, the writer, stops, take-ups, turns and Start again between them.
+                0..=4 => {
+                    hit(&mut seen, 0);
+                    let m = message(&mut r, &secrets);
+                    let most = [1, 3, 8, 20][r.below(4)];
+                    for p in pieces(&mut r, &m, most) {
+                        let item = if r.chance(20) {
+                            ChatItem::Thought(p)
+                        } else {
+                            ChatItem::Text(p)
+                        };
+                        c.board.push_item(&a, &item, 1);
+                        match r.below(24) {
+                            0 | 1 => {
+                                c.board.push_queued(&a, filler(&mut r, 12), 1);
+                            }
+                            2 => c.board.output_dropped(&a, 7, 1),
+                            3..=6 => {
+                                hit(&mut seen, 11);
+                                c.write(false);
+                            }
+                            7 => {
+                                c.board.push_user(&a, filler(&mut r, 9), 1);
+                            }
+                            8 => {
+                                hit(&mut seen, 1);
+                                c.write(true);
+                            }
+                            9 => {
+                                hit(&mut seen, 2);
+                                c.write(true);
+                                let (store, board) = open(&dir);
+                                board.seed_from_disk(&a, 1);
+                                c.store = store;
+                                c.board = board;
+                            }
+                            10 | 11 => {
+                                hit(&mut seen, 3);
+                                c.board.set_working(&a, r.chance(50));
+                            }
+                            12 => {
+                                hit(&mut seen, 4);
+                                let seed = c.board.read_seed(&a, true);
+                                c.board.resumed(&a, seed, true, 1);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // A user prompt or an adapter's notice holding a secret.
+                12 => {
+                    hit(&mut seen, 10);
+                    if r.chance(50) {
+                        let m = message(&mut r, &secrets);
+                        c.board.push_user(&a, m, 1);
+                    } else {
+                        let m = message(&mut r, &secrets);
+                        c.board.push_item(
+                            &a,
+                            &ChatItem::Notice {
+                                code: "adapter.turn_failed".into(),
+                                params: vec![("stderr_tail".into(), m)],
+                            },
+                            1,
+                        );
+                    }
+                }
+                // A tool call in versions: the output and arguments growing, then final; some through the bridge, some long.
+                5 | 6 => {
+                    hit(&mut seen, 5);
+                    calls += 1;
+                    let id = format!("c{calls}");
+                    let mut out = message(&mut r, &secrets);
+                    let mut big = false;
+                    if r.chance(15) {
+                        let n = 9_000 + r.below(9_000);
+                        let pad = filler(&mut r, n);
+                        out = format!("{pad}{out}{pad}");
+                    } else if r.chance(5) {
+                        // Over the bridge's 64 KiB, with a secret where its cut falls.
+                        big = true;
+                        let pad = filler(&mut r, 32 * 1024 - 7);
+                        let more = filler(&mut r, 2_000);
+                        out = format!("{pad}{out}{pad}{more}");
+                    }
+                    let named = r.chance(15);
+                    if named {
+                        hit(&mut seen, 7);
+                    }
+                    let tool = if named {
+                        message(&mut r, &secrets)
+                    } else {
+                        "sh".to_string()
+                    };
+                    let path = if named {
+                        Some(vec![(message(&mut r, &secrets), 1)])
+                    } else {
+                        None
+                    };
+                    let args = format!(
+                        "{{\"cmd\":{}}}",
+                        serde_json::to_string(&message(&mut r, &secrets)).unwrap()
+                    );
+                    let bridge = big || r.chance(40);
+                    if big {
+                        hit(&mut seen, 6);
+                    }
+                    let versions = 1 + r.below(4);
+                    for v in 1..=versions {
+                        let last = v == versions;
+                        let cut = |s: &str, r: &mut Rng| {
+                            if last {
+                                return s.to_string();
+                            }
+                            let mut n = r.below(s.len() + 1);
+                            while !s.is_char_boundary(n) {
+                                n -= 1;
+                            }
+                            s[..n].to_string()
+                        };
+                        let o = cut(&out, &mut r);
+                        let o = if bridge {
+                            agora_adapters::acp::bounded_output(&o)
+                        } else {
+                            o
+                        };
+                        let item = ToolItem {
+                            call_id: id.clone(),
+                            tool: Some(tool.clone()),
+                            locations: path.clone(),
+                            arguments_json: Some(cut(&args, &mut r)),
+                            status: if last { "completed" } else { "in_progress" }.into(),
+                            output: Some(o),
+                            ..ToolItem::default()
+                        };
+                        c.board.push_item(&a, &ChatItem::Tool(item), 1);
+                        if r.chance(50) {
+                            c.write(false);
+                        }
+                    }
+                }
+                // A permission whose label holds a secret, sometimes where the node cuts it.
+                7 => {
+                    hit(&mut seen, 8);
+                    let mut label = message(&mut r, &secrets);
+                    if r.chance(50) {
+                        label = format!("{}{label}{}", filler(&mut r, 240), filler(&mut r, 400));
+                    }
+                    c.board
+                        .push_permission(&a, &format!("ap{}", r.below(1000)), &label, 1);
+                }
+                // A plan whose step holds a secret.
+                8 => {
+                    hit(&mut seen, 9);
+                    let step = PlanItem {
+                        text: message(&mut r, &secrets),
+                        ..PlanItem::default()
+                    };
+                    c.board.push_item(&a, &ChatItem::PlanSteps(vec![step]), 1);
+                }
+                // The agent's turn begins or ends.
+                9 => {
+                    hit(&mut seen, 3);
+                    c.board.set_working(&a, r.chance(60));
+                }
+                // The writer, or a stop's full flush.
+                10 => c.write(r.chance(20)),
+                // A restart: the node stops (its flush), and the next one takes the agent up from the file.
+                _ => {
+                    c.write(true);
+                    let (store, board) = open(&dir);
+                    board.seed_from_disk(&a, 1);
+                    c.store = store;
+                    c.board = board;
+                }
+            }
+        }
+        c.board.set_working(&a, true);
+        c.board
+            .push_item(&a, &ChatItem::Text(format!(" {marker}")), 1);
+        c.board.set_working(&a, false);
+        c.write(false);
+        let (_, _, before_stop) = on_disk(&c.dir);
+        c.write(true);
+        let (fields, streams, raw) = on_disk(&c.dir);
+        if !before_stop.contains(&marker) {
+            return Err(format!(
+                "seed {seed}: the words of a turn that ended were not written before a stop"
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&c.dir);
+        if !raw.contains(&marker) {
+            return Err(format!(
+                "seed {seed}: the case's own words never reached the file"
+            ));
+        }
+        for v in &secrets {
+            let escaped = serde_json::to_string(v).unwrap();
+            let escaped = escaped[1..escaped.len() - 1].to_string();
+            for form in [v.as_str(), escaped.as_str()] {
+                for piece in pieces_of(form, 4) {
+                    if let Some(f) = fields.iter().find(|f| f.contains(piece)) {
+                        return Err(format!("seed {seed}: {piece:?} of {v:?} in a field: {f:?}"));
+                    }
+                    if let Some(w) = streams.iter().find(|w| w.contains(piece)) {
+                        return Err(format!(
+                            "seed {seed}: {piece:?} of {v:?} in the joined words: {w:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn no_piece_of_a_secret_reaches_the_file() {
+        let cases = std::env::var("AGORA_PROPERTY_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(CASES);
+        let failed: Vec<String> = (1..=cases)
+            .filter_map(|seed| run_case(seed).err())
+            .collect();
+        for (name, n) in SCENARIOS.iter().zip(&HITS) {
+            eprintln!(
+                "property: {name}: {} cases",
+                n.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+        assert!(
+            failed.is_empty(),
+            "{} of {cases} cases failed; first: {}",
+            failed.len(),
+            failed.first().map_or("", String::as_str)
+        );
+    }
+}
+
+/// Review of #1103, round 3: every cut of an agent's text says where it cut (`agora_adapters::text::cap_end`, `cap_middle`, and
+/// `tidy_cuts`, which record the place for the transcript writer), or is listed here with why its place needs no record. A new cut
+/// in the node's chat code or in the bridge fails this test until it is one or the other.
+#[cfg(test)]
+mod every_cut {
+    fn code(src: &str) -> &str {
+        src.split("\n#[cfg(test)]").next().unwrap_or(src)
+    }
+
+    fn check(name: &str, src: &str, cuts: &[&str], allowed: &[(&str, &str)]) {
+        let mut unlisted = Vec::new();
+        for line in code(src).lines().map(str::trim) {
+            if line.starts_with("//") {
+                continue;
+            }
+            let cutting = cuts.iter().any(|c| {
+                line.match_indices(c).any(|(i, _)| {
+                    // `cut(` as a word, not `insert_cut(` or `tidy_cuts(`.
+                    i == 0 || !line[..i].ends_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+                })
+            });
+            if cutting && !allowed.iter().any(|(l, _)| line == *l) {
+                unlisted.push(line.to_string());
+            }
+        }
+        assert!(
+            unlisted.is_empty(),
+            "{name}: cuts that do not say where they cut: {unlisted:#?}"
+        );
+    }
+
+    #[test]
+    fn every_cut_of_agent_text_says_where_it_cut_or_is_listed() {
+        check(
+            "chat.rs",
+            include_str!("chat.rs"),
+            &[".truncate(", "cap_end(", "cap_middle(", "tidy(", "cut("],
+            &[
+                ("fn cut(text: String) -> String {", "the helper below"),
+                ("cap_end(text, MAX_ENTRY_BYTES).0", "`cut`: only for texts the writer makes again (a call's, a plan's) and for seeding"),
+                ("cap_end(text, MAX_ENTRY_BYTES)", "`cut_at`: returns the place"),
+                ("cut(format!(", "a call's text: the writer makes it again from the redacted tool and arguments"),
+                ("cut(steps", "a plan's text: the writer makes it again from the redacted steps"),
+                (
+                    ".map(|(k, v)| (k.clone(), cap_end(v.clone(), MAX_PARAM_BYTES).0))",
+                    "a notice's parameters: both ends of each always count as places cut",
+                ),
+                ("fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {", "the helper (for seeding)"),
+                ("let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);", "`tidy_cuts` records it"),
+                ("let (out, last) = cap_middle(cleaned, max);", "`tidy_cuts` records it"),
+                ("ChatKind::Thought => tidy(&e.text, MAX_THOUGHT_BYTES, Style::Prose).0,", "seeding: the file's text, redacted already"),
+                ("ChatKind::Permission => tidy(&e.text, MAX_PERMISSION_BYTES, Style::Label).0,", "seeding"),
+                ("_ => cut(std::mem::take(&mut e.text)),", "seeding"),
+                ("e.path = tidy(&e.path, MAX_PATH_BYTES, Style::Label).0;", "seeding"),
+                ("let (output, cut_now) = tidy(&e.output, MAX_OUTPUT_BYTES, Style::Prose);", "seeding"),
+                ("e.paths.truncate(MAX_PATHS);", "seeding; a list: whole items go"),
+                ("p.path = tidy(&p.path, MAX_PATH_BYTES, Style::Label).0;", "seeding"),
+                ("e.plan_steps.truncate(MAX_PLAN_STEPS);", "seeding; a list"),
+                ("st.text = tidy(&st.text, MAX_PLAN_STEP_BYTES, Style::Step).0;", "seeding"),
+                ("e.approval_id = cap_end(std::mem::take(&mut e.approval_id), MAX_CALL_ID).0;", "seeding; an id"),
+                ("tidy(&tool, MAX_PATH_BYTES, Style::Label).0,", "seeding"),
+                ("tidy(&args, MAX_ENTRY_BYTES, Style::Code).0,", "seeding"),
+            ],
+        );
+        check(
+            "acp.rs",
+            include_str!("../../agora-adapters/src/acp.rs"),
+            &["clip(", "head_tail(", "cut_kept(", "cap_middle(", "cap_end(", ".truncate("],
+            &[
+                ("fn clip(s: &str, max: usize) -> String {", "the helper for ids and names below"),
+                ("|o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(\"\"), max);", "session options: not chat"),
+                ("*s = head_tail(s, s.len() / 2);", "`fit_line`, a line over the node's 4 MiB limit: a residual (T61)"),
+                ("a.truncate(a.len().div_ceil(2));", "`fit_line`: a list"),
+                ("fn head_tail(s: &str, max: usize) -> String {", "the helper"),
+                ("crate::text::cap_middle(s.to_string(), max).0", "`head_tail`"),
+                (".map(|c| clip(c, 40));", "a config choice: not chat"),
+                ("v[\"current\"] = json!(clip(", "a config value: not chat"),
+                ("cut_kept(redact(&clean), OUTPUT_MAX)", "cleaned and redacted first: the node never keeps this place"),
+                ("cut_kept(", "arguments and plan steps, cleaned first: the node never keeps this place"),
+                ("fn cut_kept(text: String, max: usize) -> String {", "the helper"),
+                ("crate::text::cap_middle(text, max).0", "`cut_kept`"),
+                ("state.model = clip(o[\"current\"].as_str().unwrap_or(\"\"), MODEL_MAX);", "a model name: not chat"),
+                ("\"name\": clip(name, OPTION_ID_MAX),", "a command: not chat"),
+                ("\"description\": clip(c.get(\"description\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_DESCRIPTION_MAX),", "a command"),
+                ("\"inputHint\": clip(c.pointer(\"/input/hint\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_NAME_MAX),", "a command"),
+                ("\"status\": clip(e.get(\"status\").and_then(Value::as_str).unwrap_or(\"\"), 40),", "a word the node maps to a status"),
+                ("\"priority\": clip(e.get(\"priority\").and_then(Value::as_str).unwrap_or(\"\"), 40)}))", "a word the node maps"),
+                ("Some(json!({\"path\": cut_kept(path, PATH_MAX),", "cleaned first, cut beyond what the node keeps"),
+                ("json!({\"diff\": {\"path\": path, \"unifiedDiff\": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),", "the node keeps the first 16 KiB of a diff and never cleans it: never this place"),
+                ("state.model = clip(m, MODEL_MAX);", "a model name"),
+                ("state.model = clip(&id, MODEL_MAX);", "a model name"),
+            ],
+        );
     }
 }
