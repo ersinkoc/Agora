@@ -314,9 +314,17 @@ fn under_a_grant(file: &Path, write: &[PathBuf]) -> bool {
 /// #1114: whether one of the node's own paths lies at or below a grant: by name; by its name in its real parent folder (a link there
 /// that an agent may write could be swapped); or by where it really leads, a folder that is itself a link included (`--data` naming a
 /// link into `/tmp`). A path that does not exist yet is judged by its nearest existing folder ([`canonical`]) instead of failing closed
-/// as [`under_a_grant`] does: below a folder the agent cannot write it cannot make the rest of the name lead anywhere else.
+/// as [`under_a_grant`] does: below a folder the agent cannot write it cannot make the rest of the name lead anywhere else. Except a
+/// link on the way whose target is missing (`--manifests` naming a link into `/tmp` after a reboot cleared it): where it leads cannot
+/// be resolved, and an agent that may write there could make it, so it fails closed.
 fn reaches(path: &Path, grants: &[PathBuf]) -> bool {
     if grants.iter().any(|g| path.starts_with(g)) {
+        return true;
+    }
+    if path.ancestors().any(|a| {
+        std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::canonicalize(a).is_err()
+    }) {
         return true;
     }
     let named = match (path.parent(), path.file_name()) {
@@ -837,6 +845,37 @@ mod tests {
         // A node that does not require the token refuses nothing.
         let off = SandboxPolicy::default();
         assert!(!off.token_reachable(&grant(&[Path::new("/")], &[Path::new("/")])));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_link_to_a_missing_place_on_the_way_to_one_of_the_nodes_paths_counts_as_reached() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("agora-1114-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, open) = (base.join("home"), base.join("open"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&open).unwrap();
+        // `--manifests ~/m/manifests` where `~/m` leads into a granted folder whose target is gone (a reboot cleared `/tmp`): an agent
+        // that may write there makes the target and puts manifests in it. Also the protected path itself as such a link.
+        let (mlink, self_link) = (home.join("mlink"), home.join("self-link"));
+        if agora_platform::symlink(&open.join("later"), &mlink).is_err()
+            || agora_platform::symlink(&open.join("gone"), &self_link).is_err()
+        {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // No links on this system.
+        }
+        let grants = vec![open.clone()];
+        assert!(reaches(&mlink.join("manifests"), &grants));
+        assert!(reaches(&self_link, &grants));
+        // Fail closed: wherever the missing target would be, the place cannot be known.
+        assert!(reaches(
+            &mlink.join("manifests"),
+            &[Path::new("/usr").to_path_buf()]
+        ));
+        // A missing path with no link on its way is still judged by its nearest existing folder.
+        assert!(!reaches(&home.join("missing/manifests"), &grants));
         let _ = std::fs::remove_dir_all(&base);
     }
 
