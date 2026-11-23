@@ -561,7 +561,7 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
 /// machine, so no old password is asked. Setting reads the password twice from the terminal with echo off and refuses to read one
 /// from a pipe; setting or clearing it signs out every session, and both are in the audit trail.
 pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
-    use agora_hub::password::{check_new, PasswordError, ScreenPassword};
+    use agora_hub::password::{check_new, hash_with, PasswordError, ScreenPassword, ITERATIONS};
     let fail = |e: String| {
         say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
         ExitCode::from(1)
@@ -579,17 +579,6 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
         Err(e) => return fail(e.to_string()),
     };
     let screen = ScreenPassword::new(&store);
-    let now = server::now_ms();
-    // Every session ends, and so does every passkey added from another machine without the password (ADR-0067).
-    let sign_out_all = || {
-        let _ = agora_hub::password::drop_unvouched_passkeys(&store);
-        SignIn::new(&store, Arc::new(Lockout::new()))
-            .revoke_all()
-            .unwrap_or(0)
-    };
-    let audit = |action: &str| {
-        let _ = agora_hub::audit::Audit::new(&store).record(now, "owner", action, "cli", "ok");
-    };
     match op {
         "status" => {
             say.out(
@@ -607,22 +596,7 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
             if let Some(code) = crate::remotecmd::clear_refused(say, &dir) {
                 return code;
             }
-            match screen.clear() {
-                Ok(true) => {
-                    let revoked = sign_out_all();
-                    audit("password_clear");
-                    say.out(
-                        key!("cli-password-cleared"),
-                        &[("count", (revoked as i64).into())],
-                    );
-                    ExitCode::SUCCESS
-                }
-                Ok(false) => {
-                    say.out(key!("cli-password-off"), &[]);
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(format!("{e:?}")),
-            }
+            commit_password(say, &store, None)
         }
         "set" => {
             // The prompt appears only once echo is off: an answer typed or pasted right after it is never shown.
@@ -663,22 +637,53 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
                 say.err(key!("cli-password-mismatch"), &[]);
                 return ExitCode::from(1);
             }
-            match screen.set(&first) {
-                Ok(()) => {
-                    let revoked = sign_out_all();
-                    audit("password_set");
-                    say.out(
-                        key!("cli-password-set"),
-                        &[("count", (revoked as i64).into())],
-                    );
-                    ExitCode::SUCCESS
-                }
+            // Derived before the transaction: the store is never held through 600 000 rounds.
+            match hash_with(&first, ITERATIONS) {
+                Ok(hashed) => commit_password(say, &store, Some(&hashed)),
                 Err(e) => fail(format!("{e:?}")),
             }
         }
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// The store half of `agora password set|clear`: the password becomes `hashed` (or none), every session ends and every passkey added
+/// from another machine without the password goes (ADR-0067), in one transaction or not at all (#1029), then it goes in the audit
+/// trail. A failure says so and exits 1 with everything as it was.
+fn commit_password(say: &Say, store: &SqliteStore, hashed: Option<&str>) -> ExitCode {
+    let result = match hashed {
+        Some(hashed) => agora_hub::password::set_and_sign_out_all(store, hashed)
+            .map(|revoked| Some((revoked, "password_set", key!("cli-password-set")))),
+        None => agora_hub::password::clear_and_sign_out_all(store).map(|revoked| {
+            revoked.map(|revoked| (revoked, "password_clear", key!("cli-password-cleared")))
+        }),
+    };
+    match result {
+        Ok(Some((revoked, action, message))) => {
+            // As the window's change: the audit row follows the change it records.
+            let _ = agora_hub::audit::Audit::new(store).record(
+                server::now_ms(),
+                "owner",
+                action,
+                "cli",
+                "ok",
+            );
+            say.out(message, &[("count", (revoked as i64).into())]);
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            say.out(key!("cli-password-off"), &[]);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(
+                key!("cli-hub-failed"),
+                &[("reason", format!("{e:?}").into())],
+            );
+            ExitCode::from(1)
         }
     }
 }
@@ -2854,5 +2859,150 @@ mod password_message_tests {
             let two = tr.text(id, &[("count", 2i64.into())]);
             assert!(two.ends_with(" Açık 2 oturum kapatıldı."), "{two}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod password_commit_tests {
+    use super::*;
+    use agora_hub::password::{hash_with, vouch_passkey, ScreenPassword};
+
+    fn tmp(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let d =
+            std::env::temp_dir().join(format!("agora-pw-{}-{nanos}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A hub folder whose store has a password, two sessions, a vouched passkey and an unvouched one. Returns the session tokens.
+    fn seed(dir: &Path, fail_vouched_write: bool) -> [String; 2] {
+        let tokens = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            ScreenPassword::with_iterations(&store, 1_000)
+                .set("old screen password")
+                .unwrap();
+            vouch_passkey(&store, "pk-v").unwrap();
+            let signin = SignIn::new(&store, Arc::new(Lockout::new()));
+            let now = server::now_ms();
+            [
+                signin.start_session(now).unwrap(),
+                signin.start_session(now).unwrap(),
+            ]
+        };
+        let conn = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES ('pk-v', x'01', 0, 1), ('pk-u', x'02', 0, 1);",
+        )
+        .unwrap();
+        if fail_vouched_write {
+            // The last step of a change writes the list of vouched passkeys: after the hash, the sessions and the passkeys.
+            conn.execute_batch(
+                "CREATE TRIGGER fail_vouched_update BEFORE UPDATE ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;
+                 CREATE TRIGGER fail_vouched_insert BEFORE INSERT ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        }
+        tokens
+    }
+
+    /// What a change could touch: which of the two passwords verifies, which sessions are live, which passkeys are left.
+    fn state(dir: &Path, tokens: &[String; 2]) -> (bool, bool, [bool; 2], Vec<String>) {
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        let screen = ScreenPassword::new(&store);
+        let signin = SignIn::new(&store, Arc::new(Lockout::new()));
+        let now = server::now_ms();
+        let mut passkeys = agora_hub::passkey::ids(&store).unwrap();
+        passkeys.sort();
+        (
+            screen.verify("old screen password"),
+            screen.verify("new screen password"),
+            [signin.check(&tokens[0], now), signin.check(&tokens[1], now)],
+            passkeys,
+        )
+    }
+
+    fn both() -> Vec<String> {
+        vec!["pk-u".to_string(), "pk-v".to_string()]
+    }
+
+    fn say() -> Say {
+        Say(agora_i18n::Catalog::english())
+    }
+
+    /// #1029: `agora password clear` that fails part way exits non-zero and leaves the password, the sessions and the passkeys.
+    #[test]
+    fn a_clear_that_fails_part_way_exits_non_zero_and_changes_nothing() {
+        let dir = tmp("clear-fail");
+        let tokens = seed(&dir, true);
+        let opts = Opts {
+            hub_dir: Some(dir.clone()),
+            ..Opts::default()
+        };
+        assert_ne!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        assert_eq!(state(&dir, &tokens), (true, false, [true, true], both()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1029: `agora password set` that fails part way (after its prompts) exits non-zero and leaves the old password, the sessions
+    /// and the passkeys.
+    #[test]
+    fn a_set_that_fails_part_way_exits_non_zero_and_changes_nothing() {
+        let dir = tmp("set-fail");
+        let tokens = seed(&dir, true);
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        let code = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            commit_password(&say(), &store, Some(&hashed))
+        };
+        assert_ne!(code, ExitCode::SUCCESS);
+        assert_eq!(state(&dir, &tokens), (true, false, [true, true], both()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `agora password clear` and `set` that succeed end every session and drop the unvouched passkey; a clear with no password
+    /// set changes nothing.
+    #[test]
+    fn set_and_clear_end_every_session_and_drop_the_unvouched_passkey() {
+        let dir = tmp("set-ok");
+        let tokens = seed(&dir, false);
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        let code = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            commit_password(&say(), &store, Some(&hashed))
+        };
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(
+            state(&dir, &tokens),
+            (false, true, [false, false], vec!["pk-v".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp("clear-ok");
+        let tokens = seed(&dir, false);
+        let opts = Opts {
+            hub_dir: Some(dir.clone()),
+            ..Opts::default()
+        };
+        assert_eq!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        assert_eq!(
+            state(&dir, &tokens),
+            (false, false, [false, false], vec!["pk-v".to_string()])
+        );
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        let fresh = SignIn::new(&store, Arc::new(Lockout::new()))
+            .start_session(server::now_ms())
+            .unwrap();
+        drop(store);
+        assert_eq!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        assert!(SignIn::new(&store, Arc::new(Lockout::new())).check(&fresh, server::now_ms()));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
