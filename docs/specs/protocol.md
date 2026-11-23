@@ -8,7 +8,7 @@ Encoding and transport: ADR-0009, ADR-0010, ADR-0011.
 ```
 connect (WSS + mTLS for nodes, session token for clients)
   → Hello      { role, protocol_generations[], capabilities[], build, locale? }
-  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time }
+  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time, person_role }
   → Resume     { last_acked_seq? }         (nodes and clients reconnecting)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
@@ -22,6 +22,17 @@ connect (WSS + mTLS for nodes, session token for clients)
 `SnapshotRequired` (control stream 0, kind 4, empty payload) is direction-neutral (ADR-0026): the sender cannot replay from
 the requested point. From a node it means the events from the hub's `from_seq` up to its oldest retained event are gone; the
 node sends it before any further event and the hub takes the node's next new event as the new base (section 3, ADR-0054).
+
+**A window's connection** (the web window, the terminal client; ADR-0106). A window sends no `Hello`: it opens with
+`Subscribe` on the events stream ("Hub service" below). Since ADR-0106 the hub's first frame to it is an unasked `Welcome` on stream 0, before
+the snapshot or any event, whose `person_role` (`PersonRole`: `OWNER`, `MEMBER`, `VIEWER`) is the role of the person the window signed
+in as (ADR-0049), from the same access the hub checks every command against. A hub not in team mode sends `OWNER`. Nothing was
+negotiated, so `chosen_generation` is the hub's generation (1), `capabilities` is empty and `peer_id` is empty. The value holds for the
+connection: the hub ends a connection whose role or grants changed (checked once a second and on every command), and the window
+reconnects into a new `Welcome`; no event carries a role change. It is a hint for what the window shows and asks, never a permission:
+the hub still checks every command. A window that gets something else first is talking to an older hub (`PERSON_ROLE_UNSPECIFIED`) and
+keeps its earlier behaviour (learning the role from a refused `PairStatus`); an older window ignores the frame, as it ignores every
+control frame it does not use. A node's `Welcome` (the answer to its `Hello`) leaves `person_role` unspecified.
 
 Roles: `node`, `client`, `adapter`. Capability names are lowercase dotted strings (`terminal.raw`,
 `terminal.cells`, `acp`, `mesh`, `files.watch`, `debug.json`). Unknown capabilities are ignored.
@@ -182,7 +193,7 @@ Frame kinds on streams 0 and 2 are the ADR-0026 table.
 Hub service (`agora-hub::server`, ADR-0011/0026/0027): one TLS port. A client certificate from the hub CA that is not revoked makes the
 peer a **node** (named by the certificate): `Hello`/`Welcome`, `Resume`/`ResumeOk`, then `Event` frames; the hub answers with a cumulative
 `EventAck` after each batch and when idle, and a `ResumeOk { from_seq }` on a gap. A peer **without** a certificate is a client if its first
-frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (`Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
+frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (a `Welcome` naming the person's role (ADR-0106, section 1), then the `Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
 resubscribe with the last position), or an enrolling node if its first frame is an `EnrollRequest` command (one command, nothing else).
 Enrollment answers are the same for a wrong, expired or used code (`auth.unauthenticated`), and guessing is locked out for everyone
 (`auth.forbidden`). Frame kinds are in `agora_protocol::frame::kinds`.

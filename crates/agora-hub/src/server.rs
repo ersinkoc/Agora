@@ -705,6 +705,28 @@ pub trait ClientAuth {
     }
 }
 
+/// The protocol generation a window speaks: windows send no `Hello`, and the hub's own is `schema/agora/v1`.
+const CLIENT_GENERATION: u32 = 1;
+
+/// ADR-0106: the `Welcome` a window gets first on its connection, naming the role of the person it signed in as. Nothing was negotiated
+/// (a window sends no `Hello`), so it carries no capabilities and no peer id. A hub not in team mode answers for its one person, the
+/// owner ([`ClientAuth::access`]). A hint for the window only: every command is still checked against `access`.
+pub(crate) fn client_welcome(access: &crate::users::Access, now_ms: u64) -> v1::Welcome {
+    use crate::users::Role;
+    let role = match access.role {
+        Role::Owner => v1::PersonRole::Owner,
+        Role::Member => v1::PersonRole::Member,
+        Role::Viewer => v1::PersonRole::Viewer,
+    };
+    let mut welcome = v1::Welcome {
+        chosen_generation: CLIENT_GENERATION,
+        server_time_ms: now_ms,
+        ..v1::Welcome::default()
+    };
+    welcome.set_person_role(role);
+    welcome
+}
+
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
     // ADR-0103: chosen before the forgotten machines are cut, which needs their agents to know what to leave out. Copied here, outside
@@ -953,6 +975,15 @@ where
     }
     let sub = v1::Subscribe::decode(first.payload.as_slice()).map_err(|_| invalid("subscribe"))?;
     let current = access().ok_or(ServeError::Refused)?;
+    // ADR-0106: the first frame a window gets says the role of the person it signed in as, for this connection (a change of role or
+    // grants ends it, below). A window sends no `Hello`, so this `Welcome` comes unasked, before the snapshot; an older window ignores
+    // a control frame it does not use.
+    conn.send(&frame(
+        STREAM_CONTROL,
+        kinds::WELCOME,
+        client_welcome(&current, now_ms()).encode_to_vec(),
+    ))
+    .await?;
     // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
     // everyone's), and from then on only the events that are theirs (ADR-0049).
     let restricted = current.projects.is_some();
@@ -3243,6 +3274,9 @@ mod opening_tests {
         })
         .await
         .unwrap();
+        // ADR-0106: the role first, then the snapshot.
+        let welcome = tokio::time::timeout(BOUND, good.recv()).await;
+        assert!(matches!(welcome, Ok(Ok(Some(f))) if f.kind == kinds::WELCOME));
         let snap = tokio::time::timeout(BOUND, good.recv()).await;
         assert!(matches!(snap, Ok(Ok(Some(f))) if f.kind == kinds::SNAPSHOT));
         assert!(tokio::time::timeout(OPENING * 4, good.recv())

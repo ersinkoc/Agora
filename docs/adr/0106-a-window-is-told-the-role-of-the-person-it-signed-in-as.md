@@ -109,3 +109,14 @@ message Welcome {
 2. **Hub:** fill it, with a test per role, a node connection, and a role change that reconnects with the new value.
 3. **Clients:** the terminal client (picker, pairing cards, `f` for a viewer), then the web (pairing cards, Usage, start actions), each
    with tests that no refused row is written for a member or viewer in the normal course. This closes #1099.
+
+## Build status
+
+- **Built:** steps 1 and 2 in #1139 (the schema, the fixtures in `schema/fixtures/person-role/`, the hub), and step 3 in the clients
+  #1141, which closes #1099.
+- **Open questions answered as proposed.** A hub not in team mode sends `PERSON_ROLE_OWNER`, and `Welcome` carries no grants.
+- **Delivery differs from the Decision's wording.** A window sends no `Hello`: it opens with `Subscribe`, and the hub built a `Welcome`
+  for nodes only. A window-sent `Hello` would be refused by an older hub, so the hub sends the window an unasked `Welcome` as its
+  **first frame**, before the snapshot. That `Welcome` has an empty capability list and an empty peer id, and
+  `docs/specs/protocol.md` section 1 describes it. An older window ignores it, as it ignores every control frame it does not use. A
+  newer window treats any other first frame as an older hub (`PERSON_ROLE_UNSPECIFIED`).
