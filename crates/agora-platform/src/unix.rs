@@ -351,6 +351,17 @@ pub(crate) fn cloexec_from(first: libc::c_int) {
     }
 }
 
+/// See [`crate::keep_only_standard_streams`].
+pub(crate) fn keep_only_standard_streams(cmd: &mut Command) {
+    // SAFETY: runs between fork and exec and only makes system calls (getrlimit, fcntl, close_range), which are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            cloexec_from(3);
+            Ok(())
+        })
+    };
+}
+
 /// Closes every descriptor from `first` up, for good. Only where nothing else of this process uses them (its own start).
 pub(crate) fn close_from(first: libc::c_int) {
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -502,19 +513,20 @@ pub(crate) fn start_child(
     if let Some(file) = git_config {
         cmd.envs(crate::git_config_env(file));
     }
-    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
+    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, fcntl, getrlimit, setsid, ioctl,
     // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
     unsafe {
         cmd.pre_exec(move || {
             if let Some(fd) = held {
                 cvt(libc::fchdir(fd))?;
             }
-            if clear_env {
-                // Whatever this process was handed at its start (a pipe of its starter, a log) must not reach the agent: it keeps
-                // the terminal (0, 1, 2) and nothing else. Marked here, not closed, so std's own pipe that reports a failed `exec`
-                // to the parent still works; it all closes at `exec`.
-                cloexec_from(3);
-            }
+            // The agent keeps the terminal (0, 1, 2) and nothing else: not what this process was handed at its start (a pipe of
+            // its starter, a log), and not a descriptor another thread of this process has open without close-on-exec at this
+            // moment. Where a pipe is not made close-on-exec in one step (macOS: std makes it, then marks it), a pipe another thread
+            // was making (a `git` whose output the node reads, another start's `exec` report) stayed open in the agent for its whole
+            // life, and whoever waited for that pipe's end waited as long (#1011). Marked here, not closed, so std's own pipe that
+            // reports a failed `exec` to the parent still works; it all closes at `exec`.
+            cloexec_from(3);
             #[cfg(target_os = "linux")]
             if die_with_parent {
                 cvt(libc::prctl(
@@ -1618,6 +1630,55 @@ zz10db8000000000000000000000005 02 40 00 01 eth0
                 _ => {}
             }
         }
+    }
+
+    /// A descriptor of this process left without close-on-exec, as std's pipes are on macOS between making them and marking them
+    /// (#1011): a number high enough that the shell below opens nothing there itself. Closed when the result is dropped.
+    fn left_open() -> (File, OwnedFd) {
+        let file = File::open("/dev/null").expect("open");
+        // SAFETY: plain fcntl on a descriptor we own; F_DUPFD makes a copy without close-on-exec.
+        let fd = cvt(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 100) }).expect("dup");
+        // SAFETY: fcntl just returned this fresh descriptor, which nothing else owns.
+        (file, unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// A shell command that says whether descriptor `fd` reached it.
+    fn says_whether_it_got(fd: &OwnedFd) -> Vec<String> {
+        let n = fd.as_raw_fd();
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("if [ -e /dev/fd/{n} ]; then echo GOT-IT; else echo NOT-GOT; fi"),
+        ]
+    }
+
+    #[test]
+    fn a_terminal_agent_never_gets_a_descriptor_another_thread_left_open() {
+        // #1011: the agent kept such a pipe for its whole life, so whoever waited for the pipe's end (another start's `exec` report,
+        // a `git` whose output was read) waited as long.
+        let (_file, fd) = left_open();
+        let p = spawn(&PtyConfig::new(says_whether_it_got(&fd))).expect("spawn");
+        let out = read_until(&*p, "GOT");
+        assert!(out.contains("NOT-GOT"), "output: {out:?}");
+    }
+
+    #[test]
+    fn a_child_kept_to_its_standard_streams_never_gets_a_descriptor_another_thread_left_open() {
+        // #1011: an adapter agent, started with std's `Command`, kept one the same way.
+        let (_file, fd) = left_open();
+        let argv = says_whether_it_got(&fd);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let out = crate::keep_only_standard_streams(&mut cmd)
+            .output()
+            .expect("run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "NOT-GOT");
+        // Without it the same command does get it, so the check above proves something.
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "GOT-IT");
     }
 
     #[test]
