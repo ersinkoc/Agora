@@ -5,10 +5,11 @@ import { parseHunks } from '../net/diff';
 import { blocks, inlines, type Block, type Inline } from '../net/markdown';
 import { titleSays, toolView, type ToolAction } from '../net/tool';
 import { actionOf, changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
-import { callMs, currentStep, initial, outputTail, planProgress, planSteps, stepTone, type StepStatus, type StepTone } from '../net/chatView';
+import { callMs, currentStep, outputTail, planProgress, planSteps, stepTone, type StepStatus, type StepTone } from '../net/chatView';
 import { preciseDuration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
+import { AgentAvatar } from './kit';
 import { alwaysText } from '../net/always';
 
 // How one conversation entry looks. Everything here was written by an agent or a person: it is drawn as React text, never as HTML
@@ -97,7 +98,7 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 // (`state`); either way it is drawn quieter, as what it is.
 export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
-    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border bg-accent/15 px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed border-accent/40 opacity-80' : 'border-accent/30'}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
+    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-(--line-accent) bg-tint-accent px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
       <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
         {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
@@ -108,11 +109,12 @@ export const UserText = memo(function UserText({ line, state }: { line: ChatLine
   );
 });
 
-// An agent's turn: its avatar tile, its name, the model it runs and when it began, and everything it said and did beside them.
-export function Turn({ name, model, atMs, children }: { name: string; model?: string; atMs: number; children: ReactNode }) {
+// An agent's turn: its avatar (the kit's agent avatar, in the agent's own colour, as on its tile and rows), its name, the model it runs and when
+// it began, and everything it said and did beside them.
+export function Turn({ name, accent, kind, model, atMs, children }: { name: string; accent?: string; kind?: string; model?: string; atMs: number; children: ReactNode }) {
   return (
     <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={name}>
-      <div aria-hidden className="grid size-7 place-items-center rounded-m border border-line bg-surface-1 text-xs font-semibold text-accent max-md:hidden">{initial(name)}</div>
+      <span className="max-md:hidden" data-turn-avatar><AgentAvatar accent={accent ?? 'var(--agent-slate)'} kind={kind || name} /></span>
       <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
         <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
         {model && <span className="truncate">{model}</span>}
@@ -407,7 +409,7 @@ const OUTCOME_TONE: Record<NonNullable<ChatLine['outcome']>, string> = { pending
 const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line: ChatLine; onShow?: () => void }) {
   const outcome = line.outcome ?? 'pending';
   return (
-    <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-needs-you/55 bg-needs-you/8' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
+    <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-(--line-needs) bg-tint-needs' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
       <span aria-hidden className={`grid size-5 flex-none place-items-center ${OUTCOME_TONE[outcome]}`}><Icon name={OUTCOME_ICON[outcome]} className="size-3.5" /></span>
       <span className="min-w-0 flex-1 break-words">
         {/* ADR-0101: an approval answered "always" says so (the agent remembers it). */}

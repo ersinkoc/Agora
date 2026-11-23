@@ -112,6 +112,8 @@ the kit (redesign PRs 2 and 3).
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
   reach them as they adopt the kit (the redesign plan's PRs 2–13): until then tiles keep their coloured edge and their shadow, existing
   overlays use the older `--shadow`, errors and change counts are still amber in places, and the global `h2` is still an uppercase label.
+  The chat view, the board and the Usage panel are on the kit (PR 12; `docs/ux/screens/polish-redesign-*`): one status pill, the agent
+  avatar in each turn, the acts-freely sign as a red-tinted tag beside Mode, board columns with a mark and hue, Usage stat tiles.
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.

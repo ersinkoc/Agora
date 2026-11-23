@@ -633,3 +633,22 @@ describe('words', () => {
     expect(bar).not.toMatch(/\$|USD|cost/i);
   });
 });
+
+// Redesign PR 12: the turn's avatar is the agent's own (its colour and kind, as on its tile), the person's bubble is the accent tint and a
+// request that waits is the needs tint (two low-chroma tints that sit together).
+describe('the chat look', () => {
+  it("draws each turn beside the agent's avatar in its own colour, with its kind's letter", () => {
+    mount([L(1, { role: 'user', text: 'go' }), L(2, { text: 'done' })], agent({ name: 'codex · teal', kind: 'codex', accent: 'var(--agent-teal)' }));
+    const avatar = host.querySelector<HTMLElement>('[data-turn] .kit-avatar')!;
+    expect(avatar).not.toBeNull();
+    expect(avatar.style.getPropertyValue('--avatar')).toBe('var(--agent-teal)');
+    expect(avatar.textContent).toBe('C');
+    expect(avatar.getAttribute('aria-hidden')).toBe('true'); // the turn already says the name
+  });
+  it('tints the bubble with the accent and a pending request with the needs tint', () => {
+    const html = draw([L(1, { role: 'user', text: 'go' }), L(2, { kind: 'permission', text: 'run_command', approvalId: 'ap', outcome: 'pending' })]);
+    expect(html).toMatch(/class="[^"]*bg-tint-accent[^"]*"[^>]*data-role="user"/);
+    expect(html).toMatch(/class="[^"]*bg-tint-needs[^"]*"[^>]*data-permission="pending"/);
+    expect(html).not.toMatch(/bg-accent\/15|bg-needs-you\/8/);
+  });
+});

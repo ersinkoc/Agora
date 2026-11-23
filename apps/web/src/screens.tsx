@@ -30,6 +30,7 @@ import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import { KitGallery } from './components/kit/KitGallery';
+import { PolishGallery } from './components/PolishGallery';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
@@ -143,6 +144,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <ChatActionsContext.Provider value={{ setConfig: async (_a, _c, v) => (v === 'yolo' ? { approvalNeeded: 'demo/9' } : true), cancelTurn: async () => true, approvals: new Set(['demo/9']) }}>
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       </ChatActionsContext.Provider>
+      <PolishGallery />
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       {/* ADR-0101: "Allow always" beside Allow and Deny, in the place of Allow when it is all the agent offers, and "Asks less". */}
       <div data-always className="grid max-w-3xl gap-3">
@@ -230,12 +232,13 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
       <header className="ide-bar min-h-10 flex-wrap border-b py-1">
         <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
         <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{agent.name}</h1>
-        <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
+        {/* A live chat agent's state and tokens are said once, in its session bar (`PromptBox`); a terminal or a closed agent keeps them here. */}
+        {!(agent.terminal === false && !agent.closed) && <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>}
         <NoAskBadge agent={agent} />
         <AsksLessChip agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
-        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
+        {agent.tokens && agent.terminal !== false ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
         <CloseAgentMenu agent={agent} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />

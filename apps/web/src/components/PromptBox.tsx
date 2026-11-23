@@ -214,7 +214,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
               // request that waits for you, opens and says so, wherever it is.
               const draw = (item: TurnItem, i: number) => <Item key={item.id} item={item} running={working && item === last} ended={ended.has(item.id)} open={item === newestSteps} diffs={paired.attached}
                 flag={item.kind === 'steps' ? flagOf(agent, item === newestSteps, item.lines, paired.items[i + 1]) : undefined} onShowRequest={showRequest} notice={notice} />;
-              return <Turn key={row.id} name={agent.name} model={model} atMs={row.atMs}>{paired.items.map(draw)}</Turn>;
+              return <Turn key={row.id} name={agent.name} accent={agent.accent} kind={agent.kind || agent.name} model={model} atMs={row.atMs}>{paired.items.map(draw)}</Turn>;
             })}
             {working && lines.length > 0 && <div role="status" className="flex items-center gap-2 text-xs text-muted"><StateMark state="working" />{t('chat-working')}</div>}
             <FilesChanged lines={lines} onGo={goTo} onReview={onReview} />
@@ -282,7 +282,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           }} />
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} approvals={actions.approvals} launchedFree={agent.skipsPermissions} />}
-          <NoAskBadge agent={agent} />
+          {/* With a session the bar draws the sign beside Mode (`launchedFree`); without one it leads the row. */}
+          {!agent.session && <NoAskBadge agent={agent} look="tag" />}
           <AsksLessChip agent={agent} />
           <span className="flex-1" />
           {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}

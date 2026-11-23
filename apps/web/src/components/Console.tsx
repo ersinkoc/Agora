@@ -311,7 +311,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {(a.filesChanged ?? 0) > 0 && (loadDiff
             ? <button type="button" className="ide-chip text-needs-you hover:brightness-125" onClick={() => openTool('changes', a.id)} title={t('pane-open-changes')}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
-          <StateBadge state={a.state} failed={endedWithError(a)} />
+          {!(a.terminal === false && !a.closed) && <StateBadge state={a.state} failed={endedWithError(a)} />}
           <CloseAgentMenu agent={a} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
             <button type="button" className="ide-iconbtn w-6 text-xs font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>

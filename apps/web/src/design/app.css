@@ -428,6 +428,8 @@
   .kit-mark .state__mark { @apply size-3; }
   .kit-tag { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-xs bg-surface-2 text-muted; height: 1.25rem; padding-inline: 0.4375rem; font-size: var(--text-caption); }
   .kit-tag--mono { @apply font-mono; }
+  /* The acts-without-asking sign beside Mode in the chat composer: the bolt alone on the danger tint, as tall as the menus beside it. */
+  .no-ask--tag { @apply inline-grid flex-none place-items-center self-center rounded-s border; width: 1.75rem; height: 1.75rem; color: var(--danger); background: var(--tint-danger); border-color: var(--line-danger); }
 
   /* An agent's identity: its colour as a soft square with a ring, and the first letter of its kind in ink. */
   .kit-avatar { --avatar: var(--agent-slate); @apply relative inline-grid flex-none place-items-center rounded-s text-ink; width: 1.75rem; height: 1.75rem; font-size: var(--text-caption); font-weight: 650; background: color-mix(in oklab, var(--avatar) 22%, var(--surface-1)); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--avatar) 50%, var(--surface-1)); }
