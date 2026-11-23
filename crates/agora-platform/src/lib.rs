@@ -2255,7 +2255,9 @@ pub fn catch_stop_requests() -> io::Result<()> {
 
 /// [`catch_stop_requests`] for a process that stops cleanly on the first request (ADR-0104 O2: `agora node`): a signal that was ignored
 /// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
-/// have without the catch. Windows: nothing, as [`catch_stop_requests`].
+/// have without the catch. A request less than a second after the first is that first one reaching the process again, not a second
+/// (#1119 item 4: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor, which passes its own on), and is
+/// not acted on. Windows: nothing, as [`catch_stop_requests`].
 pub fn catch_stop_requests_once() -> io::Result<()> {
     #[cfg(unix)]
     {

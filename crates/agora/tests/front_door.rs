@@ -1053,3 +1053,38 @@ fn a_node_started_ignoring_hangups_keeps_ignoring_them() {
     assert_eq!(status.signal(), Some(15), "{status:?}");
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// #1119 item 4: one stop that reaches the node twice at once (Ctrl-C on a foreground `agora supervise node` signals the node and its
+/// supervisor, which passes its own on as `SIGTERM`) is one request: the node stops cleanly and ends as the first signal ends it. Before,
+/// the second ended it at once, as a second request does, and the clean stop was skipped.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_reaches_the_node_twice_at_once_still_stops_it_cleanly() {
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp("o2-echo");
+    let mut node = agora(&home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the node's socket", Duration::from_secs(60), || {
+        home.join("node.sock").exists()
+    });
+    // The node is up a moment after its socket is there.
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = node.id().to_string();
+    assert!(Command::new("sh")
+        .args(["-c", "kill -TERM \"$0\"; kill -INT \"$0\"", &pid])
+        .status()
+        .unwrap()
+        .success());
+    let ended = ended_within(&mut node, Duration::from_secs(10));
+    let _ = node.kill();
+    let (status, _) = ended.expect("the node did not end");
+    assert_eq!(
+        status.signal(),
+        Some(15),
+        "the second signal ended the node at once: {status:?}"
+    );
+    let _ = std::fs::remove_dir_all(home);
+}
