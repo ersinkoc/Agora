@@ -23,7 +23,6 @@ import type { StartChoice } from './components/StartApproval';
 import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
-import { summarize, type UsageSummary } from './net/usage';
 import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, NO_PASSWORD } from './net/session';
 import { useSignInInfo } from './net/useSignInInfo';
 import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
@@ -46,7 +45,8 @@ import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, g
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
-import { startRefusalKey } from './net/startRefusal';
+import { refusalCode, startRefusalKey } from './net/startRefusal';
+import { useUsageReport } from './net/useUsage';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -118,7 +118,6 @@ export function App() {
   const pairing = usePairing(api, link);
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
-  const [usage, setUsage] = useState<UsageSummary | undefined>();
   // ADR-0061: this person's registered devices as the hub lists them, their fingerprints, and the requests put off for now.
   const [mine, setMine] = useState<DeviceInfo[]>([]);
   const [prints, setPrints] = useState<Map<string, string>>(new Map());
@@ -170,7 +169,7 @@ export function App() {
       if (id) rememberStarted(`${node}/${id}`, launch.settings);
       return { agentId: id };
     } catch (e) {
-      const code = (e as { code?: string }).code;
+      const code = refusalCode(e, 'AgentLaunch');
       if (code === 'agent.option_forbidden') return { failure: optionForbidden(e) };
       if (code === 'agent.option_unconfirmed') return { failure: 'start-option-unconfirmed' };
       if (code === 'agent.option_invalid') return { failure: 'start-option-invalid' };
@@ -205,7 +204,7 @@ export function App() {
       const authorization = await signDirectory(device, agent.machineId, 'resume', local, '', '', newSession);
       await api.command(agent.machineId, { agentResume: { agentId: local, newSession, authorization } });
       return undefined;
-    } catch (e) { return (e as { code?: string }).code ?? 'internal'; }
+    } catch (e) { return refusalCode(e, 'AgentResume') ?? 'internal'; }
   }, [api, device]);
   // Ends a running agent (`AgentStop`, as `agora agent stop` does) for exactly the agent it is given; undefined when it was sent, else the error
   // code. The node may ask for a grant first (the dialog then repeats this command once it is allowed); the agent then lands in the closed list.
@@ -256,8 +255,7 @@ export function App() {
       return true;
     } catch (e) {
       forgetSkipAnswer(a.id);
-      const code = (e as { code?: string }).code;
-      setNotice(approvalFailureKey(code));
+      setNotice(approvalFailureKey(refusalCode(e, 'ApprovalResolve')));
       return false;
     }
   }, [api, device]);
@@ -325,15 +323,8 @@ export function App() {
     trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,
   }));
   const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
-  // What the agents cost so far, estimated by the hub from its price table; asked for again every half minute.
-  useEffect(() => {
-    if (!api || !live) return;
-    let stop = false;
-    const ask = () => { api.command('', { usageReport: {} }).then((ok) => { if (!stop && ok.usageReport) setUsage(summarize(ok.usageReport)); }).catch(() => {}); };
-    ask();
-    const timer = setInterval(ask, 30_000);
-    return () => { stop = true; clearInterval(timer); };
-  }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
+  // What the agents cost so far, asked for by the owner's window only (#1044).
+  const usage = useUsageReport(api, live !== undefined, pairing.owner);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.
