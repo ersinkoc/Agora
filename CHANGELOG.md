@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-- An agent resumed right after it was stopped, while the machine was starting another agent or program, now gets back its place among the other agents (it can message them and start helpers) instead of sometimes running without one (#1093).
+- An agent that could not join the other agents on its machine (so it could not message them or start helpers) is now written in the node's log instead of running without its place silently (#1093).
 - The desktop app now builds with `cookie` 0.18.3 (RUSTSEC-2026-0594: private-cookie nonces could repeat after a fork; the app does not fork after it starts, so it was most likely not exposed).
 - Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
 - A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
