@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- The desktop app now builds with `cookie` 0.18.3 (RUSTSEC-2026-0594: private-cookie nonces could repeat after a fork; the app does not fork after it starts, so it was most likely not exposed).
 - Approving a new machine in the window now closes the hub to new machines, as approving it at `agora pair open` does (one machine per opening; other machines still waiting are told the hub closed), and an `agora pair open` that was asking about the same machine stops asking and says it was answered in a window (#942).
 - A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
 - In team mode, a member's or viewer's refused start, folder, Start again or answer now says their role does not allow it (in the window and the terminal client) instead of "This device is limited to other projects", and their window no longer asks the hub for the cost on each connection, so it leaves no refused request in the owner's Activity.
