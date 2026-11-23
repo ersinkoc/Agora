@@ -312,3 +312,15 @@ references are at main `9760e901`.
    kill, so up to 5 s of merged usage per agent is lost on every planned stop (the follow-up PR #522 names), and so is everything else in flight. Proposed:
    yes, as its own step after O1. The node drops itself on `SIGTERM` with a deadline under the supervisor's and systemd's stop timeouts,
    and exits anyway when the deadline passes. The holder keeps the agents either way.
+
+## Build status
+
+- Step 1 (O1, #1080) is built: `agora_adapters::host::replay` reads the `seen` lines once for the waiting requests and the newest options, config
+  and commands of the recorded session (or a report that names none), and `adopt_held_pipe` puts those over the kept file's before bounding and
+  judging them. Tested with a node whose reports were read and not recorded before it stopped (`hold_node_pipes`).
+- Steps 2 and 3 (U1, #930) are built together, in one PR: `AgentStarted.same_process` (8) with its fixture (`schema/fixtures/same-process/`);
+  the node sets it in `agent_taken_up` and in `announce_present`'s re-statement; the hub's fold (`projection.rs`) and the window's
+  (`view.ts`) keep the tokens, model, context level and own cost (and in the window the start time) when it is set and the agent is
+  listed from that producer. The terminal client needed no code change: it draws the hub's snapshot (a client test pins that a take-up asks for a fresh one). Tested with a view rebuilt from a log
+  with a kept take-up, a resync re-statement, a new start of a reused id that still resets, the window's fold, and a node restart in
+  `hold_node_pipes` whose hub view and terminal client header still count what the agent used before. Steps 4 and 5 are not built.

@@ -232,7 +232,8 @@ pub struct Reattach {
     pub state: Option<AgentState>,
     /// #932: what it last reported of its session (modes and models, config options, commands), as the last node recorded it. The
     /// adapter is not initialised again and does not report them again by itself, so they are the agent's until it reports new ones:
-    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`).
+    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`). A newer
+    /// report among the lines the last node had already read replaces its kind on take-up (ADR-0104, `adopt_held_pipe`).
     pub options: SessionOptions,
     pub config: Vec<ConfigOption>,
     pub commands: Vec<AdapterCommand>,
@@ -1048,7 +1049,7 @@ impl Supervisor {
     pub fn adopt_held_pipe(
         &mut self,
         r: Restore,
-        reattach: Reattach,
+        mut reattach: Reattach,
         pipe: HeldPipe,
         session: &Arc<HolderSession>,
         now: Instant,
@@ -1065,7 +1066,8 @@ impl Supervisor {
             self.unrestore(&id);
             return Err(SupervisorError::UnknownKind(kind));
         }
-        let replay = agora_adapters::host::pending_approvals(&pipe.seen);
+        // ADR-0093 decision 3 and ADR-0104 decision 1: the waiting requests and the newest reports from what the earlier node had.
+        let replay = newest_reported(&mut reattach, &pipe.seen);
         let io = session.pipe_io(id.as_str(), pipe.fresh, pipe.dropped, pipe.info.pid);
         let adapter = match Adapter::attach_held(io, replay) {
             Ok(a) => a,
@@ -1085,7 +1087,8 @@ impl Supervisor {
         e.confinement = Confinement::Unconfined;
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
-        // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
+        // Bounded and judged again as a report is (`perm`): the file is the node's own and the replay the holder's, the words in both are
+        // the adapter's.
         e.options = bounded_options(reattach.options);
         e.rich.config = bounded_config(reattach.config);
         e.rich.commands = bounded_commands(reattach.commands);
@@ -4239,6 +4242,26 @@ fn clip(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
+/// ADR-0093 decision 3 and ADR-0104 decision 1: what a node taking up a held adapter reads from the lines the earlier node had already
+/// been given (`seen`), in one pass. The requests still waiting on the person are returned, to be asked again. The newest
+/// `session/options`, `session/config` and `session/commands` of the recorded session replace the kept file's copy of that kind (a kind
+/// with no report there keeps the file's). Only the adapter's own reports set these, and each replaces the last, so the newest one the
+/// holder still has is at least as new as the file's, which misses one the earlier node read and did not record before it stopped
+/// (#1080). They are bounded and judged afterwards, with the rest of `reattach`, as a report is.
+fn newest_reported(reattach: &mut Reattach, seen: &[Vec<u8>]) -> Vec<AdapterEvent> {
+    let replay = agora_adapters::host::replay(seen, &reattach.session_id);
+    if let Some(options) = replay.options {
+        reattach.options = options;
+    }
+    if let Some(config) = replay.config {
+        reattach.config = config;
+    }
+    if let Some(commands) = replay.commands {
+        reattach.commands = commands;
+    }
+    replay.approvals
+}
+
 /// ADR-0058: an adapter's report, checked and bounded. A current id that is not in its list is dropped too.
 fn bounded_options(o: SessionOptions) -> SessionOptions {
     let list = |l: Vec<SessionOption>, modes: bool| -> Vec<SessionOption> {
@@ -6024,6 +6047,96 @@ mod adapter_option_tests {
         assert_eq!(tag(r.observe(AgentState::Idle, t0)), Some(1));
         assert!(r.cancelled(old, t0, false).is_empty());
         assert!(r.expire(t0 + CANCEL_GRACE * 10).is_none());
+    }
+
+    /// ADR-0104 decision 1 (#1080): the kept file has what the earlier node recorded; the holder's `seen` lines have the reports it
+    /// read after that and did not record before it stopped. On take-up the newest report of each kind in `seen` wins, a kind with no
+    /// report there keeps the file's, and the request still waiting is returned as before (ADR-0093 decision 3).
+    #[test]
+    fn on_take_up_the_newest_reports_the_earlier_node_had_win_over_the_kept_file() {
+        let line = |method: &str, params: serde_json::Value| {
+            serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
+                .to_string()
+                .into_bytes()
+        };
+        let modes = serde_json::json!([{"id": "default", "name": "Ask first"},
+                                       {"id": "bypassPermissions", "name": "Bypass Permissions", "skipsPermissions": true}]);
+        let mode = |current: &str| SessionOptions {
+            modes: vec![
+                SessionOption {
+                    id: "default".into(),
+                    name: "Ask first".into(),
+                    ..SessionOption::default()
+                },
+                SessionOption {
+                    id: "bypassPermissions".into(),
+                    name: "Bypass Permissions".into(),
+                    skips_permissions: true,
+                    ..SessionOption::default()
+                },
+            ],
+            current_mode: current.into(),
+            ..SessionOptions::default()
+        };
+        let kept_commands = vec![AdapterCommand {
+            name: "review".into(),
+            ..AdapterCommand::default()
+        }];
+        // What the earlier node recorded: the start's mode, no config options yet, one command.
+        let mut r = Reattach {
+            session_id: "s-1".into(),
+            options: mode("default"),
+            config: Vec::new(),
+            commands: kept_commands.clone(),
+            ..Reattach::default()
+        };
+        let seen = vec![
+            line(
+                "session/options",
+                serde_json::json!({"sessionId": "s-1", "modes": modes, "currentMode": "default"}),
+            ),
+            line(
+                "approval/request",
+                serde_json::json!({"sessionId": "s-1", "approvalId": "ap-1", "action": "run", "detail": "ls"}),
+            ),
+            line(
+                "session/options",
+                serde_json::json!({"sessionId": "s-1", "modes": modes, "currentMode": "bypassPermissions"}),
+            ),
+            line(
+                "session/config",
+                serde_json::json!({"sessionId": "s-1", "options": [{"id": "auto_approve", "name": "Auto approve",
+                                   "type": "boolean", "current": "true"}]}),
+            ),
+        ];
+        let waiting = newest_reported(&mut r, &seen);
+        assert_eq!(waiting.len(), 1, "the waiting request is asked again");
+        assert_eq!(r.options, mode("bypassPermissions"), "the newer mode won");
+        assert_eq!(
+            r.config
+                .iter()
+                .map(|o| (o.id.as_str(), o.current.as_str()))
+                .collect::<Vec<_>>(),
+            [("auto_approve", "true")],
+            "the config options the earlier node read and did not record"
+        );
+        assert_eq!(r.commands, kept_commands, "no report in seen: the file's");
+        // Judged as a report is once put back: the mode in use skips.
+        let options = bounded_options(r.options.clone());
+        assert!(options
+            .modes
+            .iter()
+            .any(|m| m.id == options.current_mode && m.skips_permissions));
+        // Nothing newer in seen: the kept file stands.
+        let mut r = Reattach {
+            session_id: "s-1".into(),
+            options: mode("bypassPermissions"),
+            commands: kept_commands.clone(),
+            ..Reattach::default()
+        };
+        assert!(newest_reported(&mut r, &[]).is_empty());
+        assert_eq!(r.options, mode("bypassPermissions"));
+        assert_eq!(r.commands, kept_commands);
     }
 
     /// ADR-0090: what a restarted adapter's old process reported is forgotten (a stale mode list could decide a choice against the
