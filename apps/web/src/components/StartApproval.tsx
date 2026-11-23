@@ -29,10 +29,11 @@ export function startTitle(approval: ApprovalModel, start: StartRequest, machine
 }
 
 // Redesign PR 5: a start request in short, for a card that offers Review (never Allow): two lines at most, each cut at the end of the
-// line. The first says what would start: the kind, whether it would act without asking or run outside the asker's folder (first, so
-// they are never the part that is cut), then the folder; the second quotes the first line of the prompt and says how many lines follow.
-// All of it is the agent's text, shown as text with any hidden character written as a visible escape. Nothing is decided on it: the
-// whole request is read in Review (`StartApproval`, the full density).
+// line. The first says how and where (the kind is in the title): whether it would act without asking or run outside the asker's folder
+// (first, so they are never the part that is cut), then the folder; the second quotes the first line of the prompt and says how many
+// lines follow.
+// The flags are never cut (only flags too wide for the card wrap). All of it is the agent's text, shown as text with any hidden
+// character written as a visible escape. Nothing is decided on it: the whole request is read in Review (`StartApproval`, full).
 export function StartSummary({ start }: { start: StartRequest }) {
   const skipping = start.options.some((o) => o.skipsPermissions);
   const lines = visible(start.prompt).split(/\r?\n/);
@@ -40,16 +41,15 @@ export function StartSummary({ start }: { start: StartRequest }) {
   const rest = at < 0 ? 0 : lines.slice(at + 1).filter((l) => l.trim() !== '').length;
   return (
     <div className="approval-req__summary" data-start-summary>
-      <p className="approval-req__line">
-        <span className="flex-none">{visible(start.kind)}</span>
-        {start.options.length > 0 && <span className={`flex-none${skipping ? ' text-danger' : ''}`}>{start.options.map(optionName).join(', ')}</span>}
-        {!start.inside && <span className="flex-none text-danger">{t('start-summary-outside')}</span>}
+      <p className="approval-req__line approval-req__line--facts">
+        {start.options.length > 0 && <span className={skipping ? 'text-danger' : undefined}>{start.options.map(optionName).join(', ')}</span>}
+        {!start.inside && <span className="text-danger">{t('start-summary-outside')}</span>}
         <span className="approval-req__clip font-mono" dir="ltr">{visible(start.folder)}{start.worktree ? ` · ${t('start-approval-worktree')}` : ''}</span>
       </p>
       <p className="approval-req__line">
         {at < 0 ? <span className="approval-req__clip">{t('start-approval-no-prompt')}</span>
           : <span className="approval-req__clip approval-req__quote" dir="auto">{lines[at]!.trim()}</span>}
-        {rest > 0 && <span className="flex-none">{t('start-summary-more', { count: rest })}</span>}
+        {rest > 0 && <span>{t('start-summary-more', { count: rest })}</span>}
       </p>
     </div>
   );

@@ -16,7 +16,7 @@ import type { ApprovalModel } from '../net/view';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ApprovalCard } from './ApprovalCard';
 import { NARROW_PX } from './ApprovalRequest';
-import { Details } from './Inspector';
+import { Details, Inspector } from './Inspector';
 import { AnswerHoldsProvider } from './useAnswerGuard';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -57,8 +57,7 @@ describe('a long start request is a summary with Review', () => {
     act(() => root.render(<ApprovalCard approval={long} agent={agent} onResolve={on} onOpen={() => {}} />));
     const lines = [...card().querySelectorAll('.approval-req__line')].map((l) => l.textContent);
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('codex');
-    expect(lines[0]).toContain('/home/dev/code/login-fix');
+    expect(lines[0]).toBe('/home/dev/code/login-fix'); // the kind is in the title
     expect(lines[1]).toContain('Write unit tests for src/auth.rs.');
     expect(lines[1]).toContain('6 more lines');
     expect(card().textContent).not.toContain('skew window'); // the rest of the prompt is not in the card
@@ -115,12 +114,24 @@ describe('a long start request is a summary with Review', () => {
     act(() => root.render(<ApprovalCard approval={outside} onResolve={() => {}} />));
     const [first, second] = [...card().querySelectorAll('.approval-req__line')];
     const parts = [...first!.children].map((c) => c.textContent);
-    expect(parts.slice(0, 3)).toEqual(['codex', "Don't ask", 'outside its folder']);
+    expect(parts).toEqual(["Don't ask", 'outside its folder', '/home/dev/code/login-fix']);
+    expect(first!.children[0]!.className).toContain('text-danger');
     expect(first!.children[1]!.className).toContain('text-danger');
-    expect(first!.children[2]!.className).toContain('text-danger');
     expect(second!.textContent).toContain('go\\u{202e}evil');
     expect(second!.textContent).not.toContain('‮');
     expect(second!.textContent).toContain('1 more line');
+  });
+
+  it('Escape in Review closes Review only, never the side panel it was opened from', () => {
+    const onOpenChange = vi.fn();
+    act(() => root.render(<Inspector fleet={[agent]} attention={[agent]} approvals={[{ ...long, agentId: agent.id }]} changed={[]} boards={[]} messages={[]}
+      onOpen={() => {}} onResolve={() => {}} open onOpenChange={onOpenChange} tab="needs" onTab={() => {}} />));
+    press(card(), 'Review');
+    expect(dialog()).not.toBeNull();
+    act(() => { dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    expect(dialog()).toBeNull();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(card()).not.toBeNull();
   });
 
   it('a card that cannot be answered still has Review, which shows it whole with no answer', () => {

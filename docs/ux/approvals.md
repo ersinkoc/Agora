@@ -15,7 +15,7 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 |---|---|---|
 | **row** | Home's queue | who, where and how long on one line, the ask under it, the buttons at the end |
 | **card** | the side panel, above a terminal, above a chat's composer | the ask whole under the title, the buttons under it (at the end of the first line when the card is wide); a start or a switch in short, with Review ([below](#start-and-switch-requests)) |
-| **full** | the attention dialog; Review's dialog; the phone's start and switch cards | larger; the title is the ask, the machine a tag; Later (or Close) before the answers |
+| **full** | the attention dialog; Review's dialog | larger; the title is the ask, the machine a tag; Later (or Close) before the answers |
 
 - **Buttons:** **Deny** (secondary), then **Allow always** where ADR-0101 offers it beside a single answer (secondary), then **Allow**
   (primary, last). A request that offers only "always" has it in the place of Allow.
@@ -47,10 +47,11 @@ for the kind of ask, the agent's avatar and the same order of buttons everywhere
 - **One copy:** the side panel lists an agent by its request's card (which opens the agent: a start's and a switch's too), not again as
   a row above it; only a switch of a shape the window cannot read (which can be dismissed) keeps its agent's row. The corner banner is
   hidden while a Needs you list is on screen.
-- **Not yet:** the phone's own cards and bar (its start and switch cards show the whole request in the request frame, flat inside the
-  phone's card), the close-agent confirmation, and the grant choices as a segmented control and a toggle (they stay radios and a check).
+- **Not yet:** the phone's own cards and bar (its start and switch cards show the whole request in the card size, flat inside the
+  phone's card, with no Review), the close-agent confirmation, and the grant choices as a segmented control and a toggle (they stay radios and a check).
 - Screens: `docs/ux/screens/approval-row-*.png`, `approval-panel-*.png`, `approval-terminal-*.png`, `approval-card-narrow-*.png`,
-  `approval-narrow-pane-*.png`, `approval-dialog-*.png`, `approval-skip-danger-*.png`, `approval-start-noask-danger-*.png` (dark and light).
+  `approval-narrow-pane-*.png`, `approval-dialog-*.png`, `approval-skip-danger-*.png`, `approval-start-noask-danger-*.png` (dark and light;
+  the last two show the start and switch cards before PR 5, which `start-cards-*.png` replace).
 
 ## Start and switch requests
 
@@ -60,8 +61,9 @@ composer) they are a **card in short** with **Review**, and the whole request is
 
 - **The card:** the icon chip (start: plus; switch: bolt), the agent's avatar, the title as the ask ("claude · amber asks to start a
   codex agent", "Let claude · amber act without asking?"), the machine beside it, and at most two lines, each cut at its end:
-  - a start: the kind, then (so they are never the part that is cut) the launch options in red when one skips asking and
-    "outside its folder" in red, then the folder; the second line quotes the prompt's first line and says how many lines follow;
+  - a start (its kind is in the title): first, so they are never the part that is cut, the launch options (red when one skips
+    asking) and "outside its folder" in red, then the folder; the second line quotes the prompt's first line and says how many lines
+    follow;
   - a switch: the setting and the choice, the agent's words with the ids the answer is signed over, then the folder.
 
   All of it is the agent's or the machine's text, shown as text with any hidden character written out.
@@ -77,8 +79,9 @@ composer) they are a **card in short** with **Review**, and the whole request is
   Every answer, on the card or in Review, holds the request in the window's holds (#1048): one answer per request everywhere.
 - **Danger:** a start that would not ask and a switch keep the red Allow; the start still opens the confirmation first ("Keep asking"
   is the primary, focused answer), which goes back to Review.
-- Screens: `docs/ux/screens/start-cards-panel-*.png`, `start-cards-terminal-*.png`, `start-cards-review-*.png`,
-  `start-cards-review-noask-*.png`, `start-cards-skip-*.png`, `start-cards-phone-*.png` (dark and light).
+- Screens: `docs/ux/screens/start-cards-panel-*.png`, `start-cards-terminal-*.png`, `start-cards-review-*.png` (also
+  `-review-phone-`, a prompt taller than the screen scrolls inside Review with its buttons in view), `start-cards-review-noask-*.png`,
+  `start-cards-skip-*.png`, and the phone's own cards `start-cards-phone-*.png` (dark and light).
 
 ## Allow always (ADR-0101)
 

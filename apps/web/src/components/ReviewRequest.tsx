@@ -96,7 +96,10 @@ function ReviewDialog({ approval: x, agent, busy, stale, onResolve, onClose }: {
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
+        {/* Its keys stay in it: Escape closes this dialog only (never the side panel it was opened from, whose React tree the portal
+            shares), and a typed letter is never a window shortcut behind it. */}
         <Dialog.Content ref={content} tabIndex={-1} aria-describedby={undefined} data-review-dialog onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
+          onKeyDown={(e) => { if (e.key === 'Escape' || (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1)) e.stopPropagation(); }}
           className="attention-card review-card fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-m shadow-pop outline-none">
           {x.start
             ? <ReviewStart approval={x} agent={agent} busy={busy} stale={stale} onResolve={onResolve} titleWrap={titleWrap} lead={close} />
