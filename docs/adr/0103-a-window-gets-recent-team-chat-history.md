@@ -1,4 +1,4 @@
-# 0102. A window gets recent Team chat history
+# 0103. A window gets recent Team chat history
 Status: Proposed
 Date: 2026-11-23
 
@@ -116,7 +116,7 @@ the web holds 50 messages and shows 5, and there is no full Team chat view to sc
 `Snapshot` (`client.proto`) gains, at the next free number (12 today, checked at the schema PR):
 
 ```
-// ADR-0102: the newest mesh messages this window may see, oldest first, each as the hub stored it (its log position, producer, time
+// ADR-0103: the newest mesh messages this window may see, oldest first, each as the hub stored it (its log position, producer, time
 // and `MessagePosted` body). Positions are before `pos`. A client folds them in as it would the live events, and ignores any other body.
 repeated PositionedEvent recent_messages = 12;
 ```
