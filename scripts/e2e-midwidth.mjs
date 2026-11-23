@@ -91,7 +91,7 @@ try {
       await ctx.close();
     }
   }
-  // The desktop keeps its layout: the list sits beside the panes from 1024 px (a phone, under 700 px, has a window of its own).
+  // The desktop keeps its layout: the list sits beside the panes from 1024 px; under 700 px a phone has a window of its own.
   {
     const ctx = await browser.newContext({ viewport: { width: 1024, height: 650 } });
     const page = await ctx.newPage();
@@ -103,6 +103,14 @@ try {
       return a.right <= m.left + 1 && Math.abs(a.top - m.top) < 2;
     }, LIST);
     check(side, '1024 px: the Agents list sits beside the panes');
+    await ctx.close();
+  }
+  {
+    const ctx = await browser.newContext({ viewport: { width: 600, height: 800 } });
+    const page = await ctx.newPage();
+    await page.goto(url);
+    await page.waitForSelector('.phone');
+    check(await page.evaluate((sel) => !document.querySelector('.ide') && !document.querySelector(sel), LIST), '600 px: the phone window, without the stacked list');
     await ctx.close();
   }
 } finally {
