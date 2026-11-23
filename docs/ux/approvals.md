@@ -86,9 +86,11 @@ composer) they are a **card in short** with **Review**, and the whole request is
   (no dwell, one click one decision, off while busy, held or answered). Review's dialog has guards of its own from the moment it opens,
   so a second click on Review never lands on Allow: a start's answers wait out a fresh dwell (restarted when the request changes, the
   person comes back, the link comes back or an answer settles anywhere); a switch's Allow keeps its dwell, its bar and "Read it first".
-  The same from Home and from the attention dialog: Review opened there starts its own dwell when it opens, and opening or closing it
-  over Home restarts Home's dwell, so a second click on Close never lands on an Allow in a row under it. A switch's Deny in Review has
-  no dwell there either (as on its card: Deny needs no reading).
+  **Review's buttons wait for its open dwell:** in a freshly opened Review, Deny and Allow both stay off (and a press sends nothing)
+  for the dwell (`ATTENTION_DWELL_MS`) from the moment it opens, for a start and a switch alike, so a double click on Review (on a card,
+  Home's row or the attention dialog) never answers anything (#1070). The same from Home and from the attention dialog: opening or
+  closing Review over Home also restarts Home's dwell, so a second click on Close never lands on an Allow in a row under it. Only the
+  switch's own card keeps a Deny with no dwell (Deny needs no reading there, main-window.md).
   Every answer, on the card or in Review, holds the request in the window's holds (#1048): one answer per request everywhere.
 - **Danger:** a start that would not ask and a switch keep the red Allow; the start still opens the confirmation first ("Keep asking"
   is the primary, focused answer), which goes back to Review.

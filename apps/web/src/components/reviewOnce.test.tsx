@@ -195,6 +195,51 @@ describe('one Review from Home (#1070)', () => {
   });
 });
 
+describe('a freshly opened Review answers nothing before its open dwell, for a switch too (#1070)', () => {
+  it('a double click on Home\'s Review for a switch sends nothing; Deny works after the dwell', () => {
+    markSkipCapable(demoSkipApproval.node);
+    const on = vi.fn((..._a: unknown[]) => true);
+    const x = demoSkipApproval as ApprovalModel;
+    act(() => root.render(homeAndCard([x], on)));
+    dwell(5 * ATTENTION_DWELL_MS);
+    // The first click opens Review; the second lands where its answers are: on Deny, and on Allow.
+    act(() => homeReview().click());
+    const d = dialog()!;
+    expect(get(d, 'Deny').disabled).toBe(true);
+    expect(get(d, 'Allow').disabled).toBe(true);
+    press(d, 'Deny');
+    press(d, 'Allow');
+    expect(on).not.toHaveBeenCalled();
+    dwell(ATTENTION_DWELL_MS + 10);
+    expect(get(d, 'Deny').disabled).toBe(false);
+    press(d, 'Deny');
+    expect(on).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledWith(expect.objectContaining({ id: x.id }), false, undefined);
+  });
+
+  it('the switch\'s own card keeps a Deny with no dwell', () => {
+    markSkipCapable(demoSkipApproval.node);
+    const on = vi.fn((..._a: unknown[]) => true);
+    act(() => root.render(homeAndCard([demoSkipApproval as ApprovalModel], on)));
+    expect(get(card(), 'Deny').disabled).toBe(false);
+    press(card(), 'Deny');
+    expect(on).toHaveBeenCalledTimes(1);
+  });
+
+  it('a start\'s Deny and Allow in Review wait too', () => {
+    const on = vi.fn((..._a: unknown[]) => true);
+    act(() => root.render(homeAndCard([start], on)));
+    dwell(5 * ATTENTION_DWELL_MS);
+    act(() => homeReview().click());
+    press(dialog()!, 'Deny');
+    press(dialog()!, 'Allow');
+    expect(on).not.toHaveBeenCalled();
+    dwell();
+    press(dialog()!, 'Deny');
+    expect(on).toHaveBeenCalledWith(expect.objectContaining({ id: start.id }), false, { grant: 0, nested: false });
+  });
+});
+
 describe('one Review from the attention dialog (#1070)', () => {
   const layer = (list: ApprovalModel[], on: Resolve, onReview = vi.fn()) => (
     <AnswerHoldsProvider listed={list.map((x) => x.id)}>
