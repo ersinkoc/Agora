@@ -473,8 +473,10 @@ impl HubSessions {
         if client.is_local() {
             return Ok(None);
         }
-        let Some(stored) = self.screen_password().stored() else {
-            return Ok(None);
+        let stored = match self.screen_password().stored() {
+            Ok(Some(s)) => s,
+            Ok(None) => return Ok(None),
+            Err(_) => return Err(()),
         };
         self.password_slot(client)
             .map(|slot| Some((stored, slot)))
@@ -586,7 +588,9 @@ impl HubSessions {
                 let Some(slot) = self.password_slot(client) else {
                     return (503, String::new());
                 };
-                let stored = self.screen_password().stored();
+                let Ok(stored) = self.screen_password().stored() else {
+                    return (500, String::new());
+                };
                 let needs_current = stored.is_some();
                 if needs_current && self.guard.attempt(client, Scope::All, now).is_err() {
                     audit("password_set", LOCKED_OUT);
@@ -610,20 +614,23 @@ impl HubSessions {
                         let Ok(hashed) = result else {
                             return (500, String::new());
                         };
-                        if self.screen_password().set_hash(&hashed).is_err() {
+                        // The hash, the other sessions' end and the unvouched passkeys' removal land together or not at all.
+                        let Ok(revoked) = crate::password::commit_change(
+                            self.hub.store(),
+                            &hashed,
+                            &token_hash(token),
+                        ) else {
                             return (500, String::new());
-                        }
+                        };
+                        audit("password_set", "ok");
+                        (200, serde_json::json!({ "revoked": revoked }).to_string())
                     }
                     Some(None) => {
                         audit("password_set", WRONG_PASSWORD);
-                        return (401, String::new());
+                        (401, String::new())
                     }
-                    None => return (500, String::new()),
+                    None => (500, String::new()),
                 }
-                let revoked = self.signin().revoke_others(token).unwrap_or(0);
-                let _ = crate::password::drop_unvouched_passkeys(self.hub.store());
-                audit("password_set", "ok");
-                (200, serde_json::json!({ "revoked": revoked }).to_string())
             }
             _ => (404, String::new()),
         }
@@ -704,10 +711,8 @@ impl HubSessions {
                     };
                 }
                 let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                // A passkey added without the password never inherits a vouch left by a removed passkey with the same id.
-                if !vouched && crate::password::forget_stale_vouch(store, id).is_err() {
-                    return (500, String::new());
-                }
+                // The passkey and its vouch are stored together; one added without the password never inherits a vouch left by a
+                // removed passkey with the same id.
                 match (field("publicKey"), field("clientDataJSON")) {
                     (Some(key), Some(cd)) => {
                         match pk::register(
@@ -719,13 +724,9 @@ impl HubSessions {
                             &cd,
                             now,
                             who.as_ref().and_then(|u| u.as_deref()),
+                            vouched,
                         ) {
-                            Ok(()) => {
-                                if vouched {
-                                    let _ = crate::password::vouch_passkey(store, id);
-                                }
-                                (200, "{}".into())
-                            }
+                            Ok(()) => (200, "{}".into()),
                             Err(pk::PasskeyError::Refused) => (403, String::new()),
                             Err(_) => (500, String::new()),
                         }
@@ -1055,6 +1056,165 @@ mod tests {
                 200
             );
             assert!(ScreenPassword::new(hub.store()).verify("new screen password"));
+        }
+
+        #[tokio::test]
+        async fn unreadable_screen_password_fails_closed_for_remote_signin_and_password_change() {
+            use crate::store::EventStore as _;
+            let (hub, api) = hub();
+            let remote = away(10);
+            let local = home();
+            hub.store()
+                .set_setting("screen_password", &[0xff, 0xfe])
+                .unwrap();
+            let c = code(&hub);
+            assert!(matches!(
+                sign_in(&api, &c, None, &remote).await,
+                SignInReply::Busy
+            ));
+            let owner = token(sign_in(&api, &c, None, &local).await).unwrap();
+            let change = serde_json::json!({"password": "new screen password"});
+            assert_eq!(
+                api.account("password", Some(&owner), &remote, &change)
+                    .await
+                    .0,
+                500
+            );
+        }
+
+        #[tokio::test]
+        async fn account_password_change_returns_500_when_drop_unvouched_passkeys_fails() {
+            use crate::store::EventStore as _;
+            let (hub, api) = hub();
+            let local = home();
+            hub.store()
+                .set_setting("passkeys_vouched", &[0xff, 0xfe])
+                .unwrap();
+            let c = code(&hub);
+            let owner = token(sign_in(&api, &c, None, &local).await).unwrap();
+            let change = serde_json::json!({"password": "new screen password"});
+            assert_eq!(
+                api.account("password", Some(&owner), &local, &change)
+                    .await
+                    .0,
+                500
+            );
+        }
+
+        /// Codex review of #1027: a password change that fails part way changes nothing. The new hash, the other sessions' end and
+        /// the unvouched passkeys' removal are one transaction, so a 500 never leaves the new password stored with the old sessions.
+        #[tokio::test]
+        async fn a_password_change_that_fails_part_way_keeps_the_old_password_and_sessions() {
+            use crate::store::EventStore as _;
+            let (hub, api) = hub();
+            let local = home();
+            ScreenPassword::with_iterations(hub.store(), 1_000)
+                .set("old screen password")
+                .unwrap();
+            let owner = token(sign_in(&api, &code(&hub), None, &local).await).unwrap();
+            let other = token(sign_in(&api, &code(&hub), None, &local).await).unwrap();
+            hub.store()
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES ('unvouched', x'00', 0, 1)",
+                    [],
+                )
+                .unwrap();
+            hub.store()
+                .set_setting("passkeys_vouched", &[0xff, 0xfe])
+                .unwrap();
+            let change = serde_json::json!({"password": "new screen password", "current": "old screen password"});
+            assert_eq!(
+                api.account("password", Some(&owner), &local, &change)
+                    .await
+                    .0,
+                500
+            );
+            let screen = ScreenPassword::new(hub.store());
+            assert!(screen.verify("old screen password"));
+            assert!(!screen.verify("new screen password"));
+            assert!(api.signin().check(&other, crate::server::now_ms()));
+            let kept: i64 = hub
+                .store()
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM passkeys WHERE id = 'unvouched'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, 1);
+        }
+
+        /// Codex review of #1027: a passkey whose vouch cannot be stored is not added either (the credential and its vouch are one
+        /// transaction), so a 500 never leaves a passkey behind that the next password change would treat as never vouched.
+        #[tokio::test]
+        async fn a_passkey_whose_vouch_cannot_be_stored_is_not_added() {
+            use crate::store::EventStore as _;
+            use ring::signature::KeyPair as _;
+            let (hub, api) = hub();
+            let owner = token(sign_in(&api, &code(&hub), None, &home()).await).unwrap();
+            let (status, begun) = api
+                .passkey(
+                    "register-begin",
+                    Some(&owner),
+                    "hub.example",
+                    &home(),
+                    &serde_json::json!({}),
+                )
+                .await;
+            assert_eq!(status, 200);
+            let challenge = serde_json::from_str::<serde_json::Value>(&begun).unwrap()["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+                &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+                &rng,
+            )
+            .unwrap();
+            let pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+                &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+                pkcs8.as_ref(),
+                &rng,
+            )
+            .unwrap();
+            let mut spki = crate::passkey::SPKI_P256_PREFIX.to_vec();
+            spki.extend_from_slice(pair.public_key().as_ref());
+            let cd = serde_json::json!({"type": "webauthn.create", "challenge": challenge, "origin": "https://hub.example"})
+                .to_string();
+            hub.store()
+                .set_setting("passkeys_vouched", &[0xff, 0xfe])
+                .unwrap();
+            let finish = serde_json::json!({
+                "id": "pk-new",
+                "publicKey": crate::passkey::b64url_encode(&spki),
+                "clientDataJSON": crate::passkey::b64url_encode(cd.as_bytes()),
+            });
+            let (status, _) = api
+                .passkey(
+                    "register-finish",
+                    Some(&owner),
+                    "hub.example",
+                    &home(),
+                    &finish,
+                )
+                .await;
+            assert_eq!(status, 500);
+            let added: i64 = hub
+                .store()
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM passkeys WHERE id = 'pk-new'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(added, 0);
         }
 
         #[tokio::test]

@@ -741,7 +741,7 @@ pub fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut left: Vec<char> = row.chars().collect();
     while !left.is_empty() {
-        let width = if out.is_empty() { first } else { rest };
+        let width = (if out.is_empty() { first } else { rest }).max(1);
         if left.len() <= width {
             out.push(left.iter().collect());
             break;
@@ -1452,5 +1452,12 @@ mod tests {
         assert!(hostile.contains("tui-tool-run echo"), "{hostile}");
         // Text that is not a call is said as it came.
         assert!(line("not json").contains("tui-chat-tool"));
+    }
+
+    #[test]
+    fn wrap_row_with_zero_width_terminates_without_looping() {
+        assert_eq!(wrap_row("ab", 0, 0), vec!["a", "b"]);
+        assert_eq!(wrap_row("ab", 1, 0), vec!["a", "b"]);
+        assert!(wrap_row("", 0, 0).is_empty());
     }
 }
