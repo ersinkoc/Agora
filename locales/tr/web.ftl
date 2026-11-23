@@ -986,6 +986,11 @@ fleet-machines =
         [one] { $total } makineden { $online } tanesi çevrimiçi
        *[other] { $total } makineden { $online } tanesi çevrimiçi
     }
+fleet-stat-machines =
+    { $total ->
+        [0] Çevrimiçi makine
+       *[other] { $total } makineden çevrimiçi olan
+    }
 fleet-filter-active = Yalnızca “{ $name }” gösteriliyor.
 fleet-filter-clear = Hepsini göster
 fleet-filter-none = Burada gösterilecek bir şey yok.

@@ -133,7 +133,7 @@ describe('the fleet console\'s rows', () => {
   it('keep Allow and Deny, and have no plain Allow for an always-only request', () => {
     const agent: AgentTileModel = { id: 'n1/a1', name: 'wstack · amber', accent: '', machine: 'laptop', machineId: 'n1', workspace: 'w', state: 'needs-you', preview: '' };
     act(() => root.render(<AttentionQueue items={attentionList([both], [agent])} machines={[]} now={0} onResolve={() => {}} onOpen={() => {}} />));
-    expect(names()).toEqual(['Allow', 'Deny']);
+    expect(names()).toEqual(['Deny', 'Allow']); // Deny first, the primary Allow last, as in the attention dialog
     act(() => root.render(<AttentionQueue items={attentionList([only], [agent])} machines={[]} now={0} onResolve={() => {}} onOpen={() => {}} />));
     expect(names()).toEqual(['Review and decide']);
   });
