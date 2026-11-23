@@ -63,6 +63,10 @@ struct Inner {
     /// the end. They are written before any later hub fact (so a node's next `NodeLink { up }` always comes after them) and by
     /// [`Hub::record_unrecorded`] once the store works again. Memory only: a hub that restarts records every node offline anyway.
     unrecorded: std::collections::VecDeque<(Body, u64)>,
+    /// #1036: nodes a published fact took offline since board membership last looked ([`Hub::board_membership`]). Membership
+    /// compares the online nodes with its last look, so a node that left and came back between two looks (its late end and its
+    /// redial's `up` written together, #996) would otherwise look as if it never left.
+    left: std::collections::BTreeSet<String>,
 }
 
 pub struct Hub {
@@ -182,6 +186,7 @@ impl Hub {
                 subs_dropped: 0,
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
                 unrecorded: std::collections::VecDeque::new(),
+                left: std::collections::BTreeSet::new(),
             }),
         };
         {
@@ -631,8 +636,13 @@ impl Hub {
     }
 
     /// ADR-0039 amendment B: the `(node, project)` pairs that must hand over their local work now (see `Boards::membership`).
+    ///
+    /// #1036: a node the log took offline since the last look is no longer a remembered member, even if it is online again now
+    /// (its end and its next `up` written in one step), so it is asked as after any other return.
     pub fn board_membership(&self, now_ms: u64) -> Vec<(String, String)> {
-        let g = self.lock();
+        let mut g = self.lock();
+        let left = std::mem::take(&mut g.left);
+        self.boards.forget_members(&left);
         self.boards.membership(&g.view, now_ms)
     }
 
@@ -782,7 +792,17 @@ impl Hub {
             }
         }
         let back = g.view.brings_back(&d.event);
+        // #1036: whether this fact takes a node offline, for board membership's next look.
+        let presence = presence_of(&d.event).map(|node| {
+            let online = g.view.nodes.get(node).is_some_and(|n| n.online);
+            (node.to_string(), online)
+        });
         g.view.apply(&d.event);
+        if let Some((node, true)) = presence {
+            if !g.view.nodes.get(&node).is_some_and(|n| n.online) {
+                g.left.insert(node);
+            }
+        }
         g.pos = d.pos;
         // ADR-0073: a forgotten machine came back. A client that joined while it was hidden holds none of its folders or agents, and
         // no event will say them again; every client is let go, reconnects from its position and, being before this one, gets a
@@ -868,6 +888,17 @@ impl Hub {
 
     pub fn subscriber_count(&self) -> usize {
         self.lock().subs.len()
+    }
+}
+
+/// The node a presence fact can take offline (the view decides whether it does): the one a hub's `NodeOffline` or `NodeLink` names,
+/// or the sender of a node's own `NodeOffline` (see `View::apply`).
+fn presence_of(event: &Event) -> Option<&str> {
+    match &event.body {
+        Some(Body::NodeOffline(e)) if event.producer_id == RESERVED_HUB_ID => Some(&e.node_id),
+        Some(Body::NodeOffline(_)) => Some(&event.producer_id),
+        Some(Body::NodeLink(e)) if !e.up => Some(&e.node_id),
+        _ => None,
     }
 }
 
@@ -2043,5 +2074,101 @@ mod tests {
         );
         drop(hub);
         remove_db(&path);
+    }
+
+    /// How a machine's end reaches the log in [`rejoin_asks`].
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum End {
+        /// Recorded when the connection ends, and looked at (as `server.rs` does) before the machine dials again.
+        Recorded,
+        /// Refused when the connection ends; the machine's redial writes it, then its own `up`, in one step.
+        Owed,
+        /// Refused when the connection ends; a first redial writes it but not its own `up`, and a second redial writes the `up`.
+        OwedSplit,
+    }
+
+    /// `(node, project)` pairs board membership asks to hand over their local work.
+    type Asks = Vec<(String, String)>;
+
+    /// #1036: what board membership asks when `n1` leaves the project `p` it shares with the other `nodes` and dials again (each
+    /// node runs an agent in `p`), and what the look after that asks.
+    fn rejoin_asks(name: &str, nodes: &[&str], end: End) -> (Asks, Asks) {
+        let (hub, path) = hub_on_file(name);
+        let sup = support();
+        let mut links = Vec::new();
+        for n in nodes {
+            let mut s = open_session(&hub, &sup, n);
+            links.push(hub.node_link_opened(n, Vec::new(), 1).unwrap());
+            hub.ingest(&mut s, &online(n, 1)).unwrap();
+            hub.ingest(&mut s, &agent(n, 2, "a")).unwrap();
+        }
+        // The project became shared: every node was asked, and every one answered.
+        assert_eq!(hub.board_membership(3).len(), nodes.len());
+        assert!(hub.board_membership(3).is_empty());
+        for n in nodes {
+            hub.board_join_settled(n, "p");
+        }
+        let other = rusqlite::Connection::open(&path).unwrap();
+        if end != End::Recorded {
+            other.execute_batch(REFUSE_EVENTS).unwrap();
+        }
+        let (reg, _cmds, generation) = links.remove(0);
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        // What the server does right after a connection's end.
+        assert!(hub.board_membership(6).is_empty());
+        if end == End::OwedSplit {
+            let held: i64 = other
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            other
+                .execute_batch(&format!(
+                    "DROP TRIGGER no_events; CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= {} BEGIN SELECT RAISE(ABORT, 'full'); END;",
+                    held + 2
+                ))
+                .unwrap();
+            assert!(hub.node_link_opened("n1", Vec::new(), 7).is_err());
+            assert!(!hub.has_unrecorded());
+            assert!(!hub.view().0.nodes["n1"].online);
+        }
+        if end != End::Recorded {
+            other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        }
+        let _back = hub.node_link_opened("n1", Vec::new(), 8).unwrap();
+        assert!(!hub.has_unrecorded());
+        assert!(hub.view().0.nodes["n1"].online);
+        let mut asked = hub.board_membership(8);
+        asked.sort();
+        let again = hub.board_membership(9);
+        drop(hub);
+        remove_db(&path);
+        (asked, again)
+    }
+
+    /// #1036: a machine whose end the store refused, and whose own redial then writes that end and its new `up` together, is asked
+    /// to hand over its local board work (ADR-0039 amendment B) exactly as after an end recorded at once, and only once; so are the
+    /// other nodes the same look asks. Before, board membership saw the machine online at both looks and asked nobody.
+    #[test]
+    fn a_machine_whose_end_is_written_by_its_own_redial_is_asked_to_rejoin_the_board() {
+        let pairs = |nodes: &[&str]| -> Asks {
+            nodes
+                .iter()
+                .map(|n| ((*n).to_string(), "p".to_string()))
+                .collect()
+        };
+        // Three nodes: the project stays shared while n1 is away, so n1 alone is asked when it is back. Two nodes: it stops being
+        // shared, so both are asked.
+        for (nodes, expected) in [
+            (&["n1", "n2", "n3"][..], pairs(&["n1"])),
+            (&["n1", "n2"][..], pairs(&["n1", "n2"])),
+        ] {
+            for end in [End::Recorded, End::Owed, End::OwedSplit] {
+                let name = format!("board-rejoin-{}-{end:?}", nodes.len());
+                assert_eq!(
+                    rejoin_asks(&name, nodes, end),
+                    (expected.clone(), Vec::new()),
+                    "{nodes:?} {end:?}"
+                );
+            }
+        }
     }
 }
