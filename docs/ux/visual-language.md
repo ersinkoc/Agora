@@ -121,9 +121,9 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
   reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
-  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Until the rest follow,
-  existing overlays use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label.
-  Amber means only "needs you" everywhere (PR 3).
+  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8).
+  Until the rest follow, existing overlays use the older `--shadow`, other screens keep their selection bars, and the global `h2` is
+  still an uppercase label. Amber means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.
@@ -140,7 +140,8 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
   the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
   SettingRow, SegmentedControl (a radio group: arrows move and choose), Toggle (a switch; red when it lets an agent act without asking),
   StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
-  (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
+  (icon, title, one line, at most one action), Tooltip, KeyValue and ConfirmDialog (a question before something destructive: an overlay with
+  a red icon chip, the safe answer first and focused, the destructive answer as a red button). They use tokens only and logical properties, grow to the 44 px
   touch target on a touch screen, and respect reduced motion.
 - **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
   (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed

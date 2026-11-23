@@ -3,6 +3,7 @@ export { AgentAvatar } from './AgentAvatar';
 export { Button, type ButtonVariant } from './Button';
 export { Callout, EmptyState, type CalloutTone } from './Callout';
 export { Card, KeyValue, ListRow, SettingRow } from './Card';
+export { ConfirmDialog } from './ConfirmDialog';
 export { Pill, StatusMark, StatusPill, Tag, type Tone } from './Pill';
 export { SegmentedControl, type Segment } from './SegmentedControl';
 export { StatTile } from './StatTile';

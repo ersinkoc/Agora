@@ -79,3 +79,30 @@ export const demoQuota: QuotaObs[] = [
   { machineId: 'build', tool: 'codex', window: 'minutes:30', usedPercent: 12, resetsAtMs: Date.now() + 10 * MIN, observedAtMs: Date.now() - 50 * MIN },
   { machineId: 'winpc', tool: 'codex', window: 'five_hour', usedPercent: 74, resetsAtMs: Date.now() - 20 * MIN, observedAtMs: Date.now() - 6 * 60 * MIN },
 ];
+
+// The Settings page with nothing live behind it (#/gallery/settings, also served by a production build): three machines of three
+// systems (one offline, one that does not trust this browser yet), two other devices of the person's, and what each machine can start.
+// Times are fixed against `demoSettingsNow`, so the screenshots of this page do not change from one run to the next.
+export const demoSettingsNow = Date.UTC(2026, 10, 22, 21, 40);
+export const demoSettingsMachines = [
+  { id: 'blackview', name: 'blackview', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: demoSettingsNow - 4000, build: '0.3.35' },
+  { id: 'mac', name: 'mac', os: 'macos', online: true, agentsRunning: 1, lastSeenMs: demoSettingsNow - 9000, build: '0.3.35' },
+  { id: 'win', name: 'win', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: demoSettingsNow - 2 * 3_600_000, build: '0.3.34' },
+];
+export const demoSettingsTrustedOn = ['blackview', 'win'];
+export const demoSettingsDevices = [
+  { id: 'web-7188eda9c2b62f50', name: 'Chrome · Linux', fingerprint: '7188-eda9-c2b6-2f50-9a5a-2a1c', lastUsedMs: demoSettingsNow - 8 * 60_000, trustedOn: [], waiting: true, removed: false },
+  { id: 'web-2a9011fe0c3d77b1', name: 'Safari · iOS', fingerprint: '2a90-11fe-0c3d-77b1-e420-9d05', lastUsedMs: demoSettingsNow - 26 * 3_600_000, trustedOn: ['blackview', 'mac'], waiting: false, removed: false },
+  { id: 'web-5c31a0e2d9f4b871', name: 'Firefox · Windows', fingerprint: '5c31-a0e2-d9f4-b871-03c6-e15a', lastUsedMs: demoSettingsNow - 40 * 86_400_000, trustedOn: [], waiting: false, removed: true },
+];
+const skip = { id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true };
+const model = { id: 'model', label: 'setting-model', values: [], defaultValue: '' };
+const effort = (d = '') => ({ id: 'effort', label: 'setting-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'], defaultValue: d });
+export const demoSettingsKinds = [
+  { kind: 'claude-code', name: 'Claude Code', installed: true, level: 2, program: 'claude', settings: [model, effort()], options: [skip] },
+  { kind: 'codex', name: 'Codex', installed: true, level: 2, program: 'codex', settings: [model, effort('medium')], options: [skip] },
+  { kind: 'antigravity-acp', name: 'Antigravity', installed: true, level: 3, program: 'antigravity', settings: [], options: [] },
+  { kind: 'wrongstack', name: 'WrongStack', installed: true, level: 2, program: 'wrongstack', settings: [], options: [skip] },
+  { kind: 'fake-adapter', name: 'Fake chat agent', installed: true, level: 4, program: 'agora-fake-agent', settings: [], options: [] },
+  { kind: 'opencode-acp', name: 'opencode', installed: false, level: 3, program: 'opencode', settings: [], options: [] },
+];

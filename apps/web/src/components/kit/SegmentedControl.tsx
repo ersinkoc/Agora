@@ -4,8 +4,8 @@ import { useRef, type KeyboardEvent, type ReactNode } from 'react';
 // a right-to-left page), Home and End go to the ends. The chosen item is a raised thumb with ink text.
 export interface Segment<T extends string> { value: T; label: ReactNode; icon?: ReactNode; title?: string }
 
-export function SegmentedControl<T extends string>({ items, value, onChange, label, labelledBy }: {
-  items: readonly Segment<T>[]; value: T; onChange: (value: T) => void; label?: string; labelledBy?: string;
+export function SegmentedControl<T extends string>({ items, value, onChange, label, labelledBy, describedBy }: {
+  items: readonly Segment<T>[]; value: T; onChange: (value: T) => void; label?: string; labelledBy?: string; describedBy?: string;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const at = Math.max(0, items.findIndex((i) => i.value === value));
@@ -26,7 +26,7 @@ export function SegmentedControl<T extends string>({ items, value, onChange, lab
     e.preventDefault();
   };
   return (
-    <div role="radiogroup" aria-label={label} aria-labelledby={labelledBy} className="kit-seg" onKeyDown={onKey}>
+    <div role="radiogroup" aria-label={label} aria-labelledby={labelledBy} aria-describedby={describedBy} className="kit-seg" onKeyDown={onKey}>
       {items.map((it, i) => (
         <button key={it.value} ref={(el) => { refs.current[i] = el; }} type="button" role="radio" aria-checked={i === at} tabIndex={i === at ? 0 : -1}
           title={it.title} className="kit-seg__item" onClick={() => onChange(it.value)}>
