@@ -69,7 +69,10 @@ function infer(keys: string[], hint: ToolAction): ToolAction {
 
 // The bridge's fallback title is the ACP kind or `tool`: a word for the window to say, not a title.
 function titled(tool: string): { title: string; kind?: ToolAction } {
-  const kind = KINDS[tool.trim().toLowerCase()];
+  const key = tool.trim().toLowerCase();
+  // The title is the agent's own words, so it is untrusted: only an own property of the table is a kind.
+  // A name that happens to be an `Object.prototype` member (`constructor`, `__proto__`) is a title, not a kind.
+  const kind = Object.hasOwn(KINDS, key) ? KINDS[key] : undefined;
   return kind ? { title: '', kind } : { title: tool.trim() };
 }
 

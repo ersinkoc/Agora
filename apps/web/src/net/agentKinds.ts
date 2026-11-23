@@ -3,6 +3,7 @@
 import { usableOptions } from '../components/launchChoice';
 import type { LaunchOptionChoice } from '../components/launchChoice';
 import { usableSettings, type LaunchSettingChoice } from '../components/launchSettingsModel';
+import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 
 // The wire's integration level (agora.v1.IntegrationLevel): 1 generic, 2 manifest, 3 ACP, 4 adapter process.
 export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[] }
@@ -18,6 +19,13 @@ export function plainText(s: string, max = 48): string {
   const one = s.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, ' ').replace(/\s+/g, ' ').trim();
   const chars = [...one];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : one;
+}
+
+/** A kind's colour for its avatar: one of the agent colours, the same for a kind everywhere (Settings, and later the Start window). */
+export function kindAccent(kind: string): string {
+  let h = 0;
+  for (const c of kind) h = (h * 31 + (c.codePointAt(0) ?? 0)) >>> 0;
+  return `var(--agent-${AGENT_COLOUR_NAMES[h % AGENT_COLOUR_NAMES.length] ?? 'slate'})`;
 }
 
 export interface KindGroups { installed: KindInfo[]; missing: KindInfo[] }

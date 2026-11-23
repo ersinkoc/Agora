@@ -200,7 +200,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
   const e = ev as Record<string, any>;
   switch (ev.body) {
-    case 'workspaceRegistered': { const w = e.workspaceRegistered; v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged ?? 0 }); break; }
+    // A folder is registered again for each agent started in it, with no count (#1017): the machine's Git watcher counts it and says
+    // it again only when it changes, so a count already known for the folder stays.
+    case 'workspaceRegistered': { const w = e.workspaceRegistered; const known = v.workspaces.get(q(w.workspaceId)); v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged || known?.filesChanged || 0 }); break; }
     case 'agentWorkspaceBound': v.agentWorkspaces.set(q(e.agentWorkspaceBound.agentId), q(e.agentWorkspaceBound.workspaceId)); break;
     case 'workspaceStatusChanged': { const w = v.workspaces.get(q(e.workspaceStatusChanged.workspaceId)); if (w) w.filesChanged = e.workspaceStatusChanged.filesChanged ?? 0; break; }
     case 'nodeOnline': {

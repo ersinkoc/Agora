@@ -145,7 +145,7 @@ function inlineTitle(title: string): Inline[] {
   return /^`[^`]+`$/.test(title) ? [{ kind: 'code', text: title.slice(1, -1) }] : inlines(title);
 }
 
-const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-needs-you', plain: 'text-muted' };
+const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-working', plain: 'text-muted' };
 const CHEVRON = 'size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!';
 
 // The lines of a change: a hunk bar, then each line with its number; added and deleted lines say so by glyph and bar as well as colour.
@@ -289,7 +289,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended
   const [flagged, setFlagged] = useState(!!flag);
   if (flag && !flagged) setFlagged(true);
   return (
-    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
+    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag === 'needs-you' ? 'border-needs-you/70' : flag ? 'border-danger/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
       <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
         {spinning && !flag
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
@@ -297,7 +297,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended
         <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
         <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
         <span className="flex-1 md:hidden" />
-        {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
+        {flag && <span className={`flex flex-none items-center gap-1 text-xs font-medium ${flag === 'needs-you' ? 'text-needs-you' : 'text-danger'}`}><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
         <Icon name="chevron" className={CHEVRON} />
       </summary>
       <div className="grid grid-cols-1 divide-y divide-line border-t border-line">

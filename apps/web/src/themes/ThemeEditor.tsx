@@ -1,6 +1,8 @@
 // The theme editor (ADR-0068 rung 2): a panel of the window, so every change shows on the window itself as it is made. Built-in
 // themes are read-only; "Customize" makes a copy the person can change. A change that would make text hard to read is shown as
-// a warning and not applied, so the window always stays readable.
+// a warning and not applied, so the window always stays readable. Text or a control that would be hard to see only in the widget kit's
+// colours (a callout, a pill, the red, an agent's badge, a switch or a ring) is listed too, but the change is applied: themes saved
+// before those checks stay usable (#1021, #1054).
 import { useId, useRef, useState, useSyncExternalStore } from 'react';
 import { t } from '../i18n';
 import { ThemePicker } from '../components/ThemePicker';
@@ -8,7 +10,7 @@ import { fullText, issueText, themeName, tokenLabel } from './messages';
 import { type Saved, themeStore } from './store';
 import {
   COLOR_TOKENS, TOKEN_NAMES, type Scheme, type Theme, type ThemeIssue, type TokenName, type Tokens,
-  MAX_NAME, contrastIssues, kindOf, pxOf, readValue, serialiseTheme, themeFile,
+  MAX_NAME, contrastIssues, kindOf, pxOf, readValue, serialiseTheme, themeFile, themeWarnings,
 } from './tokens';
 
 const SHAPE_TOKENS = TOKEN_NAMES.filter((n) => kindOf(n).kind !== 'color');
@@ -18,7 +20,11 @@ export function ThemeEditor() {
   const theme = themeStore.active();
   const [problems, setProblems] = useState<string[]>([]);
   const file = useRef<HTMLInputElement>(null);
-  const report = (r: Saved) => setProblems(r.ok ? [] : 'full' in r ? [fullText()] : r.issues.map(issueText));
+  // An imported theme for the scheme not on screen has no Readability shown, so its warnings are said here; one on screen lists
+  // them in its own Readability section.
+  const report = (r: Saved) => setProblems(r.ok
+    ? (r.warnings && r.theme.id !== themeStore.active().id ? [t('theme-import-warning'), ...r.warnings.map(issueText)] : [])
+    : 'full' in r ? [fullText()] : r.issues.map(issueText));
   const themes = themeStore.themes();
   const choice = (scheme: Scheme) => (
     <label className="grid min-w-0 gap-1">
@@ -40,7 +46,7 @@ export function ThemeEditor() {
 
       <ThemeFields key={theme.id} theme={theme} onSaved={report} />
 
-      {problems.length > 0 && <ul role="alert" className="m-0 grid list-none gap-1 rounded-s border border-needs-you p-3 text-xs">
+      {problems.length > 0 && <ul role="alert" className="m-0 grid list-none gap-1 rounded-s border border-danger p-3 text-xs">
         {problems.map((p, i) => <li key={i}>{p}</li>)}
       </ul>}
 
@@ -66,6 +72,7 @@ function ThemeFields({ theme, onSaved }: { theme: Theme; onSaved: (r: Saved) => 
   const parsed = Object.fromEntries(TOKEN_NAMES.map((n) => [n, readValue(n, draft[n])])) as Record<TokenName, string | undefined>;
   const complete = TOKEN_NAMES.every((n) => parsed[n] !== undefined);
   const contrast = complete ? contrastIssues(parsed as Tokens) : [];
+  const warnings = complete ? themeWarnings(parsed as Tokens, theme.scheme) : [];
 
   const change = (next: Record<TokenName, string>, nextName = name) => {
     setDraft(next);
@@ -99,13 +106,19 @@ function ThemeFields({ theme, onSaved }: { theme: Theme; onSaved: (r: Saved) => 
 
       <div className="grid gap-1" aria-live="polite">
         <h3 className="ide-section m-0 px-0">{t('theme-readability')}</h3>
-        {!complete ? <p className="m-0 text-xs text-needs-you">{t('theme-incomplete')}</p>
-          : contrast.length === 0 ? <p className="state state--finished m-0">{t('theme-contrast-ok')}</p>
-          : <ul className="m-0 grid list-none gap-1 p-0 text-xs">
-            <li className="text-needs-you">{t('theme-contrast-not-applied')}</li>
-            {contrast.map((c) => <li key={`${c.fg}/${c.bg}`}>{issueText({ code: 'contrast', ...c })}</li>)}
-          </ul>}
-        {issues.map((i, k) => <p key={k} className="m-0 text-xs text-needs-you">{issueText(i)}</p>)}
+        {!complete ? <p className="m-0 text-xs text-danger">{t('theme-incomplete')}</p>
+          : contrast.length === 0 && warnings.length === 0 ? <p className="state state--finished m-0">{t('theme-contrast-ok')}</p>
+          : <>
+            {contrast.length > 0 && <ul className="m-0 grid list-none gap-1 p-0 text-xs">
+              <li className="text-danger">{t('theme-contrast-not-applied')}</li>
+              {contrast.map((c) => <li key={`${c.fg}/${c.bg}`}>{issueText({ code: 'contrast', ...c })}</li>)}
+            </ul>}
+            {warnings.length > 0 && <ul className="m-0 grid list-none gap-1 p-0 text-xs">
+              <li className="text-danger">{t(contrast.length > 0 ? 'theme-contrast-also' : 'theme-contrast-warning')}</li>
+              {warnings.map((w) => <li key={JSON.stringify(w)}>{issueText(w)}</li>)}
+            </ul>}
+          </>}
+        {issues.map((i, k) => <p key={k} className="m-0 text-xs text-danger">{issueText(i)}</p>)}
       </div>
     </div>
   );

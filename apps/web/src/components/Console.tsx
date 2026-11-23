@@ -1,6 +1,7 @@
 import type { ActionResult } from '../net/refusal';
 import { asksUnderHeader } from '../net/chatView';
-import { ApprovalBanner } from './ApprovalBanner';
+import { ApprovalBanners } from './ApprovalBanner';
+import { Arrangement, requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
@@ -48,9 +49,10 @@ import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
+import { arrangementKey } from '../layout/geometry';
 import { LayoutMenu } from '../layout/LayoutMenu';
 import { subscribePanelRequests, subscribeProjectRequests, subscribeToolRequests, takePanelRequest, takeProjectRequest, takeToolRequests, type ToolRequest } from '../layout/requests';
-import { type ToolPanel, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
+import { type ToolPanel, changedFolders, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
 import { Menu, type MenuItem } from '../layout/Menu';
 import { ChangesPane, FilesPane, ManagerPane, TerminalPane, ToolChooser } from './ToolPanes';
 import { ThemeEditor } from '../themes/ThemeEditor';
@@ -74,7 +76,7 @@ const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', tasks: 'boar
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -99,7 +101,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // ADR-0060: resume an interrupted agent (or start it again in its folder); undefined when it did, else the error code.
   onResume?: (agent: AgentTileModel, action: ResumeAction) => Promise<string | undefined>;
   start?: ReactNode;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   // ADR-0057: what an agent may still start without asking, and taking that back.
   helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
@@ -111,6 +113,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onRetry?: () => void;
   // ADR-0065: machines asking to join, for an owner's session.
   pairing?: PairingUi;
+  // The hub said this session is not the owner's: an empty window says no project is theirs yet (#904).
+  guest?: boolean;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -243,10 +247,16 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const presetAgents = () => [...new Set([...shownAgents, ...fleet.filter((a) => !a.closed).map((a) => a.id)])];
   const resetLayout = () => setStored({ ws: homeWorkspace(), touched: false });
 
+  // Where the panes are drawn and what they show (#1048): a move, a split, a resize, another tab in front or a pane that shows another
+  // agent restarts the dwell of every request card in this window (`Arrangement`), the side panel's and Home's included; never a pane
+  // taking the focus.
+  const arrangement = useMemo(() => arrangementKey(ws, narrow, [showAgents ? leftWidth : 0, showDetails ? rightWidth : 0], (p) => agentOf(p, bindings)), [ws, narrow, showAgents, leftWidth, showDetails, rightWidth, bindings]);
+  // T44 (`useAnswerGuard`, as Home's queue): one guard for every card above a terminal or a composer in this window's panes. Its layout is
+  // every request with what its card shows and where the panes are, so a card that comes, goes or changes in any pane, or a pane that moves,
+  // restarts the dwell everywhere; a request is answered once, whichever pane (or other surface: the window's holds) it was answered in.
+  const banners = useAnswerGuard(approvals.map((x) => x.id), (status) => JSON.stringify([arrangement, approvals.map((x) => { const a = fleet.find((f) => f.id === x.agentId); return [requestShown(x, a), a ? asksUnderHeader(a) : null, status(x.id)]; })]), link !== 'live');
   const attention = needsAttention(fleet);
-  const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
-    .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
-    .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
+  const changed = changedFolders(fleet, projectFilter);
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
@@ -293,7 +303,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // What a chat agent waits on, pinned above its composer (a terminal agent's requests are a bar under its header).
   const pinnedAsks = (agentId: string) => {
     const mine = approvals.filter((x) => x.agentId === agentId);
-    return mine.length ? <div className="grid gap-2">{mine.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined;
+    const agent = fleet.find((f) => f.id === agentId);
+    return mine.length ? <div className="grid gap-2"><ApprovalBanners approvals={mine} agent={agent} guard={banners} onResolve={onResolve} pinned /></div> : undefined;
   };
   // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
   const agentBody = (a: AgentTileModel) => (
@@ -309,8 +320,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
         <div className="flex flex-none items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff
-            ? <button type="button" className="ide-chip text-needs-you hover:brightness-125" onClick={() => openTool('changes', a.id)} title={t('pane-open-changes')}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
-            : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
+            ? <button type="button" className="ide-chip hover:text-ink" onClick={() => openTool('changes', a.id)} title={t('pane-open-changes')}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
+            : <span className="ide-chip">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
           {!(a.terminal === false && !a.closed) && <StateBadge state={a.state} failed={endedWithError(a)} />}
           <CloseAgentMenu agent={a} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
@@ -325,10 +336,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
       </div>
       <CloseConfirm agent={a} where="pane" />
-      {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+      {!asksUnderHeader(a) ? null : <ApprovalBanners approvals={approvals.filter((x) => x.agentId === a.id)} agent={a} guard={banners} onResolve={onResolve} />}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
-        <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
+        <HelperGrants view={a.id} list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
       {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
@@ -364,7 +375,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   ];
   const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
     <Details tab={PANEL_TAB[id] as DetailsTab} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
-      onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
+      onResolve={onResolve} stale={link !== 'live'} onReview={loadDiff ? setReviewing : undefined} />
   </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
   // Home: the fleet console. It is what an empty window shows and what the Fleet tab is. A tile opens its agent like the tree does.
@@ -375,12 +386,13 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   const home = (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} />
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} guest={guest} />
     </div>
   );
   const welcome = home;
 
   return (
+    <Arrangement.Provider value={arrangement}>
     <div className="ide">
       <header className="ide-bar min-h-10 flex-wrap border-b py-1 sm:h-10 sm:flex-nowrap sm:py-0">
         <span aria-hidden className="grid size-6 flex-none place-items-center rounded-xs bg-accent text-xs font-bold text-on-accent">A</span>
@@ -404,21 +416,21 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
         {showAgents && <Explorer by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
-        <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
+        <main className="flex min-h-[55dvh] min-w-0 flex-1 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
             renderTool={renderTool} plusItems={plusItems} welcome={welcome} />
         </main>
         </div>
 
         <Inspector fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
-          onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onPane={loadDiff ? (id) => openTool('changes', id) : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
+          onResolve={onResolve} stale={link !== 'live'} onReview={loadDiff ? setReviewing : undefined} onPane={loadDiff ? (id) => openTool('changes', id) : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
       </div>
 
       <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>
-        <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
+        <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-idle'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => { setRailTab('needs'); setShowDetails(true); }}>{t('ide-status-needs', { count: needs })}</button>}
-        {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
+        {forgetError && <span role="alert" className="truncate text-danger">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
       </footer>
 
@@ -427,5 +439,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       {browsing && filesOf && find(browsing) && filesOf(find(browsing) as AgentTileModel) && <FilesDialog agent={find(browsing) as AgentTileModel} files={filesOf(find(browsing) as AgentTileModel) as WorkspaceFiles} load={loadDiff} onClose={() => setBrowsing(undefined)} />}
       {reviewing && loadDiff && find(reviewing) && <DiffDialog agent={find(reviewing) as AgentTileModel} load={loadDiff} read={filesOf?.(find(reviewing) as AgentTileModel)?.read} onClose={() => setReviewing(undefined)} />}
     </div>
+    </Arrangement.Provider>
   );
 }

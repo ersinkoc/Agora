@@ -1,6 +1,10 @@
+import { type Control, INDICATORS, type KitColour, ROLE_TOKEN, TINT_ROLES, type TintRole, kitPalette, roleColours, tints } from './tints';
+
 // Themes are data (ADR-0068 rung 2, docs/ux/themes.md): a theme file names design tokens from design/tokens.css and their values.
 // This module is the one door from untrusted text (an imported file, this browser's storage) into a theme: it never throws, refuses
-// unknown or invalid tokens, and refuses colours whose text would be hard to read (WCAG 2.2 AA). Nothing here touches the DOM.
+// unknown or invalid tokens, refuses colours whose text would be hard to read on its surfaces (WCAG 2.2 AA), and warns about text
+// that would be hard to read or see in the widget kit's colours (its coloured backgrounds, the red, agent badges, control indicators).
+// Nothing here touches the DOM.
 
 export const THEME_FORMAT = 1;
 export const MAX_NAME = 60;
@@ -35,6 +39,7 @@ export const TOKENS = {
 } as const satisfies Record<string, Kind>;
 export type TokenName = keyof typeof TOKENS;
 export type Tokens = Record<TokenName, string>;
+export type ColourToken = { [K in TokenName]: (typeof TOKENS)[K]['kind'] extends 'color' ? K : never }[TokenName];
 export const TOKEN_NAMES = Object.keys(TOKENS) as TokenName[];
 export const COLOR_TOKENS = TOKEN_NAMES.filter((n) => TOKENS[n].kind === 'color');
 export const kindOf = (name: TokenName): Kind => TOKENS[name];
@@ -126,6 +131,24 @@ export function readValue(name: TokenName, v: unknown): string | undefined {
 }
 export const pxOf = (v: string): number => Number.parseFloat(v);
 
+// ---- Agent colours -------------------------------------------------------------------------------------------------------------
+
+// The colours agents are told apart by (an agent's avatar, the second word of its name: design/tokens.css `--agent-*`). They are
+// not theme tokens a person sets: a theme gets the set that shows best on its own surfaces, whatever its scheme says (a theme in the
+// Light slot may have dark surfaces). Dark and Light draw them from design/tokens.css; a test keeps these values equal to it.
+export const AGENT_COLOUR_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'] as const;
+export type AgentColourName = (typeof AGENT_COLOUR_NAMES)[number];
+export const AGENT_COLOURS: Readonly<Record<Scheme, Readonly<Record<AgentColourName, string>>>> = {
+  dark: { amber: '#ffb454', teal: '#4fd1c5', violet: '#a78bfa', rose: '#fb7185', slate: '#94a3b8', sky: '#7dd3fc', mint: '#86efac' },
+  light: { amber: '#b45309', teal: '#0f766e', violet: '#6d28d9', rose: '#be123c', slate: '#475569', sky: '#0369a1', mint: '#15803d' },
+};
+const AGENT_SURFACES = ['surface-0', 'surface-1', 'surface-2'] as const;
+const worstContrast = (set: Readonly<Record<AgentColourName, string>>, tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>) =>
+  Math.min(...AGENT_COLOUR_NAMES.flatMap((n) => AGENT_SURFACES.map((s) => contrast(set[n], tokens[s]))));
+export function agentColours(tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>): Readonly<Record<AgentColourName, string>> {
+  return worstContrast(AGENT_COLOURS.dark, tokens) >= worstContrast(AGENT_COLOURS.light, tokens) ? AGENT_COLOURS.dark : AGENT_COLOURS.light;
+}
+
 // ---- Contrast (WCAG 2.2) ------------------------------------------------------------------------------------------------------
 
 function luminance(hex: string): number {
@@ -154,6 +177,57 @@ export function contrastIssues(tokens: Tokens): ContrastIssue[] {
   return CONTRAST_PAIRS.map((p) => ({ ...p, ratio: contrast(tokens[p.fg], tokens[p.bg]) })).filter((p) => p.ratio < p.min);
 }
 
+// Text on the widget kit's soft state backgrounds (design/app.css `--tint-*`, ADR-0102), which are mixed from the theme's own colours
+// (themes/tints.ts): each role's colour, ink and secondary text are words there, so 4.5:1. The danger role's colour is the fixed red,
+// but its background is mixed from the theme's panels. A failing pair is a warning, not a refusal: these pairs came after themes were
+// saved under the surface pairs alone, and a stored theme that is refused is dropped (#1021).
+export const TINT_PAIRS: readonly { fg: TokenName | 'danger'; tint: TintRole; min: number }[] = TINT_ROLES.flatMap((tint) => {
+  const own = tint === 'danger' ? 'danger' : ROLE_TOKEN[tint];
+  return ([own, 'text', 'text-muted'] as const).map((fg) => ({ fg, tint, min: 4.5 }));
+});
+export interface TintIssue { fg: TokenName | 'danger'; tint: TintRole; ratio: number; min: number }
+export function tintIssues(tokens: Tokens, scheme: Scheme): TintIssue[] {
+  const bg = tints(tokens, scheme);
+  const red = roleColours(tokens, scheme).danger;
+  return TINT_PAIRS.map((p) => ({ ...p, ratio: contrast(p.fg === 'danger' ? red : tokens[p.fg], bg[p.tint]) })).filter((p) => p.ratio < p.min);
+}
+
+// More of the kit's colours, warned about the same way (#1054): the fixed red as words on each surface, its label, and an agent's initial (in
+// `text`) on its badge, at 4.5:1; and each control indicator at 3:1 (ADR-0102 item 6, themes/tints.ts `INDICATORS`). An indicator
+// pair that a refusal or a text warning already asks at least as much of is not checked twice (an accent below 3:1 on a surface is
+// refused at 4.5:1; one on its own tint is a 4.5:1 warning), so a person sees each problem once.
+export const KIT_PAIRS: readonly { fg: KitColour; bg: KitColour; min: number }[] = [
+  ...SURFACES.map((bg) => ({ fg: 'danger' as const, bg, min: 4.5 })),
+  { fg: 'on-danger', bg: 'danger', min: 4.5 }, // the label on the red: both fixed (tints.ts), so it never fails, but it is asked
+  ...AGENT_COLOUR_NAMES.map((n) => ({ fg: 'text' as const, bg: `avatar-${n}` as const, min: 4.5 })),
+];
+const pairKey = (fg: string, bg: string) => `${fg}/${bg}`;
+// The most this module asks of a pair of kit colours: a refusal, a warning, or 0 for a pair it never checks.
+const ASKED = new Map<string, number>();
+const ask = (fg: string, bg: string, min: number) => ASKED.set(pairKey(fg, bg), Math.max(min, ASKED.get(pairKey(fg, bg)) ?? 0));
+for (const p of CONTRAST_PAIRS) ask(p.fg, p.bg, p.min);
+for (const p of TINT_PAIRS) ask(p.fg, `tint-${p.tint}`, p.min);
+for (const p of KIT_PAIRS) ask(p.fg, p.bg, p.min);
+// Each indicator pair once, for the first control that draws it, unless a stricter check above already covers it.
+export const CONTROL_PAIRS: readonly { control: Control; fg: KitColour; bg: KitColour; min: number }[] = INDICATORS
+  .flatMap((r) => r.bg.map((bg) => ({ control: r.control, fg: r.fg, bg, min: 3 })))
+  .filter((p, i, all) => (ASKED.get(pairKey(p.fg, p.bg)) ?? 0) < p.min && all.findIndex((q) => q.fg === p.fg && q.bg === p.bg) === i);
+for (const p of CONTROL_PAIRS) ask(p.fg, p.bg, p.min);
+export const requiredContrast = (fg: KitColour, bg: KitColour): number => ASKED.get(pairKey(fg, bg)) ?? 0;
+
+export interface KitIssue { fg: KitColour; bg: KitColour; ratio: number; min: number }
+export interface ControlIssue extends KitIssue { control: Control }
+// Every warning about a theme that its surface pairs accept, in the order the editor lists them.
+export function themeWarnings(tokens: Tokens, scheme: Scheme): ThemeIssue[] {
+  const c = kitPalette(tokens, scheme, agentColours(tokens));
+  const at = <P extends { fg: KitColour; bg: KitColour; min: number }>(p: P) => ({ ...p, ratio: contrast(c[p.fg], c[p.bg]) });
+  return [
+    ...tintIssues(tokens, scheme).map((w): ThemeIssue => ({ code: 'tint-contrast', ...w })),
+    ...KIT_PAIRS.map(at).filter((p) => p.ratio < p.min).map((w): ThemeIssue => ({ code: 'kit-contrast', ...w })),
+    ...CONTROL_PAIRS.map(at).filter((p) => p.ratio < p.min).map((w): ThemeIssue => ({ code: 'control-contrast', ...w })),
+  ];
+}
+
 // ---- Theme files --------------------------------------------------------------------------------------------------------------
 
 // The file people import and export. Tokens it leaves out come from the default theme of its scheme.
@@ -165,8 +239,13 @@ export type ThemeIssue =
   | { code: 'unknown-token'; token: string }
   | { code: 'derived-token'; token: string; base: TokenName }
   | { code: 'bad-value'; token: TokenName }
-  | ({ code: 'contrast' } & ContrastIssue);
-export type ParsedTheme = { ok: true; name: string; scheme: Scheme; tokens: Tokens } | { ok: false; issues: ThemeIssue[] };
+  | ({ code: 'contrast' } & ContrastIssue)
+  | ({ code: 'tint-contrast' } & TintIssue)
+  | ({ code: 'kit-contrast' } & KitIssue)
+  | ({ code: 'control-contrast' } & ControlIssue);
+// `warnings` (only when there are some) are problems that do not refuse the theme (`themeWarnings`): text and controls that would be
+// hard to see in the kit's colours.
+export type ParsedTheme = { ok: true; name: string; scheme: Scheme; tokens: Tokens; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 // Control and bidi characters never reach the screen in a name someone else wrote.
@@ -195,7 +274,9 @@ export function parseTheme(value: unknown): ParsedTheme {
   }
   // Contrast is judged only on colours that were all readable: a bad value already says what is wrong.
   if (!issues.some((i) => i.code === 'bad-value')) for (const c of contrastIssues(tokens)) issues.push({ code: 'contrast', ...c });
-  return issues.length > 0 ? { ok: false, issues: dedupe(issues) } : { ok: true, name, scheme, tokens };
+  if (issues.length > 0) return { ok: false, issues: dedupe(issues) };
+  const warnings = themeWarnings(tokens, scheme);
+  return warnings.length > 0 ? { ok: true, name, scheme, tokens, warnings } : { ok: true, name, scheme, tokens };
 }
 
 function dedupe(issues: ThemeIssue[]): ThemeIssue[] {
@@ -214,24 +295,6 @@ export function themeFile(theme: Pick<Theme, 'scheme' | 'tokens'>, name: string)
   return { 'agora-theme': THEME_FORMAT, name, scheme: theme.scheme, tokens: { ...theme.tokens } };
 }
 export const serialiseTheme = (file: ThemeFile) => JSON.stringify(file, null, 2);
-
-// ---- Agent colours -------------------------------------------------------------------------------------------------------------
-
-// The colours agents are told apart by (an agent's tile edge, the second word of its name: design/tokens.css `--agent-*`). They are
-// not theme tokens a person sets: a theme gets the set that shows best on its own surfaces, whatever its scheme says (a theme in the
-// Light slot may have dark surfaces). Dark and Light draw them from design/tokens.css; a test keeps these values equal to it.
-export const AGENT_COLOUR_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'] as const;
-export type AgentColourName = (typeof AGENT_COLOUR_NAMES)[number];
-export const AGENT_COLOURS: Readonly<Record<Scheme, Readonly<Record<AgentColourName, string>>>> = {
-  dark: { amber: '#ffb454', teal: '#4fd1c5', violet: '#a78bfa', rose: '#fb7185', slate: '#94a3b8', sky: '#7dd3fc', mint: '#86efac' },
-  light: { amber: '#b45309', teal: '#0f766e', violet: '#6d28d9', rose: '#be123c', slate: '#475569', sky: '#0369a1', mint: '#15803d' },
-};
-const AGENT_SURFACES = ['surface-0', 'surface-1', 'surface-2'] as const;
-const worstContrast = (set: Readonly<Record<AgentColourName, string>>, tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>) =>
-  Math.min(...AGENT_COLOUR_NAMES.flatMap((n) => AGENT_SURFACES.map((s) => contrast(set[n], tokens[s]))));
-export function agentColours(tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>): Readonly<Record<AgentColourName, string>> {
-  return worstContrast(AGENT_COLOURS.dark, tokens) >= worstContrast(AGENT_COLOURS.light, tokens) ? AGENT_COLOURS.dark : AGENT_COLOURS.light;
-}
 
 // ---- Applying -----------------------------------------------------------------------------------------------------------------
 

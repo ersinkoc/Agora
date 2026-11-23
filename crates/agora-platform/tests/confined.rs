@@ -141,3 +141,106 @@ fn the_real_path_of_a_held_folder_is_the_kernels_spelling() {
     let sub = root.subdir(OsStr::new("Sub"), false).unwrap();
     assert_eq!(sub.real_path().unwrap(), d.join("Sub"));
 }
+
+/// #1000: a file is read through the held folder; nothing there is `NotFound`, anything but a regular file is refused, not followed.
+#[test]
+fn a_file_is_read_through_the_handle_and_anything_else_is_refused() {
+    let d = tmp();
+    fs::write(d.join("f"), "one").unwrap();
+    fs::create_dir(d.join("sub")).unwrap();
+    let root = ConfinedDir::open_root(&d).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut root.open_read(OsStr::new("f")).unwrap(), &mut text)
+        .unwrap();
+    assert_eq!(text, "one");
+    assert_eq!(
+        root.open_read(OsStr::new("missing")).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let e = root.open_read(OsStr::new("sub")).unwrap_err();
+    assert_ne!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+    for bad in ["..", "a/b", ""] {
+        assert!(
+            not_confined(&root.open_read(OsStr::new(bad)).unwrap_err()),
+            "{bad:?}"
+        );
+    }
+    let outside = tmp();
+    if agora_platform::link_dir(&outside, &d.join("l")).is_ok() {
+        let e = root.open_read(OsStr::new("l")).unwrap_err();
+        assert_ne!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+    }
+}
+
+/// #1000: a link at the name, to a file or to nothing, is refused (never `NotFound`), and a FIFO is refused without waiting.
+#[cfg(unix)]
+#[test]
+fn a_file_link_or_a_fifo_is_not_read() {
+    let d = tmp();
+    let outside = tmp().join("target.txt");
+    fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, d.join("l")).unwrap();
+    std::os::unix::fs::symlink(d.join("nothing"), d.join("dangling")).unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(d.join("p"))
+        .status()
+        .unwrap()
+        .success());
+    let root = ConfinedDir::open_root(&d).unwrap();
+    for name in ["l", "dangling", "p"] {
+        let e = root.open_read(OsStr::new(name)).unwrap_err();
+        assert!(not_confined(&e), "{name}: {e}");
+    }
+}
+
+/// #1000: the lock file is opened in the folder the handle holds, even when that folder was renamed away and another put at its
+/// path; it is private and opened again as the same file.
+#[test]
+fn the_lock_is_opened_in_the_held_folder_not_one_put_at_its_path() {
+    let base = tmp();
+    let d = base.join("agents");
+    fs::create_dir(&d).unwrap();
+    let root = ConfinedDir::open_root(&d).unwrap();
+    let aside = base.join("held");
+    if fs::rename(&d, &aside).is_err() {
+        return; // this system does not rename a folder held open
+    }
+    fs::create_dir(&d).unwrap();
+    let lock = root.open_lock(OsStr::new(".lock")).unwrap();
+    assert!(lock.metadata().unwrap().is_file());
+    drop(lock);
+    assert!(aside.join(".lock").is_file());
+    assert!(!d.join(".lock").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(aside.join(".lock"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+    // An existing lock file is opened again (never truncated).
+    fs::write(aside.join(".lock"), "123").unwrap();
+    let mut again = root.open_lock(OsStr::new(".lock")).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut again, &mut text).unwrap();
+    assert_eq!(text, "123");
+    assert!(not_confined(
+        &root.open_lock(OsStr::new("a/b")).unwrap_err()
+    ));
+}
+
+/// #1000: a link at the lock's name is refused, never followed.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_lock_name_is_refused() {
+    let d = tmp();
+    let outside = tmp().join("target");
+    fs::write(&outside, "keep").unwrap();
+    std::os::unix::fs::symlink(&outside, d.join(".lock")).unwrap();
+    let root = ConfinedDir::open_root(&d).unwrap();
+    let e = root.open_lock(OsStr::new(".lock")).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep");
+}
