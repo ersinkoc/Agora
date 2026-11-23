@@ -62,6 +62,7 @@ approval-open-agent = { $name } ajanını aç
 approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
 approval-failed = Yanıt iletilemedi. Yeniden deneyin.
 approval-forbidden = Bu cihazdan bu proje için yanıt veremezsiniz: orada başka projelerle sınırlı. Bu projede çalışan birine sorun.
+approval-role = Rolünüz bu proje için yanıt vermenize izin vermiyor. Sahibine ya da bu projede çalışan birine sorun.
 approval-no-longer-valid = Bu istek artık geçerli değil. İlgili ajan sona erdi veya yeniden başladı.
 approval-ran-out = Bu isteğin süresi doldu. Ajanın denetimlerinden yeniden isteyin.
 # ADR-0101: "Hep izin ver", ajanın hatırladığı bir yanıt. Oturum sözleri ADR'nindir; hiçbir tür henüz böyle işaretli değil, pencere "-kept" sözlerini gösterir.
@@ -619,6 +620,8 @@ start-identity-change = Bu klasörü değişen proje kimliğiyle eşleştir
 start-directory-unsupported = Seçilen klasörde ajan başlatmak için bu makineyi güncelleyin.
 start-directory-failed = Klasör seçilemedi. Yolu ve erişim izinlerini kontrol edin.
 start-directory-forbidden = Bu cihaz bu makinede başka projelerle sınırlı. Üzerinde çalıştığınız bir projenin klasörünü seçin ya da makinenin sahibine sorun.
+start-directory-role = Rolünüz bu makinede klasör seçmenize izin vermiyor. Sahibine sorun.
+start-role = Rolünüz burada ajan başlatmanıza izin vermiyor. Gerekirse sahibine sorun.
 workspace-shared = Ortak klasör · değişiklikler çalışma alanına ait
 filter-project = Proje
 filter-all-projects = Tüm projeler
@@ -779,6 +782,7 @@ resume-failed-unsupported = O makine henüz ajanları devam ettiremiyor. Güncel
 resume-failed-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce durdurun.
 resume-failed-offline = O makine çevrimdışı.
 resume-failed-forbidden = Bu cihaz bu makinede başka projelerle sınırlı, bu yüzden bu ajanı başlatamaz.
+resume-failed-role = Rolünüz bu ajanı yeniden başlatmanıza izin vermiyor. Sahibine sorun.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan

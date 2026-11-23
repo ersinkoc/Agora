@@ -2260,7 +2260,9 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
     };
     // A device the machine does not trust cannot look.
     assert_eq!(
-        session.list_folder("laptop", &folder, sign(&stranger, "list", &folder, "", "")),
+        session
+            .list_folder("laptop", &folder, sign(&stranger, "list", &folder, "", ""))
+            .map_err(|e| e.code),
         Err("approval.signature_invalid".to_string())
     );
     // The trusted one sees the subfolders, the project marked; one level down works the same way.
@@ -2280,7 +2282,9 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
     assert!(inside.entries.is_empty(), "{inside:?}");
     // A signature for one folder does not list another.
     assert_eq!(
-        session.list_folder("laptop", &folder, sign(&device, "list", &app, "", "")),
+        session
+            .list_folder("laptop", &folder, sign(&device, "list", &app, "", ""))
+            .map_err(|e| e.code),
         Err("approval.signature_invalid".to_string())
     );
     // Chosen: inspected, then an agent starts there.
