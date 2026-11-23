@@ -14,6 +14,7 @@ export function CopyChip({ text, label }: { text: string; label?: string }) {
     const el = code.current;
     const sel = typeof window !== 'undefined' ? window.getSelection() : null;
     if (el && sel) { sel.removeAllRanges(); sel.selectAllChildren(el); }
+    clearTimeout(timer.current);
     setState('selected');
   };
   const copy = async () => {

@@ -182,6 +182,8 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div className="fleet-console" data-gallery="home-first-run">
         <FleetEmpty kind="first-run" machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: 0 }]} onStart={onStart} />
       </div>
+      {/* Home with Agora out of reach and nothing known. (Home with no machine is not here: its join command names this page's address.) */}
+      <div className="fleet-console" data-gallery="home-offline"><FleetEmpty kind="offline" machines={[]} onRetry={() => {}} /></div>
       <div className="gallery__row">
         <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>

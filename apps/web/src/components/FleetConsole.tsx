@@ -195,6 +195,7 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind
   const [adding, setAdding] = useState(false);
   const joinId = useId();
   const online = machines.filter((m) => m.online);
+  const joining = adding || !!pairing?.window?.open;
   if (kind === 'connecting') return <div className="fleet-empty fleet-empty--wide" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p>
       <div className="fleet-grid w-full" aria-hidden>{[0, 1, 2].map((i) => <div key={i} className="tile tile--compact"><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-1/2" /></div>)}</div></div>;
   if (kind === 'offline') {
@@ -216,10 +217,10 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind
         <div className="fleet-empty__actions">
           {online.length > 0 && onStart && <Button variant="primary" onClick={() => onStart(online.length === 1 ? online[0]?.id : undefined)}><Icon name="plus" />{t('action-start-agent')}</Button>}
           {/* Shows how a machine joins, here; it opens nothing by itself (the window for new machines has its own button). */}
-          <Button aria-expanded={adding} aria-controls={joinId} onClick={() => setAdding(!adding)}><Icon name="machine" />{t('fleet-add-machine')}</Button>
+          <Button aria-expanded={joining} aria-controls={joinId} onClick={() => setAdding(!adding)}><Icon name="machine" />{t('fleet-add-machine')}</Button>
         </div>
         {online.length > 0 && <div className="fleet-empty__step"><span className="fleet-empty__step-label">{t('fleet-firstrun-cli')}</span><CopyChip text="agora agent start codex --cwd /path/to/project" /></div>}
-        <div id={joinId} hidden={!adding} className="fleet-empty__join">{adding && <JoinSteps pairing={pairing} />}</div>
+        <div id={joinId} hidden={!joining} className="fleet-empty__join">{joining && <JoinSteps pairing={pairing} />}</div>
       </div>
     );
   }

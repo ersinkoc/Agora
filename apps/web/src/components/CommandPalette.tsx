@@ -20,16 +20,20 @@ export interface PaletteItem {
   keys?: string;
 }
 
-// The results as the list shows them: in groups, each group where its best match ranks (with no query, where its first entry stands),
-// and the entries of a group in rank order. Arrows, Enter and the highlighted row all follow this order, never the raw ranking.
-export function groupPalette(results: readonly PaletteItem[]): { group: PaletteGroup; items: PaletteItem[] }[] {
+// The headings in the order an empty query lists them.
+export const PALETTE_GROUPS: readonly PaletteGroup[] = ['go', 'agents', 'actions', 'places', 'tasks', 'appearance'];
+
+// The results as the list shows them: in groups, the entries of a group in rank order. With no query the groups come in their fixed order;
+// with one, each group sits where its best match ranks. Arrows, Enter and the highlighted row all follow this order, never the raw ranking.
+export function groupPalette(results: readonly PaletteItem[], fixedOrder = false): { group: PaletteGroup; items: PaletteItem[] }[] {
   const out = new Map<PaletteGroup, PaletteItem[]>();
   for (const r of results) {
     const g = r.group ?? 'actions';
     const list = out.get(g);
     if (list) list.push(r); else out.set(g, [r]);
   }
-  return [...out].map(([group, items]) => ({ group, items }));
+  const groups = [...out].map(([group, items]) => ({ group, items }));
+  return fixedOrder ? groups.sort((a, b) => PALETTE_GROUPS.indexOf(a.group) - PALETTE_GROUPS.indexOf(b.group)) : groups;
 }
 
 const optionId = (id: string) => `palette-${id}`;
@@ -39,7 +43,7 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  const groups = useMemo(() => groupPalette(rank(items, query, (i) => i.label)), [items, query]);
+  const groups = useMemo(() => groupPalette(rank(items, query, (i) => i.label), query.trim() === ''), [items, query]);
   const flat = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const shown = Math.min(active, Math.max(flat.length - 1, 0));
   const current = flat[shown];

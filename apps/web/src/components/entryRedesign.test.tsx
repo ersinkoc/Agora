@@ -56,6 +56,17 @@ describe('copy chip', () => {
     expect(button('Copy')).toBeTruthy(); // never claims a copy that did not happen
   });
 
+  it('a refusal right after a copy keeps its note (the Copied timer does not clear it)', async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('denied'));
+    setClipboard(writeText);
+    render(<CopyChip text="agora hub code" />);
+    await act(async () => { button('Copy').click(); });
+    await act(async () => { button('Copied').click(); });
+    await act(async () => { vi.advanceTimersByTime(2500); });
+    expect($('[role="status"]').textContent).toBe(t('copy-selected'));
+  });
+
   it('selects the text where there is no clipboard at all (an insecure origin)', async () => {
     setClipboard(undefined);
     render(<CopyChip text="agora agent start codex" />);
@@ -114,6 +125,14 @@ describe('the empty Home', () => {
     expect(panel.hidden).toBe(true);
   });
 
+  it('keeps an open window for new machines in view, with its Close button, even with Add a machine folded', () => {
+    const ui: PairingUi = { ...pairing(), window: { open: true, closesAtMs: Date.now() + 60_000, pending: 0 }, onClose: vi.fn().mockResolvedValue(true) };
+    render(<FleetEmpty kind="first-run" machines={[machine('n1')]} onStart={() => {}} pairing={ui} />);
+    const add = button(t('fleet-add-machine'));
+    expect(add.getAttribute('aria-expanded')).toBe('true');
+    expect(button(t('pair-window-close'))).toBeTruthy();
+  });
+
   it('with every machine offline it says so and offers no start, only Add a machine', () => {
     render(<FleetEmpty kind="first-run" machines={[machine('n1', { online: false })]} onStart={() => {}} />);
     expect($('.fleet-empty__text').textContent).toBe(t('fleet-firstrun-offline'));
@@ -128,16 +147,17 @@ describe('command palette', () => {
     { id: 'next', label: 'Next that needs me', run: () => run('next'), group: 'go', icon: 'bell', keys: 'N' },
     { id: 'home', label: 'Go to Home', run: () => run('home'), group: 'go', icon: 'grid' },
     { id: 'start', label: 'Start an agent', run: () => run('start'), icon: 'plus' },
-    { id: 'agent-n1/a1', label: 'Open claude · amber', run: () => run('agent'), group: 'agents', agent: { accent: 'var(--agent-amber)', kind: 'claude' } },
     { id: 'theme-dark', label: 'Theme: Dark', run: () => run('theme'), group: 'appearance', icon: 'sun' },
+    { id: 'agent-n1/a1', label: 'Open claude · amber', run: () => run('agent'), group: 'agents', agent: { accent: 'var(--agent-amber)', kind: 'claude' } },
   ];
   const selected = () => $$('[role="option"][aria-selected="true"]').map((o) => o.querySelector('.palette__label')?.textContent);
   const input = () => $<HTMLInputElement>('input[role="combobox"]');
 
-  it('groups the results under headings, with an icon or the agent avatar and the real shortcut', () => {
+  it('groups the results under headings in a fixed order, with an icon or the agent avatar and the real shortcut', () => {
     render(<CommandPalette items={items()} onClose={() => {}} />);
     const groups = $$('[role="listbox"] > [role="group"]');
-    expect(groups.map((g) => document.getElementById(g.getAttribute('aria-labelledby') ?? '')?.textContent)).toEqual(['Go to', 'Actions', 'Agents', 'Appearance']);
+    // Agents come second although they are listed last (after the themes), as the headings' order says.
+    expect(groups.map((g) => document.getElementById(g.getAttribute('aria-labelledby') ?? '')?.textContent)).toEqual(['Go to', 'Agents', 'Actions', 'Appearance']);
     const agent = $$('[role="option"]').find((o) => o.textContent?.includes('claude')) as HTMLElement;
     expect(agent.querySelector('.kit-avatar')?.textContent).toBe('C');
     expect(agent.querySelector('.palette__icon')).toBeNull();
@@ -155,18 +175,18 @@ describe('command palette', () => {
     render(<CommandPalette items={items(run)} onClose={onClose} />);
     expect(selected()).toEqual(['Next that needs me']);
     key(input(), 'ArrowDown');
-    key(input(), 'ArrowDown'); // from "Go to" into "Actions"
-    expect(selected()).toEqual(['Start an agent']);
-    expect(input().getAttribute('aria-activedescendant')).toBe('palette-start');
+    key(input(), 'ArrowDown'); // from "Go to" into "Agents"
+    expect(selected()).toEqual(['Open claude · amber']);
+    expect(input().getAttribute('aria-activedescendant')).toBe('palette-agent-n1/a1');
     key(input(), 'ArrowDown');
     key(input(), 'ArrowDown');
     key(input(), 'ArrowDown'); // stops at the last row
     expect(selected()).toEqual(['Theme: Dark']);
     key(input(), 'ArrowUp');
-    expect(selected()).toEqual(['Open claude · amber']);
+    expect(selected()).toEqual(['Start an agent']);
     key(input(), 'Enter');
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(run).toHaveBeenCalledWith('agent');
+    expect(run).toHaveBeenCalledWith('start');
   });
 
   it('a query regroups the results; arrows and Enter follow the rows as shown, not the raw ranking', () => {
@@ -200,16 +220,18 @@ describe('command palette', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('keeps each group where its best match ranks, and lists ungrouped entries as actions', () => {
+  it('keeps each group where its best match ranks once there is a query, the fixed order without one; ungrouped entries are actions', () => {
     const a = (id: string, group?: PaletteItem['group']): PaletteItem => ({ id, label: id, run: () => {}, group });
-    expect(groupPalette([a('x', 'agents'), a('y'), a('z', 'agents'), a('w', 'go')]).map((g) => [g.group, g.items.map((i) => i.id)]))
-      .toEqual([['agents', ['x', 'z']], ['actions', ['y']], ['go', ['w']]]);
+    const ranked = [a('t', 'appearance'), a('x', 'agents'), a('y'), a('z', 'agents'), a('w', 'go')];
+    const shape = (g: ReturnType<typeof groupPalette>) => g.map((x) => [x.group, x.items.map((i) => i.id)]);
+    expect(shape(groupPalette(ranked))).toEqual([['appearance', ['t']], ['agents', ['x', 'z']], ['actions', ['y']], ['go', ['w']]]);
+    expect(shape(groupPalette(ranked, true))).toEqual([['go', ['w']], ['agents', ['x', 'z']], ['actions', ['y']], ['appearance', ['t']]]);
   });
 
   it('speaks Turkish', () => {
     setLanguage('tr');
     render(<CommandPalette items={items()} onClose={() => {}} />);
-    expect($$('.palette__heading').map((h) => h.textContent)).toEqual(['Git', 'Eylemler', 'Ajanlar', 'Görünüm']);
+    expect($$('.palette__heading').map((h) => h.textContent)).toEqual(['Şuraya git', 'Ajanlar', 'Eylemler', 'Görünüm']);
   });
 });
 

@@ -325,7 +325,7 @@
   .signin-wait__status { @apply m-0 flex items-center justify-center gap-2 text-ink; }
   .signin-wait__number { @apply grid justify-items-center gap-1 rounded-m border px-4 py-3; background: var(--tint-accent); border-color: var(--line-accent); }
   .signin-wait__digits { @apply font-mono text-ink tracking-wide; font-size: var(--text-28); font-weight: 600; }
-  .signin-wait__label { @apply text-muted; font-size: var(--text-caption); }
+  .signin-wait__label { @apply font-medium text-ink; font-size: var(--text-caption); }
   .signin-wait__actions { @apply grid gap-2; }
 
   /* The command palette: one overlay (raised surface, the overlay shadow), groups with a quiet heading, a leading icon or the agent's

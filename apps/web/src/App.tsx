@@ -541,7 +541,7 @@ export function App() {
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines'), group: 'go', icon: 'machine' },
     ...paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
       showProject: (id) => { go('#/'); requestProject(id); }, showPairing, lock: hub ? lockNow : undefined }),
-    ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device'), group: 'go' as const, icon: 'settings' as const }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit'), group: 'go' as const, icon: 'history' as const }] : []),
+    ...(hub ? [{ id: 'audit', label: t('audit-link'), run: () => go('#/audit'), group: 'go' as const, icon: 'history' as const }] : []),
     // The language, here too: on a phone the title bar has no room for its picker.
     ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); }, group: 'appearance' as const, icon: 'globe' as const })),
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme, group: 'appearance', icon: 'pencil' },
