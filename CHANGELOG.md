@@ -13,6 +13,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A malformed `%` escape in a window link (`#/agent/…`, `#/machines/…`) no longer blanks the page, and a file view no longer stops responding on highlighted text with an unclosed tag.
 - `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
 - A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
+- `agora pair open` on a hub that listens on every address now suggests an address this computer has now, and lists an address its certificate still names but no interface has any more (an old DHCP lease, or an address in front of a router) apart, as one that may not lead here; on a hub that listens on this computer only and a computer on several private networks, it lists each of this computer's addresses for you to choose the one the other machine is on, instead of picking the first (#993).
 - A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version's records (its version and its program's name) as they were, or says `rollback_incomplete` when it could not put them back.
 
 ## 0.3.35
