@@ -281,14 +281,21 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
   and at every start for each agent not taken up, with any unfinished write. A failed removal keeps the report unavailable for the
   lifetime of the node and is retried on the next kept-session change or a clean flush. A new node rebuilds those marks when its
-  startup sweep cannot remove a report for an agent it did not take up. On take-up the node puts the reports back on the agent
-  (bounded and judged again as a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the
+  startup sweep cannot remove a report for an agent it did not take up. The file has only what the old node recorded, and a
+  report it had read (the holder counts it given) but not yet recorded when it stopped or was killed is not in it (#1080). So on
+  take-up the newest `session/options`, `session/config` and `session/commands` of the agent's session (`Entry::adapter_session`, or a
+  report that names no session) among the `seen` lines replace the file's copy of that kind; a kind with no report there keeps the
+  file's (ADR-0104 decision 1). Only the adapter's own reports set these and each replaces the last, so the newest one the holder still
+  has is at least as new as the file's. The node puts the reports back on the agent (bounded and judged again as a report is) and
+  re-states them from the supervisor's copy (`Supervisor::session_events`), which also records them in the file again, so the
   window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
-  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
-  conversation is not shown (the chat history is in memory, ADR-0089; #931).
+  (`skips_permissions_now`) until the agent reports new ones. Its `AgentStarted` says `same_process` (ADR-0104 decision 2), so the hub and the
+  window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering when it stopped (up to 5 s) is lost.
+  Not built: its earlier conversation is not shown (the chat history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
-- **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
+- **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
+  reports above; `pending_approvals` is its requests), which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an
   `ApprovalRequest` event exactly as a new one, so the person is **asked again**: the node never answers it, and no line of the replay is a decision. A
   request the old node had already shown and the person had already answered shows the agent going on and is not asked again; one that cannot be told apart
@@ -299,13 +306,16 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 ### Limits, plainly
 - A request the old node had read, before it was killed and with fewer than 1 MiB of output after it, is rebuilt. A request more than 1 MiB of output back is not
   (the agent waits and the person can cancel the turn).
-- Lines in flight to a node that dies are lost (at most once). What the old node had *not yet turned into an event* when it was let go is lost with it.
-- Mode, model and configuration lists an adapter reported before the restart and not within the last 1 MiB are not known until it reports them again.
+- Lines in flight to a node that dies are lost (at most once). What the old node had *not yet turned into an event* when it was let go is lost with it,
+  except what is taken from `seen` (a waiting request, and the newest options, config and commands).
+- Mode, model, configuration and command lists come from the kept file and the newest report in `seen` (ADR-0104). A report the old node read and did
+  not record, when 1 MiB of newer output then pushed it out of the holder, is not known until the adapter reports again. Chat, usage and state are
+  never taken from `seen` (they append, so reading them twice would show or count them twice): those the old node read and did not record are lost.
 - "Kept" against "continued" in the window (ADR-0093 decision 4) is **not built**: the snapshot has no field that says it without a schema change (`still_running`
   says the process runs, not that it survived a node). Left for build-order step 4.
 - **Delivered is forgotten as new.** A line is marked given when the holder takes it for a reply, before the reply is written. A reply that then
-  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines are rebuilt. Anything
-  else in them (chat, state, usage) is lost to the next node.
+  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines and the newest
+  options, config and commands are taken. Anything else in them (chat, state, usage) is lost to the next node.
 - **Evicted but delivered is not counted.** `dropped` counts only bytes pushed out of the buffer before any node was given them. An
   `approval/request` that a node had been given and that 1 MiB of newer output then pushed out is neither rebuilt nor counted. (Counting it would
   need a new field in `PipeData`, a new tag; not done.)
