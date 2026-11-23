@@ -1342,7 +1342,7 @@ pub struct Policy {
     /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
     pub credentials_malformed: Vec<String>,
     /// ADR-0089 decision 2: how much of each structured agent's chat history the node keeps on its disk (`chat.history_max_bytes`,
-    /// at most 256 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
+    /// at most the default 32 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
     pub history: crate::transcript::Limits,
 }
 
@@ -2456,16 +2456,36 @@ impl Node {
         };
         // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
         let transcript_writer = {
-            let sup = Arc::clone(&supervisor);
+            let (sup, ledger) = (Arc::clone(&supervisor), Arc::clone(&ledger));
             crate::transcript::spawn_writer(
                 Arc::clone(&chat),
-                Box::new(move || {
-                    sup.lock()
+                // ADR-0089 decision 2 (review of #1103, N6): a running agent's file and one offered for Resume are kept; an ended one
+                // ages from when it ended (the ledger's last write for it), one the ledger no longer knows from its file.
+                Box::new(move |names: &[String]| {
+                    use crate::transcript::Kept;
+                    let running: std::collections::HashSet<String> = sup
+                        .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .list()
                         .into_iter()
                         .filter(|v| v.running)
                         .map(|v| v.id.as_str().to_string())
+                        .collect();
+                    names
+                        .iter()
+                        .filter_map(|n| {
+                            if running.contains(n) {
+                                return Some((n.clone(), Kept::Keep));
+                            }
+                            let e = ledger.get(n)?;
+                            let kept = if e.ended {
+                                Kept::EndedAt(e.updated_at_ms)
+                            } else {
+                                // Interrupted (offered for Resume), or still running as far as the ledger knows.
+                                Kept::Keep
+                            };
+                            Some((n.clone(), kept))
+                        })
                         .collect()
                 }),
                 Arc::clone(&stop),
@@ -2837,6 +2857,11 @@ fn chat_event(
         }
         SupervisorEvent::OutputDropped { agent, bytes } => {
             chat.output_dropped(agent, *bytes, now);
+        }
+        // Review of #1103 (B1): a resumed session's replay of its conversation is shown only when this node holds none of it (its file
+        // was purged, never written, or the agent never spoke here).
+        SupervisorEvent::ReplayedChat { agent, items } => {
+            chat.replayed(agent, items, now);
         }
         _ => {}
     }
@@ -3714,9 +3739,10 @@ mod announce_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ADR-0089 decision 7: the transcripts folder is among what a confined agent may not reach.
+    /// ADR-0089 decision 7: the transcripts folder is among the paths the node protects for every confined agent (a confined agent
+    /// that tries to read one is in `tests/sandboxed_agent.rs`).
     #[test]
-    fn a_confined_agent_cannot_reach_the_transcripts() {
+    fn the_transcripts_folder_is_among_the_paths_confinement_protects() {
         // Built from the (absolute) temporary folder, so the same on every OS: a data folder in the node's own home, and one elsewhere.
         let tmp = std::env::temp_dir().join(format!("agora-test-private-{}", std::process::id()));
         let home = tmp.join("agora-home");
@@ -3777,7 +3803,7 @@ chat.history_days = 365
         assert_eq!(
             (p.history.max_bytes, p.history.days),
             (
-                crate::transcript::HARD_MAX_BYTES,
+                crate::transcript::DEFAULT_MAX_BYTES,
                 crate::transcript::DEFAULT_DAYS
             )
         );

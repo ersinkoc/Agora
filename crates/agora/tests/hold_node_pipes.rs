@@ -99,6 +99,20 @@ impl Rig {
         Rig { root, folder }
     }
 
+    /// A home whose kind `k` is the fake ACP agent behind `agora acp-bridge`, an agent that loads its session on resume and replays its
+    /// conversation as it does (`--load-session`).
+    fn acp(tag: &str) -> Rig {
+        let rig = Self::new(tag);
+        let argv = serde_json::to_string(&[fake_agent(), "--acp".into(), "--load-session".into()])
+            .expect("argv");
+        std::fs::write(
+            rig.root.join("manifests/k.toml"),
+            format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = {{ argv = {argv} }}\n"),
+        )
+        .expect("manifest");
+        rig
+    }
+
     fn cfg(&self) -> NodeConfig {
         NodeConfig {
             resume_all: false,
@@ -1622,4 +1636,86 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
         "the delivered decision is recorded as not approved: {resolved:#?}"
     );
     assert!(matches!(answer, Ok(Ok(_))), "{answer:?}");
+}
+
+/// Review of #1103 (B1): an ACP agent that loads its session when it is resumed replays its conversation (`session/load`), and the
+/// bridge passes the replay on as chat. The node already shows that conversation from its file, so the replay is not shown or written a
+/// second time: every turn is there once after each resume, in the window and on disk.
+#[test]
+fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
+    let _serial = serial();
+    // The bridge is this build's `agora` (the test binary is not).
+    std::env::set_var("AGORA_ACP_BRIDGE", AGORA);
+    let rig = Rig::acp("replay");
+    let node = rig.node_without_holder();
+    let id = rig.launch(&node);
+    wait_for("the agent to be idle", || {
+        state_of(&node, &id) == Some(AgentState::Idle)
+    });
+    prompt(&node, &id, "hello-1");
+    wait_for("the first answer", || said(&node, &id, "hello-1"));
+    prompt(&node, &id, "hello-2");
+    wait_for("the second answer", || said(&node, &id, "hello-2"));
+    wait_for("both turns on disk", || {
+        on_disk(&rig, &id, "hello-1") && on_disk(&rig, &id, "hello-2")
+    });
+    // Contained, not equal: replayed pieces may arrive joined into one entry.
+    let count = |node: &Node, text: &str| {
+        chat(node, &id)
+            .iter()
+            .filter(|e| e.text.contains(text))
+            .count()
+    };
+    let on_disk_count = |text: &str| {
+        std::fs::read_to_string(transcript_file(&rig, &id))
+            .unwrap_or_default()
+            .matches(text)
+            .count()
+    };
+    let texts = |node: &Node| {
+        chat(node, &id)
+            .iter()
+            .filter(|e| e.kind == v1::ChatKind::Text as i32)
+            .count()
+    };
+    let before = texts(&node);
+    drop(node);
+    for round in 0..2 {
+        let node = rig.node_without_holder();
+        wait_for("the agent to be offered for resume", || {
+            node.ledger.get(&id).is_some_and(|e| e.interrupted())
+        });
+        let mut c = Client::connect(node.socket().unwrap()).expect("control");
+        let r = c
+            .call(Cmd::AgentResume(v1::AgentResume {
+                agent_id: id.clone(),
+                new_session: false,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        wait_for("the resumed agent to be idle", || {
+            state_of(&node, &id) == Some(AgentState::Idle)
+        });
+        // Nothing of the replay was added: as many of the agent's texts as before the restart (and one per round since).
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(texts(&node), before + round, "{:#?}", chat(&node, &id));
+        let word = format!("after-{round}");
+        prompt(&node, &id, &word);
+        wait_for("the answer after the resume", || said(&node, &id, &word));
+        // The replay came before the session's answer, so it was taken in before the answer to this prompt.
+        for text in ["hello-1", "hello-2"] {
+            assert_eq!(
+                count(&node, text),
+                1,
+                "{text} in round {round}: {:#?}",
+                chat(&node, &id)
+            );
+        }
+        wait_for("the new turn on disk", || on_disk(&rig, &id, &word));
+        for text in ["hello-1", "hello-2"] {
+            assert_eq!(on_disk_count(text), 1, "{text} on disk in round {round}");
+        }
+        drop(node);
+    }
 }

@@ -257,8 +257,8 @@ fn transcript(args: &[String]) -> ExitCode {
         }
     };
     println!(
-        "push one entry: memory only {:.0} ns, saving {:.0} ns | take a batch of {} under the lock: p50 {:.1} us, max {:.1} us | write it: p50 {:.2} ms, max {:.2} ms | seed from a {} byte file: p50 {:.2} ms, max {:.2} ms",
-        r.push_memory_ns, r.push_saving_ns, r.batch_entries, r.take_p50_us, r.take_max_us, r.write_p50_ms, r.write_max_ms,
+        "push one entry: memory only {:.0} ns, saving {:.0} ns | a 16 KiB one evicting: memory only {:.0} ns, saving {:.0} ns | take a batch of {} under the lock: p50 {:.1} us, max {:.1} us | write it: p50 {:.2} ms, max {:.2} ms | seed from a {} byte file: p50 {:.2} ms, max {:.2} ms",
+        r.push_memory_ns, r.push_saving_ns, r.push_large_memory_ns, r.push_large_saving_ns, r.batch_entries, r.take_p50_us, r.take_max_us, r.write_p50_ms, r.write_max_ms,
         r.seed_file_bytes, r.seed_p50_ms, r.seed_max_ms
     );
     if let Some(path) = out {

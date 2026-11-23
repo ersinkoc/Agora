@@ -2379,6 +2379,9 @@ impl<W: Write> Bridge<W> {
                         }
                     }
                     Some(Waiting::NewSession { node_id, resume_id }) => {
+                        // What a loaded session replayed reaches the node before the answer, text still held for its window too: the
+                        // node takes everything before the answer as the replay (review of #1103, B1).
+                        self.flush_text()?;
                         let sid = msg
                             .pointer("/result/sessionId")
                             .and_then(Value::as_str)

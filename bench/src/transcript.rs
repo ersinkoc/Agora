@@ -22,6 +22,12 @@ pub struct TranscriptReport {
     /// Mean time to add one 200-byte text entry to a full ring, memory only and saving.
     pub push_memory_ns: f64,
     pub push_saving_ns: f64,
+    /// Review of #1103 (N9): the same with 16 KiB entries, 300 between two batches: the 256 KiB ring holds 16 of them, so nearly every
+    /// entry leaves it before its batch and the saving board copies it aside (`keep_unsaved`, at most 1 MiB kept).
+    #[serde(default)]
+    pub push_large_memory_ns: f64,
+    #[serde(default)]
+    pub push_large_saving_ns: f64,
     /// Entries in one batch, and the time under the board's lock to take it (p50, max).
     pub batch_entries: usize,
     pub take_p50_us: f64,
@@ -39,6 +45,27 @@ fn percentile(samples: &mut [Duration], p: f64) -> Duration {
     samples.sort();
     let i = ((samples.len() as f64 - 1.0) * p).round() as usize;
     samples.get(i).copied().unwrap_or_default()
+}
+
+/// Mean time to add one entry of `size` bytes, `per_batch` between two batches taken as the writer takes them (not timed).
+fn push_batched_ns(board: &ChatBoard, n: usize, size: usize, per_batch: usize) -> f64 {
+    let agent = AgentId::new("bench-batched");
+    let text = "z".repeat(size);
+    for _ in 0..agora_node::chat::MAX_ENTRIES {
+        board.push_item(&agent, &ChatItem::Text(text.clone()), 1);
+    }
+    let _ = board.take_unsaved();
+    let items: Vec<ChatItem> = (0..n).map(|_| ChatItem::Text(text.clone())).collect();
+    let mut spent = Duration::ZERO;
+    for chunk in items.chunks(per_batch) {
+        let start = Instant::now();
+        for item in chunk {
+            board.push_item(&agent, item, 1);
+        }
+        spent += start.elapsed();
+        let _ = board.take_unsaved();
+    }
+    spent.as_nanos() as f64 / n as f64
 }
 
 fn push_ns(board: &ChatBoard, n: usize) -> f64 {
@@ -92,6 +119,14 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         spent.as_nanos() as f64 / n as f64
     };
     let _ = saving.take_unsaved();
+    let large = 16 * 1024;
+    let push_large_memory_ns = push_batched_ns(&ChatBoard::new(), 30_000, large, 300);
+    let push_large_saving_ns = push_batched_ns(
+        &ChatBoard::saving(std::sync::Arc::clone(&store)),
+        30_000,
+        large,
+        300,
+    );
 
     // A busy agent's second: 300 entries of 200 bytes (about 64 KiB, the batch's size bound).
     let batch_entries = 300;
@@ -138,6 +173,8 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         commit: commit.to_string(),
         push_memory_ns,
         push_saving_ns,
+        push_large_memory_ns,
+        push_large_saving_ns,
         batch_entries,
         take_p50_us: us(percentile(&mut take, 0.5)),
         take_max_us: us(percentile(&mut take, 1.0)),

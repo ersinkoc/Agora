@@ -328,18 +328,32 @@ references are at main `9760e901`.
   (`<data>/transcripts/<id>.jsonl`, `0600` in a `0700` folder, a header line with the format version, one line per version of an entry with
   the call's tool and arguments and the plan mark beside it, a line for entries taken back out; every line carries the highest id given,
   and a rotated file or a fresh start's new file begins with a line holding only that, so the ids go on when no entry is left).
-  The chat path only marks changed ids; a writer thread takes the batch under the board's lock at most once a second or per 64 KiB, and
-  encodes, replaces the node's own secret values and appends after letting it go. A failed write drops the batch, keeps the ring and says
-  `chat.history_not_saved` once in that conversation. Bounds: `chat.history_max_bytes` (32 MiB, at most 256 MiB; the newest half kept in a new
-  file that says it was cut), `chat.history_days` (30, only lowered; files of agents that do not run, checked at start and hourly), 2 GiB
-  per node, `agora history purge`. The node seeds the ring from the file's end (at most 4 MiB) on take-up, before the ticker reads the
-  holder, and on resume (read before the resume, applied under the supervisor's lock once it went through, so a refused one changes
-  nothing); a fresh start moves the file aside as `<id>.earlier.jsonl` (replacing an older one) and numbers on after it. Tested with a kill then take-up
-  (earlier turns with their ids, ids after them), a node that cannot write (one notice, the agent unaffected), and a tool call that
-  finishes after the restart (one entry, updated in place), in `hold_node_pipes`, plus node unit tests and `agora-bench transcript`.
-  Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
-  file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop does
-  not flush the last batch (step 5, now built).
+  - The chat path only marks changed ids; one writer thread takes the batch under the board's lock at most once a second or per 64 KiB,
+    and encodes, replaces the node's own secret values and appends after letting it go. It alone writes, rotates and moves files. A
+    failed write drops the batch (not retried), keeps the ring and says `chat.history_not_saved` once in that conversation.
+  - Secrets: the node's stored values and the environment variables its policy passes to agents, of 8 bytes or more, in every text and
+    JSON-escaped in a tool's arguments; a piece of 4 bytes or more at the edge of a text (a value streamed across two entries) or on the
+    middle cut of a long output, thought or tool arguments; ids never changed.
+  - Bounds: `chat.history_max_bytes` (32 MiB, only lowered, as ADR-0089 decision 2 says "lowers ... the defaults"; the newest half
+    kept in a new file that says it was cut), `chat.history_days` (30, only lowered; 0: once the agent ended), counted from when the agent
+    ended as the ledger says (the file's time is set to it, so it holds after the ledger forgets the agent), never for one running or
+    offered for Resume; 2 GiB per node; `agora history purge`.
+  - Seeding: the ring is filled from the file's end (at most 4 MiB) on take-up, before the ticker reads the holder, and on resume (read
+    before the resume, applied under the supervisor's lock once it went through, so a refused one changes nothing). Seeded entries are
+    held to the live path's shapes and bounds, ids below 2^52. A fresh start's file is moved aside (`<id>.earlier.jsonl`, replacing an
+    older one) by the writer before anything of the new session, and its ids go on after it.
+  - **Replay rule** (review of #1103, B1): an agent that loads its session on resume replays its conversation (ACP `session/load`,
+    passed on by the bridge as chat before it answers the session's start). The node takes what a resumed session said before that
+    answer as one replay, and shows it only when the agent's ring is empty (no file, `chat.history_max_bytes = 0`, purged); otherwise
+    the ring already holds that conversation, and the replay is neither shown nor written again. This also stops a restart after a
+    crash, within one node, from showing the conversation twice.
+  - Tested with a kill then take-up (earlier turns with their ids, ids after them), a node that cannot write (one notice, the agent
+    unaffected), a tool call that finishes after the restart (one entry, updated in place) and an ACP agent that replays its session on
+    two resumes (each turn once, on screen and on disk), in `hold_node_pipes`; a confined agent that cannot read a transcript
+    (`sandboxed_agent`); node unit tests and `agora-bench transcript`.
+  - Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
+    file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
+    did not flush the last batch until step 5, now built.
 - Step 5 (O2) is built, and with it the ADR: `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` on Unix (`agora_platform::catch_stop_requests`,
   a stop watch thread in `crates/agora/src/main.rs`) and stops its node with `Node::stop_keeping_agents`: the supervision loop takes nothing more,
   `Supervisor::let_go_held` lets every held adapter go (`Adapter::let_go`, then its reader is waited for at most `DRAIN_WAIT`, 2 s, as a read of a

@@ -118,6 +118,8 @@ struct Save {
     woken: bool,
     /// `chat.history_not_saved` was said in this conversation.
     said: bool,
+    /// A fresh start: the earlier session's file is moved aside (keeping this highest id) before the next batch is written.
+    fresh: Option<u64>,
 }
 
 impl Save {
@@ -131,6 +133,7 @@ impl Save {
             bytes: 0,
             woken: false,
             said: false,
+            fresh: None,
         }
     }
 
@@ -638,10 +641,17 @@ impl Transcript {
         if self.next_id > 0 || !self.entries.is_empty() {
             return false;
         }
+        // Review of #1103 (N4): what the file says is held to the live path's shapes and bounds before it is kept.
+        let entries: Vec<(ChatEntry, Side)> = seed
+            .entries
+            .into_iter()
+            .filter_map(|(e, side)| seeded_entry(e, side))
+            .collect();
         let high = seed
             .high
-            .max(seed.entries.last().map_or(0, |(e, _)| e.entry_id));
-        for (e, side) in seed.entries {
+            .max(entries.last().map_or(0, |(e, _)| e.entry_id))
+            .min(MAX_SEEDED_ID);
+        for (e, side) in entries {
             if let (Some((tool, args)), false) = (side.tool, e.call_id.is_empty()) {
                 self.calls.insert(
                     e.call_id.clone(),
@@ -716,7 +726,9 @@ impl Transcript {
 
     /// Numbers an entry, keeps it, and hands it to every follower. Returns its id.
     fn add(&mut self, mut entry: ChatEntry, now_ms: u64) -> u64 {
-        self.next_id += 1;
+        // Seeding keeps the id far below the end of the range (`MAX_SEEDED_ID`), so this never saturates in practice; if it did, ids
+        // would repeat rather than the node panic or wrap under the board's lock.
+        self.next_id = self.next_id.saturating_add(1);
         entry.entry_id = self.next_id;
         self.bytes += Self::size(&entry);
         self.entries.push_back(entry.clone());
@@ -757,6 +769,81 @@ impl Transcript {
         }
         self.evict();
         true
+    }
+}
+
+/// The highest entry id seeding takes from a file (2^52): ids stay exact in the window (a JavaScript number) and can never reach the
+/// end of the `u64` range however many entries come after. An entry with a higher id is not seeded.
+pub const MAX_SEEDED_ID: u64 = 1 << 52;
+
+/// Review of #1103 (N4): an entry from a transcript file, held to what the live path makes: a role and kind the protocol knows (a
+/// person's entry is text), the size caps, the cleaning of what a tool printed and of labels, enum values in range, and a notice's
+/// code and parameters in their shape. `None` for one that cannot be such an entry. The file is the node's own record (only the
+/// node's user can write it, and no confined agent can reach it), so its person's prompts and the node's own notices are taken as
+/// such, as the ledger and the policy file are.
+fn seeded_entry(mut e: ChatEntry, mut side: Side) -> Option<(ChatEntry, Side)> {
+    if e.entry_id == 0 || e.entry_id > MAX_SEEDED_ID {
+        return None;
+    }
+    let role = ChatRole::try_from(e.role).ok()?;
+    let kind = ChatKind::try_from(e.kind).ok()?;
+    match (role, kind) {
+        (ChatRole::Unspecified, _) | (_, ChatKind::Unspecified) => return None,
+        (ChatRole::User, k) if k != ChatKind::Text => return None,
+        _ => {}
+    }
+    if e.call_id.len() > MAX_CALL_ID {
+        return None;
+    }
+    e.text = match kind {
+        ChatKind::Thought => tidy(&e.text, MAX_THOUGHT_BYTES, Style::Prose).0,
+        ChatKind::Permission => tidy(&e.text, MAX_PERMISSION_BYTES, Style::Label).0,
+        _ => cut(std::mem::take(&mut e.text)),
+    };
+    e.path = tidy(&e.path, MAX_PATH_BYTES, Style::Label).0;
+    if kind == ChatKind::Notice {
+        let params: Vec<(String, String)> = e.params.drain().collect();
+        let (code, params) = notice(&e.code, &params)?;
+        (e.code, e.params) = (code, params);
+    } else {
+        e.code.clear();
+        e.params.clear();
+    }
+    let (output, cut_now) = tidy(&e.output, MAX_OUTPUT_BYTES, Style::Prose);
+    e.output = output;
+    e.output_truncated |= cut_now;
+    e.paths.truncate(MAX_PATHS);
+    for p in &mut e.paths {
+        p.path = tidy(&p.path, MAX_PATH_BYTES, Style::Label).0;
+    }
+    e.plan_steps.truncate(MAX_PLAN_STEPS);
+    for st in &mut e.plan_steps {
+        st.text = tidy(&st.text, MAX_PLAN_STEP_BYTES, Style::Step).0;
+        st.status = plan_status_valid(st.status);
+        st.priority = PlanPriority::try_from(st.priority).map_or(0, |p| p as i32);
+    }
+    e.tool_kind = ToolKind::try_from(e.tool_kind).map_or(0, |k| k as i32);
+    e.status = ToolStatus::try_from(e.status).map_or(0, |k| k as i32);
+    e.permission_outcome =
+        PermissionOutcome::try_from(e.permission_outcome).map_or(0, |k| k as i32);
+    e.approval_id = cut_to(std::mem::take(&mut e.approval_id), MAX_CALL_ID);
+    side.tool = side
+        .tool
+        .filter(|_| kind == ChatKind::ToolCall)
+        .map(|(tool, args)| {
+            (
+                tidy(&tool, MAX_PATH_BYTES, Style::Label).0,
+                tidy(&args, MAX_ENTRY_BYTES, Style::Code).0,
+            )
+        });
+    side.plan &= kind == ChatKind::Plan;
+    Some((e, side))
+}
+
+fn plan_status_valid(status: i32) -> i32 {
+    match ToolStatus::try_from(status) {
+        Ok(ToolStatus::Failed) | Err(_) => 0,
+        Ok(s) => s as i32,
     }
 }
 
@@ -824,17 +911,39 @@ impl ChatBoard {
     }
 
     /// ADR-0060, ADR-0089 decision 5: a resume went through (called before its adapter's first words are read): the transcript is
-    /// seeded with what [`Self::read_seed`] gave, and a fresh start moves the earlier session's file aside so the new one begins a file
-    /// of its own. A resume that is refused calls nothing, and leaves the file and the ring as they were.
+    /// seeded with what [`Self::read_seed`] gave. For a fresh start the earlier session's file is to be moved aside: only marked here
+    /// (no file is touched under the supervisor's lock), and moved by the writer before it writes anything of the new session, so a
+    /// batch never lands in the file being moved (review of #1103, N5 and N8). A resume that is refused calls nothing.
     pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
+        let Some(seed) = seed else {
+            return;
+        };
+        let high = seed.high;
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        t.seed(seed, now_ms);
         if fresh {
-            if let Some(store) = &self.store {
-                store.move_aside(agent.as_str(), seed.as_ref().map_or(0, |s| s.high));
+            if let Some(s) = &mut t.save {
+                s.fresh = Some(high);
+                s.wake.notify();
             }
         }
-        if let Some(seed) = seed {
-            self.seed(agent, seed, now_ms);
+    }
+
+    /// Review of #1103 (B1): the chat a resumed session replayed before it answered its start (ACP `session/load`). An agent whose
+    /// transcript already gave ids (seeded from its file, or kept in this node's memory across a restart after a crash) holds that
+    /// conversation, so the replay is dropped: shown again it would be every turn twice, and written again a copy on every resume.
+    /// An agent with an empty transcript (no file: purged, `chat.history_max_bytes = 0`, or a first resume after an upgrade) shows
+    /// the replay as before. Returns whether it was kept.
+    pub fn replayed(&self, agent: &AgentId, items: &[ChatItem], now_ms: u64) -> bool {
+        let holds = self.lock().get(agent).is_some_and(|t| t.next_id > 0);
+        if holds {
+            return false;
         }
+        for item in items {
+            self.push_item(agent, item, now_ms);
+        }
+        true
     }
 
     /// ADR-0089 decision 1: what changed since the last batch, per agent: the entries as they are now (each once), the changed ones
@@ -846,9 +955,14 @@ impl ChatBoard {
             let Some(s) = &mut t.save else {
                 continue;
             };
-            if s.dirty.is_empty() && s.evicted.is_empty() && s.removed.is_empty() {
+            if s.dirty.is_empty()
+                && s.evicted.is_empty()
+                && s.removed.is_empty()
+                && s.fresh.is_none()
+            {
                 continue;
             }
+            let fresh = s.fresh.take();
             let dirty = std::mem::take(&mut s.dirty);
             let evicted = std::mem::take(&mut s.evicted);
             let removed = std::mem::take(&mut s.removed);
@@ -870,6 +984,7 @@ impl ChatBoard {
                 agent: agent.clone(),
                 high: t.next_id,
                 lines,
+                fresh,
             });
         }
         out
@@ -2646,6 +2761,84 @@ mod tests {
         assert_eq!(third.snapshot(&a), new.snapshot(&a));
     }
 
+    /// Review of #1103 (N4): what a file says is held to the live path's shapes and bounds, and a highest id at the end of the range
+    /// neither panics nor wraps.
+    #[test]
+    fn a_seed_is_held_to_the_live_paths_bounds() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let e = |id: u64, role: ChatRole, kind: ChatKind, text: String| ChatEntry {
+            entry_id: id,
+            role: role as i32,
+            kind: kind as i32,
+            text,
+            ..Default::default()
+        };
+        let mut bad_role = e(1, ChatRole::Agent, ChatKind::Text, "x".into());
+        bad_role.role = 99;
+        let mut bad_code = e(4, ChatRole::Agent, ChatKind::Notice, String::new());
+        bad_code.code = "Not A Code".into();
+        let mut good_code = e(5, ChatRole::Agent, ChatKind::Notice, String::new());
+        good_code.code = crate::transcript::NOT_SAVED.into();
+        let mut thought = e(6, ChatRole::Agent, ChatKind::Thought, "t\u{1b}[31mx".into());
+        thought.output = "o".repeat(100_000);
+        let seed = Seed {
+            entries: vec![
+                (bad_role, Side::default()),
+                (
+                    e(2, ChatRole::User, ChatKind::ToolCall, "{}".into()),
+                    Side::default(),
+                ),
+                (
+                    e(3, ChatRole::Agent, ChatKind::Text, "y".repeat(100_000)),
+                    Side::default(),
+                ),
+                (bad_code, Side::default()),
+                (good_code, Side::default()),
+                (
+                    thought,
+                    Side {
+                        tool: Some(("t".into(), "a".into())),
+                        plan: true,
+                    },
+                ),
+            ],
+            high: u64::MAX,
+        };
+        assert!(b.seed(&a, seed, 1));
+        let got = b.snapshot(&a);
+        assert_eq!(
+            got.iter().map(|e| e.entry_id).collect::<Vec<_>>(),
+            [3, 5, 6]
+        );
+        assert_eq!(got[0].text.len(), MAX_ENTRY_BYTES);
+        assert_eq!(got[2].text, "tx");
+        assert!(got[2].output.len() <= MAX_OUTPUT_BYTES && got[2].output_truncated);
+        {
+            let g = b.lock();
+            let t = g.get(&a).unwrap();
+            assert!(
+                t.calls.is_empty() && t.plan.is_none(),
+                "side state only where it belongs"
+            );
+        }
+        b.push_item(&a, &ChatItem::Text("next".into()), 2);
+        assert_eq!(b.snapshot(&a).last().unwrap().entry_id, MAX_SEEDED_ID + 1);
+    }
+
+    /// Review of #1103 (B1): a resumed session's replay is shown only to an agent whose transcript holds nothing.
+    #[test]
+    fn a_replay_is_shown_only_when_the_transcript_is_empty() {
+        let b = ChatBoard::new();
+        let (fresh, kept) = (AgentId::new("fresh"), AgentId::new("kept"));
+        let replay = [ChatItem::Text("one".into()), ChatItem::Text("two".into())];
+        assert!(b.replayed(&fresh, &replay, 1));
+        assert_eq!(b.snapshot(&fresh).len(), 2);
+        b.push_item(&kept, &ChatItem::Text("one".into()), 1);
+        assert!(!b.replayed(&kept, &replay, 2));
+        assert_eq!(b.snapshot(&kept).len(), 1);
+    }
+
     #[test]
     fn a_window_that_already_follows_a_resumed_agent_gets_the_earlier_entries() {
         let (_dir, s) = store("follow");
@@ -2674,6 +2867,17 @@ mod tests {
         assert_eq!(new.read_seed(&a, false).unwrap().entries.len(), 2);
         new.resumed(&a, seed, true, 2);
         assert!(new.snapshot(&a).is_empty());
+        // Review of #1103 (N5, N8): no file is touched there (that runs under the supervisor's lock); the writer moves it, before
+        // anything of the new session, even when nothing new was said yet.
+        assert_eq!(s.read("a").entries.len(), 2);
+        let batches = new.take_unsaved();
+        assert_eq!(
+            (batches.len(), batches[0].fresh, batches[0].lines.len()),
+            (1, Some(2), 0)
+        );
+        s.write(&batches[0]).unwrap();
+        assert!(s.read("a").entries.is_empty());
+        assert_eq!(s.read("a").high, 2);
         new.push_item(&a, &ChatItem::Text("z".into()), 3);
         assert_eq!(new.snapshot(&a)[0].entry_id, 3);
         save(&new);
@@ -2693,7 +2897,7 @@ mod tests {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = crate::transcript::spawn_writer(
             Arc::clone(&b),
-            Box::new(Default::default),
+            Box::new(|_: &[String]| HashMap::new()),
             Arc::clone(&stop),
         )
         .unwrap()
