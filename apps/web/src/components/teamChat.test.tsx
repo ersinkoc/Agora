@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -83,6 +84,17 @@ describe('team chat rows', () => {
     const tags = [...(rows()[0]?.querySelectorAll('.kit-tag') ?? [])].map((x) => x.textContent);
     expect(tags).toEqual(['win', 'reported by laptop']);
     expect(rows()[0]?.textContent).toContain('between machines'); // said to a screen reader, and in the tag's tooltip
+  });
+});
+
+describe('the two-line cut is in the style sheet', () => {
+  // jsdom draws no layout, so this pins the rule itself; the drawn height (two lines) is checked in Chromium by the panel screenshot script.
+  const css = readFileSync('src/design/app.css', 'utf8'); // vitest runs in apps/web
+  const rule = (sel: string) => new RegExp(`\\${sel} \\{([^}]*)\\}`).exec(css)?.[1] ?? '';
+  it('cuts a row body to two lines, and the reading view keeps line breaks and scrolls', () => {
+    expect(rule('.team-msg__body')).toMatch(/\bline-clamp-2\b/);
+    expect(rule('.team-reader__body')).toMatch(/\bwhitespace-pre-wrap\b/);
+    expect(rule('.team-reader__body')).toMatch(/\boverflow-auto\b/);
   });
 });
 
