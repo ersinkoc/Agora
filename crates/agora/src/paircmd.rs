@@ -2,15 +2,17 @@
 //! that runs the hub. It talks to the **running** hub as the owner (the token in `<hub dir>/token`, the same way as every owner
 //! command that is not a database read), because the switch and the waiting requests live in the hub's memory.
 //!
-//! `open` is also the owner's screen for the moment: it stays in the foreground, shows each machine that asks to join with its
-//! number, and asks whether the number on that machine is the same. The window cards (web, terminal) are a later step; until then
-//! this is where the owner compares and answers. After one machine was approved it closes the switch again.
+//! `open` is also an owner's screen: it stays in the foreground, shows each machine that asks to join with its number, and asks
+//! whether the number on that machine is the same. The owner's windows (web, `agora tui`) show the same cards and may answer first:
+//! the question here then ends and says so (#942). After one machine was approved, here or in a window, the hub is closed to new
+//! machines again (the hub does that itself when it takes the approval) and this ends.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agora_i18n::key;
+use agora_platform::Confirmation;
 use agora_protocol::v1::{self, command_ok, command_request::Command};
 use agora_tui::client::{Hub, PairNote, Session, Update};
 
@@ -488,37 +490,122 @@ pub(crate) fn ask_line(say: &Say, question: &str) -> Option<String> {
     None
 }
 
-/// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the terminal went.
-fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
-    let mut waiting: std::collections::VecDeque<v1::PairRequested> = Default::default();
-    let mut ended: std::collections::HashSet<Vec<u8>> = Default::default();
-    let mut last_status = Instant::now();
-    loop {
-        // A connection that ended answers at once, so carrying on would spin and wait for a hub that is gone.
-        if let Update::Closed = session.next(Duration::from_millis(250)) {
-            return fail_hub(say, "client.unreachable");
+/// How a question about a card ended.
+enum CardAnswer {
+    /// The owner answered here.
+    Said(Answer),
+    /// The request ended before an answer here (`PairOutcome`): the owner answered in a window, it ran out, the machine stopped
+    /// asking, or the hub closed to new machines (#942).
+    Elsewhere(i32),
+    /// The connection to the hub ended.
+    HubGone,
+}
+
+/// The owner's screen: the connection to the hub, the cards waiting their turn and how the requests the hub told of ended.
+struct Board<'a> {
+    session: &'a mut Session,
+    waiting: std::collections::VecDeque<v1::PairRequested>,
+    ended: std::collections::HashMap<Vec<u8>, i32>,
+    gone: bool,
+}
+
+impl Board<'_> {
+    /// Takes in what the hub sent within `wait`: new machine cards wait their turn, endings are remembered. False once the
+    /// connection ended (a connection that ended answers at once, so carrying on would spin and wait for a hub that is gone).
+    fn pump(&mut self, wait: Duration) -> bool {
+        if self.gone {
+            return false;
         }
-        for note in session.take_pair_notes() {
+        if let Update::Closed = self.session.next(wait) {
+            self.gone = true;
+            return false;
+        }
+        for note in self.session.take_pair_notes() {
             match note {
                 PairNote::Requested(c) if c.kind == v1::PairKind::Machine as i32 => {
-                    if !waiting.iter().any(|w| w.pair_id == c.pair_id) {
-                        waiting.push_back(c);
+                    if !self.waiting.iter().any(|w| w.pair_id == c.pair_id) {
+                        self.waiting.push_back(c);
                     }
                 }
-                // A browser asks to sign in: that is for a window (a later step); it waits there.
+                // A browser asks to sign in: that is for a window; it waits there.
                 PairNote::Requested(_) => {}
                 PairNote::Decided(d) => {
-                    ended.insert(d.pair_id);
+                    self.ended.insert(d.pair_id, d.outcome);
                 }
             }
         }
+        true
+    }
+
+    /// Asks `question` about the request `pair_id` at the terminal (the discipline of [`ask`]: the terminal only, typed-ahead input
+    /// discarded, a first key that comes too fast is ignored three times, then no) while the hub is still listened to, so the
+    /// question ends as soon as that request ended somewhere else: answered in a window, run out, or closed (#942).
+    fn ask(&mut self, say: &Say, question: &str, pair_id: &[u8]) -> CardAnswer {
+        let yes = say.text(key!("cli-devices-yes"), &[]);
+        for _ in 0..TOO_FAST_TRIES {
+            let mut out = std::io::stdout();
+            let _ = write!(out, "{question} ");
+            let _ = out.flush();
+            let read = {
+                let mut stop = || {
+                    // Everything the hub sent so far (a frame per call; nothing waits here).
+                    for _ in 0..8 {
+                        if !self.pump(Duration::ZERO) {
+                            return true;
+                        }
+                    }
+                    self.ended.contains_key(pair_id)
+                };
+                agora_platform::read_confirmation_until(MIN_THINK, &mut stop)
+            };
+            let _ = writeln!(out);
+            if self.gone {
+                return CardAnswer::HubGone;
+            }
+            match read {
+                Ok(Confirmation::Line(line)) => {
+                    return CardAnswer::Said(if crate::trustcli::is_yes(&line, &yes) {
+                        Answer::Yes
+                    } else {
+                        Answer::No
+                    })
+                }
+                Ok(Confirmation::TooSoon) => say.out(key!("pair-too-fast"), &[]),
+                Ok(Confirmation::Stopped) => {
+                    return self
+                        .ended
+                        .get(pair_id)
+                        .map_or(CardAnswer::HubGone, |o| CardAnswer::Elsewhere(*o))
+                }
+                Err(_) => return CardAnswer::Said(Answer::Gone),
+            }
+        }
+        CardAnswer::Said(Answer::No)
+    }
+}
+
+/// The owner's screen: cards in, answers out, until a machine was approved (here or in a window), the time given ended, the switch
+/// closed or the terminal went.
+fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
+    let mut board = Board {
+        session,
+        waiting: Default::default(),
+        ended: Default::default(),
+        gone: false,
+    };
+    let mut last_status = Instant::now();
+    loop {
+        if !board.pump(Duration::from_millis(250)) {
+            return fail_hub(say, "client.unreachable");
+        }
         if until.is_some_and(|t| Instant::now() >= t) {
-            return close_and_say(say, session, key!("pair-time-up"));
+            return close_and_say(say, board.session, key!("pair-time-up"));
         }
         // The switch may have been closed from somewhere else, or ran out.
         if last_status.elapsed() >= STATUS_EVERY {
             last_status = Instant::now();
-            let still_open = session
+            let still_open = board
+                .session
                 .command_info("", Command::PairStatus(v1::PairStatus {}), WAIT)
                 .map_err(|e| e.code)
                 .and_then(|ok| status_of(Ok(ok)))
@@ -528,8 +615,8 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         }
-        while let Some(card) = waiting.pop_front() {
-            if ended.contains(&card.pair_id) {
+        while let Some(card) = board.waiting.pop_front() {
+            if board.ended.contains_key(&card.pair_id) {
                 continue;
             }
             let number = grouped(&card.number);
@@ -542,13 +629,17 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                     ("number", number.as_str().into()),
                 ],
             );
-            match ask(say, &say.text(key!("pair-card-ask"), &[])) {
-                Answer::Gone => {
+            let question = say.text(key!("pair-card-ask"), &[]);
+            let answer = board.ask(say, &question, &card.pair_id);
+            let approval = match answer {
+                CardAnswer::HubGone => return fail_hub(say, "client.unreachable"),
+                CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
+                CardAnswer::Said(Answer::Gone) => {
                     say.out(key!("pair-input-ended"), &[]);
                     return ExitCode::SUCCESS;
                 }
-                Answer::No => {
-                    match session.command_info(
+                CardAnswer::Said(Answer::No) => {
+                    match board.session.command_info(
                         "",
                         Command::PairDeny(v1::PairDeny {
                             pair_id: card.pair_id.clone(),
@@ -558,19 +649,34 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                         Ok(_) => say.out(key!("pair-denied-now"), &[]),
                         Err(e) => refusal(say, &e),
                     }
+                    continue;
                 }
-                Answer::Yes => match approve(say, session, &card) {
-                    Approval::Done => {
-                        // One machine per opening: close the switch again, which is the safer thing to forget.
-                        say.out(
-                            key!("pair-approved"),
-                            &[("name", card.name.as_str().into())],
-                        );
-                        return close_and_say(say, session, key!("pair-closed-after"));
+                CardAnswer::Said(Answer::Yes) => approve(say, &mut board, &card),
+            };
+            match approval {
+                Approval::Done => {
+                    say.out(
+                        key!("pair-approved"),
+                        &[("name", card.name.as_str().into())],
+                    );
+                    return closed_after_approval(say, board.session);
+                }
+                Approval::Elsewhere(outcome) => {
+                    let name = [("name", card.name.as_str().into())];
+                    match v1::PairOutcome::try_from(outcome) {
+                        Ok(v1::PairOutcome::Approved) => {
+                            say.out(key!("pair-card-approved-elsewhere"), &name);
+                            return closed_after_approval(say, board.session);
+                        }
+                        Ok(v1::PairOutcome::Denied) => {
+                            say.out(key!("pair-card-denied-elsewhere"), &name);
+                        }
+                        _ => say.out(key!("pair-card-ended"), &name),
                     }
-                    Approval::Refused => {}
-                    Approval::Stop => return ExitCode::SUCCESS,
-                },
+                }
+                Approval::Refused => {}
+                Approval::Stop => return ExitCode::SUCCESS,
+                Approval::HubGone => return fail_hub(say, "client.unreachable"),
             }
         }
     }
@@ -580,10 +686,13 @@ enum Approval {
     Done,
     Refused,
     Stop,
+    /// The request ended somewhere else while the replace question was asked (`PairOutcome`).
+    Elsewhere(i32),
+    HubGone,
 }
 
 /// Approves the card; if the name belongs to a machine that already joined, asks once more whether to replace it.
-fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approval {
+fn approve(say: &Say, board: &mut Board<'_>, card: &v1::PairRequested) -> Approval {
     let send = |s: &mut Session, replace: bool| {
         s.command_info(
             "",
@@ -594,24 +703,26 @@ fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approv
             WAIT,
         )
     };
-    match send(session, false) {
+    match send(board.session, false) {
         Ok(_) => Approval::Done,
         Err(e) if e.code == "pair.state" && state_is(&e, "name_in_use") => {
             let question = say.text(
                 key!("pair-replace-ask"),
                 &[("name", card.name.as_str().into())],
             );
-            match ask(say, &question) {
-                Answer::Gone => {
+            match board.ask(say, &question, &card.pair_id) {
+                CardAnswer::HubGone => Approval::HubGone,
+                CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
+                CardAnswer::Said(Answer::Gone) => {
                     say.out(key!("pair-input-ended"), &[]);
                     Approval::Stop
                 }
-                Answer::No => {
+                CardAnswer::Said(Answer::No) => {
                     // The request stays pending on the hub; this screen leaves it to its own time.
                     say.out(key!("pair-left-waiting"), &[]);
                     Approval::Refused
                 }
-                Answer::Yes => match send(session, true) {
+                CardAnswer::Said(Answer::Yes) => match send(board.session, true) {
                     Ok(_) => Approval::Done,
                     Err(e) => {
                         refusal(say, &e);
@@ -625,6 +736,22 @@ fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approv
             Approval::Refused
         }
     }
+}
+
+/// After an approval, here or in a window: one machine per opening. The hub closed itself to new machines when it took the approval
+/// (#942), so this only says so; a hub from before that change (or one whose answer did not come) is closed from here. Never a
+/// `PairClose` to a hub that already closed: closing ends what is still undecided, and there is nothing to gain from racing it.
+fn closed_after_approval(say: &Say, session: &mut Session) -> ExitCode {
+    let open = session
+        .command_info("", Command::PairStatus(v1::PairStatus {}), WAIT)
+        .map_err(|e| e.code)
+        .and_then(|ok| status_of(Ok(ok)))
+        .map_or(true, |s| s.open);
+    if open {
+        return close_and_say(say, session, key!("pair-closed-after"));
+    }
+    say.out(key!("pair-closed-after"), &[]);
+    ExitCode::SUCCESS
 }
 
 fn state_is(e: &v1::ErrorInfo, state: &str) -> bool {

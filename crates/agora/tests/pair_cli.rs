@@ -754,6 +754,122 @@ fn a_key_that_comes_too_soon_after_the_question_is_not_an_answer() {
     nothing_stored(&machine);
 }
 
+/// An owner's window on the hub (the web window and `agora tui` use the same owner commands and cards).
+fn window(hub: &Hub) -> agora_tui::client::Session {
+    let token = std::fs::read_to_string(hub.dir.join("token")).unwrap();
+    let addr = agora_tui::client::Hub {
+        addr: format!("localhost:{}", hub.port),
+        ca_pem: std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap(),
+    };
+    agora_tui::client::Session::connect(&addr, token.trim()).unwrap()
+}
+
+/// The window's card for `name`.
+fn window_card(
+    w: &mut agora_tui::client::Session,
+    name: &str,
+) -> agora_protocol::v1::PairRequested {
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        let _ = w.next(Duration::from_millis(250));
+        for n in w.take_pair_notes() {
+            if let agora_tui::client::PairNote::Requested(c) = n {
+                if c.name == name {
+                    return c;
+                }
+            }
+        }
+    }
+    panic!("no card for {name:?} in the window");
+}
+
+/// #942 (RM-07): the owner answers in a window while `agora pair open` is asking about the same machine. The terminal's question
+/// ends and says it was answered in a window: a deny leaves the screen waiting for the next machine with the hub still open; an
+/// approval closes the hub to new machines (one machine per opening, whoever approves) and the screen ends.
+#[test]
+fn an_answer_from_a_window_ends_the_question_at_the_terminal() {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    let root = tmp("window");
+    let hub = hub(&root);
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut screen = hub.open(&owner_home);
+    let mut w = window(&hub);
+    let wait = Duration::from_secs(5);
+    let open = |w: &mut agora_tui::client::Session| match w
+        .command_info("", Cmd::PairStatus(v1::PairStatus {}), wait)
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::PairStatus(s)) => s.open,
+        other => panic!("{other:?}"),
+    };
+
+    // A deny from the window: the terminal stops asking about that machine and waits for the next; the hub stays open.
+    let first = root.join("first");
+    let mut m = join(
+        &first,
+        &format!("localhost:{}", hub.port),
+        &["--id", "rm-join2"],
+    );
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    screen.wait_for("[y/N]");
+    let card = window_card(&mut w, "rm-join2");
+    w.command_info(
+        "",
+        Cmd::PairDeny(v1::PairDeny {
+            pair_id: card.pair_id,
+        }),
+        wait,
+    )
+    .unwrap();
+    let (ok, text) = m.finish();
+    assert!(!ok && text.contains("The owner said no"), "{text}");
+    screen.wait_for("Answered in a window: \"rm-join2\" was denied");
+    assert!(open(&mut w), "a deny closed the hub");
+
+    // An approval from the window: the machine joins, the terminal's question ends, and the hub is closed to new machines again.
+    let second = root.join("second");
+    let mut m = join(
+        &second,
+        &format!("localhost:{}", hub.port),
+        &["--id", "rm-join3"],
+    );
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    screen.wait_for("[y/N]");
+    let card = window_card(&mut w, "rm-join3");
+    w.command_info(
+        "",
+        Cmd::PairApprove(v1::PairApprove {
+            pair_id: card.pair_id,
+            replace: false,
+        }),
+        wait,
+    )
+    .unwrap();
+    let (ok, joined) = m.finish();
+    assert!(
+        ok && joined.contains("Joined. This machine is \"rm-join3\""),
+        "{joined}"
+    );
+    screen.wait_for("Answered in a window: \"rm-join3\" was approved");
+    let (ok, text) = screen.finish();
+    assert!(ok, "{text}");
+    assert!(text.contains("closed to new machines again"), "{text}");
+    assert!(
+        !open(&mut w),
+        "the hub stayed open after the window approved"
+    );
+    let status = hub.pair(&owner_home, &["status"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("Closed"),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 /// Audit F890: `agora join` looks at "already joined" before it waits for the owner, and again before it stores: a link this machine
 /// got meanwhile (`agora` enrolling with its own hub, `agora node enroll`, another join) is kept unless `--replace` was given. Each
 /// join has a hub of its own (a hub limits pairing attempts per address per minute); the link is planted only after the number is
