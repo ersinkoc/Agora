@@ -30,6 +30,11 @@ const BOARD_WAIT: Duration = Duration::from_secs(10);
 /// How long "this project is not shared" is believed before the hub is asked again.
 const LOCAL_FOR: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
+/// #1093: how long an agent that joins again waits for its endpoint's lock while something else holds it. A process the node starts
+/// holds a copy of every open descriptor from its fork until it runs its program (under load, and with a sandbox set up in between,
+/// a while), so the lock of an endpoint that just closed can outlive it for a moment. Waited out under the supervisor's lock (a
+/// launch or resume joins the mesh), so short; only a lock that is held is waited for.
+const RELISTEN_WAIT: Duration = Duration::from_millis(500);
 /// A longer line is a broken or hostile client; the connection is closed.
 const MAX_LINE: usize = 1024 * 1024;
 
@@ -937,7 +942,25 @@ impl MeshServer {
     ) -> io::Result<PathBuf> {
         let id = info.id.clone();
         let path = self.socket_path(&id);
-        let listener = local_listen_agent(&path, identity)?;
+        // #1093: an endpoint this server still serves for the agent is in use for good; any other holder only for a moment.
+        let serving = self
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&id);
+        let until = Instant::now() + RELISTEN_WAIT;
+        let listener = loop {
+            match local_listen_agent(&path, identity) {
+                Err(e)
+                    if e.kind() == io::ErrorKind::AddrInUse
+                        && !serving
+                        && Instant::now() < until =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => break other?,
+            }
+        };
         listener.set_nonblocking(true)?;
         self.mesh
             .lock()
@@ -2376,6 +2399,53 @@ mod tests {
         let _ = closer.shutdown();
         let _ = writer.join();
         assert!(closed, "the node kept reading a line without a newline");
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #1093: an agent that joins again right after it left (a stop, then a resume) gets its endpoint even while the lock of the one
+    /// it left is still held for a moment. A process the node starts in that moment (another agent, a `git` call) holds a copy of
+    /// every open descriptor from its fork until it runs its program, the lock's too; here a second holder of the lock stands in for
+    /// it.
+    #[cfg(unix)]
+    #[test]
+    fn joining_again_waits_for_a_moment_held_lock_of_the_endpoint_it_left() {
+        let dir = std::env::temp_dir().join(format!("agora-rj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let id = AgentId::new("a1");
+        let info = || AgentInfo {
+            id: id.clone(),
+            kind: "fixture".into(),
+            node: "n".into(),
+            project: "p".into(),
+            label: "a1".into(),
+            worktree: String::new(),
+            state: "idle".into(),
+        };
+        let sock = server.register(info()).unwrap();
+        server.unregister_because(&id, "stopped");
+        let mut name = sock.clone().into_os_string();
+        name.push(".lock");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+            .unwrap();
+        held.lock().unwrap();
+        // Let go after 25 ms, or at once when the registration returned first.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _ = rx.recv_timeout(Duration::from_millis(25));
+            drop(held);
+        });
+        let again = server.register(info());
+        drop(tx);
+        holder.join().unwrap();
+        assert_eq!(again.ok(), Some(sock.clone()));
+        assert!(server.is_registered(&id));
+        assert!(agora_platform::local_connect(&sock).is_ok());
         server.unregister(&id);
         drop(server);
         let _ = std::fs::remove_dir_all(dir);
