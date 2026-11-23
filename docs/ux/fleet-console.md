@@ -44,7 +44,7 @@ The hub does not send terminal previews to the web client yet, so today the line
 | State | What it says | Next step |
 | --- | --- | --- |
 | Connecting, nothing known | "Connecting to your hub…" (it does not claim there are no machines yet) | none |
-| Hub unreachable, nothing known | "Cannot reach your hub", agents keep running | Retry now |
+| Hub unreachable, nothing known | "Cannot reach your Agora", agents keep running | Retry now |
 | Fresh hub: no machine, no agent | "Connect your first machine" | the two commands (`agora hub code`, `agora node enroll …`) with Copy, and the machines page |
 | Machines connected, no agent | "Your machines are ready. Start the first agent." | Start an agent; the terminal command |
 | Hub unreachable, something known | what was known, with a note that it may be out of date | Retry now |

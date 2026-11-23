@@ -20,6 +20,7 @@ import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
 import { AgentTile } from './components/AgentTile';
+import { FleetEmpty } from './components/FleetConsole';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
@@ -30,6 +31,7 @@ import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import { KitGallery } from './components/kit/KitGallery';
+import { Button, Callout, CopyChip } from './components/kit';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
@@ -41,7 +43,7 @@ import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, 
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
@@ -172,9 +174,13 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <PairRequest inline now={300_000} request={{ id: 'pair-expired', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: 272_000 }} onAnswer={async () => 'ok'} />
         <PairRequest inline request={{ id: 'pair-browser', kind: 'browser', name: 'Chrome · macOS', address: '192.168.1.57', number: '731004' }} onAnswer={async () => 'ok'} />
       </div>
-      <div className="gallery__row">
-        <SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />
-        <SignInWaiting approval={{ number: '731004', state: 'denied' }} onAskAgain={() => {}} onUseCode={() => {}} />
+      {/* The sign-in card while it waits for the owner's approval and once refused (ADR-0065 decision 6), and Home's first run. */}
+      <div className="gallery__row items-start" data-gallery="signin">
+        <SignInCard onSubmit={() => {}} onPasskey={() => {}} approval={{ number: '731004', state: 'waiting' }} />
+        <SignInCard onSubmit={() => {}} onPasskey={() => {}} approval={{ number: '731004', state: 'denied' }} />
+      </div>
+      <div className="fleet-console" data-gallery="home-first-run">
+        <FleetEmpty kind="first-run" machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: 0 }]} onStart={onStart} />
       </div>
       <div className="gallery__row">
         <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
@@ -500,36 +506,50 @@ function actionLabel(action: string): string {
 // `passwordRequired`: the hub asks this browser for the screen password too (ADR-0067; never on the hub's own machine).
 // `approval`: this browser asked the owner to approve it (ADR-0065 decision 6); the page shows the number to compare instead of the
 // code form, which stays one click away.
-export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '', approval, onAskAgain }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string; approval?: SignInApprovalModel; onAskAgain?: () => void }) {
+type SignInProps = { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string; approval?: SignInApprovalModel; onAskAgain?: () => void };
+
+export function SignInPage(props: SignInProps) {
+  return <main className="signin"><SignInCard {...props} /></main>;
+}
+
+// The sign-in card (the gallery shows it in each state): the mark and the title, then the code form or the approval wait, an error as a
+// danger callout, the passkey under a divider in every state, and the language in the footer (it works before signing in).
+export function SignInCard({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '', approval, onAskAgain }: SignInProps) {
   const [code, setCode] = useState(initialCode);
   const [password, setPassword] = useState('');
   const [byCode, setByCode] = useState(false);
+  const id = useId();
   return (
-    <main className="page">
-      <div className="flex justify-end"><LanguagePicker /></div>
-      <h1>{t('signin-title')}</h1>
-      {approval && !byCode ? <SignInWaiting approval={approval} onAskAgain={() => onAskAgain?.()} onUseCode={() => setByCode(true)} /> : <>
-      <p>{t('signin-intro')}</p>
-      <form onSubmit={(e) => { e.preventDefault(); if (code.trim() && (!passwordRequired || password)) onSubmit(code, passwordRequired ? password : undefined); }}>
-        <label>
-          <span className="muted">{t('signin-code')}</span>{' '}
-          <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
-        </label>{' '}
-        {passwordRequired && (
-          <>
-            <label>
-              <span className="muted">{t('signin-password')}</span>{' '}
+    <section className="signin__card" aria-labelledby={`${id}-title`}>
+      <header className="signin__head">
+        <span aria-hidden className="signin__mark">{Array.from(t('app-name'))[0]}</span>
+        <h1 id={`${id}-title`} className="signin__title">{t('signin-title')}</h1>
+      </header>
+      {approval && !byCode ? <SignInWaiting approval={approval} onAskAgain={() => onAskAgain?.()} onUseCode={() => setByCode(true)} /> : (
+        <form className="signin__form" onSubmit={(e) => { e.preventDefault(); if (code.trim() && (!passwordRequired || password)) onSubmit(code, passwordRequired ? password : undefined); }}>
+          <p className="signin__step">{t('signin-intro')}</p>
+          <CopyChip text="agora hub login" />
+          <label className="signin__field">
+            <span className="signin__label">{t('signin-code')}</span>
+            <input className="signin__code" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
+          </label>
+          {passwordRequired && <>
+            <label className="signin__field">
+              <span className="signin__label">{t('signin-password')}</span>
               <input type="password" name="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-            </label>{' '}
-          </>
-        )}
-        <button type="submit" className="button button--primary">{t('signin-action')}</button>
-      </form>
-      {passwordRequired && <p className="muted">{t('signin-password-hint')}</p>}
+            </label>
+            <p className="signin__hint">{t('signin-password-hint')}</p>
+          </>}
+          <Button type="submit" variant="primary" className="signin__wide">{t('signin-action')}</Button>
+        </form>
+      )}
+      {notice && <Callout tone="danger" icon="warn" title={notice} alert />}
+      {onPasskey && <>
+        <div className="signin__or" aria-hidden>{t('signin-or')}</div>
+        <Button className="signin__wide" onClick={onPasskey}><Icon name="lock" />{t('signin-passkey')}</Button>
       </>}
-      {onPasskey && <p><button type="button" className="button" onClick={onPasskey}>{t('signin-passkey')}</button></p>}
-      {notice && <p role="alert">{notice}</p>}
-    </main>
+      <footer className="signin__foot"><Icon name="globe" className="size-3.5 text-muted" /><LanguagePicker compact /></footer>
+    </section>
   );
 }
 

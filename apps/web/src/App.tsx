@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
+import type { IconName } from './components/Icon';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects, demoQuota } from './fixtures';
 import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
@@ -75,6 +76,9 @@ function useHash(): [string, (h: string) => void] {
   }, []);
   return [hash, (h) => { window.location.hash = h; }];
 }
+
+// The icon of each tool in the command palette (the same ones the tool panes use).
+const TOOL_ICON: Record<(typeof TOOL_PANELS)[number], IconName> = { terminal: 'terminal', changes: 'diff', files: 'files', manager: 'folder' };
 
 export function App() {
   const language = useSyncExternalStore(subscribeLanguage, getLanguage);
@@ -526,27 +530,27 @@ export function App() {
   // Back to the window (the panes live there); from the window itself (the demo included) nothing moves.
   const toWindow = useCallback(() => { if (!['', '#/', '#/demo'].includes(hash)) go('#/'); }, [hash, go]);
   const items: PaletteItem[] = useMemo(() => [
-    { id: 'next', label: t('palette-next-attention'), run: next },
-    { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); } },
-    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); } }] : []),
+    { id: 'next', label: t('palette-next-attention'), run: next, group: 'go', icon: 'bell', keys: 'N' },
+    { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); }, group: 'go', icon: 'grid' },
+    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); }, icon: 'plus' as const }] : []),
     // The tools open as panes of the window, beside the agent in focus (not on a phone, which has no panes).
     ...(phone ? [] : [
-      ...TOOL_PANELS.map((panel) => ({ id: `tool-${panel}`, label: t(`palette-open-${panel}`), run: () => { toWindow(); requestTool({ panel }); } })),
-      ...(hub ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); } }] : []),
+      ...TOOL_PANELS.map((panel) => ({ id: `tool-${panel}`, label: t(`palette-open-${panel}`), run: () => { toWindow(); requestTool({ panel }); }, icon: TOOL_ICON[panel] })),
+      ...(hub ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); }, icon: 'terminal' as const }] : []),
     ]),
-    { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
+    { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines'), group: 'go', icon: 'machine' },
     ...paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
       showProject: (id) => { go('#/'); requestProject(id); }, showPairing, lock: hub ? lockNow : undefined }),
-    ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit') }] : []),
+    ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device'), group: 'go' as const, icon: 'settings' as const }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit'), group: 'go' as const, icon: 'history' as const }] : []),
     // The language, here too: on a phone the title bar has no room for its picker.
-    ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); } })),
-    { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme },
-    ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id) })),
-    ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
+    ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); }, group: 'appearance' as const, icon: 'globe' as const })),
+    { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme, group: 'appearance', icon: 'pencil' },
+    ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
+    ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
-    ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); } })) : []),
+    ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); }, group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })) : []),
     // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
-    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
+    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task), group: 'tasks' as const, icon: 'board' as const })) : []),
   ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
 
   useEffect(() => {

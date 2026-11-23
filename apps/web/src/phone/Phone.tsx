@@ -265,7 +265,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <h2 className="phone-section__title text-needs-you">{t('pair-section', { count: pairing.cards.length })}</h2>
         <div className="grid gap-2"><PairCards ui={pairing} /></div>
       </section>}
-      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} />}
+      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} />}
       {pairing && <div className="px-3"><PairRecentList recent={pairing.recent} /></div>}
       {pairing?.window?.open && !empty && <div className="px-3"><PairWindowControl ui={pairing} /></div>}
       {needs.length > 0 && <section className="phone-section" aria-label={t('attention-title')}>

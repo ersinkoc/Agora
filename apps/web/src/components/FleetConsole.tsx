@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -13,6 +13,7 @@ import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile } from './AgentTile';
 import { Skeleton } from './EmptyState';
 import { Icon } from './Icon';
+import { Button, CopyChip } from './kit';
 import { StateBadge, StateMark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
@@ -176,58 +177,59 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   );
 }
 
-// A command to copy: shown as it is typed, never translated.
-function Command({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
-  const copy = () => { try { void navigator.clipboard?.writeText(text).then(() => setDone(true), () => undefined); } catch { /* the text can be selected and copied by hand */ } };
+// How another machine joins: a join code here, the command there, and (for the owner) the window that lets a machine join without a code.
+function JoinSteps({ pairing }: { pairing?: PairingUi }) {
+  const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
   return (
-    <div className="fleet-command">
-      <code dir="ltr" className="fleet-command__text">{text}</code>
-      <button type="button" className="button fleet-command__copy" onClick={copy}><Icon name="copy" className="size-4" />{done ? t('address-copied') : t('address-copy')}</button>
-    </div>
+    <>
+      <div className="fleet-empty__step"><span className="fleet-empty__step-label">1 · {t('fleet-empty-step-code')}</span><CopyChip text="agora hub code" /></div>
+      <div className="fleet-empty__step"><span className="fleet-empty__step-label">2 · {t('fleet-empty-step-join')}</span><CopyChip text={`agora node enroll --hub wss://${host} --ca ca.pem --code XXXX-XXXX --id NAME`} /><span className="fleet-empty__step-label">{t('fleet-empty-ca')}</span></div>
+      {/* ADR-0065: the owner at this window opens the 10-minute window for a new machine (its own button); `agora join` there does the rest. */}
+      {pairing && <div className="fleet-empty__step"><PairWindowControl ui={pairing} intro /></div>}
+    </>
   );
 }
 
-// What the page shows when there is no fleet yet: it says where things stand and offers the next step.
+// What the page shows when there is no fleet yet, centred: where things stand and the next step. Commands are shown as they are typed.
 export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi }) {
-  const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
+  const [adding, setAdding] = useState(false);
+  const joinId = useId();
   const online = machines.filter((m) => m.online);
   if (kind === 'connecting') return <div className="fleet-empty fleet-empty--wide" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p>
       <div className="fleet-grid w-full" aria-hidden>{[0, 1, 2].map((i) => <div key={i} className="tile tile--compact"><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-1/2" /></div>)}</div></div>;
   if (kind === 'offline') {
     return (
-      <div className="fleet-empty" role="alert">
-        <Icon name="machine" className="size-8 text-muted" />
+      <div className="fleet-empty kit-tone-idle" role="alert">
+        <span aria-hidden className="kit-chip"><Icon name="machine" className="size-5" /></span>
         <h2 className="fleet-empty__title">{t('fleet-offline-title')}</h2>
         <p className="fleet-empty__text">{t('fleet-offline-text')}</p>
-        {onRetry && <button type="button" className="button button--primary" onClick={onRetry}>{t('link-retry')}</button>}
+        {onRetry && <div className="fleet-empty__actions"><Button variant="primary" onClick={onRetry}>{t('link-retry')}</Button></div>}
       </div>
     );
   }
   if (kind === 'first-run') {
     return (
-      <div className="fleet-empty">
-        <Icon name="terminal" className="size-8 text-accent" />
+      <div className="fleet-empty kit-tone-accent">
+        <span aria-hidden className="kit-chip"><Icon name="terminal" className="size-5" /></span>
         <h2 className="fleet-empty__title">{t('fleet-firstrun-title')}</h2>
-        {online.length === 0 ? <p className="fleet-empty__text">{t('fleet-firstrun-offline')}</p> : <>
-          <p className="fleet-empty__text">{t('fleet-firstrun-text')}</p>
-          {onStart && <button type="button" className="button button--primary" onClick={() => onStart(online.length === 1 ? online[0]?.id : undefined)}><Icon name="plus" />{t('action-start-agent')}</button>}
-          <div className="fleet-empty__step"><span className="muted">{t('fleet-firstrun-cli')}</span><Command text="agora agent start codex --cwd /path/to/project" /></div>
-        </>}
-        <a className="link" href="#/machines">{t('fleet-empty-machines')}</a>
+        <p className="fleet-empty__text">{t(online.length === 0 ? 'fleet-firstrun-offline' : 'fleet-firstrun-text')}</p>
+        <div className="fleet-empty__actions">
+          {online.length > 0 && onStart && <Button variant="primary" onClick={() => onStart(online.length === 1 ? online[0]?.id : undefined)}><Icon name="plus" />{t('action-start-agent')}</Button>}
+          {/* Shows how a machine joins, here; it opens nothing by itself (the window for new machines has its own button). */}
+          <Button aria-expanded={adding} aria-controls={joinId} onClick={() => setAdding(!adding)}><Icon name="machine" />{t('fleet-add-machine')}</Button>
+        </div>
+        {online.length > 0 && <div className="fleet-empty__step"><span className="fleet-empty__step-label">{t('fleet-firstrun-cli')}</span><CopyChip text="agora agent start codex --cwd /path/to/project" /></div>}
+        <div id={joinId} hidden={!adding} className="fleet-empty__join">{adding && <JoinSteps pairing={pairing} />}</div>
       </div>
     );
   }
   return (
-    <div className="fleet-empty">
-      <Icon name="machine" className="size-8 text-accent" />
+    <div className="fleet-empty kit-tone-accent">
+      <span aria-hidden className="kit-chip"><Icon name="machine" className="size-5" /></span>
       <h2 className="fleet-empty__title">{t('fleet-empty-title')}</h2>
       <p className="fleet-empty__text">{t('fleet-empty-text')}</p>
-      {/* ADR-0065: the owner at this window opens the 10-minute window for a new machine; `agora join` on that machine does the rest. */}
-      <div className="fleet-empty__step"><span className="muted">1 · {t('fleet-empty-step-code')}</span><Command text="agora hub code" /></div>
-      <div className="fleet-empty__step"><span className="muted">2 · {t('fleet-empty-step-join')}</span><Command text={`agora node enroll --hub wss://${host} --ca ca.pem --code XXXX-XXXX --id NAME`} /><span className="muted">{t('fleet-empty-ca')}</span></div>
-      {pairing && <div className="fleet-empty__step"><PairWindowControl ui={pairing} intro /></div>}
-      <a className="link" href="#/machines">{t('fleet-empty-machines')}</a>
+      <JoinSteps pairing={pairing} />
+      <a className="link mt-2" href="#/machines">{t('fleet-empty-machines')}</a>
     </div>
   );
 }
@@ -265,7 +267,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     <>
       {view.attention.length > 0 && <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />}
       {pairing && <PairRecentList recent={pairing.recent} />}
-      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} />
+      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} />
     </>
   ) : (
     <>
