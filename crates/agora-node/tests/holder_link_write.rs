@@ -139,3 +139,74 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
         "write_frame took {elapsed:?}, its limit is {FRAME_TIMEOUT:?}"
     );
 }
+
+/// A frame to a peer that never reads, on a stream whose own write timeout is `own` (`None`: none at all). Returns what
+/// `write_frame` answered and how long it took, or `None` when it had not returned 3 s after its deadline.
+fn write_to_a_peer_that_never_reads(
+    tag: &str,
+    own: Option<Duration>,
+) -> Option<(Result<(), LinkError>, Duration)> {
+    let dir = std::env::temp_dir().join(format!("agora-hlw-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.sock");
+    let listener = agora_platform::local_listen(&path).unwrap();
+    let mut w = agora_platform::local_connect(&path).unwrap();
+    let r = listener.accept().unwrap();
+    w.set_write_timeout(own).unwrap();
+    // Far larger than the socket's buffer: most of it can never go.
+    let payload = vec![1u8; 2 << 20];
+    let (done, result) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let began = Instant::now();
+        let res = write_frame(&mut w, &payload, None);
+        let _ = done.send((res, began.elapsed()));
+    });
+    let got = result
+        .recv_timeout(FRAME_TIMEOUT + Duration::from_secs(3))
+        .ok();
+    // A write still blocked ends when the peer goes.
+    drop(r);
+    let _ = writer.join();
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+fn assert_ends_at_its_deadline(got: Option<(Result<(), LinkError>, Duration)>, own: &str) {
+    let Some((res, elapsed)) = got else {
+        panic!("write_frame with {own} did not return within {FRAME_TIMEOUT:?} and 3 s more");
+    };
+    println!("write_frame with {own}: {res:?} after {elapsed:?}");
+    assert!(
+        matches!(&res, Err(LinkError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{res:?}"
+    );
+    // Not before its time, and not later than scheduling on a loaded machine explains: a send waits for room by `poll`, which ends
+    // on time, and never for longer than the frame has left.
+    assert!(
+        elapsed >= FRAME_TIMEOUT - Duration::from_millis(50)
+            && elapsed <= FRAME_TIMEOUT + Duration::from_millis(250),
+        "write_frame with {own} took {elapsed:?}, its limit is {FRAME_TIMEOUT:?}"
+    );
+}
+
+#[test]
+fn a_frame_to_a_peer_that_never_reads_ends_at_its_deadline_with_no_write_timeout_set() {
+    // Issue #830: the frame's deadline holds whatever the stream's own write timeout; with none, a blocked send waited for ever.
+    let got = write_to_a_peer_that_never_reads("none", None);
+    assert_ends_at_its_deadline(got, "no write timeout");
+}
+
+#[test]
+fn a_frame_to_a_peer_that_never_reads_ends_at_its_deadline_with_a_long_write_timeout() {
+    // A write timeout longer than a slice let one send run past the frame's deadline (the send began with time left).
+    let got = write_to_a_peer_that_never_reads("long", Some(3 * WRITE_SLICE));
+    assert_ends_at_its_deadline(got, "a 3 s write timeout");
+}
+
+#[test]
+fn a_frame_to_a_peer_that_never_reads_ends_at_its_deadline_with_the_slice_set() {
+    let got = write_to_a_peer_that_never_reads("slice", Some(WRITE_SLICE));
+    assert_ends_at_its_deadline(got, "the write slice");
+}
