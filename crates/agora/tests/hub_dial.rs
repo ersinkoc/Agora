@@ -2322,11 +2322,12 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
 /// ADR-0049 Amendment A (#1049), with a real node: a member granted one of the machine's projects lists its folder and a folder in it,
 /// chooses one and starts an agent there (the project the machine answers for the folder is the one the grant names). Another project's
 /// folder, the home folder and a link inside the project that leads to the other project are refused for the person's role (the link
-/// after the machine followed it); the way up stops at the project's folder.
+/// after the machine followed it); the way up stops at the project's folder. The terminal client's picker opens there, at the project's
+/// folder from the member's own snapshot (#1086).
 #[test]
 fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine() {
     use agora_hub::users::{Access, Role};
-    use agora_tui::client::{Hub as ConsoleHub, Session};
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED || cfg!(windows) {
@@ -2420,6 +2421,22 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
         ca_pem: hub.ca_pem.clone(),
     };
     let mut session = Session::connect(&console, "client-token").unwrap();
+    // #1086: the terminal client's folder picker opens where the member may look, from what the hub showed them: their project's
+    // folder on that machine (the other project is not in their snapshot), never the home folder.
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match session.next(Duration::from_millis(200)) {
+            Update::Snapshot(s) => break *s,
+            Update::Closed => panic!("the hub closed the member's connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    let roots = agora_tui::picker::project_roots(&snapshot, "laptop");
+    assert_eq!(roots, [pick.join("app").to_string_lossy().into_owned()]);
+    let mut nav = agora_tui::picker::Nav::projects(roots);
+    let agora_tui::picker::At::Folder(start) = nav.start() else {
+        panic!("one project opens in its folder")
+    };
     let now = || {
         u64::try_from(
             std::time::SystemTime::now()
@@ -2436,10 +2453,11 @@ fn a_member_browses_and_starts_in_a_granted_projects_folders_on_a_real_machine()
     };
     let app = pick.join("app").to_string_lossy().into_owned();
     let listed = session
-        .list_folder("laptop", &app, sign("list", &app, "", ""))
+        .list_folder("laptop", &start, sign("list", &start, "", ""))
         .unwrap();
     assert_eq!(listed.path, app);
     assert_eq!(listed.parent, "", "no way up out of the project");
+    assert_eq!(nav.up(&listed), None, "the picker goes no higher either");
     let names: Vec<&str> = listed.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["src"], "a link is never listed");
     let src = agora_tui::picker::child(&listed.path, "src");
