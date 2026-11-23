@@ -105,6 +105,20 @@ pub struct Book {
     last_end: Option<(String, Ended)>,
 }
 
+/// What the hub's answer to `PairStatus` says of the role (#1086, #1099): the error code it answered, `None` for an answer. An answer is
+/// the owner's; `auth.forbidden` is anyone else's, a member's or a viewer's. `protocol.capability_missing` comes from a hub with pairing
+/// switched off, which asks for the role first, so only its owner hears it (a hub that predates pairing says it to everyone; it lets no
+/// member look into folders either). Any other code tells nothing: `None`, asked again at the next connection.
+pub fn status_role(code: Option<&str>) -> Option<(Owner, crate::picker::Role)> {
+    use crate::picker::Role;
+    match code {
+        None => Some((Owner::Yes, Role::Owner)),
+        Some("auth.forbidden") => Some((Owner::No, Role::Limited)),
+        Some("protocol.capability_missing") => Some((Owner::No, Role::Owner)),
+        Some(_) => None,
+    }
+}
+
 /// The hub shows at most four cards, so does the client.
 pub const MAX_CARDS: usize = 4;
 
@@ -120,6 +134,14 @@ impl Book {
 
     /// A new connection: what was held is stale until the hub sends the cards waiting now.
     pub fn reset(&mut self) {
+        self.cards.clear();
+    }
+
+    /// The link was lost. The hub ends a person's connection when their role or grants change, so who the owner is is asked again at
+    /// the next connection (#1099), and the cards held are stale, as after [`Self::reset`]. A routine refresh, which the client asks
+    /// for itself, keeps the answer ([`Self::reset`]).
+    pub fn lost(&mut self) {
+        self.owner = Owner::Unknown;
         self.cards.clear();
     }
 
@@ -694,6 +716,38 @@ mod tests {
         assert_eq!(b.owner, Owner::Yes);
         b.apply(PairNote::Requested(requested(1, "a", "482193")));
         assert_eq!(b.shown().len(), 1);
+    }
+
+    #[test]
+    fn a_lost_link_asks_again_who_the_owner_is_and_a_routine_refresh_does_not() {
+        // #1099: the hub ends a connection when the person's role changes; a member made the owner is asked again after that.
+        let mut b = Book::default();
+        b.set_owner(Owner::No);
+        b.reset();
+        assert_eq!(b.owner, Owner::No, "a refresh keeps the answer");
+        b.lost();
+        assert_eq!(b.owner, Owner::Unknown, "a lost link asks again");
+        let mut b = owner_book();
+        b.apply(PairNote::Requested(requested(1, "a", "482193")));
+        b.lost();
+        assert!(b.shown().is_empty());
+        assert_eq!(b.owner, Owner::Unknown);
+    }
+
+    #[test]
+    fn the_answer_to_pair_status_says_the_role_for_the_folder_picker() {
+        use crate::picker::Role;
+        assert_eq!(status_role(None), Some((Owner::Yes, Role::Owner)));
+        assert_eq!(
+            status_role(Some("auth.forbidden")),
+            Some((Owner::No, Role::Limited))
+        );
+        // Pairing switched off: only the owner gets this far; the owner's picker is unchanged.
+        assert_eq!(
+            status_role(Some("protocol.capability_missing")),
+            Some((Owner::No, Role::Owner))
+        );
+        assert_eq!(status_role(Some("hub.unreachable")), None);
     }
 
     #[test]
