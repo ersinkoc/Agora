@@ -1009,7 +1009,6 @@ fleet-attention-count = { $count ->
 }
 fleet-asked = { $when } soruldu
 fleet-waiting-in-terminal = Terminalinde sizi bekliyor
-fleet-asks-start = Başka bir ajan başlatmak istiyor
 fleet-allow-for = İzin ver: { $name }
 fleet-deny-for = Reddet: { $name }
 fleet-review = İncele ve karar ver
@@ -1065,7 +1064,7 @@ fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
 attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce isteği tam kartında okuyun.
-attention-start = { $name } başka bir ajan başlatmak istiyor. Klasörü, istemi ve ayarları tam kartta okunur.
+attention-start-read = Klasörü, istemi ve ayarları tam kartta okunur.
 attention-pair = Onaylamadan önce, tam kartta numarasını ekranındaki numarayla karşılaştır.
 attention-later = Sonra
 attention-review = İncele

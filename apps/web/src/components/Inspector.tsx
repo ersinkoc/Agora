@@ -1,6 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { needsPanel } from '../net/needsPanel';
-import { isDismissedUnknown } from '../net/skipApproval';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { UsageSummary } from '../net/usage';
@@ -137,7 +136,8 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
   useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
   // An agent is listed once: by its request's card when it has one (the card opens the agent), else by its row (it waits in its terminal).
-  const carded = (id: string) => approvals.some((x) => x.agentId === id && !isDismissedUnknown(x.id));
+  // A start or a switch to act without asking keeps the row until those cards can open the agent themselves (redesign PR 5).
+  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.start && !x.skip && !x.skipUnknown);
   const agentOf = (id: string) => fleet.find((a) => a.id === id) ?? attention.find((a) => a.id === id);
   return <>
     {tab === 'needs' && <div className="grid gap-2">

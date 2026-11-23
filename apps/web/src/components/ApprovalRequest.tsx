@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { useId, useLayoutEffect, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { t } from '../i18n';
 import { approvalName } from '../net/approvalText';
 import type { ApprovalModel } from '../net/view';
@@ -40,13 +40,15 @@ export function askTitle(x: Pick<ApprovalModel, 'action' | 'start' | 'skip' | 's
   return t(`approval-ask-${kind}`, { name });
 }
 
-export function ApprovalRequest({ density, icon, avatar, title, where, children, actions, foot, stacked, alert, titleWrap, className = '' }: {
+export function ApprovalRequest({ density, icon, avatar, title, where, titleEnd, children, actions, foot, stacked, alert, titleWrap, className = '' }: {
   density: ApprovalDensity;
   icon: IconName;
   avatar?: ReactNode;
   title: ReactNode;
   // Where it runs and how long it waited, muted, after the title (tags in the full density).
   where?: ReactNode;
+  // At the end of the title line (the side panel's "open the agent").
+  titleEnd?: ReactNode;
   // The ask, whole (or, where the screen only offers Review, the short form).
   children?: ReactNode;
   actions?: ReactNode;
@@ -61,7 +63,7 @@ export function ApprovalRequest({ density, icon, avatar, title, where, children,
 }) {
   const id = useId();
   // Under `titleWrap` the wrapper gives the title its id (an `id` key here, even undefined, would replace it).
-  const head = <p {...(titleWrap ? {} : { id })} className="kit-callout__title approval-req__title">{avatar}<span className="approval-req__text"><span className="approval-req__ask">{title}</span>{where ? <span className="approval-req__where">{where}</span> : null}</span></p>;
+  const head = <p {...(titleWrap ? {} : { id })} className="kit-callout__title approval-req__title">{avatar}<span className="approval-req__text"><span className="approval-req__ask">{title}</span>{where ? <span className="approval-req__where">{where}</span> : null}</span>{titleEnd}</p>;
   const cls = ['kit-callout kit-tone-needs approval-req', `approval-req--${density}`, stacked && 'approval-req--stacked', className].filter(Boolean).join(' ');
   return (
     <section className={cls} data-density={stacked ? 'row' : density} aria-labelledby={titleWrap ? undefined : id} role={alert ? 'alert' : undefined}>
@@ -108,9 +110,13 @@ export function AnswerButtons({ approval: x, size = 'md', off = {}, danger, alwa
 export const NARROW_PX = 360;
 export function useNarrow(ref: RefObject<HTMLElement | null>, below = NARROW_PX): boolean {
   const [narrow, setNarrow] = useState(false);
-  useEffect(() => {
+  // Measured before the first paint, so a narrow pane never shows the wide layout for a frame.
+  useLayoutEffect(() => {
     const el = ref.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (!el) return;
+    const now = el.getBoundingClientRect().width;
+    if (now > 0) setNarrow(now < below);
+    if (typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver((entries) => {
       const w = entries[entries.length - 1]?.contentRect.width ?? el.getBoundingClientRect().width;
       if (w > 0) setNarrow(w < below);

@@ -109,11 +109,12 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
       {onResolve && (docked ? <p className="phone-card__why m-0">{t('phone-answer-below')}</p> : <>
         <AlwaysOnly approval={x} />
         <div className="phone-card__actions">
-          {/* ADR-0101: "Allow always" only when offered; in the place of Allow when the request offers nothing else. */}
+          {/* ADR-0101: "Allow always" only when offered; in the place of Allow when the request offers nothing else. Redesign PR 4: Deny
+              first, then the primary, as on every request; "Allow always" beside a single answer keeps its own full-width row here. */}
+          <button type="button" className="button" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
           {x.always?.only
             ? <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x, 'phone')} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>
             : <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>}
-          <button type="button" className="button" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
           {x.always && !x.always.only && <button type="button" className="button phone-card__always" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x, 'phone')} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>}
         </div>
         {x.always && <AlwaysNote approval={x} surface="phone" />}
@@ -177,8 +178,8 @@ function NeedsDock({ dock, count, machines, stale, onResolve, onOpen }: { dock: 
       {dock.kind === 'answer' && <>
         <p className="phone-dock__ask m-0">{visible(askLine(dock.approval.action, dock.approval.detail))}</p>
         <div className="phone-card__actions">
-          <button type="button" className="button button--primary phone-dock__btn" disabled={busy || stale || !ready || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
           <button type="button" className="button phone-dock__btn" disabled={busy || stale || !ready || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
+          <button type="button" className="button button--primary phone-dock__btn" disabled={busy || stale || !ready || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
         </div>
         {stale && <p id={why} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
       </>}

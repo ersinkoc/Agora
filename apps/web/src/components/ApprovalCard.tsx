@@ -50,10 +50,8 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
       <ApprovalRequest density={narrow ? 'row' : density} stacked={narrow} alert={alert} icon={ASK_ICON[askKind(x)]}
         avatar={agent ? <AgentAvatar accent={agent.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent.kind, name })} size="s" /> : undefined}
         title={askTitle(x, name)}
-        where={x.machineName?.trim() || onOpen ? <>
-          {x.machineName?.trim() ? <bdi>{visible(x.machineName)}</bdi> : null}
-          {onOpen && <button type="button" className="ide-iconbtn approval-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="rtl:rotate-180" /></button>}
-        </> : undefined}
+        where={x.machineName?.trim() ? <bdi>{visible(x.machineName)}</bdi> : undefined}
+        titleEnd={onOpen && <button type="button" className="ide-iconbtn approval-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="rtl:rotate-180" /></button>}
         actions={onAnswer && <AnswerButtons approval={x} size="sm" off={{ disabled: busy }} alwaysNote={alwaysNoteId(x, surface)}
           onDeny={() => onAnswer(false)} onAllow={() => onAnswer(true)} onAlways={() => onAnswer(true, true)} />}
         foot={x.always ? <AlwaysNote approval={x} surface={surface} /> : undefined}>

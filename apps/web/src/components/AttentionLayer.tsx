@@ -230,7 +230,8 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             <div id="attention-what" className="min-h-0 overflow-auto">
               {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
               {kind === 'answer' && x?.always && <AlwaysNote approval={x} surface="attention" className="mt-2" />}
-              {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
+              {/* The title already says who wants to start another agent; this says where it is read. */}
+              {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start-read')}</p>}
               {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
               {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
                 <p className="m-0 mb-2 text-sm text-ink">{t('attention-ask-review')}</p>

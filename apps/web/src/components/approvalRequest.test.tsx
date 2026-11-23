@@ -191,6 +191,11 @@ describe('one copy of each request', () => {
     expect(onOpen).toHaveBeenCalledWith('n1/a1');
   });
 
+  it('a start request keeps its agent\'s row until its card can open the agent (redesign PR 5)', () => {
+    act(() => root.render(details([{ ...(demoStartApproval as ApprovalModel), agentId: agent.id }], [agent])));
+    expect([...host.querySelectorAll('.ide-row')].map((r) => r.textContent)).toEqual([expect.stringContaining('codex · teal')]);
+  });
+
   it('the toast is hidden while a Needs you list is on screen, and comes back when it closes', () => {
     attentionPrefs.setMode('banner');
     const layer = <AttentionLayer key="layer" items={attentionList([ask()], [agent])} onResolve={vi.fn()} onReview={() => {}} />;

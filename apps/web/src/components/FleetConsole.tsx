@@ -54,9 +54,13 @@ export function FleetSummary({ counts, filter, onFilter }: { counts: FleetCounts
 }
 const MARK_TONE: Record<FleetFilter, string> = { 'needs-you': 'needs', working: 'working', finished: 'finished', failed: 'danger' };
 
-// The one line of what an agent asks: the request's own words, short. Anything long goes through the full card.
+// The one line of what an agent asks: the request's own words, short. Anything long goes through the full card. A start request's title
+// already says it wants to start another agent, so its line is the start of its first prompt (cut: it is only ever reviewed, never answered
+// here).
 function askText(x: ApprovalModel): string {
-  if (x.start) return t('fleet-asks-start');
+  // A switch to act without asking: what it would mean, in the window's words (the title names it; the ids are read in its full card).
+  if (x.skip) return t('skip-approval-body');
+  if (x.start) return x.start.prompt.trim() ? visible(x.start.prompt.replace(/\s+/g, ' ').trim()) : t('start-approval-no-prompt');
   const d = x.detail ? detailText(x.detail) : '';
   return visible(d ? `${x.action} · ${d}` : x.action);
 }
@@ -217,12 +221,13 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const open = read.has(it.key);
     const c = it.card;
     return card(it.key, `fleet-ask${open ? ' fleet-ask--open' : ''}`, 'machine',
-      <><bdi className="fleet-ask__name">{peerText(c.name)}</bdi><span className="fleet-ask__where">{t('pair-row-where')}</span></>,
+      <bdi className="fleet-ask__name">{peerText(c.name)}</bdi>,
       <>
         <p className="fleet-ask__what">{t('pair-row-what')}</p>
         {open && pairing && <div id={`pair-row-${c.id}`} className="mt-2"><PairRequest inline request={c} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(c, a, r)} /></div>}
       </>,
-      <Button size="sm" variant="primary" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${c.id}` : `pair-row-${c.id}`} aria-label={t('pair-review-for', { name: isolated(c.name) })} onClick={() => reviewPair(it.key, c.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</Button>);
+      <Button size="sm" variant="primary" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${c.id}` : `pair-row-${c.id}`} aria-label={t('pair-review-for', { name: isolated(c.name) })} onClick={() => reviewPair(it.key, c.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</Button>,
+      undefined, <span className="fleet-ask__where">{t('pair-row-where')}</span>);
   };
   const rowOf = (it: AttentionItem, inlineOk: boolean) => {
     if (it.kind === 'pair') return pairRow(it);

@@ -1033,7 +1033,6 @@ fleet-attention-count = { $count ->
 }
 fleet-asked = Asked { $when }
 fleet-waiting-in-terminal = Waiting for you in its terminal
-fleet-asks-start = Asks to start another agent
 fleet-allow-for = Allow: { $name }
 fleet-deny-for = Deny: { $name }
 fleet-review = Review and decide
@@ -1089,7 +1088,7 @@ fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
 attention-ask-review = This needs to be read in full before you answer. Review it to decide.
 attention-skip = { $name } was asked to act without asking you. Read the request in its full card before you answer.
-attention-start = { $name } wants to start another agent. Its folder, prompt and settings are read in the full card.
+attention-start-read = Its folder, prompt and settings are read in the full card.
 attention-pair = Compare its number with the one on its screen in the full card before you approve.
 attention-later = Later
 attention-review = Review
