@@ -332,7 +332,8 @@ references are at main `9760e901`.
   `chat.history_not_saved` once in that conversation. Bounds: `chat.history_max_bytes` (32 MiB, at most 256 MiB; the newest half kept in a new
   file that says it was cut), `chat.history_days` (30, only lowered; files of agents that do not run, checked at start and hourly), 2 GiB
   per node, `agora history purge`. The node seeds the ring from the file's end (at most 4 MiB) on take-up, before the ticker reads the
-  holder, and on resume; a fresh start moves the file aside as `<id>.earlier.jsonl` and numbers on after it. Tested with a kill then take-up
+  holder, and on resume (read before the resume, applied under the supervisor's lock once it went through, so a refused one changes
+  nothing); a fresh start moves the file aside as `<id>.earlier.jsonl` (replacing an older one) and numbers on after it. Tested with a kill then take-up
   (earlier turns with their ids, ids after them), a node that cannot write (one notice, the agent unaffected), and a tool call that
   finishes after the restart (one entry, updated in place), in `hold_node_pipes`, plus node unit tests and `agora-bench transcript`.
   Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the

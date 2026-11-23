@@ -590,9 +590,12 @@ impl Transcript {
 
     /// An entry changed (or is new): the next batch writes it.
     fn changed(&mut self, id: u64, bytes: usize) {
+        // Counted once per batch: an entry that changes many times (a tool call's output) is written once, as it is then, so its
+        // changes neither wake the writer early nor fill the file with copies.
         if let Some(s) = &mut self.save {
-            s.dirty.insert(id);
-            s.grew(bytes);
+            if s.dirty.insert(id) {
+                s.grew(bytes);
+            }
         }
     }
 
@@ -809,21 +812,29 @@ impl ChatBoard {
         self.seed(agent, seed, now_ms)
     }
 
-    /// ADR-0089 decision 5: a fresh start of the agent ("Start again") begins a new file; its ids go on after the earlier session's.
-    pub fn begin_fresh(&self, agent: &AgentId, now_ms: u64) -> bool {
-        let Some(store) = &self.store else {
-            return false;
-        };
-        let high = store.begin_fresh(agent.as_str());
-        high > 0
-            && self.seed(
-                agent,
-                Seed {
-                    entries: Vec::new(),
-                    high,
-                },
-                now_ms,
-            )
+    /// ADR-0060, ADR-0089 decision 5: what a resume will seed the agent's transcript with, read from its file before the resume (so
+    /// no file is read under the supervisor's lock): the newest entries, or for a fresh start ("Start again") only the highest id, so
+    /// the new session numbers on after the earlier one. `None` when there is nothing.
+    pub fn read_seed(&self, agent: &AgentId, fresh: bool) -> Option<Seed> {
+        let mut seed = self.store.as_ref()?.read(agent.as_str());
+        if fresh {
+            seed.entries.clear();
+        }
+        (seed.high > 0).then_some(seed)
+    }
+
+    /// ADR-0060, ADR-0089 decision 5: a resume went through (called before its adapter's first words are read): the transcript is
+    /// seeded with what [`Self::read_seed`] gave, and a fresh start moves the earlier session's file aside so the new one begins a file
+    /// of its own. A resume that is refused calls nothing, and leaves the file and the ring as they were.
+    pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
+        if fresh {
+            if let Some(store) = &self.store {
+                store.move_aside(agent.as_str());
+            }
+        }
+        if let Some(seed) = seed {
+            self.seed(agent, seed, now_ms);
+        }
     }
 
     /// ADR-0089 decision 1: what changed since the last batch, per agent: the entries as they are now (each once), the changed ones
@@ -2470,6 +2481,27 @@ mod tests {
         assert_eq!(again[0].lines.len(), 1);
     }
 
+    /// One tool call whose large output changes a hundred times between two batches is one line, and does not wake the writer early.
+    #[test]
+    fn an_entry_that_changes_often_is_written_once_per_batch() {
+        let (_dir, s) = store("often");
+        let b = ChatBoard::saving(s);
+        let a = AgentId::new("a");
+        for i in 0..100 {
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some(format!("{i}{}", "o".repeat(MAX_OUTPUT_BYTES))),
+                    ..tool("c1")
+                }),
+                i,
+            );
+        }
+        assert!(!b.lock().get(&a).unwrap().save.as_ref().unwrap().woken);
+        let batch = b.take_unsaved().pop().unwrap();
+        assert_eq!(batch.lines.len(), 1);
+    }
+
     #[test]
     fn an_entry_that_leaves_the_ring_before_the_batch_is_still_written() {
         let (_dir, s) = store("flood");
@@ -2637,7 +2669,10 @@ mod tests {
         old.push_item(&a, &ChatItem::Text("y".into()), 1);
         save(&old);
         let new = ChatBoard::saving(Arc::clone(&s));
-        assert!(new.begin_fresh(&a, 2));
+        let seed = new.read_seed(&a, true);
+        // A refused fresh start changes nothing: a later Resume still finds the conversation.
+        assert_eq!(new.read_seed(&a, false).unwrap().entries.len(), 2);
+        new.resumed(&a, seed, true, 2);
         assert!(new.snapshot(&a).is_empty());
         new.push_item(&a, &ChatItem::Text("z".into()), 3);
         assert_eq!(new.snapshot(&a)[0].entry_id, 3);

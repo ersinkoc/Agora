@@ -24,18 +24,20 @@
 //!
 //! **Writes.** Off every agent's path: the chat path only marks which entries changed (an id in a set); the writer thread
 //! ([`spawn_writer`]) takes the changed entries under the board's lock once a second, or as soon as 64 KiB of them wait, and encodes,
-//! redacts and appends them after letting it go. A write that fails (a full disk, a folder that cannot be made) drops that batch:
+//! redacts and appends them after letting it go (an entry that changed many times is written once, as it is then). A batch after a
+//! write that was cut short starts on a line of its own. A write that fails (a full disk, a folder that cannot be made) drops that batch:
 //! the entries stay in the ring, the agent is not touched, and its conversation says once `chat.history_not_saved`. A node that is
 //! killed loses at most the last batch (up to a second or 64 KiB).
 //!
 //! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, lowered (or raised up to 256 MiB) by the node policy
 //! `chat.history_max_bytes` (0 writes nothing); over it, the newest half is written to a new file that replaces the old one (whole
 //! lines, a header that says `truncated`). The file of an agent that does not run is removed once it was not written for
-//! `chat.history_days` (30 by default, never more); a fresh start ("Start again") moves the earlier file aside as `<id>.earlier.jsonl`,
-//! which ages the same way. Over 2 GiB in all, the files of agents that do not run go, oldest first. Checked when the node starts and
+//! `chat.history_days` (30 by default, never more); a fresh start ("Start again") that went through moves the earlier file aside as
+//! `<id>.earlier.jsonl` (replacing an older one), which ages the same way. Over 2 GiB in all, the files of agents that do not run go, oldest first. Checked when the node starts and
 //! every hour. `agora history purge` removes the folder.
 //!
-//! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, ADR-0084) are replaced by
+//! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, and the environment variables its
+//! policy passes to agents, ADR-0084) are replaced by
 //! `<redacted>` in every text of a line before it is written. A secret the node does not hold cannot be found in what an agent or a
 //! tool printed; the file is as sensitive as the terminal, and its mode is what protects it.
 //!
@@ -148,6 +150,8 @@ pub struct Store {
     dir: PathBuf,
     limits: Limits,
     secrets: Option<SecretStore>,
+    /// ADR-0084: values the node passes from its own environment (a `credentials.<kind>` name it does not hold in its store).
+    env_values: Vec<String>,
     /// The secret values last read, longest first, and when their folder last changed.
     known: Mutex<(Option<SystemTime>, Vec<String>)>,
 }
@@ -450,8 +454,21 @@ impl Store {
             dir: data_dir.join(TRANSCRIPTS_DIR),
             limits,
             secrets,
+            env_values: Vec::new(),
             known: Mutex::new((None, Vec::new())),
         }
+    }
+
+    /// ADR-0084: the values of these environment variables of the node (the names its policy lists for agents, which it passes from
+    /// its environment when its store does not hold them) are replaced too.
+    pub fn with_env_secrets<'a>(mut self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        self.env_values = names
+            .into_iter()
+            .filter_map(|n| std::env::var(n).ok())
+            .filter(|v| v.len() >= MIN_SECRET)
+            .collect();
+        self.known = Mutex::new((None, Vec::new()));
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -473,20 +490,25 @@ impl Store {
 
     /// The secret values to replace, read again only when their folder changed.
     fn known_secrets(&self) -> Vec<String> {
-        let Some(store) = &self.secrets else {
-            return Vec::new();
-        };
-        let changed = std::fs::metadata(store.dir())
-            .and_then(|m| m.modified())
-            .ok();
+        let changed = self
+            .secrets
+            .as_ref()
+            .and_then(|s| std::fs::metadata(s.dir()).and_then(|m| m.modified()).ok());
         let mut g = self.known.lock().unwrap_or_else(|e| e.into_inner());
         if g.0 != changed || changed.is_none() {
-            let mut values: Vec<String> = store
-                .list()
+            let mut values: Vec<String> = self
+                .secrets
                 .iter()
-                .filter_map(|n| store.get(n))
-                .map(|s| s.expose().to_string())
+                .flat_map(|store| {
+                    store
+                        .list()
+                        .iter()
+                        .filter_map(|n| store.get(n))
+                        .map(|s| s.expose().to_string())
+                        .collect::<Vec<_>>()
+                })
                 .filter(|v| v.len() >= MIN_SECRET)
+                .chain(self.env_values.iter().cloned())
                 .collect();
             values.sort_by_key(|v| std::cmp::Reverse(v.len()));
             values.dedup();
@@ -513,6 +535,9 @@ impl Store {
         let len = f.metadata()?.len();
         if len == 0 {
             f.write_all(&header(false))?;
+        } else if !ends_a_line(&path, len) {
+            // A write cut short (a full disk) left half a line: ended here, so the next line is whole and only the torn one is lost.
+            f.write_all(b"\n")?;
         }
         f.write_all(&out)?;
         f.flush()?;
@@ -551,20 +576,20 @@ impl Store {
             .unwrap_or_default()
     }
 
-    /// ADR-0089 decision 5: a fresh start of the agent ("Start again"): its file is moved aside as the earlier session's, and the
-    /// highest id it gave is returned, so the new session's ids go on after it.
-    pub fn begin_fresh(&self, agent: &str) -> u64 {
+    /// ADR-0089 decision 5: a fresh start of the agent ("Start again") that went through: its file is moved aside as the earlier
+    /// session's (`<id>.earlier.jsonl`, replacing an older one), so the new session begins a file of its own. Only after the start
+    /// succeeded: a refused one leaves the conversation where a later Resume finds it.
+    pub fn move_aside(&self, agent: &str) {
         let (Some(path), Some(earlier)) = (self.path(agent), self.earlier_path(agent)) else {
-            return 0;
+            return;
         };
-        let high = read_tail(&path).map(|s| s.high).unwrap_or(0);
-        if high > 0 {
-            if let Err(e) = std::fs::rename(&path, &earlier) {
+        match std::fs::rename(&path, &earlier) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
                 // Operational log, not UI text. The new session is written after the earlier one in the same file then.
                 eprintln!("transcripts: {agent}: the earlier session was not moved aside: {e}");
             }
+            _ => {}
         }
-        high
     }
 
     /// ADR-0089 decision 2: removes the files of agents that do not run (`running` holds the ids that do) not written for
@@ -617,6 +642,17 @@ impl Store {
         }
         removed
     }
+}
+
+/// The file's last byte is a line break (or cannot be read: then a line break is written, which a reader skips as an empty line).
+fn ends_a_line(path: &Path, len: u64) -> bool {
+    let mut last = [0u8; 1];
+    agora_platform::open_read_no_follow(path)
+        .and_then(|mut f| {
+            f.seek(SeekFrom::Start(len.saturating_sub(1)))?;
+            f.read_exact(&mut last)
+        })
+        .is_ok_and(|()| last[0] == b'\n')
 }
 
 fn read_tail(path: &Path) -> io::Result<Seed> {
@@ -865,6 +901,44 @@ mod tests {
         assert_eq!(seed.high, 2);
     }
 
+    /// A write cut short left half a line: the next batch starts on a line of its own, so only the torn line is lost.
+    #[test]
+    fn a_batch_after_a_torn_line_is_read_whole() {
+        let dir = temp("torn-write");
+        let store = Store::new(&dir, Limits::default(), None);
+        store.write(&batch("a", 1, vec![text(1, "x")])).unwrap();
+        let path = store.path("a").unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"{\"n\":2,\"entry\":{\"entry_id\":2,\"te")
+            .unwrap();
+        store.write(&batch("a", 3, vec![text(3, "z")])).unwrap();
+        let seed = store.read("a");
+        let ids: Vec<u64> = seed.entries.iter().map(|(e, _)| e.entry_id).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(seed.high, 3);
+    }
+
+    #[test]
+    fn values_the_node_passes_from_its_environment_are_replaced_too() {
+        let dir = temp("env-secret");
+        // A variable every test process has, so nothing here sets the environment.
+        let value = std::env::var("PATH").unwrap();
+        let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)))
+            .with_env_secrets(["PATH", "AGORA_TRANSCRIPT_TEST_UNSET"]);
+        store
+            .write(&batch(
+                "a",
+                1,
+                vec![text(1, &format!("it is {value} here"))],
+            ))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(body.contains(&format!("it is {REDACTED} here")), "{body}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_folder_and_the_file_are_the_owners_only() {
@@ -975,7 +1049,8 @@ mod tests {
         for a in ["old", "running", "fresh"] {
             store.write(&batch(a, 1, vec![text(1, "x")])).unwrap();
         }
-        assert_eq!(store.begin_fresh("fresh"), 1);
+        assert_eq!(store.read("fresh").high, 1);
+        store.move_aside("fresh");
         assert!(store.earlier_path("fresh").unwrap().exists());
         assert!(!store.path("fresh").unwrap().exists());
         let running: HashSet<String> = ["running".to_string()].into();

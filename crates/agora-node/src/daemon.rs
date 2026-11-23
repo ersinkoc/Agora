@@ -1931,13 +1931,14 @@ impl Node {
         }
         // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
         // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
-        let history = read_policy(&cfg.data_dir.join(POLICY_FILE)).history;
+        let policy = read_policy(&cfg.data_dir.join(POLICY_FILE));
         let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::new(
             crate::transcript::Store::new(
                 &cfg.data_dir,
-                history,
+                policy.history,
                 Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
-            ),
+            )
+            .with_env_secrets(policy.credentials.values().flatten().map(String::as_str)),
         )));
         for (id, _) in &taken_up {
             chat.seed_from_disk(id, now_ms());
@@ -3574,6 +3575,30 @@ mod announce_tests {
             (S::Forbid, vec!["unreadable".to_string()])
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0089 decision 7: the transcripts folder is among what a confined agent may not reach.
+    #[test]
+    fn a_confined_agent_cannot_reach_the_transcripts() {
+        for data in ["/tmp/agora-home/data", "/srv/elsewhere/data"] {
+            let cfg = NodeConfig {
+                resume_all: false,
+                node_id: "n".into(),
+                socket: "/tmp/agora-home/run/n.sock".into(),
+                data_dir: data.into(),
+                worktree_root: "/tmp/agora-home/worktrees".into(),
+                manifests_dir: "/tmp/agora-home/manifests".into(),
+                projects: vec![],
+                limits: crate::supervisor::NodeLimits::default(),
+            };
+            let transcripts = Path::new(data).join(crate::transcript::TRANSCRIPTS_DIR);
+            assert!(
+                node_private_paths(&cfg)
+                    .iter()
+                    .any(|p| transcripts.starts_with(p)),
+                "{data}"
+            );
+        }
     }
 
     /// ADR-0089 decision 2: the history bounds come from the policy, never past their caps; a value that is not a number keeps the

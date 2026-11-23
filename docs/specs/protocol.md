@@ -462,8 +462,9 @@ secret values replaced). A node that takes an agent up from the holder, or resum
 before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
 shows: ids never start again at 1. A tool call or a plan from before the restart is changed in place under its id. A permission entry
 still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
-there is dropped with an `adapter.queue_dropped` notice. A fresh start ("Start again") begins a new file and numbers on after the
-earlier session's ids. A node killed loses at most the last batch (up to a second): those entries were shown live and are not in the
+there is dropped with an `adapter.queue_dropped` notice. A fresh start ("Start again") that went through begins a new file (the earlier
+one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
+changes neither. A node killed loses at most the last batch (up to a second): those entries were shown live and are not in the
 file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
