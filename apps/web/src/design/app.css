@@ -511,7 +511,7 @@
   .approval-req__summary { @apply grid min-w-0 gap-0.5 text-muted; font-size: var(--text-caption); }
   .approval-req__line { @apply m-0 flex min-w-0 items-baseline gap-x-1.5; }
   .approval-req__line > * + *::before { content: '·'; @apply me-1.5; }
-  .approval-req__clip { @apply min-w-0 flex-1 truncate; }
+  .approval-req__clip { @apply min-w-0 truncate; flex: 0 1 auto; }
   .approval-req__quote { @apply text-ink; }
   .approval-req__quote::before { content: '“'; }
   .approval-req__quote::after { content: '”'; }
