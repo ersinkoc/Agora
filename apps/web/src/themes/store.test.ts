@@ -141,7 +141,7 @@ describe('the person\'s themes', () => {
 
   it('keeps a stored theme that only the later checks warn about: the red on its surfaces, a badge, a control (#1054)', () => {
     const files = [
-      { name: 'Light raised', tokens: { 'surface-2': '#3a3a40', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }, code: 'kit-contrast' },
+      { name: 'Light raised', tokens: { 'surface-2': '#38383e', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }, code: 'kit-contrast' },
       { name: 'Dim text', tokens: { text: '#9c9ca4' }, code: 'kit-contrast' },
       { name: 'Dim idle icon', tokens: { 'state-idle': '#66666e' }, code: 'control-contrast' },
     ];

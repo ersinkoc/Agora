@@ -163,13 +163,13 @@ describe('theme tokens', () => {
   });
 
   it('warns about the fixed red as words on the theme\'s own surfaces (#1054)', () => {
-    // Raised surfaces a little lighter than Dark's: text, secondary text and the accent still read 4.5:1 there, the red 4.0:1.
-    const p = parseTheme(file({ 'surface-2': '#3a3a40', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }));
+    // Raised surfaces a little lighter than Dark's: text, secondary text and the accent still read 4.5:1 there, the red 4.2:1.
+    const p = parseTheme(file({ 'surface-2': '#38383e', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }));
     expect(p.ok).toBe(true);
     if (!p.ok) return;
     expect(tintIssues(p.tokens, 'dark')).toEqual([]); // what #1051 checked: nothing to say
-    expect(p.warnings).toEqual([{ code: 'kit-contrast', fg: 'danger', bg: 'surface-2', ratio: contrast(DANGER.dark, '#3a3a40'), min: 4.5 }]);
-    expect(issueText(p.warnings![0]!)).toBe('Red (errors) on Raised surfaces is 4.0:1; it needs at least 4.5:1 to be readable.');
+    expect(p.warnings).toEqual([{ code: 'kit-contrast', fg: 'danger', bg: 'surface-2', ratio: contrast(DANGER.dark, '#38383e'), min: 4.5 }]);
+    expect(issueText(p.warnings![0]!)).toBe('Red (errors) on Raised surfaces is 4.2:1; it needs at least 4.5:1 to be readable.');
   });
 
   it('warns about an agent\'s initial on its coloured badge (#1054)', () => {
