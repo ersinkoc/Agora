@@ -427,7 +427,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                       <span className={m.online ? 'text-finished' : 'muted'}>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
                       <span className="muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
                       {m.build && <span className="muted font-mono" title={t('network-build')}>{m.build}</span>}
-                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
+                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-ink'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
                     </li>
                   ))}
                 </ul>

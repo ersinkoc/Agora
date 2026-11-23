@@ -106,7 +106,7 @@ export function PairCardView({ request, state, inline, offline, now, onApprove, 
           <span><strong className="font-semibold">{t('pair-replace')}</strong><br /><span className="text-muted">{t('pair-replace-why', { name: isolated(request.name) })}</span></span>
         </label>
       )}
-      {failed && <p role="alert" className="m-0 text-needs-you">{t('pair-failed')}</p>}
+      {failed && <p role="alert" className="m-0 text-danger">{t('pair-failed')}</p>}
       {why && <p id={`${id}-why`} className="m-0 text-xs text-muted">{t(why)}</p>}
       {step === 'sent' && <p role="status" className="m-0 text-xs text-muted">{t('pair-sent')}</p>}
       {/* The question has a place of its own above the buttons, so the buttons never move when it appears: the yes is not under the

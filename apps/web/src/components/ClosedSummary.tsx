@@ -70,7 +70,7 @@ export function ClosedSummary({ agent, now, source, onReview, onHistory, onFiles
           {agent.interrupted.resumable && <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume('resume')}><Icon name="play" className="size-4" />{t('action-resume')}</button>}
           <button type="button" className={agent.interrupted.resumable ? 'button' : 'button button--primary'} disabled={resuming} onClick={() => onResume('again')}>{t('action-start-again')}</button>
         </div>}
-        {resumeError && <p role="alert" className="m-0 text-needs-you">{t(resumeReasonKey(resumeError))}</p>}
+        {resumeError && <p role="alert" className="m-0 text-danger">{t(resumeReasonKey(resumeError))}</p>}
         <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[0.8125rem]">
           <dt className="text-muted">{t('closed-machine')}</dt><dd className="m-0 truncate">{agent.machine}</dd>
           <dt className="text-muted">{t('closed-folder')}</dt><dd className="m-0 break-all font-mono text-xs">{agent.workspace || agent.project || '—'}</dd>
@@ -89,7 +89,7 @@ export function ClosedSummary({ agent, now, source, onReview, onHistory, onFiles
           <button type="button" className="button" onClick={onDismiss}>{t('closed-dismiss')}</button>
           {onForget && <button type="button" className="button" onClick={onForget}>{t('closed-forget')}</button>}
         </div>
-        {forgetError && <p role="alert" className="m-0 text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
+        {forgetError && <p role="alert" className="m-0 text-danger">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
       </div>
     </div>
   );

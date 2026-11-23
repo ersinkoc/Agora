@@ -341,7 +341,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
         <CloseConfirm agent={agent} where="pane" />
         {!agent.closed && (changed > 0 && loadDiff || files) && (
           <div className="phone-tools">
-            {changed > 0 && loadDiff && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => setShown('changes')}>{t('changes-files', { count: changed })}</button>}
+            {changed > 0 && loadDiff && <button type="button" className="phone-chipbtn" onClick={() => setShown('changes')}>{t('changes-files', { count: changed })}</button>}
             {files && <button type="button" className="phone-chipbtn" onClick={() => setShown('files')}><Icon name="files" className="size-4" />{t('console-files')}</button>}
           </div>
         )}

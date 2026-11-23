@@ -72,7 +72,7 @@ export function SkipApproval({ approval, busy, onResolve }: {
         <dd className="m-0 break-words">{visible(skip.valueName)} <code dir="ltr" className="font-mono text-muted">{visible(skip.value)}</code></dd>
       </dl>
       <p className="m-0 text-xs text-muted">{t('skip-approval-scope')}</p>
-      {!capable && <p role="note" className="m-0 text-xs text-needs-you">{t('skip-approval-other-window')}</p>}
+      {!capable && <p role="note" className="m-0 text-xs text-muted">{t('skip-approval-other-window')}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" className="button button--primary relative overflow-hidden px-3 py-1 text-xs" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
           {t('approval-allow')}
