@@ -261,6 +261,10 @@ fn transcript(args: &[String]) -> ExitCode {
         r.push_memory_ns, r.push_saving_ns, r.push_large_memory_ns, r.push_large_saving_ns, r.batch_entries, r.take_p50_us, r.take_max_us, r.write_p50_ms, r.write_max_ms,
         r.seed_file_bytes, r.seed_p50_ms, r.seed_max_ms
     );
+    println!(
+        "with a 52-byte secret: take {:.1} us, write {:.2} ms | with an 8 KiB secret: take {:.1} us, write {:.2} ms (p50, one stream, newest pieces held)",
+        r.take_52_p50_us, r.write_52_p50_ms, r.take_8k_p50_us, r.write_8k_p50_ms
+    );
     if let Some(path) = out {
         match serde_json::to_string_pretty(&r) {
             Ok(json) if std::fs::write(&path, &json).is_ok() => {}

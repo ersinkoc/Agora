@@ -30,8 +30,11 @@
 //! redacts and appends them after letting it go (an entry that changed many times is written once, as it is then). A batch after a
 //! write that was cut short starts on a line of its own. A write that fails (a full disk, a folder that cannot be made) drops that
 //! batch and is not tried again: the entries stay in the ring, the agent is not touched, and its conversation says once
-//! `chat.history_not_saved`. A node that is killed loses at most the last batch (up to a second or 64 KiB). The writer is the only
-//! one that writes, rotates or moves a file aside, so none of these races another.
+//! `chat.history_not_saved`. The writer is the only one that writes, rotates or moves a file aside, so none of these races another.
+//! While the node holds a secret value, the newest pieces of the agent's streamed text and thinking (within the longest value's
+//! length of the stream's end) wait until more follows, another entry ends the stream, or it has been quiet for `chat::HOLD_MS` (5 s),
+//! so a value split between pieces is whole before any piece of it is written (see **Secrets**). A node that is killed loses at most
+//! the last batch (up to a second or 64 KiB) and, with a secret value held, the held pieces (up to 5 s more of a stream).
 //!
 //! **Seeding** (ADR-0104 C1). On take-up and on resume the ring is filled from the file's end, every entry held to the live path's
 //! shapes and bounds (`chat::seeded_entry`) and ids kept below 2^52. A permission still pending there is shown cancelled, and a prompt
@@ -48,19 +51,28 @@
 //! (replacing an older one), which follows its agent. Over 2 GiB in all, the files of agents that are not kept go, oldest first.
 //! Leftovers of a rewrite go. Checked when the node starts and every hour. `agora history purge` removes the folder.
 //!
-//! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, and the environment variables its
-//! policy passes to agents, ADR-0084), of 8 bytes or more, are replaced by `<redacted>` before a line is written: in every text, and
-//! as JSON escapes them in a tool's arguments. What an agent streams arrives in pieces and a long tool output is cut in its middle,
-//! so a piece of a value (4 bytes or more) at the edge of a text or on the middle cut of an output, a thought or a tool's arguments
-//! is replaced too; a piece shorter than that is left.
-//! Ids (`call_id`, `approval_id`) are never changed. A secret the node does not hold cannot be found in what an agent or a tool
-//! printed; the file is as sensitive as the terminal, and its mode is what protects it.
+//! **Secrets** (ADR-0089 decision 7; review of #1103). The values of the secrets this node holds (`<data>/secrets`, and the
+//! environment variables its policy passes to agents, ADR-0084), of 8 bytes or more, are replaced by `<redacted>` before a line is
+//! written:
+//! - whole, in every text, also as JSON escapes them (a tool's arguments and a call's text, which is made again from them);
+//! - whole across the pieces of the agent's streamed text and thinking: consecutive pieces are joined, with what came before and
+//!   after them, and each piece's part of a value is replaced, however many pieces it spans (the newest are held back, above);
+//! - as a piece (4 bytes or more) on each side of a place the node cut a text: the middle cut of a tool output, a thought or a tool's
+//!   arguments (also the 64 KiB cut made before cleaning, whose place is kept), and the end of a text cut to 16 KiB. A word that only
+//!   begins like a value counts only there, so elsewhere it is left; at a real cut it may be replaced too.
+//!
+//! The bridge (`agora acp-bridge`) removes escape sequences from a tool's output before its own 64 KiB cut, so the node never keeps
+//! the place that cut joins. Not covered: a value shorter than 8 bytes, a piece shorter than 4 bytes at a cut, the cuts another
+//! adapter makes on its own (and the bridge's other cuts: arguments over 64 KiB, plan text, a diff, a line over the node's limit),
+//! a value split between pieces that the ring dropped before they were written (a flood), and a secret the node does not hold. Ids
+//! (`call_id`, `approval_id`) are never changed. The file is as sensitive as the terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
 //! remove the file; retention does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -145,6 +157,33 @@ pub struct Side {
     pub tool: Option<(String, String)>,
     /// This entry is the plan a new plan replaces in place.
     pub plan: bool,
+    /// Where the node cut something out of the entry's texts (not written; for the writer's redaction).
+    pub cuts: Cuts,
+}
+
+/// Review of #1103 (N1): places in an entry's texts where the node cut something out (its head and tail kept, or its end dropped):
+/// a value cut there leaves a piece on one side or both, which the writer looks for. Byte offsets in the text as kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cuts {
+    pub text: Vec<usize>,
+    pub output: Vec<usize>,
+    pub args: Vec<usize>,
+}
+
+/// Review of #1103 (N1): consecutive pieces of the agent's streamed text and thinking, joined, so a value split between pieces is found
+/// whole. Each part is one entry's text in `text`; `line` is its line in the batch when it is written there, `None` for a piece that
+/// is only context (written already, or held back).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Run {
+    pub text: String,
+    pub parts: Vec<RunPart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunPart {
+    pub line: Option<usize>,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// One line after the header.
@@ -164,6 +203,8 @@ pub struct Batch {
     /// ADR-0089 decision 5: the agent was started again fresh: its earlier file is moved aside, keeping this highest id, before the
     /// lines are written. The writer does both, so nothing else writes the file meanwhile (review of #1103, N8).
     pub fresh: Option<u64>,
+    /// The runs of streamed words a line of this batch belongs to (empty when the node holds no secret value).
+    pub runs: Vec<Run>,
 }
 
 /// What the file gives back: the newest version of each entry still in it, oldest first, and the highest id ever given.
@@ -401,6 +442,7 @@ pub fn decode_line(text: &str) -> Option<(u64, Line)> {
         let side = Side {
             tool,
             plan: get_bool(&v, "plan"),
+            ..Side::default()
         };
         return Some((n, Line::Entry(Box::new(e), side)));
     }
@@ -439,11 +481,14 @@ pub fn fold(text: &str) -> Seed {
     }
 }
 
-fn redact(s: &mut String, known: &[String]) {
-    for k in known {
-        if s.contains(k.as_str()) {
-            *s = s.replace(k.as_str(), REDACTED);
-        }
+/// How far around a place the node cut a piece is looked for (the isolates' balance can move a place by a character or two).
+const SEAM_SLACK: usize = 4;
+
+/// Where each known value occurs whole in `s`.
+fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
+    // A needle longer than the text is skipped before the search is set up (its setup costs the needle's length).
+    for k in known.iter().filter(|k| k.len() <= s.len()) {
+        out.extend(s.match_indices(k.as_str()).map(|(i, m)| i..i + m.len()));
     }
 }
 
@@ -482,84 +527,113 @@ fn starts_with_end(s: &str, known: &[String]) -> usize {
     best
 }
 
-/// Review of #1103 (N1): [`redact`], and a piece of a known value at either edge of `s` (what is left of a value split across two
-/// entries) replaced too.
-fn redact_split(s: &mut String, known: &[String]) {
-    redact(s, known);
-    let end = ends_with_start(s, known);
-    if end > 0 {
-        s.truncate(s.len() - end);
-        s.push_str(REDACTED);
-    }
-    let start = starts_with_end(s, known);
-    if start > 0 {
-        s.replace_range(..start, REDACTED);
+/// Review of #1103 (N1): at each place the node cut `s` (within [`SEAM_SLACK`] bytes), a piece of a known value on either side: the
+/// value's start before the place, its end after it. Only at a real cut: elsewhere a value counts only whole, so a word that merely
+/// begins like a value is left (probe 4).
+fn pieces(s: &str, cuts: &[usize], known: &[String], out: &mut Vec<Range<usize>>) {
+    for &c in cuts {
+        for at in c.saturating_sub(SEAM_SLACK)..=(c + SEAM_SLACK).min(s.len()) {
+            if !s.is_char_boundary(at) {
+                continue;
+            }
+            let end = ends_with_start(&s[..at], known);
+            if end > 0 {
+                out.push(at - end..at);
+            }
+            let start = starts_with_end(&s[at..], known);
+            if start > 0 {
+                out.push(at..at + start);
+            }
+        }
     }
 }
 
-/// A text the node cut in its middle (head and tail kept, `max` bytes in all): the head ends within 3 bytes before half of it (on a
-/// character boundary), so a value cut there is looked for on both sides of each such place. Run before the whole values are
-/// replaced, which would move the cut.
-fn redact_cut(s: &mut String, max: usize, known: &[String]) {
-    let half = max / 2;
-    for cut in (half.saturating_sub(3)..=half.min(s.len())).rev() {
-        if !s.is_char_boundary(cut) {
+/// `s` with each of `ranges` (merged where they touch) replaced by [`REDACTED`]. The ranges are on character boundaries.
+fn mask(s: &mut String, mut ranges: Vec<Range<usize>>) {
+    if ranges.is_empty() {
+        return;
+    }
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    let mut i = 0;
+    while i < ranges.len() {
+        let start = ranges[i].start.max(at);
+        let mut end = ranges[i].end;
+        i += 1;
+        while i < ranges.len() && ranges[i].start <= end {
+            end = end.max(ranges[i].end);
+            i += 1;
+        }
+        if end <= start {
             continue;
         }
-        let (head, tail) = s.split_at(cut);
-        let (end, start) = (ends_with_start(head, known), starts_with_end(tail, known));
-        if end > 0 || start > 0 {
-            let out = format!(
-                "{}{}{}",
-                &head[..head.len() - end],
-                if end > 0 || start > 0 { REDACTED } else { "" },
-                &tail[start..]
-            );
-            *s = out;
-            return;
-        }
+        out.push_str(&s[at..start]);
+        out.push_str(REDACTED);
+        at = end;
     }
+    out.push_str(&s[at..]);
+    *s = out;
 }
 
-/// `line` with every known secret value replaced in each text it holds.
-fn redacted(line: &Line, known: &[String]) -> Line {
+/// What to replace in each line's text, from the batch's runs: every whole value in a run, in the part of it each line holds.
+fn run_masks(batch: &Batch, known: &[String]) -> Vec<Vec<Range<usize>>> {
+    let mut masks = vec![Vec::new(); batch.lines.len()];
+    for run in &batch.runs {
+        let mut found = Vec::new();
+        whole(&run.text, known, &mut found);
+        for r in &found {
+            for p in &run.parts {
+                let (Some(line), a, b) = (p.line, r.start.max(p.start), r.end.min(p.end)) else {
+                    continue;
+                };
+                if a < b {
+                    if let Some(m) = masks.get_mut(line) {
+                        m.push(a - p.start..b - p.start);
+                    }
+                }
+            }
+        }
+    }
+    masks
+}
+
+/// `line` with every known secret value replaced (ADR-0089 decision 7; review of #1103, N1 to N3): a value whole anywhere in a text
+/// (also where JSON escapes it); in the agent's streamed words also one split between pieces (`text_mask`, from the runs); and a
+/// piece of one at each place the node cut a text. Not `call_id` or `approval_id`: ids the node matches later, never a value. A tool
+/// call's text is made again from its redacted tool and arguments, as the node made it from them.
+fn redacted(line: &Line, known: &[String], text_mask: Vec<Range<usize>>) -> Line {
     let mut line = line.clone();
     if known.is_empty() {
         return line;
     }
     if let Line::Entry(e, side) = &mut line {
-        // Not `call_id` or `approval_id`: ids the node matches later (a call that finishes after a restart), never a value it holds.
-        // The text and the output are what an agent streams in pieces: a value split between two entries is found at their edges.
-        // Middle cuts first (a whole value replaced before them would move them): a cut tool output, and a thought or a tool's
-        // arguments as long as their cap (the node keeps their head and tail).
-        if e.output_truncated {
-            redact_cut(&mut e.output, crate::chat::MAX_OUTPUT_BYTES, known);
-        }
-        if e.kind == agora_protocol::v1::ChatKind::Thought as i32
-            && e.text.len() + 4 > crate::chat::MAX_THOUGHT_BYTES
-        {
-            redact_cut(&mut e.text, crate::chat::MAX_THOUGHT_BYTES, known);
-        }
-        if let Some((_, args)) = &mut side.tool {
-            if args.len() + 4 > crate::chat::MAX_ENTRY_BYTES {
-                redact_cut(args, crate::chat::MAX_ENTRY_BYTES, known);
-            }
-        }
-        redact_split(&mut e.text, known);
-        redact_split(&mut e.output, known);
-        redact(&mut e.path, known);
-        for v in e.params.values_mut() {
-            redact(v, known);
-        }
-        for p in &mut e.paths {
-            redact(&mut p.path, known);
-        }
-        for s in &mut e.plan_steps {
-            redact(&mut s.text, known);
-        }
+        let mut r = text_mask;
+        whole(&e.text, known, &mut r);
+        pieces(&e.text, &side.cuts.text, known, &mut r);
+        mask(&mut e.text, r);
+        let mut r = Vec::new();
+        whole(&e.output, known, &mut r);
+        pieces(&e.output, &side.cuts.output, known, &mut r);
+        mask(&mut e.output, r);
+        let plain = |s: &mut String| {
+            let mut r = Vec::new();
+            whole(s, known, &mut r);
+            mask(s, r);
+        };
+        plain(&mut e.path);
+        e.params.values_mut().for_each(plain);
+        e.paths.iter_mut().for_each(|p| plain(&mut p.path));
+        e.plan_steps.iter_mut().for_each(|s| plain(&mut s.text));
         if let Some((tool, args)) = &mut side.tool {
-            redact(tool, known);
-            redact(args, known);
+            plain(tool);
+            let mut r = Vec::new();
+            whole(args, known, &mut r);
+            pieces(args, &side.cuts.args, known, &mut r);
+            mask(args, r);
+            if e.kind == agora_protocol::v1::ChatKind::ToolCall as i32 {
+                e.text = crate::chat::tool_text(tool, args);
+            }
         }
     }
     line
@@ -645,6 +719,15 @@ impl Store {
         g.1.clone()
     }
 
+    /// The longest value looked for (0: none), so the board gathers enough of a run around a piece and holds back enough of it.
+    pub fn longest_secret(&self) -> usize {
+        self.known_secrets()
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Appends a batch to its agent's file (made private, with its header, when new), then keeps the file within its bound.
     pub fn write(&self, batch: &Batch) -> io::Result<()> {
         if let Some(high) = batch.fresh {
@@ -658,9 +741,10 @@ impl Store {
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         agora_platform::ensure_private_dir(&self.dir)?;
         let known = self.known_secrets();
+        let masks = run_masks(batch, &known);
         let mut out = Vec::new();
-        for line in &batch.lines {
-            out.extend(encode_line(batch.high, &redacted(line, &known)));
+        for (line, m) in batch.lines.iter().zip(masks) {
+            out.extend(encode_line(batch.high, &redacted(line, &known, m)));
         }
         let mut f = agora_platform::open_append_private(&path)?;
         let len = f.metadata()?.len();
@@ -934,7 +1018,7 @@ pub fn spawn_writer(
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
-                for batch in board.take_unsaved() {
+                for batch in board.take_due(crate::daemon::now_ms()) {
                     match store.write(&batch) {
                         Ok(()) => {
                             failed.remove(&batch.agent);
@@ -990,6 +1074,7 @@ mod tests {
             high,
             lines,
             fresh: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1032,6 +1117,7 @@ mod tests {
         let side = Side {
             tool: Some(("read".into(), "{\"p\":1}".into())),
             plan: true,
+            ..Side::default()
         };
         let line = encode_line(9, &Line::Entry(Box::new(full()), side.clone()));
         let text = String::from_utf8(line).unwrap();
@@ -1287,6 +1373,7 @@ mod tests {
         let side = Side {
             tool: Some(("sh".into(), "echo sk-very-secret-1234".into())),
             plan: false,
+            ..Side::default()
         };
         store
             .write(&batch("a", 7, vec![Line::Entry(Box::new(e), side)]))
@@ -1305,28 +1392,8 @@ mod tests {
         (dir, store)
     }
 
-    /// Review of #1103 (N1): what an agent streams arrives in pieces, so a value can be split between two entries (here written in
-    /// two batches); neither piece reaches the file.
-    #[test]
-    fn a_secret_split_between_two_entries_is_replaced_on_both_sides() {
-        let (_dir, store) = store_with_secret("secret-split", "sk-very-secret-1234");
-        store
-            .write(&batch("a", 1, vec![text(1, "my key is sk-very-se")]))
-            .unwrap();
-        store
-            .write(&batch("a", 2, vec![text(2, "cret-1234, keep it")]))
-            .unwrap();
-        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
-        assert!(
-            !body.contains("sk-very-se") && !body.contains("cret-1234"),
-            "{body}"
-        );
-        let seed = store.read("a");
-        assert_eq!(seed.entries[0].0.text, format!("my key is {REDACTED}"));
-        assert_eq!(seed.entries[1].0.text, format!("{REDACTED}, keep it"));
-    }
-
-    /// Review of #1103 (N1): a long tool output is cut in its middle (head and tail kept); a value on the cut is replaced on both sides.
+    /// Review of #1103 (N1): a long tool output is cut in its middle (head and tail kept); a value on the cut (where the node noted
+    /// it) is replaced on both sides.
     #[test]
     fn a_secret_on_the_cut_of_a_long_output_is_replaced() {
         let (_dir, store) = store_with_secret("secret-cut", "sk-very-secret-1234");
@@ -1339,7 +1406,16 @@ mod tests {
             .write(&batch(
                 "a",
                 7,
-                vec![Line::Entry(Box::new(e), Side::default())],
+                vec![Line::Entry(
+                    Box::new(e),
+                    Side {
+                        cuts: Cuts {
+                            output: vec![half],
+                            ..Cuts::default()
+                        },
+                        ..Side::default()
+                    },
+                )],
             ))
             .unwrap();
         let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
@@ -1360,7 +1436,16 @@ mod tests {
             .write(&batch(
                 "b",
                 7,
-                vec![Line::Entry(Box::new(e), Side::default())],
+                vec![Line::Entry(
+                    Box::new(e),
+                    Side {
+                        cuts: Cuts {
+                            output: vec![half],
+                            ..Cuts::default()
+                        },
+                        ..Side::default()
+                    },
+                )],
             ))
             .unwrap();
         let body = std::fs::read_to_string(store.path("b").unwrap()).unwrap();
@@ -1381,7 +1466,16 @@ mod tests {
             .write(&batch(
                 "c",
                 7,
-                vec![Line::Entry(Box::new(e), Side::default())],
+                vec![Line::Entry(
+                    Box::new(e),
+                    Side {
+                        cuts: Cuts {
+                            text: vec![half],
+                            ..Cuts::default()
+                        },
+                        ..Side::default()
+                    },
+                )],
             ))
             .unwrap();
         let body = std::fs::read_to_string(store.path("c").unwrap()).unwrap();
@@ -1398,6 +1492,7 @@ mod tests {
         let side = Side {
             tool: Some(("sh".into(), r#"{"pw":"pa\"ss\\word-99"}"#.into())),
             plan: false,
+            ..Side::default()
         };
         store
             .write(&batch("a", 7, vec![Line::Entry(Box::new(e.clone()), side)]))

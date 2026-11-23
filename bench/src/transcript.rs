@@ -35,6 +35,17 @@ pub struct TranscriptReport {
     /// Encoding, redacting and appending that batch (p50, max).
     pub write_p50_ms: f64,
     pub write_max_ms: f64,
+    /// Review of #1103 (N1): the same batch, all one stream of the agent's text, as the writer takes it (holding back the newest
+    /// pieces and joining each run's context) when the node holds a secret value of 52 bytes and one of 8 KiB: under the lock, then
+    /// redacting and appending (p50).
+    #[serde(default)]
+    pub take_52_p50_us: f64,
+    #[serde(default)]
+    pub write_52_p50_ms: f64,
+    #[serde(default)]
+    pub take_8k_p50_us: f64,
+    #[serde(default)]
+    pub write_8k_p50_ms: f64,
     /// The file seeding reads, and the time to read its end and fill the ring (p50, max).
     pub seed_file_bytes: u64,
     pub seed_p50_ms: f64,
@@ -147,6 +158,47 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         write.push(start.elapsed());
     }
 
+    // The writer's timed take with a secret value held: one stream of text, the newest pieces held back.
+    let with_secret = |tag: &str, value: String| -> std::io::Result<(f64, f64)> {
+        let home = dir.join(tag);
+        std::fs::create_dir_all(&home)?;
+        let secrets = agora_node::credentials::SecretStore::in_data(&home);
+        let secret = agora_node::credentials::Secret::new(&value)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        secrets
+            .set("BENCH", &secret)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        let st = std::sync::Arc::new(Store::new(
+            &home,
+            Limits::default(),
+            Some(agora_node::credentials::SecretStore::in_data(&home)),
+        ));
+        let board = ChatBoard::saving(std::sync::Arc::clone(&st));
+        let agent = AgentId::new("agent-s");
+        let (mut take, mut write) = (Vec::new(), Vec::new());
+        let mut now = 1_000_000u64;
+        for _ in 0..runs {
+            for _ in 0..batch_entries {
+                now += 1;
+                board.push_item(&agent, &ChatItem::Text(text.clone()), now);
+            }
+            let start = Instant::now();
+            let batches = board.take_due(now);
+            take.push(start.elapsed());
+            let start = Instant::now();
+            for b in &batches {
+                st.write(b)?;
+            }
+            write.push(start.elapsed());
+        }
+        Ok((
+            percentile(&mut take, 0.5).as_secs_f64() * 1e6,
+            percentile(&mut write, 0.5).as_secs_f64() * 1e3,
+        ))
+    };
+    let (take_52_p50_us, write_52_p50_ms) = with_secret("s52", "s".repeat(52))?;
+    let (take_8k_p50_us, write_8k_p50_ms) = with_secret("s8k", "k".repeat(8192))?;
+
     // A full file to seed from: 32 MiB of entries.
     let full = AgentId::new("agent-full");
     while std::fs::metadata(store.path(full.as_str()).unwrap_or_default()).map_or(0, |m| m.len())
@@ -180,6 +232,10 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         take_max_us: us(percentile(&mut take, 1.0)),
         write_p50_ms: ms(percentile(&mut write, 0.5)),
         write_max_ms: ms(percentile(&mut write, 1.0)),
+        take_52_p50_us,
+        write_52_p50_ms,
+        take_8k_p50_us,
+        write_8k_p50_ms,
         seed_file_bytes,
         seed_p50_ms: ms(percentile(&mut seed, 0.5)),
         seed_max_ms: ms(percentile(&mut seed, 1.0)),
