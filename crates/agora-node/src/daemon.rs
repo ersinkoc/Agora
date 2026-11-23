@@ -1763,8 +1763,22 @@ impl Node {
                         },
                         l.identity.as_deref(),
                     )
+                    // #1093: the agent still starts, outside the mesh; the node's log says so (operational log, not UI text).
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} could not get its endpoint and runs outside the mesh: {e}",
+                            l.id.as_str()
+                        );
+                    })
                     .ok()?;
-                let command = std::env::current_exe().ok()?;
+                let command = std::env::current_exe()
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} gets no endpoint (this program's path is unknown): {e}",
+                            l.id.as_str()
+                        );
+                    })
+                    .ok()?;
                 Some(agora_adapters::inject::Endpoint { command, socket })
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
