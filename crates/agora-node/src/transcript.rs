@@ -32,7 +32,7 @@
 //! the entries stay in the ring, the agent is not touched, and its conversation says once `chat.history_not_saved`. A node that is
 //! killed loses at most the last batch (up to a second or 64 KiB).
 //!
-//! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, lowered (or raised up to 256 MiB) by the node policy
+//! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, only lowered by the node policy
 //! `chat.history_max_bytes` (0 writes nothing); over it, the newest half is written to a new file that replaces the old one (whole
 //! lines, a header that says `truncated`). The file of an agent that does not run is removed once it was not written for
 //! `chat.history_days` (30 by default, never more); a fresh start ("Start again") that went through moves the earlier file aside as
@@ -47,7 +47,7 @@
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
 //! remove the file; retention does.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,9 +65,10 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 /// The format the first line names, and its version.
 pub const FORMAT: &str = "chat-transcript";
 pub const VERSION: u64 = 1;
-/// ADR-0089 decision 2: per agent, by default and at most; per node.
+/// ADR-0089 decision 2: per agent by default (the policy only lowers it: "a node policy `chat.history_max_bytes` and
+/// `chat.history_days` lowers (never raises past a hard cap of 256 MiB per agent, 2 GiB per node) the defaults"; review of #1103, N7),
+/// and per node.
 pub const DEFAULT_MAX_BYTES: u64 = 32 << 20;
-pub const HARD_MAX_BYTES: u64 = 256 << 20;
 pub const NODE_MAX_BYTES: u64 = 2 << 30;
 /// ADR-0089 decision 2: days a file is kept after it was last written, by default and at most (the policy only lowers it).
 pub const DEFAULT_DAYS: u64 = 30;
@@ -110,9 +111,10 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// `chat.history_max_bytes`: a number of bytes, at most [`HARD_MAX_BYTES`]. `None` for a value that is not a number.
+    /// `chat.history_max_bytes`: a number of bytes, at most [`DEFAULT_MAX_BYTES`] (the policy lowers it). `None` for a value that is
+    /// not a number.
     pub fn parse_max_bytes(v: &str) -> Option<u64> {
-        v.trim().parse::<u64>().ok().map(|b| b.min(HARD_MAX_BYTES))
+        v.trim().parse::<u64>().ok().map(|b| b.min(DEFAULT_MAX_BYTES))
     }
 
     /// `chat.history_days`: a number of days, at most [`DEFAULT_DAYS`] (the policy lowers it). `None` for a value that is not a number.
@@ -167,14 +169,14 @@ pub struct Store {
     known: Mutex<(Option<SystemTime>, Vec<String>)>,
 }
 
-/// The file name of an agent: its id when that is a plain name, never a path.
+/// The file name of an agent: its id when that is a plain name (letters, digits, `-` and `_`), never a path. Without dots, so no id
+/// names another agent's earlier session (`x.earlier`) or a leftover of a rewrite (review of #1103, N9).
 fn file_stem(agent: &str) -> Option<&str> {
     (!agent.is_empty()
         && agent.len() <= 128
-        && !agent.starts_with('.')
         && agent
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
     .then_some(agent)
 }
 
@@ -705,56 +707,94 @@ impl Store {
         }
     }
 
-    /// ADR-0089 decision 2: removes the files of agents that do not run (`running` holds the ids that do) not written for
-    /// [`Limits::days`], then, over [`NODE_MAX_BYTES`] in all, the oldest files of agents that do not run. Returns how many went.
-    pub fn sweep(&self, running: &HashSet<String>, now: SystemTime) -> usize {
+    /// ADR-0089 decision 2: removes the files of agents that closed more than [`Limits::days`] ago, then, over [`NODE_MAX_BYTES`] in
+    /// all, the oldest files of agents that are not kept. `status` tells, for the agents whose files are there, which the node keeps
+    /// whatever their age (running, or interrupted and offered for Resume) and when the others ended; an agent it does not know ages
+    /// from its file's last write (review of #1103, N6). An earlier session's file (`.earlier`) follows its agent. Leftovers of a
+    /// rewrite another process left (`.tmp-<pid>`) go. Returns how many files went.
+    pub fn sweep(
+        &self,
+        status: &dyn Fn(&[String]) -> HashMap<String, Kept>,
+        now: SystemTime,
+    ) -> usize {
         let Ok(dir) = std::fs::read_dir(&self.dir) else {
             return 0;
         };
-        let keep_ms = self.limits.days.saturating_mul(DAY_MS);
-        let mut files: Vec<(SystemTime, u64, PathBuf, bool)> = Vec::new();
         let mut removed = 0;
+        let mut found: Vec<(String, std::fs::Metadata, PathBuf)> = Vec::new();
+        let ours = format!(".tmp-{}", std::process::id());
         for item in dir.flatten() {
             let name = item.file_name().to_string_lossy().into_owned();
-            let Some(stem) = name.strip_suffix(".jsonl") else {
-                continue;
-            };
-            let (agent, earlier) = match stem.strip_suffix(".earlier") {
-                Some(a) => (a, true),
-                None => (stem, false),
-            };
             let Ok(meta) = item.metadata() else {
                 continue;
             };
             if !meta.is_file() {
                 continue;
             }
-            let modified = meta.modified().unwrap_or(now);
-            let live = !earlier && running.contains(agent);
-            let age = now
-                .duration_since(modified)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            if !live && age >= keep_ms {
-                if std::fs::remove_file(item.path()).is_ok() {
+            if name.contains(".jsonl.tmp-") {
+                if !name.ends_with(&ours) && std::fs::remove_file(item.path()).is_ok() {
                     removed += 1;
                 }
                 continue;
             }
-            files.push((modified, meta.len(), item.path(), live));
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            let agent = stem.strip_suffix(".earlier").unwrap_or(stem).to_string();
+            found.push((agent, meta, item.path()));
+        }
+        let names: Vec<String> = found.iter().map(|f| f.0.clone()).collect();
+        let known = status(&names);
+        let keep_ms = self.limits.days.saturating_mul(DAY_MS);
+        let ms = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        };
+        let now_ms = ms(now);
+        let mut files: Vec<(SystemTime, u64, PathBuf, bool)> = Vec::new();
+        for (agent, meta, path) in found {
+            let modified = meta.modified().unwrap_or(now);
+            let kept = known.get(&agent).copied().unwrap_or(Kept::Unknown);
+            let since = match kept {
+                Kept::Keep => {
+                    files.push((modified, meta.len(), path, true));
+                    continue;
+                }
+                Kept::EndedAt(t) => t.max(ms(modified)),
+                Kept::Unknown => ms(modified),
+            };
+            if now_ms.saturating_sub(since) >= keep_ms {
+                if std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+                continue;
+            }
+            files.push((modified, meta.len(), path, false));
         }
         let mut total: u64 = files.iter().map(|f| f.1).sum();
         files.sort_by_key(|f| f.0);
-        for (_, len, path, live) in files {
+        for (_, len, path, keep) in files {
             if total <= NODE_MAX_BYTES {
                 break;
             }
-            if !live && std::fs::remove_file(&path).is_ok() {
+            if !keep && std::fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(len);
                 removed += 1;
             }
         }
         removed
     }
+}
+
+/// ADR-0089 decision 2: what the node knows of an agent whose transcript is on disk, for retention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// It runs, or it is interrupted and offered for Resume: its file is kept whatever its age.
+    Keep,
+    /// It ended at this time (ms since the epoch): its file is kept [`Limits::days`] after that.
+    EndedAt(u64),
+    /// The node no longer knows it: its file ages from its last write.
+    Unknown,
 }
 
 /// The file's last byte is a line break (or cannot be read: then a line break is written, which a reader skips as an empty line).
@@ -825,11 +865,12 @@ impl Wake {
 }
 
 /// Runs the writer of `board` until `stop`: a batch once per [`BATCH_INTERVAL`] or when woken, and retention at its start and every
-/// [`SWEEP_EVERY`] (`running` names the agents that run). A failed write is said once in that agent's conversation. Nothing is
-/// written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
+/// [`SWEEP_EVERY`] (`status` says which agents' files are kept and when the others ended, see [`Store::sweep`]). A failed write is
+/// said once in that agent's conversation; its batch is not tried again (its entries stay in the ring, and every later change is
+/// written as it comes). Nothing is written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
 pub fn spawn_writer(
     board: Arc<crate::chat::ChatBoard>,
-    running: Box<dyn Fn() -> HashSet<String> + Send>,
+    status: Box<dyn Fn(&[String]) -> HashMap<String, Kept> + Send>,
     stop: Arc<AtomicBool>,
 ) -> io::Result<Option<std::thread::JoinHandle<()>>> {
     let (Some(store), Some(wake)) = (board.store(), board.wake()) else {
@@ -842,7 +883,7 @@ pub fn spawn_writer(
             let mut failed: HashMap<AgentId, ()> = HashMap::new();
             while !stop.load(Ordering::Acquire) {
                 if swept.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
-                    store.sweep(&running(), SystemTime::now());
+                    store.sweep(&*status, SystemTime::now());
                     swept = Some(std::time::Instant::now());
                 }
                 wake.wait(BATCH_INTERVAL);
@@ -1074,7 +1115,7 @@ mod tests {
             Limits::default(),
             None,
         );
-        for bad in ["", "../x", "a/b", ".hidden", "a\\b"] {
+        for bad in ["", "../x", "a/b", ".hidden", "a\\b", "x.earlier", "a.jsonl.tmp-1"] {
             assert!(store.path(bad).is_none(), "{bad}");
         }
         assert!(store.path("agent-7").is_some());
@@ -1165,7 +1206,7 @@ mod tests {
         let seed = store.read("a");
         assert!(seed.entries.is_empty());
         assert_eq!(seed.high, 9);
-        assert_eq!(store.read("a.earlier").entries.len(), 1);
+        assert_eq!(read_tail(&store.earlier_path("a").unwrap()).unwrap().entries.len(), 1);
         // A new entry is appended after the mark, and the file stays private.
         store.write(&batch("a", 10, vec![text(10, "y")])).unwrap();
         assert_eq!(store.read("a").entries.len(), 1);
@@ -1264,34 +1305,53 @@ mod tests {
     }
 
     #[test]
-    fn retention_removes_what_does_not_run_and_was_not_written_for_its_days() {
+    fn retention_counts_from_when_an_agent_ended_and_never_touches_one_offered_for_resume() {
         let dir = temp("sweep");
-        let store = Store::new(
-            &dir,
-            Limits {
-                max_bytes: 1 << 20,
-                days: 2,
-            },
-            None,
-        );
-        for a in ["old", "running", "fresh"] {
+        let limits = |days| Limits {
+            max_bytes: 1 << 20,
+            days,
+        };
+        let store = Store::new(&dir, limits(2), None);
+        for a in ["old", "running", "offered", "idle-long", "fresh"] {
             store.write(&batch(a, 1, vec![text(1, "x")])).unwrap();
         }
-        assert_eq!(store.read("fresh").high, 1);
         store.move_aside("fresh", 1);
         assert!(store.earlier_path("fresh").unwrap().exists());
         // The new session's file holds only the earlier session's highest id.
         assert!(store.read("fresh").entries.is_empty());
-        let running: HashSet<String> = ["running".to_string()].into();
-        // Nothing is old yet.
-        assert_eq!(store.sweep(&running, SystemTime::now()), 0);
-        // Three days on: everything but the running agent's file goes, both of the fresh agent's too.
+        // A leftover of a rewrite another process did not finish.
+        std::fs::write(store.dir().join("old.jsonl.tmp-1"), "x").unwrap();
+        let ms = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
         let later = SystemTime::now() + Duration::from_secs(3 * 24 * 3600);
-        assert_eq!(store.sweep(&running, later), 3);
-        assert!(store.path("running").unwrap().exists());
+        // Review of #1103 (N6): an agent idle for long (its file not written for 3 days) that ended a day ago keeps its file.
+        let status = |names: &[String]| -> HashMap<String, Kept> {
+            names
+                .iter()
+                .filter_map(|n| {
+                    let k = match n.as_str() {
+                        "running" | "offered" => Kept::Keep,
+                        "idle-long" => Kept::EndedAt(ms(later) - DAY_MS),
+                        _ => return None,
+                    };
+                    Some((n.clone(), k))
+                })
+                .collect()
+        };
+        // Nothing is old yet; the leftover goes.
+        assert_eq!(store.sweep(&status, SystemTime::now()), 1);
+        // Three days on: the unknown agents' files go (both of the fresh agent's), the others stay.
+        assert_eq!(store.sweep(&status, later), 3);
+        for kept in ["running", "offered", "idle-long"] {
+            assert!(store.path(kept).unwrap().exists(), "{kept}");
+        }
         assert!(!store.path("old").unwrap().exists());
         assert!(!store.earlier_path("fresh").unwrap().exists());
         assert!(!store.path("fresh").unwrap().exists());
+        // `chat.history_days = 0`: a file goes as soon as its agent ended, never one offered for Resume or running.
+        let none = Store::new(&dir, limits(0), None);
+        assert_eq!(none.sweep(&status, SystemTime::now()), 1);
+        assert!(!store.path("idle-long").unwrap().exists());
+        assert!(store.path("offered").unwrap().exists() && store.path("running").unwrap().exists());
         purge_all(&dir).unwrap();
         assert!(!store.dir().exists());
         purge_all(&dir).unwrap();
@@ -1302,7 +1362,7 @@ mod tests {
         assert_eq!(Limits::parse_max_bytes("1000"), Some(1000));
         assert_eq!(
             Limits::parse_max_bytes("999999999999"),
-            Some(HARD_MAX_BYTES)
+            Some(DEFAULT_MAX_BYTES)
         );
         assert_eq!(Limits::parse_max_bytes("lots"), None);
         assert_eq!(Limits::parse_days("7"), Some(7));

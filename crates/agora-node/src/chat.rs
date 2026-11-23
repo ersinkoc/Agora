@@ -2859,7 +2859,7 @@ mod tests {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = crate::transcript::spawn_writer(
             Arc::clone(&b),
-            Box::new(Default::default),
+            Box::new(|_: &[String]| HashMap::new()),
             Arc::clone(&stop),
         )
         .unwrap()

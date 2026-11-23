@@ -224,3 +224,44 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     let _ = std::fs::remove_file(tmp_socket);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// ADR-0089 decision 7, review of #1103 (N9): a confined agent cannot read the chat transcripts in the node's data folder, which the node
+/// protects for every confined agent (`node_private_paths`).
+#[test]
+fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
+    if !agora_platform::sandbox_supported() {
+        eprintln!("skipped: no confinement on this machine");
+        return;
+    }
+    // Not under the temporary folder (a confined agent may use `/tmp`): as the node's home is not.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("agora-sbx-transcripts-{}", std::process::id()));
+    let data = base.join("data");
+    let transcript = data.join("transcripts").join("agent-1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"n\":1,\"entry\":{\"entry_id\":1,\"text\":\"private-words\"}}\n").unwrap();
+    let script = format!(
+        "cat {} > copied 2>/dev/null; echo in > inside; sleep 30",
+        transcript.display()
+    );
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        protect: vec![data.clone()],
+        data_dir: Some(data.clone()),
+        ..Default::default()
+    };
+    let (mut sup, req, dir) = setup_with("transcripts", &script, policy);
+    sup.start(&req, Instant::now()).unwrap();
+    let inside = dir.join("worktrees/a/inside");
+    let end = Instant::now() + Duration::from_secs(10);
+    while !inside.exists() && Instant::now() < end {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(inside.exists(), "the agent did not run");
+    let copied = std::fs::read_to_string(dir.join("worktrees/a/copied")).unwrap_or_default();
+    assert!(!copied.contains("private-words"), "the agent read the transcript");
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(base);
+}

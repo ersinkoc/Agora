@@ -469,7 +469,7 @@ changes neither. A node killed loses at most the last batch (up to a second): th
 file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
-`chat.history_max_bytes = N` (per agent; default 32 MiB, at most 256 MiB, 0 writes nothing) and `chat.history_days = N` (default and
+`chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
 at most 30) bound it: over its size a file keeps its newest half, and the file of an agent that does not run is removed once it was not
 written for that many days (2 GiB per node in all). `agora history purge` removes every transcript. Reading older entries in pages
 (`chat.history`) is ADR-0089's later schema step.
