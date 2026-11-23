@@ -19,22 +19,25 @@ export function usePairing(api: Live | undefined, link: LinkState): { ui: Pairin
   // A new hub connection starts from nothing: what the last session knew is not carried over.
   useEffect(() => { setState(emptyPairState()); }, [api]);
 
-  // Is this session the owner's? The hub answers `PairStatus` to the owner only; everyone else gets `auth.forbidden`.
+  // Is this session the owner's? The hub answers `PairStatus` to the owner only; everyone else gets `auth.forbidden`. That answer is
+  // final for the connection (a change of role or grants ends it, and a new connection asks again), so a window that is not the owner's
+  // stops asking: each refusal is a row in the owner's Activity (#904).
   const live = link === 'live';
   useEffect(() => {
     if (!api || !live) return;
     let stop = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
     const read = () => api.command('', { pairStatus: {} }).then((ok) => {
       if (stop) return;
       dispatch({ type: 'owner', owner: 'yes' });
       dispatch({ type: 'window', window: windowOf(ok.pairStatus) });
     }).catch((e: unknown) => {
       if (stop) return;
-      if (code(e) === 'auth.forbidden') dispatch({ type: 'owner', owner: 'no' });
+      if (code(e) === 'auth.forbidden') { dispatch({ type: 'owner', owner: 'no' }); clearInterval(timer); }
       else if (code(e) === 'protocol.capability_missing') dispatch({ type: 'owner', owner: 'unavailable' });
     });
     void read();
-    const timer = setInterval(() => { void read(); }, WINDOW_POLL_MS);
+    timer = setInterval(() => { void read(); }, WINDOW_POLL_MS);
     return () => { stop = true; clearInterval(timer); };
   }, [api, live, dispatch]);
 
