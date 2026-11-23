@@ -7,6 +7,7 @@ import { setLanguage, t } from '../i18n';
 import { attentionPrefs } from '../net/attention';
 import { when } from '../net/time';
 import { DevicePage, type MyDevice } from '../screens';
+import { themeStore } from '../themes/store';
 import type { MachineModel } from '../net/view';
 import { demoSettingsKinds } from '../fixtures';
 import { AgentsSettings } from './AgentsSettings';
@@ -84,6 +85,46 @@ describe('the Settings page', () => {
     expect(rows[2]!.textContent).toContain('Offline');
     expect(host.querySelector('#settings-machines')!.textContent).toContain('2 of 3 online');
     expect(host.querySelector('.set-group__head a[href="#/machines"]')?.textContent).toContain('Manage machines');
+  });
+});
+
+describe('Appearance, This device and Passkey', () => {
+  it('chooses the colour scheme with a segmented control named by its row, the same choice as the title bar', () => {
+    act(() => themeStore.setMode('system'));
+    render(page());
+    const group = byName('radiogroup', 'Colour scheme')!;
+    expect([...group.querySelectorAll('[role="radio"]')].map((r) => r.textContent)).toEqual(['System', 'Dark', 'Light']);
+    key(group.querySelector('[aria-checked="true"]')!, 'ArrowRight');
+    expect(themeStore.state().mode).toBe('dark');
+    expect(group.querySelector('[aria-checked="true"]')?.textContent).toBe('Dark');
+    act(() => themeStore.setMode('system'));
+  });
+
+  it('asks another device to approve this one, and says how it went', async () => {
+    const device = { id: 'web-me', publicKeyHex: '04ab', keys: undefined as unknown as CryptoKeyPair };
+    let ok = false;
+    const onAsk = vi.fn(async () => ok);
+    render(page({ device, fingerprint: '91c2-9a46', trustedOn: [], onAsk }));
+    const ask = byName('button', 'Ask another device to approve')!;
+    expect(ask.getAttribute('data-variant')).toBe('primary');
+    click(ask);
+    await flush();
+    expect(host.querySelector('#settings-device [role="alert"]')?.textContent).toBe(t('device-ask-failed'));
+    ok = true;
+    click(ask);
+    await flush();
+    expect(host.querySelector('#settings-device [role="status"]')?.textContent).toContain('91c2-9a46');
+  });
+
+  it('adds a passkey from the head of its card and says how it went', async () => {
+    const onAddPasskey = vi.fn(async () => ({ ok: true as const }));
+    render(page({ onAddPasskey }));
+    const add = host.querySelector('#settings-passkeys .set-card__head button')!;
+    expect(add.textContent).toBe('Add a passkey');
+    click(add);
+    await flush();
+    expect(onAddPasskey).toHaveBeenCalledWith(undefined);
+    expect(host.querySelector('#settings-passkeys [role="status"]')?.textContent).toBe(t('device-passkey-added'));
   });
 });
 

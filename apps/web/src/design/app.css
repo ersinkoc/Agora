@@ -537,7 +537,9 @@
   .set-group__head { @apply flex flex-wrap items-center justify-between gap-2; }
   .set-group__title { @apply m-0 font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
   .set-card, .set-anchor { scroll-margin-top: 6rem; }
-  .set-card { @apply min-w-0 overflow-hidden rounded-m border border-line bg-surface-1; container-type: inline-size; }
+  /* Not clipped: a kind card's tooltip may reach past the card's edge. The last row's hover keeps the card's corners instead. */
+  .set-card { @apply min-w-0 rounded-m border border-line bg-surface-1; container-type: inline-size; }
+  .set-card > .set-list:last-child > li:last-child > a.set-item { border-end-start-radius: calc(var(--radius-m) - 1px); border-end-end-radius: calc(var(--radius-m) - 1px); }
   .set-card > * + * { @apply border-t border-line; }
   .set-card__head { @apply flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3.5; }
   .set-card__icon { @apply size-8; background: var(--kit-tint); }
@@ -588,6 +590,8 @@
   .set-kind__chev { @apply text-muted transition-transform duration-150 rtl:-scale-x-100; }
   .set-kind details[open] .set-kind__chev { @apply rotate-90; }
   .set-kind__more { @apply grid gap-2 border-t border-line px-2.5 pb-2.5 pt-2; }
+  /* The bolt sits at a card's end: its tooltip opens toward the start, so it stays on the page. */
+  .set-kind .kit-tip { inset-inline-start: auto; inset-inline-end: 0; }
   .set-risk { @apply inline-grid size-5 flex-none place-items-center rounded-xs; color: var(--danger); background: var(--tint-danger); }
 }
 @media (prefers-reduced-motion: no-preference) {
