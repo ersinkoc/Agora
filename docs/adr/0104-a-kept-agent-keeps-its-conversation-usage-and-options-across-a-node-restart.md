@@ -26,7 +26,7 @@ references are at main `9760e901`.
   ADR-0093 "Context" names this ("the in-memory chat history is gone until ADR-0089's persistent history is built"), and so does the
   holder-link spec (`docs/specs/holder-link.md:288-289`).
 - The ring holds more than the adapter said: the person's own prompts (role USER) and the entries the node makes itself (permission
-  entries from its approvals queue, the node's notices; `chat.rs:10`, `NODE_NOTICES` at `chat.rs:52`). None of these ever pass
+  entries from its approvals queue, the node's notices; `chat.rs:11`, `NODE_NOTICES` at `chat.rs:52`). None of these ever pass
   through the adapter's stdout, so nothing the holder keeps can rebuild them.
 - Entry ids start again at 1 in the new node (`Transcript::add`, `chat.rs:464-473`). The spec says "a client ignores an id it already
   holds" (`protocol.md:456`), so ids that restart can collide with ids a window still holds.
@@ -47,7 +47,10 @@ references are at main `9760e901`.
     `daemon.rs:512`), so a hub that only missed some events also zeroes the counters of agents that never stopped.
   - The hub's cost report (`usage.report`, ADR-0033) is built from the same per-agent counters (`Hub::usage_report`,
     `crates/agora-hub/src/hub.rs:235-272`). The window's cost total and per-project cost (`useUsageReport`, `Console`) therefore lose a
-    kept agent's earlier usage too. The issue's "per-day rows" were not found in the web at this commit.
+    kept agent's earlier usage too.
+  - The window's Usage panel (`UsagePanel`, `apps/web/src/net/usageView.ts:20-33`) sums the same per-agent `tokens` and measures
+    active time from `startedMs`, and both start again at the take-up. At this commit the panel has no per-day rows, so contrary to
+    the issue it is affected too.
   - Resume (ADR-0060) resets the counters too. That is a new process, and whether it should keep them is open question 3.
 - `AgentUsageReported` is a **growth**, not a total (`schema/agora/v1/events.proto:192-202`; summed at `projection.rs:634-650`; the node
   merges reports for 5 s before logging, `crates/agora-node/src/usage_merge.rs`). The node cannot re-state a total through it: the hub
@@ -69,9 +72,10 @@ references are at main `9760e901`.
     with it.
   - **On a kill**, everything in flight is lost, including a `PipeData` reply that never reached the node.
   - **In production every stop is a kill.** `agora node` has no stop handler: it sleeps after starting (`crates/agora/src/main.rs:850-851`),
-    and the supervisor passes `SIGTERM` on to it (`crates/agora/src/supervise.rs:117`). So `agora down`, a service restart and an update
-    end the node without unwinding, as `daemon.rs:137-140` says for the usage merge. `Node::drop` and `Supervisor::shutdown` run only
-    when a node is dropped in-process (tests).
+    and the supervisor passes `SIGTERM` on to it (`crates/agora/src/supervise.rs:117`; only the supervisor and the holder catch
+    `SIGTERM`, `catch_stop_requests`). So `agora down`, a service restart and the restart after an update (`agora update` only replaces
+    the executable) end the node without unwinding, as `daemon.rs:137-140` says for the usage merge. `Node::drop` and
+    `Supervisor::shutdown` run only when a node is dropped in-process (tests).
 - On take-up, `adopt_held_pipe` reads `pipe.seen` only for approvals (`host::pending_approvals`, `host.rs:1291-1313`; ADR-0093
   decision 3). Reproduced in the issue: a probe once showed `options=true config=false` in the kept file just before the node stopped
   (1 run in 15), and the next node never learned `auto_approve`.
@@ -113,7 +117,12 @@ references are at main `9760e901`.
   - *Compatibility.* Node-local. Every client gets the ring snapshot it gets today, only filled. No schema change and no capability.
     Paging (`chat.history`) stays ADR-0089's later schema step.
   - *Turn in progress.* A tool call or plan entry that changes in place needs the ring's side state (`calls`, `plan`; `chat.rs:74-86`).
-    The `ChatEntry` carries `call_id` and its kind, so the seeded ring rebuilds that state from the entries themselves.
+    A call keeps its tool name and arguments apart from the entry (`Call`, `chat.rs:67-71`). The entry's text joins them as JSON and can
+    be cut at 16 KiB, so the text alone does not always give them back. The writer must therefore store them with a tool-call entry's
+    line, or seeding must close a call it cannot rebuild.
+  - *Permission entries.* A permission entry is keyed by the approval id the old node minted (`push_permission`, `chat.rs:897-909`). A
+    seeded entry still `pending` whose approval the new node does not hold must be marked ended. Otherwise it would wait forever beside
+    the entry for the request the take-up asks again (ADR-0093 decision 3).
 - **(C2) Rebuild the ring from the holder's `seen` lines.** No disk, no schema. But it lacks the person's prompts and the node-made entries,
   goes back at most 1 MiB of raw output (one long tool output can be all of it), the text is not yet redacted, and the same `chat/append`
   read twice shows twice. It also widens ADR-0093 decision 3 to an appending report. Rejected.
@@ -147,6 +156,9 @@ references are at main `9760e901`.
   to what the hub has. It needs a new event anyway, keeps a second copy of what the hub already holds, and writes the ledger on every usage
   report. Rejected.
 - **(U4) A state blob in the holder.** As C3, for a number the hub already has. Rejected.
+- **(U5) The adapter re-announces its usage.** Adapters report growth (`usage/report`; the ACP bridge sends the cost's growth), and most
+  agents expose no running total, so a re-announced total would need a new report kind, and the hub would still have to be told not to
+  add it. Rejected.
 
 ### For the options (#1080)
 
@@ -167,9 +179,9 @@ references are at main `9760e901`.
 - **(O2) A stop drains before it detaches, and `agora node` gets a stop handler so that a stop is clean.** `Supervisor::shutdown` takes
   each held adapter's remaining events after `detach` has joined the reader. It records them through the usual path, then flushes the
   ledger's kept writes (`Ledger::flush_all`), the usage merge and the transcript writer (C1). On its own this helps only a node dropped
-  in-process, which production never does today (Context). With a `SIGTERM` handler that drops the `Node` within a bounded time, it would
-  cover `agora down`, a service restart and an update. There it closes the gap for chat, state and usage too, which O1 cannot.
-  Node-local, with no decision change. The handler changes how every node stop ends, though: it must finish before the supervisor's
+  in-process, which production never does today (Context). With a `SIGTERM` handler that drops the `Node` within a bounded time, it
+  would cover `agora down`, a service restart and the restart after an update. There it closes the gap for chat, state and usage too,
+  which O1 cannot. Node-local, with no decision change. The handler changes how every node stop ends, though: it must finish before the supervisor's
   and systemd's timeouts, and a hung join must not keep a node from stopping. So it is its own step (open question 6).
 - **(O3) Write the kept file on the reader's thread, before the event is queued.** This puts a disk write on the adapter's read path
   and still loses a line between `PipeRead` and the parse. Rejected.
@@ -177,6 +189,8 @@ references are at main `9760e901`.
   come back as `fresh`. This is the general fix for in-flight loss, but it makes delivery at least once. Chat and usage would then show and
   count twice unless every report gets an id the node can deduplicate. It would also arrive late on machines with a running version 2
   holder. Rejected for now.
+- **(O6) A state blob in the holder.** The node would push each report to the holder as an opaque blob (link version 3). The holder's
+  replay already holds the same reports as raw lines, which O1 reads. Rejected.
 - **(O5) The adapter re-announces on request.** A new adapter-protocol request (for example `session/restate`), gated by a capability the
   adapter declares in `initialize`. The ledger already keeps those capabilities (`Entry::adapter_capabilities`), so the next node knows
   without `initialize`. The adapter is the source of truth, so this removes the ordering question entirely. But it needs every adapter
@@ -215,7 +229,8 @@ references are at main `9760e901`.
      `entry_id` (ADR-0090 open question 3's proposed answer).
    - Added here: **a node that takes an agent up from the holder, or resumes it, seeds the agent's ring from the tail of its file**
      before the adapter's replay. It reads at most the ring's bounds and continues the entry ids from the file's last id. Seeding
-     also rebuilds the ring's side state for calls and plans.
+     rebuilds the ring's side state for calls and plans from what the writer stored, and marks a seeded pending permission entry ended
+     when the new node does not hold its approval.
    - Seeding and the writer need no schema, so they may be built before ADR-0089's schema step. Paging (`chat.history`, its schema and
      the web's scroll-back) stays ADR-0089's, in its own order.
    - A file that is missing or cannot be read seeds nothing: the ring starts empty, as today, and the agent is taken up all the same.
@@ -294,7 +309,7 @@ references are at main `9760e901`.
    but the snapshot still needs a field to show it. Proposed: out of scope here; that step keeps its own ADR step.
 5. **O5, the adapter re-announcing, later?** Proposed: only if a third-party adapter is found whose reports the holder's 1 MiB regularly
    pushes out. Agora's ACP bridge could then implement it first.
-6. **A stop handler for `agora node` (O2).** Today `agora down`, a service restart and an update end the node like a kill, so up to 5 s of
-   merged usage per agent is lost on every planned stop (the follow-up PR #522 names), and so is everything else in flight. Proposed:
+6. **A stop handler for `agora node` (O2).** Today `agora down`, a service restart and the restart after an update end the node like a
+   kill, so up to 5 s of merged usage per agent is lost on every planned stop (the follow-up PR #522 names), and so is everything else in flight. Proposed:
    yes, as its own step after O1. The node drops itself on `SIGTERM` with a deadline under the supervisor's and systemd's stop timeouts,
    and exits anyway when the deadline passes. The holder keeps the agents either way.
