@@ -1516,7 +1516,7 @@ fn forget_agent(ctx: &ControlContext, agent_id: &str) -> Result<v1::CommandOk, E
     {
         return Err(running());
     }
-    let answer = {
+    {
         let sup = ctx.sup();
         let known = sup.list().iter().any(|v| v.id == id);
         let live = sup.live(&id)
@@ -1527,12 +1527,19 @@ fn forget_agent(ctx: &ControlContext, agent_id: &str) -> Result<v1::CommandOk, E
         if live {
             return Err(running());
         }
-        // Under the supervisor's lock, which a resume takes to bring the agent back: no resume comes between the check and this.
+        // Under the supervisor's lock, in memory only: a resume checks the ledger again under this lock before it brings the agent
+        // back, so one that read the entry before now is refused (`agent.not_interrupted`), and none comes between the check above
+        // and this.
         if let Some(ledger) = &ctx.ledger {
             ledger.forget(agent_id);
         }
-        ctx.chat.forget(&id)
     };
+    // Written, and the files removed, after the lock is let go (no disk work under the supervisor's lock). No take-up comes meanwhile
+    // (that happens only as the node starts) and no resume (the ledger no longer offers the agent).
+    if let Some(ledger) = &ctx.ledger {
+        let _ = ledger.flush_all();
+    }
+    let answer = ctx.chat.forget(&id);
     match answer.recv_timeout(FORGET_WAIT) {
         Ok(true) => {
             // Operational log (codes only, never the conversation).
@@ -1673,6 +1680,11 @@ pub(crate) fn resume_agent(
     };
     let (events, views, has_terminal, carried) = {
         let mut sup = ctx.sup();
+        // ADR-0108: checked again under the supervisor's lock, under which a forget drops the agent from the ledger: a forget that came
+        // after the check above is not undone by bringing the agent back (with the conversation it removed in its ring).
+        if !ledger.get(agent_id).is_some_and(|e| e.interrupted()) {
+            return Err(not_interrupted());
+        }
         if !sup.sandbox_policy().enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 entry.kind.clone(),
@@ -3002,6 +3014,68 @@ mod idempotency_tests {
         n.ctx.sup().stop(&AgentId::new(&s.agent_id)).unwrap();
         assert!(n.forget(&s.agent_id).is_ok());
         assert!(!path.exists());
+    }
+
+    /// ADR-0108: a resume that read the agent's ledger entry before a forget dropped it is refused when it takes the supervisor's lock
+    /// (`agent.not_interrupted`), so it never brings back an agent whose conversation the forget removed. The resume is held at the
+    /// lock while the forget's ledger change is made (as `forget_agent` makes it, under that lock).
+    #[test]
+    fn a_resume_that_read_the_entry_before_a_forget_is_refused() {
+        if !agora_platform::PTY_SUPPORTED || !sh_on_path() {
+            return;
+        }
+        let dir = forget_dir("race");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let project = git::discover_checkout(&repo).unwrap().project.to_string();
+        let data = dir.join("data");
+        let ledger = crate::ledger::Ledger::open(&data, 1).unwrap();
+        ledger.observe(
+            &v1::event::Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-6".into(),
+                project_id: project,
+                node_id: "n".into(),
+                worktree_id: repo.to_string_lossy().into_owned(),
+                kind: "shell".into(),
+                level: 1,
+                ..Default::default()
+            }),
+            1,
+        );
+        drop(ledger);
+        let ledger = crate::ledger::Ledger::open(&data, 20).unwrap();
+        let mut sup = bare_supervisor();
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let n = Arc::new(Forgetting::new("race", sup, Vec::new(), ledger, dir));
+        let held = n.ctx.supervisor.lock().unwrap();
+        let resuming = {
+            let n = Arc::clone(&n);
+            // "Start again" (a new session), so no session of the kind's own is needed.
+            std::thread::spawn(move || resume_agent(&n.ctx, "agent-6", true, false))
+        };
+        // Long enough for the resume to have read the entry and checked the folder, and to wait for the lock.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(n.ledger.forget("agent-6"));
+        drop(held);
+        let r = resuming.join().unwrap();
+        let running: Vec<AgentId> = n.ctx.sup().list().into_iter().map(|v| v.id).collect();
+        for id in &running {
+            let _ = n.ctx.sup().stop(id);
+        }
+        assert_eq!(
+            r.err().map(|e| e.code),
+            Some(ErrorCode::AgentNotInterrupted)
+        );
+        assert!(running.is_empty(), "nothing was brought back: {running:?}");
     }
 
     /// ADR-0108: an id that is not a plain name is refused before anything is touched.

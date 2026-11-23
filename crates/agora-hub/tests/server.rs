@@ -2234,7 +2234,10 @@ async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_a
     })
     .await;
 
-    // A forget while it is connected goes at once, and an `ok` settles it.
+    // A forget while it is connected goes at once, and an `ok` settles it. Another machine that offers the capability and is
+    // connected is sent nothing: the forget goes to the agent's own machine only.
+    let (mut n3, _t3) = node_conn(&st, "n3").await;
+    handshake_offering(&mut n3, &[CAP]).await;
     let r = forget_answer(&mut client, "n1/agent-3").await;
     assert!(
         matches!(r.result, Some(command_response::Result::Ok(_))),
@@ -2260,6 +2263,10 @@ async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_a
         st.hub.forgets().pending("n1").is_empty()
     })
     .await;
+    assert!(command_to_node(&mut n3, Duration::from_millis(500))
+        .await
+        .is_none());
+    assert!(st.hub.forgets().pending("n3").is_empty());
 
     // n2 does not offer the capability: it is never sent the forget, which stays owed.
     let (mut n2, _t2) = node_conn(&st, "n2").await;

@@ -841,25 +841,20 @@ impl Ledger {
 
     /// ADR-0108: the person forgot the agent in the window: it is no longer offered for Resume (by hand, or by `resume = auto` at the
     /// next start) and no longer kept, and the session it kept for a take-up goes with it. The ids already given stay given
-    /// ([`Self::next_id`] is not lowered), so the id is never used again. Returns whether the ledger held it.
+    /// ([`Self::next_id`] is not lowered), so the id is never used again. In memory only (the caller may hold the supervisor's lock):
+    /// the ledger and the kept session's file are written by the next [`Self::flush_all`]. Returns whether the ledger held it.
     pub fn forget(&self, agent_id: &str) -> bool {
-        let held = {
-            let mut st = self.st();
-            let held = st.entries.remove(agent_id).is_some();
-            st.early_sessions.remove(agent_id);
-            st.early_states.remove(agent_id);
-            st.bound.remove(agent_id);
-            if st.kept.remove(agent_id).is_some() || held {
-                st.mark_kept_pending(agent_id.to_string());
-            }
-            if held {
-                st.dirty = true;
-            }
-            held
-        };
-        // Its kept session's file goes now (nothing is kept for it any more), under the write lock every other write takes.
-        write_kept_pending(&self.state, &self.write, self.dir().as_deref());
-        let _ = self.flush();
+        let mut st = self.st();
+        let held = st.entries.remove(agent_id).is_some();
+        st.early_sessions.remove(agent_id);
+        st.early_states.remove(agent_id);
+        st.bound.remove(agent_id);
+        if st.kept.remove(agent_id).is_some() || held {
+            st.mark_kept_pending(agent_id.to_string());
+        }
+        if held {
+            st.dirty = true;
+        }
         held
     }
 
@@ -1262,6 +1257,7 @@ mod tests {
         std::fs::write(&kept, b"x").unwrap();
         assert!(l.forget("agent-5"));
         assert!(l.get("agent-5").is_none());
+        l.flush_all().unwrap();
         assert!(!kept.exists(), "its kept session goes too");
         assert!(!l.forget("agent-5"), "a second forget finds nothing");
         drop(l);
