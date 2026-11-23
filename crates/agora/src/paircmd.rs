@@ -646,10 +646,15 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                         }),
                         WAIT,
                     ) {
-                        Ok(_) => say.out(key!("pair-denied-now"), &[]),
-                        Err(e) => refusal(say, &e),
+                        Ok(_) => {
+                            say.out(key!("pair-denied-now"), &[]);
+                            continue;
+                        }
+                        Err(e) => match refused(say, &mut board, &card.pair_id, &e) {
+                            Approval::Refused => continue,
+                            other => other,
+                        },
                     }
-                    continue;
                 }
                 CardAnswer::Said(Answer::Yes) => approve(say, &mut board, &card),
             };
@@ -686,7 +691,7 @@ enum Approval {
     Done,
     Refused,
     Stop,
-    /// The request ended somewhere else while the replace question was asked (`PairOutcome`).
+    /// The request ended somewhere else before an answer here reached the hub (`PairOutcome`).
     Elsewhere(i32),
     HubGone,
 }
@@ -724,18 +729,35 @@ fn approve(say: &Say, board: &mut Board<'_>, card: &v1::PairRequested) -> Approv
                 }
                 CardAnswer::Said(Answer::Yes) => match send(board.session, true) {
                     Ok(_) => Approval::Done,
-                    Err(e) => {
-                        refusal(say, &e);
-                        Approval::Refused
-                    }
+                    Err(e) => refused(say, board, &card.pair_id, &e),
                 },
             }
         }
-        Err(e) => {
-            refusal(say, &e);
-            Approval::Refused
+        Err(e) => refused(say, board, &card.pair_id, &e),
+    }
+}
+
+/// The hub refused an answer typed here. When that is because the request was answered or ended somewhere else just before (the
+/// window was quicker), its ending is on its way to this screen (window notices come at most once a second): wait for it a moment
+/// and say how it ended instead of the refusal. Any other refusal is said as it is.
+fn refused(say: &Say, board: &mut Board<'_>, pair_id: &[u8], e: &v1::ErrorInfo) -> Approval {
+    let not_pending = matches!(
+        e.code.as_str(),
+        "pair.state" | "pair.unknown" | "pair.expired" | "pair.closed"
+    ) && !state_is(e, "name_in_use");
+    if not_pending {
+        let end = Instant::now() + Duration::from_millis(1500);
+        while !board.ended.contains_key(pair_id) && Instant::now() < end {
+            if !board.pump(Duration::from_millis(100)) {
+                return Approval::HubGone;
+            }
+        }
+        if let Some(outcome) = board.ended.get(pair_id) {
+            return Approval::Elsewhere(*outcome);
         }
     }
+    refusal(say, e);
+    Approval::Refused
 }
 
 /// After an approval, here or in a window: one machine per opening. The hub closed itself to new machines when it took the approval

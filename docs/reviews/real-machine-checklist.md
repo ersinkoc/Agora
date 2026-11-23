@@ -226,7 +226,8 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
   the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
-  saved"; the hub closes itself after one approval. The join by an address the certificate does not name says at once "The hub at … could
+  saved"; the hub closes itself after one approval, from the terminal or from the window (`agora pair status` says "Closed to new machines"), and a
+  `pair open` that was asking about a machine answered in the window stops asking and says "Answered in a window: …" (#942). The join by an address the certificate does not name says at once "The hub at … could
   not be verified, so nothing was saved." with no number, the owner gets no card, and a later join with that name is not offered
   "Replace the existing machine".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): terminal answer passed; after a window approval the hub stays open (#942); the join hint on a loopback hub (#943).
