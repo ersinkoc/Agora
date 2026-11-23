@@ -165,7 +165,10 @@ never takes `replaced` as offline, and ignores a `NodeLink` from any producer bu
 (`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
 current connection ends. A hub that starts has no connection: every node its rebuilt view shows online is recorded offline
 before it accepts connections (`NodeOffline`, then `NodeLink { up: false, reason: closed }` for the node's latest generation,
-or 0, with `last_heard_ms` the node's last time in the log). The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+or 0, with `last_heard_ms` the node's last time in the log). An end the store refuses to record (busy, I/O error) is kept in
+memory, in order, and written before any later hub fact (so a node that dials again is recorded down, then up, and its new
+connection is refused while the end still cannot be written) and by a retry that waits 100 ms, doubling up to 5 s, until the store works (#996); the
+machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
