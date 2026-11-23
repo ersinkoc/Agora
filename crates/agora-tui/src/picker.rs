@@ -153,13 +153,40 @@ impl Nav {
         true
     }
 
-    /// The folder to ask the machine for before the choice of projects is offered (#1099): the hub refuses a person whose role may
-    /// not look into folders (a viewer) at once, so they are told before they choose rather than after. `None` without a choice.
-    pub fn probe(&self) -> Option<&str> {
-        match self.roots.as_deref() {
-            Some([first, _, ..]) => Some(first.as_str()),
-            _ => None,
-        }
+    /// The folder to ask the machine `node` for before the choice of projects is offered (#1099): the hub refuses a person whose role
+    /// may not look into folders (a viewer) at once, so they are told before they choose rather than after. The first project folder
+    /// that `snapshot` places in one project only: the hub refuses a member a folder two projects were reported in (a project they were
+    /// not granted is not in their snapshot, so that cannot always be seen here). `None` without a choice.
+    pub fn probe(&self, snapshot: &Snapshot, node: &str) -> Option<String> {
+        let roots = self.roots.as_deref().filter(|r| r.len() > 1)?;
+        let projects_of = |root: &str| {
+            let checkouts = snapshot
+                .checkouts
+                .iter()
+                .filter(|c| c.node_id == node && c.path == root)
+                .map(|c| c.project_id.as_str());
+            let workspaces = snapshot
+                .workspaces
+                .iter()
+                .filter(|w| {
+                    let folder = if w.git_root.is_empty() {
+                        &w.path
+                    } else {
+                        &w.git_root
+                    };
+                    w.node_id == node && folder == root
+                })
+                .map(|w| w.project_id.as_str());
+            let mut ids: Vec<&str> = checkouts.chain(workspaces).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len()
+        };
+        roots
+            .iter()
+            .find(|r| projects_of(r) == 1)
+            .or_else(|| roots.first())
+            .cloned()
     }
 
     /// Where the picker opens: the home folder for the whole machine; a member's project folder, or the choice when they have several
@@ -660,15 +687,28 @@ mod tests {
         let s = snapshot();
         for role in [Role::Limited, Role::Unknown] {
             assert_eq!(
-                Nav::for_role(role, project_roots(&s, "n1")).probe(),
-                Some("/home/eda/notes")
+                Nav::for_role(role, project_roots(&s, "n1")).probe(&s, "n1"),
+                Some("/home/eda/notes".into())
             );
-            assert_eq!(Nav::for_role(role, project_roots(&s, "n2")).probe(), None);
+            assert_eq!(
+                Nav::for_role(role, project_roots(&s, "n2")).probe(&s, "n2"),
+                None
+            );
         }
         assert_eq!(
-            Nav::for_role(Role::Owner, project_roots(&s, "n1")).probe(),
+            Nav::for_role(Role::Owner, project_roots(&s, "n1")).probe(&s, "n1"),
             None
         );
+        // A folder two projects were reported in is refused to a member: the next folder that is one project's is tried instead.
+        let mut two = snapshot();
+        two.checkouts.push(agora_protocol::v1::CheckoutSnapshot {
+            checkout_id: "c3".into(),
+            node_id: "n1".into(),
+            project_id: "q".into(),
+            path: "/home/eda/notes".into(),
+        });
+        let nav = Nav::for_role(Role::Limited, project_roots(&two, "n1"));
+        assert_eq!(nav.probe(&two, "n1"), Some("/home/eda/web".into()));
     }
 
     #[test]

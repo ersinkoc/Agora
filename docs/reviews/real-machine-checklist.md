@@ -436,7 +436,7 @@ not built: nothing to check.
 - **See:** without a grant the viewer sees no machine and is told no project is theirs yet (no "Connect your first machine");
   `projects` lists `MACHINE/proj` with its folder; `MACHINE/nosuch` is refused with a reason (exit 1); with the grant, the project's
   agents, and a start is refused; as a member the project's folders list (no way up from the project's own folder) and the start
-  works, while a folder outside the project is refused in words for the role; in `agora tui` the picker opens at the project's folder (its projects to choose from when several are granted there) and ⌫ goes no higher, and after the change to owner (the client reconnects by itself) it opens at the home folder; Activity (Person column) lists both people's actions in words, each row with "session <id>".
+  works, while a folder outside the project is refused in words for the role; in `agora tui` the picker opens at the project's folder (its projects to choose from when several are granted there) and ⌫ goes no higher, and after the change to owner it goes up from the project's folder, and opens at the home folder once the client has noticed the change (on a quiet hub, or after a restart; ADR-0106, if accepted, removes this); Activity (Person column) lists both people's actions in words, each row with "session <id>".
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)
