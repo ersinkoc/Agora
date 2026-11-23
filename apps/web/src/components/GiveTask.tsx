@@ -99,7 +99,7 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
         {row(t('give-field-project'), plain(task.project, FULL))}
       </dl>
       {actsFreelyNow(agent) && (
-        <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-needs-you/60 p-3 text-sm text-ink">
+        <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-danger/60 p-3 text-sm text-ink">
           <FreeBadge agent={agent} nested={false} />
           <span>{t('give-confirm-no-ask', { agent: plain(agent.name, FULL) })}</span>
         </p>
@@ -235,7 +235,7 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
           <Dialog.Title className="m-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title>
           {step.at === 'pick' && <>
             <p id="give-task-title" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</p>
-            {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-needs-you/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
+            {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-danger/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
             {candidates.length === 0
               ? <>
                 <p className="muted m-0 text-sm">{t(startable ? 'give-none-start' : starter ? 'give-none-plain' : 'give-none', { project: plain(task.project, FULL) })}</p>

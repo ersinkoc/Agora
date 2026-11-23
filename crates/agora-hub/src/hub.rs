@@ -59,6 +59,14 @@ struct Inner {
     subs_dropped: u64,
     /// How long an agent waited for a person's answer (`GET /api/metrics`).
     approval_wait: crate::metrics::Histogram,
+    /// #996: presence facts about connections that ended while the store refused the write, oldest first, with the hub clock of
+    /// the end. They are written before any later hub fact (so a node's next `NodeLink { up }` always comes after them) and by
+    /// [`Hub::record_unrecorded`] once the store works again. Memory only: a hub that restarts records every node offline anyway.
+    unrecorded: std::collections::VecDeque<(Body, u64)>,
+    /// #1036: nodes a published fact took offline since board membership last looked ([`Hub::board_membership`]). Membership
+    /// compares the online nodes with its last look, so a node that left and came back between two looks (its late end and its
+    /// redial's `up` written together, #996) would otherwise look as if it never left.
+    left: std::collections::BTreeSet<String>,
 }
 
 pub struct Hub {
@@ -74,6 +82,8 @@ pub struct Hub {
     store: Arc<SqliteStore>,
     /// At most one node event job is scheduled on the blocking pool per hub.
     pub(crate) event_writer: Arc<tokio::sync::Semaphore>,
+    /// #996: whether a task is retrying the presence facts the store refused (at most one per hub).
+    pub(crate) recording_later: std::sync::atomic::AtomicBool,
     router: std::sync::Arc<crate::router::Router>,
     inner: Mutex<Inner>,
 }
@@ -166,6 +176,7 @@ impl Hub {
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store: Arc::new(store),
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
+            recording_later: std::sync::atomic::AtomicBool::new(false),
             router: crate::router::Router::new(),
             inner: Mutex::new(Inner {
                 view,
@@ -174,6 +185,8 @@ impl Hub {
                 subs: Vec::new(),
                 subs_dropped: 0,
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
+                unrecorded: std::collections::VecDeque::new(),
+                left: std::collections::BTreeSet::new(),
             }),
         };
         {
@@ -433,6 +446,9 @@ impl Hub {
     ) -> Result<(), agora_protocol::Error> {
         use agora_protocol::{Error, ErrorCode};
         let mut g = self.lock();
+        // #996: a machine that left while the store refused the record is offline; it is written first so the check sees it.
+        self.write_unrecorded(&mut g)
+            .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
         match g.view.nodes.get(node) {
             None => return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node)),
             Some(n) if n.online => {
@@ -515,8 +531,13 @@ impl Hub {
     /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
     /// `NodeLink { up: false }` under one lock. When a newer connection of the node had already replaced this one, the fact says
     /// `replaced` and the node stays online; otherwise the hub also records `NodeOffline`, which clients from before ADR-0070
-    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether the node is now
-    /// offline.
+    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether this was the node's
+    /// current connection (the node is offline once the facts are stored).
+    ///
+    /// #996: facts the store refuses are not dropped. They are kept in order and written before any later hub fact (a node that
+    /// dials again is recorded down, then up) and by [`Hub::record_unrecorded`], which the server retries until the store works
+    /// ([`Hub::has_unrecorded`]). Before, the failure was dropped: the router had let the node go, but every view kept the machine
+    /// online until it came back or the hub restarted.
     pub fn node_link_closed(
         &self,
         registration: crate::router::Registration,
@@ -534,16 +555,14 @@ impl Hub {
             (true, false) => NodeLinkReason::Closed,
         };
         if current {
-            let _ = self.emit(
-                &mut g,
+            g.unrecorded.push_back((
                 Body::NodeOffline(NodeOffline {
                     node_id: node.clone(),
                 }),
                 now_ms,
-            );
+            ));
         }
-        let _ = self.emit(
-            &mut g,
+        g.unrecorded.push_back((
             Body::NodeLink(NodeLink {
                 node_id: node,
                 up: false,
@@ -552,12 +571,52 @@ impl Hub {
                 last_heard_ms,
             }),
             now_ms,
-        );
+        ));
+        // What the store refuses stays in `unrecorded` (see above); the caller checks `has_unrecorded`.
+        let _kept = self.write_unrecorded(&mut g);
         current
     }
 
-    /// Records an event the hub itself produced (as the reserved hub producer).
+    /// #996: writes the presence facts the store refused before, oldest first. `Ok` when none is left.
+    pub fn record_unrecorded(&self) -> Result<(), StoreError> {
+        let mut g = self.lock();
+        self.write_unrecorded(&mut g)
+    }
+
+    /// #996: whether presence facts the store refused are still waiting to be written.
+    pub fn has_unrecorded(&self) -> bool {
+        !self.lock().unrecorded.is_empty()
+    }
+
+    /// Writes the facts in `unrecorded` in order, stopping at the first the store refuses (it and the ones after it stay).
+    ///
+    /// A fact the store does not apply (its number is already taken, or is not the next: the hub's count of its own facts no longer
+    /// matches the store's) is an error too, never dropped: it stays, the count is read again from the store, and the next
+    /// attempt numbers it from there.
+    fn write_unrecorded(&self, g: &mut Inner) -> Result<(), StoreError> {
+        while let Some((body, at_ms)) = g.unrecorded.front().cloned() {
+            if !self.write(g, body, at_ms)? {
+                let seq = g.hub_seq + 1;
+                g.hub_seq = self.store.acked(RESERVED_HUB_ID)?;
+                return Err(StoreError(format!(
+                    "the hub's fact {seq} was not applied; the store holds {}",
+                    g.hub_seq
+                )));
+            }
+            g.unrecorded.pop_front();
+        }
+        Ok(())
+    }
+
+    /// Records an event the hub itself produced (as the reserved hub producer). Facts the store refused before are written first
+    /// (#996), so the log keeps the order things happened in: a node's late `NodeOffline` can never land after its next `up`.
     fn emit(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<(), StoreError> {
+        self.write_unrecorded(g)?;
+        self.write(g, body, now_ms).map(|_| ())
+    }
+
+    /// Appends one hub fact and publishes it. Returns whether the store applied it (not a duplicate or a gap).
+    fn write(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<bool, StoreError> {
         let seq = g.hub_seq + 1;
         let event = Event {
             producer_id: RESERVED_HUB_ID.to_string(),
@@ -571,13 +630,19 @@ impl Hub {
         {
             g.hub_seq = seq;
             Self::publish(g, Delivered { pos, event });
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// ADR-0039 amendment B: the `(node, project)` pairs that must hand over their local work now (see `Boards::membership`).
+    ///
+    /// #1036: a node the log took offline since the last look is no longer a remembered member, even if it is online again now
+    /// (its end and its next `up` written in one step), so it is asked as after any other return.
     pub fn board_membership(&self, now_ms: u64) -> Vec<(String, String)> {
-        let g = self.lock();
+        let mut g = self.lock();
+        let left = std::mem::take(&mut g.left);
+        self.boards.forget_members(&left);
         self.boards.membership(&g.view, now_ms)
     }
 
@@ -632,7 +697,21 @@ impl Hub {
         call: &agora_protocol::v1::BoardCall,
         now_ms: u64,
     ) -> crate::board::Answer {
+        let refused = || crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store"),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
         let mut g = self.lock();
+        // #996: a machine that left while the store refused the record is offline before the board decides anything (a handoff
+        // to it is refused), and the board's events come after that record in the log.
+        if self.write_unrecorded(&mut g).is_err() {
+            return refused();
+        }
         let key = self.restore_board(&call.project_id, now_ms);
         let project = call.project_id.as_str();
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
@@ -685,15 +764,7 @@ impl Hub {
                 if let Some(board) = before {
                     self.boards.restore(project, board);
                 }
-                crate::board::Answer {
-                    verdict: crate::board::Verdict::Invalid(
-                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
-                            .with("incident_id", "board.store"),
-                    ),
-                    events: Vec::new(),
-                    handoff: None,
-                    fanout: None,
-                }
+                refused()
             }
         }
     }
@@ -721,7 +792,17 @@ impl Hub {
             }
         }
         let back = g.view.brings_back(&d.event);
+        // #1036: whether this fact takes a node offline, for board membership's next look.
+        let presence = presence_of(&d.event).map(|node| {
+            let online = g.view.nodes.get(node).is_some_and(|n| n.online);
+            (node.to_string(), online)
+        });
         g.view.apply(&d.event);
+        if let Some((node, true)) = presence {
+            if !g.view.nodes.get(&node).is_some_and(|n| n.online) {
+                g.left.insert(node);
+            }
+        }
         g.pos = d.pos;
         // ADR-0073: a forgotten machine came back. A client that joined while it was hidden holds none of its folders or agents, and
         // no event will say them again; every client is let go, reconnects from its position and, being before this one, gets a
@@ -807,6 +888,17 @@ impl Hub {
 
     pub fn subscriber_count(&self) -> usize {
         self.lock().subs.len()
+    }
+}
+
+/// The node a presence fact can take offline (the view decides whether it does): the one a hub's `NodeOffline` or `NodeLink` names,
+/// or the sender of a node's own `NodeOffline` (see `View::apply`).
+fn presence_of(event: &Event) -> Option<&str> {
+    match &event.body {
+        Some(Body::NodeOffline(e)) if event.producer_id == RESERVED_HUB_ID => Some(&e.node_id),
+        Some(Body::NodeOffline(_)) => Some(&event.producer_id),
+        Some(Body::NodeLink(e)) if !e.up => Some(&e.node_id),
+        _ => None,
     }
 }
 
@@ -1808,5 +1900,275 @@ mod tests {
         assert!(hub.view().0.nodes["n1"].online);
         drop(hub);
         remove_db(&path);
+    }
+
+    const REFUSE_EVENTS: &str =
+        "CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;";
+
+    /// The presence facts in the log about `node`, as `(up, reason, generation)` (`NodeOffline` is `(false, -1, 0)`).
+    fn presence(hub: &Hub, node: &str) -> Vec<(bool, i32, u64)> {
+        hub.store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .iter()
+            .filter_map(decode)
+            .filter_map(|d| match d.event.body {
+                Some(Body::NodeLink(l)) if l.node_id == node => {
+                    Some((l.up, l.reason, l.generation))
+                }
+                Some(Body::NodeOffline(o)) if o.node_id == node => Some((false, -1, 0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #996: the end of a connection the store refused to record is kept, not dropped, and written once the store works again,
+    /// with no reconnect: the view, a live subscriber and a rebuilt view all show the machine offline, and it can be forgotten.
+    /// Before, the failure was dropped and the machine that had left stayed online until it came back or the hub restarted.
+    #[test]
+    fn a_connection_whose_end_cannot_be_recorded_is_recorded_once_the_store_works() {
+        let (hub, path) = hub_on_file("presence-end-refused");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let sub = hub.subscribe(None).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        assert!(!hub.router().is_connected("n1"));
+        assert!(hub.has_unrecorded());
+        assert!(hub.record_unrecorded().is_err());
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        hub.record_unrecorded().unwrap();
+        assert!(!hub.has_unrecorded());
+        let (view, _) = hub.view();
+        assert!(!view.nodes["n1"].online);
+        assert_eq!(view.nodes["n1"].last_event_ms, 5);
+        assert!(!View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        let live: Vec<_> = std::iter::from_fn(|| sub.live.try_recv().ok())
+            .filter_map(|d| match d.event.body {
+                Some(Body::NodeLink(l)) => Some((l.up, l.reason, l.generation)),
+                Some(Body::NodeOffline(_)) => Some((false, -1, 0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            [(false, -1, 0), (false, NodeLinkReason::Closed as i32, 1)]
+        );
+        hub.forget_node("n1", false, 7).unwrap();
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: when only the second of a connection's two end facts is refused, only that one is kept: the first is not written twice.
+    #[test]
+    fn only_the_end_facts_the_store_refused_are_written_later() {
+        let (hub, path) = hub_on_file("presence-end-partial");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        // The log holds the opening; `NodeOffline` is the second event and goes in, `NodeLink` would be the third.
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= 2 BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        hub.record_unrecorded().unwrap();
+        assert_eq!(
+            presence(&hub, "n1"),
+            [
+                (true, NodeLinkReason::Opened as i32, 1),
+                (false, -1, 0),
+                (false, NodeLinkReason::Closed as i32, 1),
+            ]
+        );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a board call writes the ends the store refused before it decides anything, so the board sees a machine that left as
+    /// offline (never hands work to it) and its events come after that record. While the store still refuses, the call is answered
+    /// `internal` (`board.store`) and the end stays waiting.
+    #[test]
+    fn a_board_call_records_a_waiting_end_first() {
+        let (hub, path) = hub_on_file("presence-end-board");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: "p".into(),
+            tool: "task_list".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        match hub.board_call("n2", &call, 7).verdict {
+            crate::board::Verdict::Invalid(e) => assert_eq!(
+                e,
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store")
+            ),
+            _ => panic!("a board call went ahead while a machine's end could not be recorded"),
+        }
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _ = hub.board_call("n2", &call, 8);
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a waiting end the store does not apply (the hub's count of its own facts no longer matches the store's) is not
+    /// dropped: the attempt fails, the count is read again, and the next attempt writes it.
+    #[test]
+    fn a_waiting_end_the_store_does_not_apply_is_kept_and_written_later() {
+        let (hub, path) = hub_on_file("presence-end-unapplied");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        other
+            .execute_batch("DROP TRIGGER no_events; UPDATE producers SET last_seq = last_seq + 1 WHERE producer = 'hub';")
+            .unwrap();
+        assert!(hub.record_unrecorded().is_err());
+        assert!(hub.has_unrecorded());
+        assert!(hub.view().0.nodes["n1"].online);
+        hub.record_unrecorded().unwrap();
+        assert!(!hub.has_unrecorded());
+        assert!(!hub.view().0.nodes["n1"].online);
+        assert!(!View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #996: a machine that dials again after its last end could not be recorded is recorded down, then up, in that order, so the
+    /// late end never hides the new connection. While the store still refuses, the new connection is not kept (#957); once it
+    /// works, the next one is recorded online, with the next generation.
+    #[test]
+    fn a_machine_whose_end_was_not_recorded_comes_back_online_in_order() {
+        let (hub, path) = hub_on_file("presence-end-then-open");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_closed(reg, generation, true, 5, 6));
+        assert!(hub.node_link_opened("n1", Vec::new(), 7).is_err());
+        assert!(!hub.router().is_connected("n1"));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let (_reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 8).unwrap();
+        assert_eq!(generation, 2);
+        assert!(!hub.has_unrecorded());
+        assert!(hub.router().is_connected("n1"));
+        assert!(hub.view().0.nodes["n1"].online);
+        assert!(View::rebuild(hub.store()).unwrap().0.nodes["n1"].online);
+        assert_eq!(
+            presence(&hub, "n1"),
+            [
+                (true, NodeLinkReason::Opened as i32, 1),
+                (false, -1, 0),
+                (false, NodeLinkReason::Silent as i32, 1),
+                (true, NodeLinkReason::Opened as i32, 2),
+            ]
+        );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// How a machine's end reaches the log in [`rejoin_asks`].
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum End {
+        /// Recorded when the connection ends, and looked at (as `server.rs` does) before the machine dials again.
+        Recorded,
+        /// Refused when the connection ends; the machine's redial writes it, then its own `up`, in one step.
+        Owed,
+        /// Refused when the connection ends; a first redial writes it but not its own `up`, and a second redial writes the `up`.
+        OwedSplit,
+    }
+
+    /// `(node, project)` pairs board membership asks to hand over their local work.
+    type Asks = Vec<(String, String)>;
+
+    /// #1036: what board membership asks when `n1` leaves the project `p` it shares with the other `nodes` and dials again (each
+    /// node runs an agent in `p`), and what the look after that asks.
+    fn rejoin_asks(name: &str, nodes: &[&str], end: End) -> (Asks, Asks) {
+        let (hub, path) = hub_on_file(name);
+        let sup = support();
+        let mut links = Vec::new();
+        for n in nodes {
+            let mut s = open_session(&hub, &sup, n);
+            links.push(hub.node_link_opened(n, Vec::new(), 1).unwrap());
+            hub.ingest(&mut s, &online(n, 1)).unwrap();
+            hub.ingest(&mut s, &agent(n, 2, "a")).unwrap();
+        }
+        // The project became shared: every node was asked, and every one answered.
+        assert_eq!(hub.board_membership(3).len(), nodes.len());
+        assert!(hub.board_membership(3).is_empty());
+        for n in nodes {
+            hub.board_join_settled(n, "p");
+        }
+        let other = rusqlite::Connection::open(&path).unwrap();
+        if end != End::Recorded {
+            other.execute_batch(REFUSE_EVENTS).unwrap();
+        }
+        let (reg, _cmds, generation) = links.remove(0);
+        assert!(hub.node_link_closed(reg, generation, false, 5, 6));
+        // What the server does right after a connection's end.
+        assert!(hub.board_membership(6).is_empty());
+        if end == End::OwedSplit {
+            let held: i64 = other
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            other
+                .execute_batch(&format!(
+                    "DROP TRIGGER no_events; CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= {} BEGIN SELECT RAISE(ABORT, 'full'); END;",
+                    held + 2
+                ))
+                .unwrap();
+            assert!(hub.node_link_opened("n1", Vec::new(), 7).is_err());
+            assert!(!hub.has_unrecorded());
+            assert!(!hub.view().0.nodes["n1"].online);
+        }
+        if end != End::Recorded {
+            other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        }
+        let _back = hub.node_link_opened("n1", Vec::new(), 8).unwrap();
+        assert!(!hub.has_unrecorded());
+        assert!(hub.view().0.nodes["n1"].online);
+        let mut asked = hub.board_membership(8);
+        asked.sort();
+        let again = hub.board_membership(9);
+        drop(hub);
+        remove_db(&path);
+        (asked, again)
+    }
+
+    /// #1036: a machine whose end the store refused, and whose own redial then writes that end and its new `up` together, is asked
+    /// to hand over its local board work (ADR-0039 amendment B) exactly as after an end recorded at once, and only once; so are the
+    /// other nodes the same look asks. Before, board membership saw the machine online at both looks and asked nobody.
+    #[test]
+    fn a_machine_whose_end_is_written_by_its_own_redial_is_asked_to_rejoin_the_board() {
+        let pairs = |nodes: &[&str]| -> Asks {
+            nodes
+                .iter()
+                .map(|n| ((*n).to_string(), "p".to_string()))
+                .collect()
+        };
+        // Three nodes: the project stays shared while n1 is away, so n1 alone is asked when it is back. Two nodes: it stops being
+        // shared, so both are asked.
+        for (nodes, expected) in [
+            (&["n1", "n2", "n3"][..], pairs(&["n1"])),
+            (&["n1", "n2"][..], pairs(&["n1", "n2"])),
+        ] {
+            for end in [End::Recorded, End::Owed, End::OwedSplit] {
+                let name = format!("board-rejoin-{}-{end:?}", nodes.len());
+                assert_eq!(
+                    rejoin_asks(&name, nodes, end),
+                    (expected.clone(), Vec::new()),
+                    "{nodes:?} {end:?}"
+                );
+            }
+        }
     }
 }

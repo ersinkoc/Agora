@@ -260,6 +260,12 @@ where
     if verifies_devices {
         give_device_changes(hub, node_id);
     }
+    // ADR-0039 amendment B, #1036: board membership looks now, not only at the node's next event. A redial that wrote the node's
+    // late end together with its `up` makes it due to hand over its local work, and an idle node that is caught up may send no
+    // event for a long time (ADR-0054). The asks go out after the device changes, before anything the connection carries.
+    for (node, project) in hub.board_membership(now_ms()) {
+        ask_board_join(hub, node, project);
+    }
     let mut last_heard = tokio::time::Instant::now();
     let mut events = NodeEvents {
         session: Some(session),
@@ -287,7 +293,69 @@ where
             ask_board_join(hub, node, project);
         }
     }
+    // #996: the store refused the end: it is written as soon as the store works, even if nothing else happens on the hub.
+    if hub.has_unrecorded() {
+        record_later(hub);
+    }
     result
+}
+
+/// #996: retries the presence facts the store refused until they are written, waiting longer each time (up to 5 s), at most one
+/// task per hub. Once they are, the board's membership is worked out again, as when a connection's end is recorded at once. The
+/// task holds the hub only during an attempt (a hub dropped meanwhile ends it), and however it ends, a panic included, it lets
+/// the next close start another.
+fn record_later(hub: &Arc<Hub>) {
+    use std::sync::atomic::Ordering;
+    /// Clears `recording_later` when the task ends while it still owns it.
+    struct Owner {
+        hub: std::sync::Weak<Hub>,
+        owns: bool,
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if let (true, Some(hub)) = (self.owns, self.hub.upgrade()) {
+                hub.recording_later.store(false, Ordering::Release);
+            }
+        }
+    }
+    if hub.recording_later.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut owner = Owner {
+        hub: Arc::downgrade(hub),
+        owns: true,
+    };
+    tokio::spawn(async move {
+        let mut wait = Duration::from_millis(100);
+        loop {
+            tokio::time::sleep(wait).await;
+            let Some(hub) = owner.hub.upgrade() else {
+                return;
+            };
+            let recorded = {
+                let hub = Arc::clone(&hub);
+                tokio::task::spawn_blocking(move || hub.record_unrecorded().is_ok())
+                    .await
+                    .unwrap_or(false)
+            };
+            if recorded {
+                for (node, project) in hub.board_membership(now_ms()) {
+                    ask_board_join(&hub, node, project);
+                }
+                owner.owns = false;
+                hub.recording_later.store(false, Ordering::Release);
+                // A connection that ended between the write and the line above found this task still running and left its
+                // facts to it.
+                if !hub.has_unrecorded() || hub.recording_later.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                owner.owns = true;
+                wait = Duration::from_millis(100);
+            } else {
+                wait = (wait * 2).min(Duration::from_secs(5));
+            }
+        }
+    });
 }
 
 /// Sends one frame to a node, but never waits longer than `limit` for it: a node that stopped reading fills the socket's buffer,
@@ -2438,29 +2506,48 @@ mod event_writer_tests {
         Conn<DuplexStream>,
         tokio::task::JoinHandle<Result<(), ServeError>>,
     ) {
+        let (mut node, link) = open_link(hub, node_id, &[]).await;
+        // This comes after the hub has recorded the link open, which also writes to SQLite.
+        ping(&mut node).await;
+        (node, link)
+    }
+
+    /// A node connection through `Hello` and an empty `Resume` (the node has nothing to send), both sides offering `caps`.
+    async fn open_link(
+        hub: &Arc<Hub>,
+        node_id: &'static str,
+        caps: &[&str],
+    ) -> (
+        Conn<DuplexStream>,
+        tokio::task::JoinHandle<Result<(), ServeError>>,
+    ) {
+        let caps: Vec<String> = caps.iter().map(|c| (*c).to_string()).collect();
         let (client, server) = tokio::io::duplex(8192);
         let hub = Arc::clone(hub);
+        let offered = caps.clone();
         let link = tokio::spawn(async move {
             let (conn, _) = agora_protocol::ws::accept_with_token(server).await.unwrap();
-            serve_node(conn, node_id, &hub, &support()).await
+            let support = Support {
+                capabilities: offered,
+                ..support()
+            };
+            serve_node(conn, node_id, &hub, &support).await
         });
         let mut node = agora_protocol::ws::connect(client, "ws://localhost/")
             .await
             .unwrap();
-        node.send(&frame(
-            STREAM_CONTROL,
-            kinds::HELLO,
-            hello().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+        let hello = v1::Hello {
+            capabilities: caps,
+            ..hello()
+        };
+        node.send(&frame(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+            .await
+            .unwrap();
         assert_eq!(recv(&mut node).await.kind, kinds::WELCOME);
         node.send(&frame(STREAM_CONTROL, kinds::RESUME, Vec::new()))
             .await
             .unwrap();
         assert_eq!(recv(&mut node).await.kind, kinds::RESUME_OK);
-        // This comes after the hub has recorded the link open, which also writes to SQLite.
-        ping(&mut node).await;
         (node, link)
     }
 
@@ -2750,6 +2837,180 @@ mod event_writer_tests {
         beta.close().await;
         let _ = beta_link.await;
         assert!(reverted, "handoff must revert after giver disconnects");
+    }
+
+    /// #996: a machine whose connection ends while the store refuses writes is recorded offline once the store works again, with
+    /// no reconnect, no restart and nothing else happening on the hub. Before, the failed `NodeLink { up: false }` was dropped and
+    /// the machine that had left stayed online in every view until it came back or the hub restarted.
+    #[tokio::test]
+    async fn a_machine_that_leaves_while_the_store_refuses_writes_is_shown_offline_once_it_works() {
+        let path = std::env::temp_dir().join(format!("agora-996-{}.db", std::process::id()));
+        let remove = |path: &std::path::Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+            }
+        };
+        remove(&path);
+        let hub = Arc::new(Hub::open(SqliteStore::open(&path).unwrap()).unwrap());
+        let (mut node, link) = connect(&hub, "n").await;
+        assert!(hub.view().0.nodes["n"].online);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        node.close().await;
+        link.await.unwrap().unwrap();
+        assert!(!hub.router().is_connected("n"));
+        assert!(hub.has_unrecorded());
+        // The retry fails at least once while the store still refuses.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let offline = tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.view().0.nodes["n"].online {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        // The retry task lets go once it is done, so a later close can start another.
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while hub
+                .recording_later
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let rebuilt = crate::projection::View::rebuild(hub.store()).unwrap().0;
+        drop(hub);
+        remove(&path);
+        assert!(offline.is_ok(), "the machine that left stayed online");
+        assert!(released.is_ok(), "the retry task kept its claim");
+        assert!(!rebuilt.nodes["n"].online);
+    }
+    /// #1036 (Codex review): a machine whose end the store refused, and whose redial then writes that end and its new `up`
+    /// together, is asked to hand over its local board work (`BoardJoin`) by the redial itself, even when it sends no event (an
+    /// idle node that is caught up only resumes and answers pings, ADR-0054) and no retry task is left to look at membership
+    /// (the redial wrote the end before the closing connection checked for one). Before, the ask waited for the node's next event.
+    #[tokio::test]
+    async fn an_idle_machine_whose_redial_writes_its_end_is_asked_to_rejoin_the_board() {
+        let path = std::env::temp_dir().join(format!("agora-1036-{}.db", std::process::id()));
+        let remove = |path: &std::path::Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+            }
+        };
+        remove(&path);
+        let hub = Arc::new(Hub::open(SqliteStore::open(&path).unwrap()).unwrap());
+        let mut links = Vec::new();
+        for node in ["alpha", "beta", "gamma"] {
+            let (mut conn, link) = open_link(&hub, node, &["board.join"]).await;
+            for (seq, body) in [
+                (
+                    1,
+                    v1::event::Body::NodeOnline(v1::NodeOnline {
+                        node_id: node.into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    2,
+                    v1::event::Body::AgentStarted(v1::AgentStarted {
+                        agent_id: "a".into(),
+                        node_id: node.into(),
+                        project_id: "p".into(),
+                        kind: "shell".into(),
+                        ..Default::default()
+                    }),
+                ),
+            ] {
+                let event = v1::Event {
+                    producer_id: node.into(),
+                    seq,
+                    at_ms: seq,
+                    body: Some(body),
+                };
+                conn.send(&frame(STREAM_EVENTS, kinds::EVENT, event.encode_to_vec()))
+                    .await
+                    .unwrap();
+            }
+            // Other frames (the `BoardJoin` asks of the project becoming shared) are left unanswered.
+            loop {
+                let f = recv(&mut conn).await;
+                if f.kind == kinds::EVENT_ACK
+                    && v1::EventAck::decode(f.payload.as_slice())
+                        .unwrap()
+                        .up_to_seq
+                        >= 2
+                {
+                    break;
+                }
+            }
+            links.push((conn, link));
+        }
+        assert!(hub.board_membership(now_ms()).is_empty());
+        for node in ["alpha", "beta", "gamma"] {
+            hub.board_join_settled(node, "p");
+        }
+
+        // No retry task will look at membership: as when the redial wrote the end before the closing connection checked.
+        hub.recording_later
+            .store(true, std::sync::atomic::Ordering::Release);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        let (mut alpha, alpha_link) = links.remove(0);
+        alpha.close().await;
+        alpha_link.await.unwrap().unwrap();
+        assert!(hub.has_unrecorded());
+        assert!(hub.view().0.nodes["alpha"].online);
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+
+        // The redial: resume and a ping, no event.
+        let (mut alpha, alpha_link) = open_link(&hub, "alpha", &["board.join"]).await;
+        assert!(!hub.has_unrecorded());
+        alpha
+            .send(&frame(STREAM_CONTROL, kinds::PING, b"ping".to_vec()))
+            .await
+            .unwrap();
+        let (mut ponged, mut asked) = (false, Vec::new());
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            while !(ponged && !asked.is_empty()) {
+                let f = alpha.recv().await.unwrap().expect("open node link");
+                if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PONG) {
+                    ponged = true;
+                } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 0) {
+                    if let Some(command_request::Command::BoardJoin(j)) =
+                        v1::CommandRequest::decode(f.payload.as_slice())
+                            .unwrap()
+                            .command
+                    {
+                        asked.push(j.project_id);
+                    }
+                }
+            }
+        })
+        .await;
+        let left_over = hub.board_membership(now_ms());
+        hub.recording_later
+            .store(false, std::sync::atomic::Ordering::Release);
+        alpha.close().await;
+        let _ = alpha_link.await;
+        for (mut conn, link) in links {
+            conn.close().await;
+            let _ = link.await;
+        }
+        drop(hub);
+        remove(&path);
+        assert!(ponged, "the redialled node got no pong");
+        assert!(
+            seen.is_ok(),
+            "the redialled node was not asked to rejoin the board"
+        );
+        assert_eq!(asked, ["p"]);
+        assert!(left_over.is_empty(), "{left_over:?}");
     }
 }
 
