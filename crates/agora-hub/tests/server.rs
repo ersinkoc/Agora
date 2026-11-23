@@ -2254,14 +2254,7 @@ async fn audit_records_the_routed_project_agent_and_device_outcome() {
     }
 
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     for (i, accepted) in [false, true, true].into_iter().enumerate() {
         let req = v1::CommandRequest {
