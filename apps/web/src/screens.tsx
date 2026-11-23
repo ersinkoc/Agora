@@ -5,7 +5,8 @@ import { DeviceRequest } from './components/DeviceRequest';
 import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
 import type { SignInApprovalModel } from './components/pairChoice';
-import { ApprovalBanner } from './components/ApprovalBanner';
+import { ApprovalBanner, ApprovalBanners } from './components/ApprovalBanner';
+import { requestShown, useAnswerGuard, type AnswerResult } from './components/useAnswerGuard';
 import { SkipApproval } from './components/SkipApproval';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
@@ -29,6 +30,7 @@ import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
 import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
+import { KitGallery } from './components/kit/KitGallery';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
@@ -36,7 +38,7 @@ import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -133,6 +135,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
   return (
     <section className="theme-panel" data-theme={theme}>
       <h2>{t(`theme-${theme}`)}</h2>
+      <KitGallery />
       <div className="gallery__row">{STATES.map((s) => <StateBadge key={s} state={s} />)}</div>
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
@@ -148,13 +151,28 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
         <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
       </div>
+      {/* Redesign PR 4: the one request component as a card, and in a pane narrower than 360 px (the row density, the buttons under the text). */}
+      <div data-approval-sizes className="gallery__row items-start">
+        <div className="w-full max-w-[22rem]"><ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} /></div>
+        <div data-approval-narrow className="w-[12.5rem]"><ApprovalBanner approval={{ ...demoAlwaysApproval, machineName: 'laptop' }} agent={demoAsksLess} onResolve={() => {}} pinned /></div>
+      </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
-      <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
-      <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
-      <StartApproval approval={demoStartNoAskApproval} start={demoStartNoAskApproval.start} onResolve={() => {}} />
+      {/* Redesign PR 5: a start and a switch to act without asking as short cards with Review (a long prompt, settings, a start that
+          would not ask, a switch, a pane narrower than 360 px), and the whole request as Review shows it. */}
+      <div data-start-cards className="grid max-w-3xl gap-3">
+        <div className="approvals">
+          <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartSettingsApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} onOpen={() => {}} />
+          <ApprovalCard approval={demoSkipApproval as ApprovalModel} agent={demoRichAgent} onResolve={() => {}} onOpen={() => {}} />
+        </div>
+        <ApprovalBanner approval={demoStartApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned />
+        <div data-start-narrow className="w-[12.5rem]"><ApprovalBanner approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned /></div>
+        <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
+        <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
+      </div>
       <HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
@@ -198,11 +216,13 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, approvals = [], onResolve, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, stale = false, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
-  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // The link is not live: its requests cannot be answered (T44: the dwell starts again when it is back).
+  stale?: boolean;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
@@ -212,6 +232,9 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   const preview = agent?.preview ?? '';
   const demo = useMemo(() => demoSource(preview), [preview]);
   const source = live ?? demo;
+  // T44 (`useAnswerGuard`, as Home's queue): one dwell for this agent's cards, above its terminal or its composer.
+  const mine = agent ? approvals.filter((x) => x.agentId === agent.id) : [];
+  const guard = useAnswerGuard(mine.map((x) => x.id), (status) => JSON.stringify([agent?.terminal !== false, mine.map((x) => [requestShown(x, agent), status(x.id)])]), stale);
   if (!agent) {
     return (
       <main className="page">
@@ -221,7 +244,6 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
-  const asks = approvals.filter((x) => x.agentId === agent.id);
   // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
@@ -240,10 +262,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
         <CloseConfirm agent={agent} where="pane" />
-        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+        {agent.terminal === false ? null : <ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} />}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
+          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={mine.length ? <div className="grid gap-2"><ApprovalBanners approvals={mine} agent={agent} guard={guard} onResolve={onResolve} pinned /></div> : undefined} /> : (
             <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>
@@ -425,7 +447,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                       <span className={m.online ? 'text-finished' : 'muted'}>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
                       <span className="muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
                       {m.build && <span className="muted font-mono" title={t('network-build')}>{m.build}</span>}
-                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
+                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-ink'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
                     </li>
                   ))}
                 </ul>

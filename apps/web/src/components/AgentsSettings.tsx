@@ -89,7 +89,7 @@ function KindRow({ k, stale }: { k: KindInfo; stale: boolean }) {
             <div className="contents">
               <dt className="muted">{t('agents-options')}</dt>
               <dd className="m-0 flex min-w-0 flex-wrap gap-x-3 gap-y-0.5">
-                {options.map((o) => <span key={o.id} className={o.skipsPermissions ? 'text-needs-you' : undefined}>{plainText(labelOf(o, t), 32)}{o.skipsPermissions ? ` (${t('agents-option-skips')})` : ''}</span>)}
+                {options.map((o) => <span key={o.id} className={o.skipsPermissions ? 'text-danger' : undefined}>{plainText(labelOf(o, t), 32)}{o.skipsPermissions ? ` (${t('agents-option-skips')})` : ''}</span>)}
               </dd>
             </div>
           )}

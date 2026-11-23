@@ -5,6 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "private_home/mod.rs"]
 mod private_home;
+#[path = "short_socket/mod.rs"]
+mod short_socket;
 use agora_node::{
     control::Client,
     daemon::{Node, NodeConfig},
@@ -73,6 +75,8 @@ struct Env {
     socket: PathBuf,
     node: Option<Node>,
     seen: BTreeSet<String>,
+    /// Dropped after the node (`drop` takes the node first).
+    _sockets: short_socket::SocketDir,
 }
 
 impl Env {
@@ -136,10 +140,12 @@ impl Env {
             ),
         )
         .unwrap();
+        // #1031: the socket's folder fits whatever the checkout's depth.
+        let sockets = short_socket::SocketDir::new(&base, "lfs");
         let node = Node::start(&NodeConfig {
             resume_all: false,
             node_id: "node-launch-folder-swap".into(),
-            socket: base.join("n.sock"),
+            socket: sockets.socket("n.sock"),
             data_dir: base.join("data"),
             worktree_root: base.join("worktrees"),
             manifests_dir: base.join("manifests"),
@@ -155,6 +161,7 @@ impl Env {
             socket,
             node: Some(node),
             seen: BTreeSet::new(),
+            _sockets: sockets,
         }
     }
 

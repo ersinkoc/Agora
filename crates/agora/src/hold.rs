@@ -19,7 +19,7 @@ use agora_i18n::key;
 use agora_node::holder_link::{
     agent_id_fits, read_frame, socket_path, write_frame, AgentInfo, AgentState, PipeData, Refusal,
     Reply, Request, StartPipeRequest, StartRequest, TerminalInfo, LINK_VERSION, LINK_VERSION_PIPES,
-    MAX_FRAME, WRITE_SLICE,
+    MAX_FRAME, MAX_HELD_AGENTS, WRITE_SLICE,
 };
 use agora_platform::{
     ExitStatus, HeldBuffer, HeldProcess, HeldSignal, HeldTerminal, LineWriter, LocalListener,
@@ -256,6 +256,8 @@ pub(crate) struct Holder {
     /// The home, for `run/hold.pid`, and the count it last said.
     home: PathBuf,
     published: Option<usize>,
+    /// The most agents it keeps (#983): [`MAX_HELD_AGENTS`], as many as one `List` reply can name; lower only in tests.
+    capacity: usize,
 }
 
 impl Holder {
@@ -281,6 +283,7 @@ impl Holder {
             start,
             home: home.to_path_buf(),
             published: None,
+            capacity: MAX_HELD_AGENTS,
         })
     }
 
@@ -516,6 +519,12 @@ impl Holder {
         );
     }
 
+    /// Whether one more agent may be kept (#983): every agent it keeps, terminal or pipe, running or ended and not yet released, is an
+    /// entry of the one `List` reply, which must fit a frame. A start past it is `Failed`, and the node runs that agent itself.
+    fn has_room(&self) -> bool {
+        self.agents.len() + self.pipes.len() < self.capacity
+    }
+
     fn agent(&mut self, id: &str) -> Option<&mut Agent> {
         self.agents.iter_mut().find(|a| a.id == id)
     }
@@ -621,6 +630,9 @@ impl Holder {
         if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {
             return self.refuse(Refusal::AgentExists);
         }
+        if !self.has_room() {
+            return self.refuse(Refusal::Failed);
+        }
         let config = PtyConfig {
             argv: s.argv.clone(),
             cwd: s.cwd.as_ref().map(PathBuf::from),
@@ -716,6 +728,9 @@ impl Holder {
         }
         if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {
             return self.refuse(Refusal::AgentExists);
+        }
+        if !self.has_room() {
+            return self.refuse(Refusal::Failed);
         }
         let cwd = s.cwd.as_ref().map(PathBuf::from);
         let Ok(mut proc) = HeldProcess::start(&s.argv, cwd.as_deref(), &s.env) else {
@@ -901,6 +916,90 @@ mod tests {
         a.exit = a.term.try_wait().unwrap_or(None);
         assert!(a.exit.is_some());
         assert!(!a.drain_to_end(later, false));
+    }
+
+    /// #983: a holder keeps no more agents than one `List` reply can name. A `Start` or `StartPipe` past its capacity (terminal and
+    /// pipe agents together) is refused with `Failed`, which the node takes as "run it yourself", and nothing is started; `List`
+    /// still answers with what it keeps.
+    #[test]
+    fn a_full_holder_refuses_another_start_and_its_list_still_fits() {
+        let home = std::env::temp_dir().join(format!("agora-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut holder = Holder::open(&home, Box::new(|_| None)).unwrap();
+        let mut node = agora_platform::local_connect(&socket_path(&home)).unwrap();
+        let stream = holder.listener.accept().unwrap();
+        let me = std::process::id();
+        holder.node = Some(Node {
+            stream,
+            version: LINK_VERSION_PIPES,
+            watch: ProcessWatch::open(me, agora_platform::process_start_time(me).unwrap()).unwrap(),
+            attached: true,
+        });
+        holder.capacity = 2;
+        let wait = Duration::from_secs(5);
+        let reply = |node: &mut LocalStream| {
+            let (payload, _) = read_frame(node, wait).unwrap().unwrap();
+            Reply::decode(&payload).unwrap()
+        };
+        let argv = || vec!["sleep".to_string(), "600".to_string()];
+        let start = |agent: &str| {
+            Request::Start(StartRequest {
+                agent: agent.into(),
+                argv: argv(),
+                cols: 80,
+                rows: 24,
+                ..StartRequest::default()
+            })
+        };
+        let start_pipe = |agent: &str| {
+            Request::StartPipe(StartPipeRequest {
+                agent: agent.into(),
+                argv: argv(),
+                cwd: None,
+                env: Vec::new(),
+            })
+        };
+        holder.handle(start("t1"));
+        assert!(matches!(reply(&mut node), Reply::Started { .. }));
+        holder.handle(start_pipe("p1"));
+        assert!(matches!(reply(&mut node), Reply::PipeStarted { .. }));
+        for full in [start("t2"), start_pipe("p2")] {
+            holder.handle(full);
+            assert!(
+                matches!(
+                    reply(&mut node),
+                    Reply::Refused {
+                        code: Refusal::Failed,
+                        ..
+                    }
+                ),
+                "a start past the capacity was not refused"
+            );
+        }
+        assert_eq!((holder.agents.len(), holder.pipes.len()), (1, 1));
+        holder.handle(Request::List);
+        let Reply::Agents(list) = reply(&mut node) else {
+            panic!("no list")
+        };
+        let ids: Vec<&str> = list.iter().map(|a| a.agent.as_str()).collect();
+        assert_eq!(ids, ["t1", "p1"]);
+        // An id already held is still `AgentExists`, not "full": the node ends that earlier run and starts again.
+        holder.handle(start("t1"));
+        assert!(matches!(
+            reply(&mut node),
+            Reply::Refused {
+                code: Refusal::AgentExists,
+                ..
+            }
+        ));
+        for a in &mut holder.agents {
+            a.term.kill_and_reap();
+        }
+        for p in &mut holder.pipes {
+            p.proc.kill_and_reap();
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The lock names a supervisor, which runs the node as its child (ADR-0062 item 8): the node is admitted, the supervisor itself is,
