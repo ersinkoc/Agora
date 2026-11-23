@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -16,7 +16,8 @@ import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, Pill, StatTile } from './kit';
 import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from './ApprovalRequest';
 import { Mark } from './StateBadge';
-import { useAnswerGuard } from './useAnswerGuard';
+import { ReviewDialog } from './ReviewRequest';
+import { ShareHolds, useAnswerGuard } from './useAnswerGuard';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
@@ -65,6 +66,9 @@ function askText(x: ApprovalModel): string {
   return visible(d ? `${x.action} · ${d}` : x.action);
 }
 
+// A start or a switch to act without asking is read and answered in Review (#1070); a switch the window cannot read keeps its full card.
+const reviewsHere = (x: ApprovalModel): boolean => !!(x.start || x.skip);
+
 const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(it.approval) : it.kind === 'pair' ? t('pair-row-what') : t('fleet-waiting-in-terminal'));
 
 // The icon chip of a request card: what kind of thing is asked.
@@ -85,13 +89,14 @@ interface RowModel {
   ask: string;
   inline: boolean; // Allow and Deny are on the card
   when?: string; // "Asked 3 minutes ago", when the queue shows it (drawn in a box of its own width: not part of the dwell's identity)
-  action: 'answer' | 'agent' | 'panel' | 'none';
+  action: 'answer' | 'review' | 'agent' | 'panel' | 'none';
   agentId?: string;
 }
 
 // The queue: everything that needs the user, most urgent first, one request card each (the kit's Callout, amber, never a bar on one side).
 // A plain yes or no has Allow and Deny in its card (the same answer, signed the same way, as the banner above the terminal); anything with
-// something to read opens the agent, where the whole request is.
+// something to read opens the agent, where the whole request is. A start or a switch (#1070) opens Review here, over Home: the same dialog
+// the agent's card opens, so it takes one Review wherever it is seen.
 export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview, stale, pairing }: {
   items: readonly AttentionItem[];
   machines: readonly MachineModel[];
@@ -121,6 +126,14 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const [read, setRead] = useState<ReadonlySet<string>>(new Set());
   const toggleRead = (key: string) => setRead((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
 
+  // #1070: the start or switch whose Review is open over Home, by request id. It is drawn from the list as it is now, so a request that
+  // leaves the list takes the dialog with it.
+  const [reviewing, setReviewing] = useState<string | undefined>();
+  const reviewed = reviewing === undefined ? undefined
+    : items.find((it): it is Extract<AttentionItem, { kind: 'approval' }> => it.kind === 'approval' && it.approval.id === reviewing && reviewsHere(it.approval));
+  // Gone from the list: forgotten, so the same request asked again later does not open Review by itself.
+  useEffect(() => { if (reviewing !== undefined && !reviewed) setReviewing(undefined); }, [reviewing, reviewed]);
+
   // T44 (`useAnswerGuard`, shared with the side panel and the cards above a terminal and a composer): Allow and Deny in a card do nothing
   // for a short dwell after anything on the list changed, after the person came back to the window and after the link came back, and a
   // request is answered once. The layout is made of the model of every agent card on screen, opened "Review each" lists included (the
@@ -129,6 +142,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const agent = it.agent;
     const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
     const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
+    const review = !inline && it.kind === 'approval' && reviewsHere(it.approval);
     return {
       name,
       title: it.kind === 'approval' ? askTitle(it.approval, name) : name,
@@ -138,7 +152,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       ask: askOf(it),
       inline,
       when: knownWait && it.sinceMs ? t('fleet-asked', { when: ago(it.sinceMs, now) }) : undefined,
-      action: inline ? 'answer' : agent ? 'agent' : onReview ? 'panel' : 'none',
+      action: inline ? 'answer' : review ? 'review' : agent ? 'agent' : onReview ? 'panel' : 'none',
       agentId: agent?.id,
     };
   };
@@ -146,7 +160,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const identity = (it: AttentionItem, inlineOk: boolean): string => (it.kind === 'pair'
       ? JSON.stringify([it.key, peerText(it.card.name), read.has(it.key)])
       : JSON.stringify([it.key, it.kind === 'approval' ? [it.approval.action, it.approval.detail, statusOf(it.approval.id)] : '', { ...model(it, inlineOk), when: !!model(it, inlineOk).when }]));
-    return JSON.stringify([all, stale, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
+    // Review opening or closing over Home starts the dwell again: a second click on its Close never lands on an Allow in a row under it.
+    return JSON.stringify([all, stale, reviewing ?? null, shown.map((r) => (r.kind === 'one' ? identity(r.item, true)
       : [r.key, r.items.length, r.agentKind, r.machine, askOf(r.items[0] as AttentionItem), each.has(r.key) ? r.items.map((it) => identity(it, false)) : null]))]);
   }, stale);
   const { canAnswer } = guard;
@@ -197,7 +212,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
         <AnswerButtons approval={it.approval} size="sm" off={off} denyLabel={t('fleet-deny-for', { name })} allowLabel={t('fleet-allow-for', { name })}
           onDeny={() => answer(it.approval, false)} onAllow={() => answer(it.approval, true)} />
         {sentTo(it.approval.id) && agentId && <Button size="sm" aria-label={t('fleet-review-for', { name })} onClick={() => onOpen(agentId)}>{t('attention-review')}</Button>}
-      </> : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
+      </> : action === 'review' && it.kind === 'approval' ? <Button size="sm" variant="primary" aria-haspopup="dialog" aria-label={t('fleet-review-for', { name })} onClick={() => setReviewing(it.approval.id)}>{t('fleet-review')}</Button>
+        : action === 'agent' && agentId ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agentId)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
         : action === 'panel' && onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null,
       <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />,
       <>
@@ -224,6 +240,11 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
         </ul>
       )}
       {rows.length > ATTENTION_SHOWN && <Button className="fleet-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>{all ? t('fleet-attention-less') : t('fleet-attention-more', { count: rows.length - ATTENTION_SHOWN })}</Button>}
+      {/* Its own dwell and guards (a start's `useAnswerGuard`, a switch's `useSkipAnswer`), in this list's holds (the window's), with the
+          raw answer: the dialog's guard holds the request, so this list's guard must not hold it first. */}
+      {reviewed && <ShareHolds holds={guard.holds}>
+        <ReviewDialog approval={reviewed.approval} agent={reviewed.agent} stale={!!stale} onResolve={onResolve ? (ok, choice) => onResolve(reviewed.approval, ok, choice) : undefined} onClose={() => setReviewing(undefined)} />
+      </ShareHolds>}
     </section>
   );
 }

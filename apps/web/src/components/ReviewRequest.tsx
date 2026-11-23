@@ -19,8 +19,11 @@ import { requestShown, ShareHolds, useAnswerGuard, type AnswerGuard, type Answer
 // - a start's Deny goes through the surface's guard (T44: the dwell and one answer per request, `useAnswerGuard`);
 // - a switch's Deny keeps the switch's own rules (no dwell; off while busy, held or answered: `useSkipAnswer`, main-window.md).
 // Review's dialog has guards of its own, started when it opens, so a second click on Review never lands on Allow: a start's answers wait
-// out a fresh dwell (its own `useAnswerGuard`), a switch's Allow its own dwell and "Read it first". Every answer, on the card or in the
+// out a fresh dwell (its own `useAnswerGuard`), a switch's Deny and Allow its own dwell (`denyWaits`, #1070) and "Read it first": in a
+// freshly opened Review, no answer goes before its open dwell, for a start or a switch alike. Every answer, on the card or in the
 // dialog, holds the request in the same holds as the surface's guard (the window's: an answer anywhere holds it everywhere).
+// #1070: Home's row and the attention dialog open this same dialog (`ReviewDialog`) straight away, so a start or a switch takes one Review
+// wherever it is seen; they pass it the raw answer (never their own guard's, which would hold the request before the dialog's guard sends).
 export type ReviewResolve = (approved: boolean, choice?: StartChoice) => AnswerResult;
 
 export function ReviewableRequest(props: {
@@ -80,8 +83,9 @@ function SkipDeny({ approval, busy, onResolve }: { approval: ApprovalModel; busy
 
 // The whole request, in the full density, over the window. Nothing is focused for the person when it opens (the dialog itself is), and
 // Escape, a click outside and Close only close it: never an answer. What it shows is the request itself, so a change of it starts the
-// dwell again; a request that leaves the list takes its card, and this dialog, with it.
-function ReviewDialog({ approval: x, agent, busy, stale, onResolve, onClose }: {
+// dwell again; a request that leaves the list takes its card, and this dialog, with it. Opened by a card, Home's row or the attention
+// dialog (#1070): each draws it only while the request is listed, under its own holds (`ShareHolds`), and passes the raw answer.
+export function ReviewDialog({ approval: x, agent, busy, stale, onResolve, onClose }: {
   approval: ApprovalModel;
   agent?: RequestAgent;
   busy?: boolean;
@@ -103,7 +107,7 @@ function ReviewDialog({ approval: x, agent, busy, stale, onResolve, onClose }: {
           className="attention-card review-card fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-m shadow-pop outline-none">
           {x.start
             ? <ReviewStart approval={x} agent={agent} busy={busy} stale={stale} onResolve={onResolve} titleWrap={titleWrap} lead={close} />
-            : <SkipApproval key={`${x.id}:${x.detail}`} approval={x} density="full" titleWrap={titleWrap} lead={close} busy={busy || stale} onResolve={onResolve ? (ok) => onResolve(ok) : undefined} />}
+            : <SkipApproval key={`${x.id}:${x.detail}`} approval={x} density="full" titleWrap={titleWrap} lead={close} denyWaits busy={busy || stale} onResolve={onResolve ? (ok) => onResolve(ok) : undefined} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

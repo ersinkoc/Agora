@@ -103,7 +103,7 @@ describe('a long start request is a summary with Review', () => {
     // The grant choices are in Review, and what is chosen there is what is sent.
     act(() => root.render(<ApprovalCard approval={demoStartApproval as ApprovalModel} onResolve={on} />));
     press(card(), 'Review');
-    act(() => (dialog()!.querySelectorAll('input[type=radio]')[1] as HTMLInputElement).click());
+    act(() => (dialog()!.querySelectorAll('[role=radiogroup] [role=radio]')[1] as HTMLButtonElement).click());
     dwell();
     press(dialog()!, 'Allow');
     expect(on).toHaveBeenCalledWith(true, { grant: 3, nested: false });

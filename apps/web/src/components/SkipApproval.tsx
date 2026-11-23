@@ -21,18 +21,21 @@ import { useAnswerHolds } from './useAnswerGuard';
 // - After a click both answers are off for a few seconds: one click sends one decision.
 // - The window's holds (#1048, `useAnswerGuard`) are shared with every surface: while an answer to this request is on its way, or once it
 //   went, from this card or another, both answers here are off.
-// - Deny has no dwell; it is off only while busy, held or answered (main-window.md).
+// - Deny has no dwell; it is off only while busy, held or answered (main-window.md). Except in Review's dialog (`denyWaits`, #1070):
+//   there Deny waits out the same dwell as Allow from the moment the dialog opens, so a double click on Review (from a card, Home's row
+//   or the attention dialog) never lands on Deny either.
 // `busy` (a surface that cannot take an answer now: one on its way, the link down) turns both answers off.
-export function useSkipAnswer(approval: ApprovalModel, busy: boolean | undefined, onResolve: ((approved: boolean) => unknown) | undefined) {
+export function useSkipAnswer(approval: ApprovalModel, busy: boolean | undefined, onResolve: ((approved: boolean) => unknown) | undefined, denyWaits = false) {
   const capable = useSkipCapable(approval.node);
   const wait = `skip-wait-${useId()}`;
   const [ready, setReady] = useState(false);
+  const readyNow = useRef(false); // `ready` as the click handler sees it, even before React has drawn the change
   const [sent, setSent] = useState(false);
   const once = useRef(false); // set at once by the first click: state alone would let two clicks in one frame both go
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
-    setReady(false); setSent(false); once.current = false;
-    const h = setTimeout(() => setReady(true), ATTENTION_DWELL_MS);
+    setReady(false); setSent(false); once.current = false; readyNow.current = false;
+    const h = setTimeout(() => { readyNow.current = true; setReady(true); }, ATTENTION_DWELL_MS);
     return () => clearTimeout(h);
   }, [approval.id, approval.detail]);
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -41,6 +44,8 @@ export function useSkipAnswer(approval: ApprovalModel, busy: boolean | undefined
   const held = holds.status(approval.id) !== 'open';
   const answer = (ok: boolean) => {
     if (once.current || busy || !onResolve || holds.status(approval.id) !== 'open') return;
+    // The press itself is refused during the dwell, not only the button (Allow always; Deny where it waits too).
+    if (!readyNow.current && (ok || denyWaits)) return;
     once.current = true;
     setSent(true);
     clearTimeout(timer.current);
@@ -49,7 +54,7 @@ export function useSkipAnswer(approval: ApprovalModel, busy: boolean | undefined
   };
   const answerable = capable && !!onResolve;
   const off = sent || !!busy || held || !answerable;
-  return { capable, answerable, ready, wait, answer, denyOff: off, allowOff: off || !ready };
+  return { capable, answerable, ready, wait, answer, denyOff: off || (denyWaits && !ready), allowOff: off || !ready };
 }
 
 /** The setting a switch changes, in the agent's words (a mode is the window's word "Mode"). */
@@ -89,7 +94,7 @@ export function SkipUnknown({ approval, density = 'card' }: { approval: Approval
 
 // The whole switch, in the request frame: Review's dialog (`full`) and the phone's card. Panes and the side panel show `SkipSummary`
 // with Deny and Review. `busy` turns both answers off.
-export function SkipApproval({ approval, busy, onResolve, density = 'card', titleWrap, lead }: {
+export function SkipApproval({ approval, busy, onResolve, density = 'card', titleWrap, lead, denyWaits }: {
   approval: ApprovalModel;
   busy?: boolean;
   /** What it returns says how the answer went (`AnswerResult`): `false`, a promise of it or one that rejects is a failed answer. */
@@ -98,8 +103,10 @@ export function SkipApproval({ approval, busy, onResolve, density = 'card', titl
   titleWrap?: (title: ReactElement) => ReactNode;
   // Before the answers (Review's Close).
   lead?: ReactNode;
+  /** Review's dialog (#1070): Deny waits out the open dwell too. */
+  denyWaits?: boolean;
 }) {
-  const g = useSkipAnswer(approval, busy, onResolve);
+  const g = useSkipAnswer(approval, busy, onResolve, denyWaits);
   const skip = approval.skip;
   if (!skip) return <SkipUnknown approval={approval} density={density} />;
   const facts = [
