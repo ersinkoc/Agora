@@ -67,14 +67,25 @@
   .ide-iconbtn[aria-pressed='true'] { @apply bg-surface-2 text-ink; }
   .ide-iconbtn[aria-current='page'] { @apply bg-surface-2 text-accent; box-shadow: inset 0 -2px 0 var(--accent); }
   .ide-row { @apply flex w-full min-w-0 items-center gap-2 rounded-xs px-2 py-1 text-start transition-colors duration-150 hover:bg-surface-2; }
-  .ide-row[aria-current='true'] { @apply bg-surface-2; box-shadow: inset 2px 0 0 var(--accent); }
-  .ide-tab { @apply flex h-9 min-w-[7rem] max-w-56 shrink items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  /* The row in front (the Agents list, the Files tree, a section list): an accent tint and a bolder label, never a bar on its edge (ADR-0102,
+     redesign PR 7). */
+  .ide-row[aria-current='true'] { @apply font-semibold text-ink; background: var(--tint-accent); }
+  .ide-tab { @apply flex h-9 min-w-[7rem] max-w-[13.75rem] shrink items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
   .tab-strip .ide-tab[data-cut] { visibility: hidden; }
-  /* The tab in front keeps a hard floor, in rem so it holds at any zoom: icon, about five characters and an ellipsis, and the close button.
-     The icon, the badge and the button never shrink; the title is what gives way and it always ends in an ellipsis. The strip scrolls instead. */
+  /* A tab's floor, in rem so it holds at any zoom: an agent's tab keeps its avatar (who it is, always), about eight characters of its name
+     and an ellipsis, its state and the close button (more with the bolt); the tab in front a little more. The name gives way from the front,
+     so the colour word that tells two agents of one kind apart stays ("cl… · teal", Workspace.tsx `PaneName`). The avatar, the marks and the button never shrink; the
+     title is what gives way and it always ends in an ellipsis. The strip scrolls instead, and its "more" menu lists what is cut off. */
+  .ide-tab:has(> .kit-avatar) { min-width: 10rem; }
+  .ide-tab:has(> .kit-avatar):has(> [data-no-ask]) { min-width: 11.5rem; }
   .ide-tab[aria-selected='true'] { min-width: 8.5rem; }
+  .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: 11rem; }
+  /* The tab in front never shrinks for the others (they scroll away and the "more" menu lists them): its whole name shows, up to the tab's
+     largest width or the strip's own, whichever is less. */
+  .tab-strip .ide-tab[aria-selected='true'] { flex-shrink: 0; min-width: min(8.5rem, 100%); max-width: min(13.75rem, 100%); }
+  .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: min(11rem, 100%); }
   .ide-tab > :not(.truncate) { flex: none; }
-  .ide-tab > .truncate { min-width: 5ch; }
+  .ide-tab > .truncate { min-width: 6ch; }
   .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
   .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
   .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted; }
@@ -88,7 +99,11 @@
   @media (max-width: 1023.98px) { .inspector__panel { box-shadow: var(--shadow); } }
   .rail { @apply flex w-11 flex-none flex-col items-center gap-1 border-s border-line bg-surface-1 py-2; }
   .rail__btn { @apply relative inline-grid size-9 place-items-center rounded-s text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
-  .rail__btn[aria-selected='true'] { @apply bg-surface-2 text-ink; box-shadow: inset 2px 0 0 var(--accent); }
+  /* A row of the file manager (its folder tree and its list): the chosen one is an accent tint; the one with keyboard focus has a ring on
+     all four sides, inside the row so the list's edge never cuts it (no bar on one side, redesign PR 7). */
+  .fm-row[aria-selected='true'] { background: var(--tint-accent); }
+  .fm-row:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .rail__btn[aria-selected='true'] { @apply text-accent; background: var(--tint-accent); }
   .rail__badge { @apply absolute -end-0.5 -top-0.5 min-w-4 rounded-full bg-surface-2 px-1 text-center text-xs leading-4 font-semibold text-ink; border: 1px solid var(--border); }
   .rail__badge--alert { @apply border-transparent bg-needs-you text-on-accent; }
   /* The name and shortcut of a rail icon: beside it, towards the panel, on hover and keyboard focus. */
@@ -415,6 +430,25 @@
 .hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* Redesign PR 7: narrow panes. Outside the layers on purpose, so a utility on the same element (`flex`, `truncate`) cannot undo them. */
+/* A pane's bar is measured by its own width (a pane can be far narrower than the window): split and maximize fold into its ⋯ menu first,
+   then a tab or the pane's title keeps only the avatar and the state, with the name in its tooltip and still its accessible name. The
+   thresholds are where at least 48 px of the name (about six characters) still shows with the bolt beside it; below them a sliver of
+   letters would say less than the avatar does (scripts/e2e-explorer-no-bars.mjs sweeps the widths across them). */
+.pane-bar { container: pane-bar / inline-size; }
+.tab-strip { container: tab-strip / inline-size; }
+@container pane-bar (max-width: 26rem) { .pane-bar [data-pane-tool='split'] { display: none; } }
+@container pane-bar (max-width: 18rem) { .pane-bar [data-pane-tool='maximize'] { display: none; } }
+@container pane-bar (max-width: 13rem) { .pane-bar [data-pane-name] { @apply sr-only; } }
+/* An agent's pane is measured as a whole (not its header row: a size container there would hold the header's own menus under the
+   terminal): below 24rem the header drops the machine and the branch, which stay in its tooltip. */
+.agent-body { container: agent-body / inline-size; }
+@container agent-body (max-width: 24rem) { .agent-body [data-crumb] { display: none; } }
+@container tab-strip (max-width: 11rem) {
+  .tab-strip .ide-tab, .tab-strip .ide-tab:has(> .kit-avatar), .tab-strip .ide-tab[aria-selected='true'], .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: auto; }
+  .ide-tab [data-pane-name] { @apply sr-only; }
+}
 
 /* Derived roles for the widget kit (ADR-0102; visual-language.md §2 and §3). Like the syntax colours they are mixed from the theme's own
    colours, so a user's theme (ADR-0068) gets them with no keys of its own; theme files cannot set them. They are declared on every

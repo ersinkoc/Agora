@@ -308,17 +308,19 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
   const agentBody = (a: AgentTileModel) => (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="agent-body flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Redesign PR 7: in a narrow pane the machine and the branch leave this row (they stay in its tooltip) so the folder is read whole,
+          not three single letters, and the tools wrap inside the pane instead of running into the next one (app.css `.agent-body`). */}
       <div className="flex min-h-9 flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface-1 px-3 py-1">
-        <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}`}>
-          <Icon name="machine" className="size-3.5" /><span className="truncate">{a.machine}</span>
-          <Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" /><span className="truncate">{a.project || a.workspace}</span>
-          {a.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="truncate font-mono">{a.branch}</span></>}
+        <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}`}>
+          <span className="flex min-w-0 items-center gap-1.5" data-crumb="machine"><Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{a.machine}</span>
+          <Icon name="chevron" className="size-3 flex-none rtl:rotate-180" /></span><Icon name="folder" className="size-3.5 flex-none" /><span className="min-w-[4ch] truncate">{a.project || a.workspace}</span>
+          {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{a.branch}</span></span>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
           <NoAskBadge agent={a} />
           <AsksLessChip agent={a} />
         </div>
-        <div className="flex flex-none items-center gap-1">
+        <div className="flex max-w-full flex-wrap items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff
             ? <button type="button" className="ide-chip hover:text-ink" onClick={() => openTool('changes', a.id)} title={t('pane-open-changes')}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
             : <span className="ide-chip">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}

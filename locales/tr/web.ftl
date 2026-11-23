@@ -235,6 +235,8 @@ machines-empty = Henüz bağlı makine yok.
 machine-online = Çevrimiçi
 machine-offline = Çevrimdışı
 machine-last-seen = son görülme: { $when }
+# The Agents list: an offline machine's row ends with how long it has been away ("offline · 2 hr").
+explorer-offline-for = çevrimdışı · { $when }
 machine-agents =
     { $count ->
         [one] { $count } ajan çalışıyor
@@ -726,6 +728,7 @@ terminal-copy-offer-copy = Kopyala
 terminal-copy-offer-ignore = Yoksay
 closed-section = Kapananlar
 closed-clear = Kapananları temizle
+closed-clear-short = Temizle
 closed-dismiss = Bu listeden kaldır
 closed-forget = Herkes için kaldır
 closed-ok = Tamamlandı
@@ -764,6 +767,7 @@ trust-show-path = Yolun tamamını göster
 trust-copy = Kopyala
 trust-copied = Kopyalandı
 interrupted-section = Makine kapanınca durdu
+interrupted-section-short = Durdu
 interrupted-hint = Bunlar makine durduğunda çalışıyordu.
 interrupted-note = Makinesi durduğunda çalışıyordu. Devam Et, konuşmasını aynı klasörde sürdürür.
 interrupted-note-new = Makinesi durduğunda çalışıyordu. Konuşması sürdürülemiyor; Yeniden Başlat aynı klasörde yeni bir konuşma açar.

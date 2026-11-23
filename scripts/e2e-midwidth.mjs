@@ -45,7 +45,7 @@ try {
       await page.getByRole('button', { name: 'Show the agent list' }).click();
       await page.waitForSelector(LIST);
       await page.waitForTimeout(300);
-      const group = page.locator(`${LIST} .fleet-tools__by`);
+      const group = page.locator(`${LIST} [role=radiogroup][aria-label="Group by"]`);
       // Every point of every Group by button (centre and corners, 2 px in) belongs to that button, nothing paints over it.
       const covered = await group.evaluate((el) => {
         const out = [];
@@ -78,7 +78,8 @@ try {
       const target = buttons.nth(n - 1);
       const box = await target.boundingBox();
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-      const pressed = await target.getAttribute('aria-pressed');
+      // Group by is the kit's segmented control: a radio group, so the chosen button is aria-checked.
+      const pressed = await target.getAttribute('aria-checked');
       check(pressed === 'true', `${at}: clicking the last Group by button chooses it`);
       await buttons.nth(0).click({ trial: true, timeout: 2000 }).then(() => true, () => false).then((ok) => check(ok, `${at}: the first Group by button can be clicked`));
       if (shots && width === 900 && height === 650) {

@@ -180,7 +180,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** S1, S3. Start a Shell on `rm-two`. Freeze `rm-two`'s node process for 60 s (`kill -STOP <pid>` on Linux and macOS; on
   Windows, Resource Monitor > CPU > right-click the node's `agora.exe` > Suspend process (unverified; the Windows run used
   `NtSuspendProcess`)), then let it go (`kill -CONT`; on Windows, Resume process (unverified)). Note the times.
-- **See:** `rm-two` shows Offline with "last seen" within about 15 to 25 s of the freeze (25 s after its last frame; the node pings
+- **See:** `rm-two` shows Offline with "last seen" (the Agents list: "offline · 20 sec") within about 15 to 25 s of the freeze (25 s after its last frame; the node pings
   every 10 s); Online again within a few seconds of the
   resume, by itself; its Shell agent is still there and answers.
 - **Evidence so far:** lan-test-findings R1 and R5 measured earlier builds (the first version failed on `754a7b1`, the hub restart
@@ -364,7 +364,7 @@ not built: nothing to check.
   with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then `agora down` and start again
   with `agora --resume auto` (given while Agora already runs, `--resume auto` changes nothing and says nothing; it applies to a
   start).
-- **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume starts the same agent in
+- **See:** the agents are under "Stopped when the machine shut down" (the Agents list: "Stopped") with Resume or Start again; Resume starts the same agent in
   the same folder (the conversation comes back only for an agent that can load a session: not the fake, which says
   `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once), except an agent the node brought back by itself less than 10
   minutes ago (ADR-0062: a second restart within 10 minutes offers it with Resume instead); one still running from before says "Stop it".

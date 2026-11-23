@@ -1,7 +1,8 @@
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { endedWithError, type AgentTileModel } from '../model';
+import { agentKind, endedWithError, type AgentTileModel } from '../model';
 import { Icon } from '../components/Icon';
+import { AgentAvatar, StatusMark } from '../components/kit';
 import { StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
 import { type Action, type Place, type Workspace as WorkspaceState, displayRoot, visiblePanes } from './engine';
@@ -94,14 +95,15 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     { label: t('layout-close-pane'), divider: true, run: () => dispatch({ type: 'close', pane: p.id }) },
   ];
 
+  // Split and maximize are also in the ⋯ menu, so a narrow pane folds them away first (app.css `.pane-bar`) and keeps its name.
   const tools = (p: Pane, f: Frame) => (
     <div className="flex flex-none items-center gap-0.5 px-1">
       {!narrow && !ws.zoom && <>
-        <button type="button" className="ide-iconbtn" onClick={() => dispatch({ type: 'split', pane: p.id, direction: 'row' })} aria-label={t('layout-split-right')} title={t('layout-split-right')}><Icon name="splitRight" /></button>
-        <button type="button" className="ide-iconbtn" onClick={() => dispatch({ type: 'split', pane: p.id, direction: 'column' })} aria-label={t('layout-split-down')} title={t('layout-split-down')}><Icon name="splitDown" /></button>
+        <button type="button" data-pane-tool="split" className="ide-iconbtn" onClick={() => dispatch({ type: 'split', pane: p.id, direction: 'row' })} aria-label={t('layout-split-right')} title={t('layout-split-right')}><Icon name="splitRight" /></button>
+        <button type="button" data-pane-tool="split" className="ide-iconbtn" onClick={() => dispatch({ type: 'split', pane: p.id, direction: 'column' })} aria-label={t('layout-split-down')} title={t('layout-split-down')}><Icon name="splitDown" /></button>
       </>}
       {ws.zoom ? <button type="button" className="ide-iconbtn" aria-pressed onClick={() => dispatch({ type: 'restore' })} aria-label={t('layout-restore')} title={t('layout-restore')}><Icon name="restore" /></button>
-        : !single && <button type="button" className="ide-iconbtn" onClick={() => dispatch({ type: 'maximize', pane: p.id })} aria-label={t('layout-maximize')} title={t('layout-maximize')}><Icon name="maximize" /></button>}
+        : !single && <button type="button" data-pane-tool="maximize" className="ide-iconbtn" onClick={() => dispatch({ type: 'maximize', pane: p.id })} aria-label={t('layout-maximize')} title={t('layout-maximize')}><Icon name="maximize" /></button>}
       <Menu label={t('layout-pane-menu', { name: label(p) })} items={() => paneItems(p, f)}><Icon name="more" /></Menu>
     </div>
   );
@@ -148,7 +150,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     const a = agentFor(front);
     const ring = tiled && focused ? 'shadow-[inset_0_2px_0_var(--accent)]' : a?.state === 'needs-you' ? 'shadow-[inset_0_2px_0_var(--state-needs-you)]' : '';
     return (
-      <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch border-b border-line bg-surface-1 ${ring}`}
+      <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`pane-bar flex items-stretch border-b border-line bg-surface-1 ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
           <TabStrip tabs={f.panes.map((p, i) => { const pa = agentFor(p); return { id: p.id, label: label(p), active: i === f.active, state: pa?.state, failed: pa ? endedWithError(pa) : undefined }; })} onPick={(id) => dispatch({ type: 'activate', pane: id })}
@@ -159,9 +161,10 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                 <div key={p.id} id={`tab-${p.id}`} role="tab" aria-selected={i === f.active} aria-controls={`pane-${p.id}`} aria-keyshortcuts="Delete" tabIndex={i === f.active ? 0 : -1}
                   className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={label(p)}
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
-                  {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
-                  <span className="min-w-0 truncate">{label(p)}</span>
-                  {pa && <NoAskBadge agent={pa} nested />}
+                  {pa ? <AgentAvatar accent={pa.accent} kind={agentKind(pa)} size="s" /> : <Icon name="layout" className="size-3.5 text-muted" />}
+                  <PaneName text={label(p)} />
+                  {pa && <NoAskBadge agent={pa} nested bare />}
+                  {pa && <StatusMark state={pa.state} failed={endedWithError(pa)} />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
                 </div>
               );
@@ -169,9 +172,10 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
           </TabStrip>
         ) : (
           <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
-            {a ? <StateMark state={a.state} failed={endedWithError(a)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
-            <span className="min-w-0 truncate font-medium" title={label(front)}>{label(front)}</span>
-            {a && <NoAskBadge agent={a} />}
+            {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
+            <PaneName text={label(front)} className="font-medium" />
+            {a && <NoAskBadge agent={a} bare />}
+            {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
             {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
             {followOf(front) && <span className="ide-chip flex-none">{t(`layout-follows-${followOf(front)}`)}</span>}
           </div>
@@ -338,5 +342,17 @@ function DividerLine({ d, host, dispatch }: { d: Divider; host: { current: HTMLD
       }}>
       <span aria-hidden className={`absolute bg-transparent group-hover:bg-accent/40 group-focus-visible:bg-accent group-active:bg-accent/60 ${row ? 'inset-y-0 start-[3px] w-0.5' : 'inset-x-0 top-[3px] h-0.5'}`} />
     </div>
+  );
+}
+
+// A pane's or tab's name gives way from the front, never its last part ("cl… · teal", "Changes · cl… · amber"): the avatar already shows
+// the kind's letter, and the colour word is what tells two agents of one kind apart. A name without " · " ends in an ellipsis as usual.
+function PaneName({ text, className = '' }: { text: string; className?: string }) {
+  const cut = text.lastIndexOf(' · ');
+  if (cut <= 0) return <span className={`min-w-0 truncate ${className}`} data-pane-name>{text}</span>;
+  return (
+    <span className={`truncate flex min-w-0 ${className}`} data-pane-name>
+      <span className="min-w-[1.5ch] truncate">{text.slice(0, cut)}</span><span className="flex-none whitespace-pre">{text.slice(cut)}</span>
+    </span>
   );
 }
