@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-- A node now refuses any command other than a subscription on a terminal, chat or preview stream, as the protocol says, instead of relying on the hub to; a subscription there needs the same grant as on the commands stream.
+- A node now refuses any command other than a subscription on a terminal, chat or preview stream, as the protocol says, instead of relying on the hub to; a subscription there needs the same grant as on the commands stream, and a grant for one agent now covers watching its terminal or following its conversation (the window asks for that agent only, not the whole machine).
 - Security, Linux: a node whose data folder (`--data`) or agent types folder (`--manifests`) lies inside a folder confined agents may read or write (`/tmp`, `/var`, `/opt`, `/etc`, `/run`, or one named in the policy) no longer starts confined agents, which could read its stored secrets, its session ledger and its chat transcripts there; the start is refused (`agent.sandbox_unavailable`, reason `protected_path_reachable`) and `agora doctor` names the folder. Before, only a reachable control token was refused. Keep the node's folder under your home (`~/.agora`, the default). macOS keeps these folders closed itself; macOS and Windows are unchanged (#1114).
 - `agora agent list` keeps listing the agents that ended (stopped, with their last state and folder) after the node restarts, for as long as the node keeps them (14 days), whatever folder they ran in; before, a restarted node said it had no agents although it still kept them (#1120).
 

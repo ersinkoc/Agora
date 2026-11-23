@@ -126,6 +126,16 @@ fn outcome(r: &CommandResponse) -> String {
 struct Seen {
     answers: HashMap<String, String>,
     streams: HashMap<u32, Vec<u8>>,
+    /// How long the node's uplink took to stop once the hub was done.
+    stopped_in: Duration,
+}
+
+/// One thing the fake hub does: send a request on a stream and wait for its answer, or close a stream (kind 255).
+// Test-only, a few per test: the size of a request is no concern here.
+#[allow(clippy::large_enum_variant)]
+enum Step {
+    Ask(u32, CommandRequest),
+    Close(u32),
 }
 
 /// Plays a hub: takes the node's connection, sends each `(stream, request)` once the previous one was answered, then keeps reading
@@ -136,6 +146,11 @@ fn hub(
     script: Vec<(u32, CommandRequest)>,
     done: impl Fn(&Seen) -> bool,
 ) -> Seen {
+    let steps = script.into_iter().map(|(s, r)| Step::Ask(s, r)).collect();
+    hub_steps(n, socket, steps, done)
+}
+
+fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) -> bool) -> Seen {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -144,7 +159,7 @@ fn hub(
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let port = l.local_addr().unwrap().port();
-    let _uplink: UplinkHandle = spawn(
+    let uplink: UplinkHandle = spawn(
         Arc::clone(&n.events),
         HubLink {
             mesh_out: None,
@@ -161,7 +176,7 @@ fn hub(
         },
     )
     .unwrap();
-    rt.block_on(async move {
+    let mut seen = rt.block_on(async move {
         let (s, _) = l.accept().await.unwrap();
         let mut c = agora_protocol::ws::accept(s).await.unwrap();
         let hello = c.recv().await.unwrap().unwrap();
@@ -190,6 +205,7 @@ fn hub(
         let mut seen = Seen {
             answers: HashMap::new(),
             streams: HashMap::new(),
+            stopped_in: Duration::ZERO,
         };
         let mut script = script.into_iter();
         let mut waiting = 0;
@@ -199,9 +215,15 @@ fn hub(
         loop {
             if waiting == 0 {
                 match script.next() {
-                    Some((stream, r)) => {
+                    Some(Step::Ask(stream, r)) => {
                         c.send(&frame(stream, 0, r.encode_to_vec())).await.unwrap();
                         waiting = 1;
+                    }
+                    Some(Step::Close(stream)) => {
+                        c.send(&frame(stream, 255, Vec::new())).await.unwrap();
+                        // Kind 255 has no answer; a moment for the node to let the stream go before the next step.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        continue;
                     }
                     None if done(&seen) => {
                         settled.get_or_insert_with(|| {
@@ -232,7 +254,11 @@ fn hub(
             }
         }
         seen
-    })
+    });
+    let at = std::time::Instant::now();
+    drop(uplink);
+    seen.stopped_in = at.elapsed();
+    seen
 }
 
 fn local_agents(socket: &Path) -> Vec<String> {
@@ -309,6 +335,26 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
     let script = vec![
         // On stream 1 the policy asks for a grant.
         (STREAM_COMMANDS, req("cmd", start())),
+        // A command that opens a stream needs one of its own.
+        (
+            STREAM_COMMANDS,
+            req(
+                "cmd-term",
+                Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+                    terminal_id: shell.terminal_id.clone(),
+                    ..Default::default()
+                }),
+            ),
+        ),
+        (
+            STREAM_COMMANDS,
+            req(
+                "cmd-preview",
+                Cmd::PreviewConnect(v1::PreviewConnect {
+                    forward_id: "f".into(),
+                }),
+            ),
+        ),
         (3, req("dyn-start", start())),
         (
             5,
@@ -385,6 +431,8 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
     let a = |id: &str| seen.answers.get(id).cloned().unwrap_or_default();
     assert_eq!(a("cmd"), "approval.grant_required", "{:?}", seen.answers);
     for id in [
+        "cmd-term",
+        "cmd-preview",
         "dyn-start",
         "dyn-launch",
         "dyn-stop",
@@ -520,8 +568,230 @@ fn the_control_socket_refuses_a_misplaced_command() {
         )),
         "ok"
     );
+    assert_eq!(
+        code(c.call(Cmd::PreviewConnect(v1::PreviewConnect {
+            forward_id: "f".into(),
+        }))),
+        "protocol.invalid_message"
+    );
+    // A request with no command on a dynamic stream is refused for the stream, before anything looks at the command.
+    let empty = CommandRequest {
+        request_id: "empty".into(),
+        ..Default::default()
+    };
+    let r = c.request_on(6, &empty, Duration::from_secs(10)).unwrap();
+    assert_eq!(outcome(&r), "protocol.invalid_message/stream_id");
+    // `ControlAuth` only proves the connection, so a local client may send it on any stream (an empty token when the node asks for
+    // none).
+    let token =
+        agora_node::control_token::read_token(&agora_node::control_token::token_path(&socket))
+            .unwrap_or_default();
+    assert_eq!(
+        code(c.call_on(7, Cmd::ControlAuth(v1::ControlAuth { token }))),
+        "ok"
+    );
     std::thread::sleep(Duration::from_millis(500));
     assert!(!e.marker.exists(), "the stub ran");
     assert_eq!(local_agents(&socket), vec![shell.agent_id.clone()]);
     stop(&socket, &shell.agent_id);
+}
+
+/// A device the node trusts, and grants it signs for this node (ADR-0041).
+struct Owner(ring::signature::EcdsaKeyPair);
+
+impl Owner {
+    fn new(e: &Env) -> Self {
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let hex: String = key
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(
+            e.dir
+                .join("data")
+                .join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+            format!("owner {hex}\n"),
+        )
+        .unwrap();
+        Owner(key)
+    }
+
+    fn grant(&self, id: &str, scope: &str, commands: &[&str]) -> CommandRequest {
+        let commands: Vec<String> = commands.iter().map(|c| (*c).to_string()).collect();
+        let expires = agora_node::grants::now_ms() + 3_600_000;
+        let message = agora_node::grants::signed_message("laptop", id, scope, &commands, expires);
+        let signature = self
+            .0
+            .sign(&ring::rand::SystemRandom::new(), &message)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        req(
+            id,
+            Cmd::GrantCreate(v1::GrantCreate {
+                grant_id: id.into(),
+                scope: scope.into(),
+                commands,
+                expires_at_ms: expires,
+                signer_device_id: "owner".into(),
+                signature,
+            }),
+        )
+    }
+}
+
+fn watch(id: &str, terminal_id: &str) -> CommandRequest {
+    req(
+        id,
+        Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+            terminal_id: terminal_id.into(),
+            format: "terminal.raw".into(),
+            history_lines: 0,
+        }),
+    )
+}
+
+fn follow(id: &str, agent_id: &str) -> CommandRequest {
+    req(
+        id,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: agent_id.into(),
+        }),
+    )
+}
+
+/// ADR-0041: watching names its agent, so a grant for that agent lets a window watch it (and no other), and a machine-wide grant
+/// still covers every agent.
+#[test]
+fn a_grant_for_one_agent_lets_a_window_watch_that_agent_only() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("scope", "terminal.*, chat.subscribe");
+    let owner = Owner::new(&e);
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let (a, b) = (start_shell(&socket), start_shell(&socket));
+    let script = vec![
+        (
+            STREAM_COMMANDS,
+            owner.grant(
+                "g-agent",
+                &format!("agent:{}", a.agent_id),
+                &["terminal.*", "chat.subscribe"],
+            ),
+        ),
+        (3, watch("term-a", &a.terminal_id)),
+        (5, watch("term-b", &b.terminal_id)),
+        (7, follow("chat-a", &a.agent_id)),
+        (9, follow("chat-b", &b.agent_id)),
+        (
+            STREAM_COMMANDS,
+            owner.grant("g-node", "node", &["terminal.subscribe"]),
+        ),
+        (11, watch("term-b-node", &b.terminal_id)),
+    ];
+    let seen = hub(&n, &socket, script, |s| {
+        [(3, 1), (7, 10), (11, 1)]
+            .iter()
+            .all(|(st, k)| s.streams.get(st).is_some_and(|ks| ks.contains(k)))
+    });
+    let got = |id: &str| seen.answers.get(id).cloned().unwrap_or_default();
+    for id in ["g-agent", "term-a", "chat-a", "g-node", "term-b-node"] {
+        assert_eq!(got(id), "ok", "{id}: {:?}", seen.answers);
+    }
+    for id in ["term-b", "chat-b"] {
+        assert_eq!(
+            got(id),
+            "approval.grant_required",
+            "{id}: {:?}",
+            seen.answers
+        );
+    }
+    assert!(
+        seen.streams.get(&3).is_some_and(|k| k.contains(&1)),
+        "{:?}",
+        seen.streams
+    );
+    assert!(
+        seen.streams.get(&7).is_some_and(|k| k.contains(&10)),
+        "{:?}",
+        seen.streams
+    );
+    assert!(
+        seen.streams.get(&11).is_some_and(|k| k.contains(&1)),
+        "{:?}",
+        seen.streams
+    );
+    assert!(
+        !seen.streams.contains_key(&5) && !seen.streams.contains_key(&9),
+        "{:?}",
+        seen.streams
+    );
+    stop(&socket, &a.agent_id);
+    stop(&socket, &b.agent_id);
+}
+
+/// A stream the node has open takes no second subscription (it would take the first one's place and leave it running); once closed,
+/// or refused, the stream may be used again.
+#[test]
+fn a_second_subscription_on_an_open_stream_is_refused() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("again", "chat.subscribe");
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let a = start_shell(&socket);
+    let steps = vec![
+        Step::Ask(3, watch("first", &a.terminal_id)),
+        Step::Ask(3, watch("again", &a.terminal_id)),
+        Step::Ask(3, follow("again-chat", &a.agent_id)),
+        Step::Close(3),
+        Step::Ask(3, watch("reopened", &a.terminal_id)),
+        // Refused for want of a grant: the stream is not kept.
+        Step::Ask(5, follow("refused", &a.agent_id)),
+        Step::Ask(5, watch("after-refusal", &a.terminal_id)),
+    ];
+    let seen = hub_steps(&n, &socket, steps, |s| {
+        s.streams
+            .get(&3)
+            .is_some_and(|k| k.iter().filter(|&&x| x == 1).count() >= 2)
+            && s.streams.get(&5).is_some_and(|k| k.contains(&1))
+    });
+    let got = |id: &str| seen.answers.get(id).cloned().unwrap_or_default();
+    assert_eq!(got("first"), "ok", "{:?}", seen.answers);
+    assert_eq!(
+        got("again"),
+        "protocol.invalid_message/stream_id",
+        "{:?}",
+        seen.answers
+    );
+    assert_eq!(
+        got("again-chat"),
+        "protocol.invalid_message/stream_id",
+        "{:?}",
+        seen.answers
+    );
+    assert_eq!(got("reopened"), "ok", "{:?}", seen.answers);
+    assert_eq!(
+        got("refused"),
+        "approval.grant_required",
+        "{:?}",
+        seen.answers
+    );
+    assert_eq!(got("after-refusal"), "ok", "{:?}", seen.answers);
+    // Every relay stopped with the connection: none was left behind to hold it up.
+    assert!(
+        seen.stopped_in < Duration::from_secs(5),
+        "{:?}",
+        seen.stopped_in
+    );
+    stop(&socket, &a.agent_id);
 }

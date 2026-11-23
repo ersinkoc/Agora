@@ -840,23 +840,22 @@ where
                     };
                     // Only a command that opens a stream may come on one (protocol.md, terminal relay). Any other is refused here,
                     // whatever the hub does: carried to the control socket it would skip every check `run_local_on` makes on stream 1.
-                    if !req
-                        .command
-                        .as_ref()
-                        .is_some_and(crate::control::opens_stream)
+                    // So is a second one on a stream that is still open: it would take the first one's place and leave it running.
+                    let open = relays
+                        .0
+                        .get(&stream)
+                        .is_some_and(|a| a.load(Ordering::Acquire));
+                    if open
+                        || !req
+                            .command
+                            .as_ref()
+                            .is_some_and(crate::control::opens_stream)
                     {
-                        let _ = answers_tx.send(CommandResponse {
-                            request_id: req.request_id,
-                            result: Some(command_response::Result::Err(
-                                agora_protocol::Error::new(
-                                    agora_protocol::ErrorCode::ProtocolInvalidMessage,
-                                )
-                                .with("field", "stream_id")
-                                .to_info(),
-                            )),
-                        });
+                        let _ = answers_tx.send(misplaced(req.request_id));
                         continue;
                     }
+                    // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
+                    // a refused subscription included (the grant is judged on the relay's own thread, off this loop).
                     let alive = Arc::new(AtomicBool::new(true));
                     relays.0.insert(stream, Arc::clone(&alive));
                     let (socket, answers, out, grants) = (
@@ -875,6 +874,7 @@ where
                             &answers,
                             &out,
                         );
+                        alive.store(false, Ordering::Release);
                     });
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
@@ -995,6 +995,18 @@ fn relay_terminal(
     // The local stream ended without an exit frame (the node closed it): tell the hub so the client can resubscribe.
     if alive.load(Ordering::Acquire) && accepted {
         let _ = out.blocking_send(frame(stream, STREAM_CLOSE, Vec::new()));
+    }
+}
+
+/// The answer to a command on a stream it may not use (protocol.md, terminal relay): `protocol.invalid_message {field: stream_id}`.
+fn misplaced(request_id: String) -> CommandResponse {
+    CommandResponse {
+        request_id,
+        result: Some(command_response::Result::Err(
+            agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                .with("field", "stream_id")
+                .to_info(),
+        )),
     }
 }
 
@@ -1168,16 +1180,13 @@ fn run_local_on(
             None => {}
         }
     }
-    if matches!(
-        req.command,
-        Some(
-            command_request::Command::TerminalSubscribe(_)
-                | command_request::Command::ChatSubscribe(_)
-        )
-    ) {
-        return fail(
-            Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),
-        );
+    // A command that opens a stream needs a stream of its own (protocol.md, terminal relay).
+    if req
+        .command
+        .as_ref()
+        .is_some_and(crate::control::opens_stream)
+    {
+        return misplaced(req.request_id.clone());
     }
     // ADR-0082: the control token is for the local socket only; the hub neither knows nor may probe it, so the command is not
     // carried to the socket (where a wrong token would end the node's own kept connection).

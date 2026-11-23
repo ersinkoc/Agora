@@ -128,7 +128,8 @@ empty means none). A listed command with no live grant is refused with `approval
 expires_at_ms`; `scope` is `node`, `agent:<id>` or `project:<id>`; it lasts at most 8 hours; the node keeps grants in memory only (a
 restart ends them), refuses a grant id it has seen, a wrong signer, another node's grant and an expired one. `GrantList` and `GrantRevoke`
 need no signature. Commands that name a worktree or open a new terminal (`files.write`, `worktree.*`, `terminal.open`) name no agent, so only
-a `node` grant covers them. Recommended for a machine that is not a throwaway: `signed_commands = agent.start, terminal.input, files.write` (reading stays free). Typos in the line cannot widen anything: an unknown name simply matches no command. Tests: `crates/agora-node/src/grants.rs` and `crates/agora/tests/hub_dial.rs`.
+a `node` grant covers them. Watching a terminal or following a conversation (`terminal.subscribe`, `chat.subscribe`) names its agent, so a grant
+for that agent or its project covers it, as it does typing; the node judges it when the stream opens, on the hub's dynamic stream as on stream 1. Recommended for a machine that is not a throwaway: `signed_commands = agent.start, terminal.input, files.write` (reading stays free). Typos in the line cannot widen anything: an unknown name simply matches no command. Tests: `crates/agora-node/src/grants.rs` and `crates/agora/tests/hub_dial.rs`.
 
 ### Launch options that skip permissions (ADR-0059, T15)
 Policy line in `<data>/policy`: `skip_permissions = forbid | allow | confined_only` (absent: `allow`, the maintainer's default; any

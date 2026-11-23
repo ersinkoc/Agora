@@ -2052,12 +2052,12 @@ fn handle_request(
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
-    // A dynamic stream carries only a command that opens one, and a subscription needs a stream of its own (protocol.md, terminal
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
     // relay). Before the idempotency claim, so a refused request stores nothing.
     let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
     let misplaced = match &req.command {
-        Some(Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_)) => !dynamic,
-        Some(c) => dynamic && !opens_stream(c),
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
         None => dynamic,
     };
     if misplaced {

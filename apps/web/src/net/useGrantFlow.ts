@@ -47,7 +47,9 @@ export function useGrantFlow(deps: GrantDeps) {
       setQuestion(undefined);
       // A task given to an agent: the answer goes to its dialog (sent, queued or the refusal).
       if (isGive(g.body)) await resendGive(command, g.node, g.body);
-      else if (!('terminalResize' in g.body)) await command(g.node, g.body).catch(() => {});
+      // A resize is sent again with the next one, and a refused subscription is tried again on its own stream by the window: neither is
+      // resent here (a subscription on the commands stream is refused).
+      else if (!('terminalResize' in g.body) && !('terminalSubscribe' in g.body) && !('chatSubscribe' in g.body)) await command(g.node, g.body).catch(() => {});
     } catch {
       busy.current = false;
       if (live.current === g.id) setQuestion({ ...g, busy: false, failed: true });
