@@ -122,7 +122,9 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
   reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
   pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8), and
-  My machines and its forget dialog have (PR 9), their animated links gone. Until the rest follow, existing overlays (except the command
+  My machines and its forget dialog have (PR 9), their animated links gone. The chat view, the board and the Usage panel are on the kit
+  (PR 12; `docs/ux/screens/polish-redesign-*`): one status pill, the agent avatar in each turn, the acts-freely sign as a red-tinted tag
+  beside Mode, board columns with a mark and hue, Usage stat tiles. Until the rest follow, existing overlays (except the command
   palette) use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label. Amber
   means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except

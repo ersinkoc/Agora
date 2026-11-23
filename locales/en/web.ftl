@@ -1238,7 +1238,17 @@ attention-notify-names-warn = These names come from the agents and machines them
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Usage
 ide-tab-usage = Usage
-usage-empty = Nothing to show yet. Usage appears once an agent has worked.
+usage-empty = Usage appears once an agent has worked.
+usage-empty-title = Nothing to show yet
+# The Usage panel's three totals (stat tiles: a big number over this label).
+usage-stat-tokens = { $count ->
+    [one] Token used
+   *[other] Tokens used
+}
+usage-stat-agents = { $count ->
+    [one] Agent
+   *[other] Agents
+}
 usage-agents = { $count ->
     [one] { $count } agent
    *[other] { $count } agents

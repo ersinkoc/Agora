@@ -1207,7 +1207,10 @@ attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildiri
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
-usage-empty = Henüz gösterilecek bir şey yok. Bir ajan çalışınca kullanım burada görünür.
+usage-empty = Bir ajan çalışınca kullanım burada görünür.
+usage-empty-title = Henüz gösterilecek bir şey yok
+usage-stat-tokens = Kullanılan token
+usage-stat-agents = Ajan
 usage-agents = { $count } ajan
 usage-by-machine = Makineye göre
 usage-by-project = Projeye göre

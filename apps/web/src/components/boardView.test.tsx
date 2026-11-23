@@ -49,6 +49,28 @@ describe('untrusted task text', () => {
     const html = renderToStaticMarkup(<BoardColumns board={board([])} />);
     expect(html).toContain('No tasks yet');
     expect(html).not.toMatch(/claim|lease|mesh/i);
+    // The kit's empty state (a tinted icon chip, a title and one line), and no empty columns under it.
+    expect(html).toMatch(/class="kit-empty kit-tone-accent" role="status"><span aria-hidden="true" class="kit-chip">/);
+    expect(html).toContain('Tasks that agents add for this project appear here.');
+    expect(html).not.toContain('data-column');
+  });
+});
+
+describe('the board look (redesign PR 12)', () => {
+  beforeEach(() => setLanguage('en'));
+  it('heads each column with its mark, hue and count, and draws the tasks as kit cards', () => {
+    const html = renderToStaticMarkup(<BoardColumns board={board([task('1', 'open'), task('2', 'claimed', { ownerState: 'working' }), task('3', 'done')])} />);
+    for (const [col, tone] of [['backlog', 'plain'], ['doing', 'working'], ['done', 'finished']]) {
+      expect(html).toMatch(new RegExp(`data-column="${col}"[^>]*><h3 id="board-col-${col}" class="[^"]*kit-tone-${tone}`));
+    }
+    expect(html).toMatch(/<span class="kit-tag">1<\/span><\/h3>/);
+    expect(html.match(/class="kit-card kit-card--dense/g)).toHaveLength(3);
+    expect(html).toContain('kit-pill kit-tone-working'); // the owner's state as the kit pill
+    expect(html).not.toMatch(/needs-you|tint-needs/); // nothing on the board is amber unless an agent needs you
+  });
+  it('says a column is empty in a quiet dashed frame', () => {
+    const html = renderToStaticMarkup(<BoardColumns board={board([task('1', 'open')])} />);
+    expect(html).toMatch(/border-dashed[^>]*>Nothing in progress\.</);
   });
 });
 beforeEach(() => setLanguage('en'));

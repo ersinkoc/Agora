@@ -18,7 +18,7 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'components/AttentionLayer.tsx': { uses: 1, why: 'the attention toast (the dialog is ApprovalRequest)' },
   'components/ApprovalRequest.tsx': { uses: 1, why: 'the one approval request component (redesign PR 4): every request waiting on the person, starts and switches included (PR 5)' },
   'components/ChatEntry.tsx': { uses: 5, why: 'a tool group whose agent waits on the person, and a pending permission in the chat' },
-  'components/SessionBar.tsx': { uses: 3, why: 'the Needs you session state, and the note to answer the request first' },
+  'components/SessionBar.tsx': { uses: 1, why: 'the note to answer the request first (the Needs you state is the kit status pill, redesign PR 12)' },
   'components/Console.tsx': { uses: 1, why: 'the status bar count of agents that need you' },
   'components/Inspector.tsx': { uses: 1, why: 'the Needs you list in the side panel' },
   'layout/TabStrip.tsx': { uses: 1, why: 'the dot on a tab whose agent needs you' },
