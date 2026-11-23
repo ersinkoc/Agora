@@ -32,22 +32,46 @@ fn main() -> ExitCode {
     }
 }
 
+fn next_value<'a>(it: &mut std::slice::Iter<'a, String>, flag: &str) -> Result<&'a str, ExitCode> {
+    it.next().map(String::as_str).ok_or_else(|| {
+        eprintln!("agora-bench: missing value for {flag}");
+        ExitCode::from(2)
+    })
+}
+
+fn parse_value<T: std::str::FromStr>(
+    it: &mut std::slice::Iter<'_, String>,
+    flag: &str,
+) -> Result<T, ExitCode> {
+    let raw = next_value(it, flag)?;
+    raw.parse().map_err(|_| {
+        eprintln!("agora-bench: invalid value for {flag}: {raw}");
+        ExitCode::from(2)
+    })
+}
+
 fn run(args: &[String]) -> ExitCode {
     let (mut out, mut secs, mut repeat, mut commit, mut names) =
         (None, 2u64, 1u32, "unknown".to_string(), Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--out" => out = it.next().cloned(),
-            "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(secs),
-            "--repeat" => {
-                repeat = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(repeat)
-                    .max(1)
-            }
-            "--commit" => commit = it.next().cloned().unwrap_or(commit),
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
+            "--secs" => match parse_value(&mut it, "--secs") {
+                Ok(v) => secs = v,
+                Err(code) => return code,
+            },
+            "--repeat" => match parse_value::<u32>(&mut it, "--repeat") {
+                Ok(v) => repeat = v.max(1),
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
             n => names.push(n.to_string()),
         }
     }
@@ -99,7 +123,10 @@ fn bestof(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--out" {
-            out = it.next().cloned();
+            match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            }
         } else {
             files.push(a.as_str());
         }
@@ -154,7 +181,15 @@ fn cmp(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--threshold" {
-            threshold = it.next().and_then(|s| s.parse().ok()).unwrap_or(threshold);
+            let v: f64 = match parse_value(&mut it, "--threshold") {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            if !v.is_finite() || v < 0.0 {
+                eprintln!("agora-bench: invalid value for --threshold: {v}");
+                return ExitCode::from(2);
+            }
+            threshold = v;
         } else {
             files.push(a.as_str());
         }
@@ -194,15 +229,18 @@ fn history(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--runs" => {
-                runs = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(runs)
-                    .max(1)
-            }
-            "--commit" => commit = it.next().cloned().unwrap_or(commit),
-            "--out" => out = it.next().cloned(),
+            "--runs" => match parse_value::<usize>(&mut it, "--runs") {
+                Ok(v) => runs = v.max(1),
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
             "--check" => check = true,
             _ => {
                 eprintln!(
@@ -275,14 +313,22 @@ fn footprint(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--terminals" => {
-                terminals = it.next().and_then(|s| s.parse().ok()).unwrap_or(terminals)
-            }
-            "--idle-secs" => {
-                idle_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(idle_secs)
-            }
-            "--commit" => commit = it.next().cloned().unwrap_or(commit),
-            "--out" => out = it.next().cloned(),
+            "--terminals" => match parse_value(&mut it, "--terminals") {
+                Ok(v) => terminals = v,
+                Err(code) => return code,
+            },
+            "--idle-secs" => match parse_value(&mut it, "--idle-secs") {
+                Ok(v) => idle_secs = v,
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
             "--check" => check = true,
             _ => {
                 eprintln!("usage: agora-bench footprint [--terminals N] [--idle-secs S] [--commit SHA] [--out FILE] [--check]");
@@ -329,5 +375,47 @@ fn footprint(args: &[String]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn compare_rejects_invalid_and_missing_threshold_values() {
+        let dir = std::env::temp_dir().join(format!("agora-bench-f31-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.json");
+        std::fs::write(&path, r#"{"commit":"abc","scenarios":[]}"#).unwrap();
+        let p = path.to_string_lossy().into_owned();
+
+        assert_eq!(
+            cmp(&[p.clone(), p.clone(), "--threshold".into(), "10".into()]),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            cmp(&[p.clone(), p.clone(), "--threshold".into(), "invalid".into()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            cmp(&[p.clone(), p.clone(), "--threshold".into(), "NaN".into()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            cmp(&[p.clone(), p.clone(), "--threshold".into()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(bestof(&[p, "--out".into()]), ExitCode::from(2));
+        // `history` (added on main after the audit) reads its flags the same way: a bad or missing value is refused before any run.
+        assert_eq!(
+            history(&["--runs".into(), "many".into()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(history(&["--out".into()]), ExitCode::from(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

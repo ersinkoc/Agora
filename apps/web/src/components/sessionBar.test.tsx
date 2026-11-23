@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
-import type { SessionModel } from '../model';
+import type { ConfigOptionModel, SessionModel } from '../model';
 import { SessionBar } from './SessionBar';
 import { isChange } from './sessionChoice';
 
@@ -55,7 +55,52 @@ describe('a mode that skips permission questions', () => {
     expect(html).not.toContain('Acts freely');
     expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={session} />)).not.toContain('data-no-ask');
   });
-  it('does not repeat the badge of an agent that was started that way', () => {
-    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} launchedFree />)).not.toContain('data-no-ask');
+  it('does not repeat the badge of an agent that was started that way: one sign, the started one', () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} launchedFree />);
+    expect(html.match(/data-no-ask=/g)).toHaveLength(1);
+    expect(html).toContain('data-no-ask="started"');
+  });
+});
+
+// Redesign PR 12: the sign is a red-tinted tag (still the bolt alone, no words) that stands right beside Mode, the control that causes it.
+describe('the acts-freely tag', () => {
+  const at = (html: string, needle: string) => { const i = html.indexOf(needle); expect(i, needle).toBeGreaterThanOrEqual(0); return i; };
+  const one = (html: string) => { expect(html.match(/data-no-ask=/g) ?? []).toHaveLength(1); expect(html).toContain('data-look="tag"'); expect(html).not.toContain('Acts freely'); };
+  const cfg = (current: string): ConfigOptionModel[] => [
+    { id: 'mode', name: 'Mode', description: '', category: 'mode', type: 'select', current, skipsPermissions: false, choices: [opt('build', 'Build'), opt('yolo', 'Bypass', true)] },
+    { id: 'model', name: 'Model', description: '', category: 'model', type: 'select', current: 'm1', skipsPermissions: false, choices: [opt('m1', 'Model Large')] },
+  ];
+  it('follows the Mode menu, before Model, when the agent was switched to a mode that skips', () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} />);
+    one(html);
+    expect(at(html, 'aria-label="Mode: ')).toBeLessThan(at(html, 'data-no-ask="session"'));
+    expect(at(html, 'data-no-ask="session"')).toBeLessThan(at(html, 'aria-label="Model: '));
+  });
+  it('follows the Mode menu for an agent that was started that way, also while its mode is a safe one', () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={session} launchedFree />);
+    one(html);
+    expect(at(html, 'aria-label="Mode: Build"')).toBeLessThan(at(html, 'data-no-ask="started"'));
+    expect(at(html, 'data-no-ask="started"')).toBeLessThan(at(html, 'aria-label="Model: '));
+  });
+  it("follows the agent's own Mode setting when that replaces the mode menu", () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, modes: [], models: [], config: cfg('yolo') }} setConfig={async () => true} />);
+    one(html);
+    expect(at(html, 'aria-label="Mode: ')).toBeLessThan(at(html, 'data-no-ask="session"'));
+    expect(at(html, 'data-no-ask="session"')).toBeLessThan(at(html, 'aria-label="Model: '));
+  });
+  it('leads the row when there is no Mode control at all', () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, modes: [], currentMode: '' }} launchedFree />);
+    one(html);
+    expect(html).not.toContain('aria-label="Mode: ');
+    expect(at(html, 'data-no-ask="started"')).toBeLessThan(at(html, 'aria-label="Model: '));
+  });
+});
+
+describe('the session state', () => {
+  it('is the kit status pill: tint, shape and word, never colour alone', () => {
+    const html = renderToStaticMarkup(<SessionBar part="status" agentKey="n/a" session={session} state="needs-you" tokens={215} />);
+    expect(html).toMatch(/data-state-pill="needs-you"[^>]*><span class="kit-pill kit-tone-needs"><svg class="state__mark"/);
+    expect(html).toContain('Needs you');
+    expect(html.match(/215 tokens used/g)).toHaveLength(1);
   });
 });

@@ -134,16 +134,17 @@ impl<'a> ScreenPassword<'a> {
         Self { store, iterations }
     }
 
-    pub(crate) fn stored(&self) -> Option<String> {
-        self.store
-            .setting(SETTING)
-            .ok()
-            .flatten()
-            .and_then(|v| String::from_utf8(v).ok())
+    pub(crate) fn stored(&self) -> Result<Option<String>, PasswordError> {
+        let Some(v) = self.store.setting(SETTING)? else {
+            return Ok(None);
+        };
+        String::from_utf8(v)
+            .map(Some)
+            .map_err(|e| PasswordError::Store(e.to_string()))
     }
 
     pub fn is_set(&self) -> bool {
-        self.stored().is_some()
+        !matches!(self.stored(), Ok(None))
     }
 
     /// Sets (or replaces) the password.
@@ -169,7 +170,7 @@ impl<'a> ScreenPassword<'a> {
 
     /// Does `candidate` match? `false` when no password is set.
     pub fn verify(&self, candidate: &str) -> bool {
-        self.stored().is_some_and(|s| verify(&s, candidate))
+        matches!(self.stored(), Ok(Some(s)) if verify(&s, candidate))
     }
 }
 
@@ -178,51 +179,89 @@ const VOUCHED: &str = "passkeys_vouched";
 /// Records that the passkey `id` was added where the screen password would not have been asked (the hub's own machine) or was
 /// given. Such passkeys outlive a password change; every other one does not ([`drop_unvouched_passkeys`]).
 pub fn vouch_passkey(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let mut ids = vouched(store);
-    if !ids.iter().any(|v| v == id) {
-        ids.push(id.to_string());
-    }
-    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    set_vouch_in(&tx, id, true)?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Forgets the vouch for `id` when no passkey has that id (its passkey went with its person): ids are chosen by the client, so a
 /// passkey added later under the same id without the password must not inherit it ([`drop_unvouched_passkeys`]).
 pub fn forget_stale_vouch(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let exists = store
-        .lock()?
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let exists = tx
         .query_row("SELECT 1 FROM passkeys WHERE id = ?1", [id], |_| Ok(()))
         .optional()?
         .is_some();
-    let mut ids = vouched(store);
-    if exists || !ids.iter().any(|v| v == id) {
-        return Ok(());
+    if !exists {
+        set_vouch_in(&tx, id, false)?;
     }
-    ids.retain(|v| v != id);
-    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    tx.commit()?;
     Ok(())
 }
 
-fn vouched(store: &SqliteStore) -> Vec<String> {
-    store
-        .setting(VOUCHED)
-        .ok()
-        .flatten()
-        .map(|v| {
-            String::from_utf8_lossy(&v)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+/// Within the caller's transaction: `id` vouched for (`true`) or not (`false`) in the list of vouched passkeys. An unreadable list
+/// is an error, never an empty one.
+pub(crate) fn set_vouch_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+    vouched: bool,
+) -> Result<(), PasswordError> {
+    let mut ids = vouched_in(conn)?;
+    let has = ids.iter().any(|v| v == id);
+    if vouched && !has {
+        ids.push(id.to_string());
+    } else if !vouched && has {
+        ids.retain(|v| v != id);
+    } else {
+        return Ok(());
+    }
+    write_vouched_in(conn, &ids)
+}
+
+fn vouched_in(conn: &rusqlite::Connection) -> Result<Vec<String>, PasswordError> {
+    let raw: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [VOUCHED],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(v) = raw else {
+        return Ok(Vec::new());
+    };
+    let text = String::from_utf8(v).map_err(|e| PasswordError::Store(e.to_string()))?;
+    Ok(text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn write_vouched_in(conn: &rusqlite::Connection, ids: &[String]) -> Result<(), PasswordError> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![VOUCHED, ids.join("\n").as_bytes()],
+    )?;
+    Ok(())
 }
 
 /// Removes every passkey that was added from another machine without the screen password (when none was set, or before this
 /// rule existed): setting, changing or clearing the password must not leave a way in that never knew it. Returns how many.
 pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordError> {
-    let keep = vouched(store);
-    let conn = store.lock()?;
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let dropped = drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(dropped)
+}
+
+/// [`drop_unvouched_passkeys`] within the caller's transaction.
+fn drop_unvouched_in(conn: &rusqlite::Connection) -> Result<usize, PasswordError> {
+    let keep = vouched_in(conn)?;
     let ids: Vec<String> = conn
         .prepare("SELECT id FROM passkeys")?
         .query_map([], |r| r.get(0))?
@@ -231,18 +270,64 @@ pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordErr
     for id in ids.iter().filter(|id| !keep.contains(id)) {
         dropped += conn.execute("DELETE FROM passkeys WHERE id = ?1", params![id])?;
     }
-    drop(conn);
-    let still: Vec<&String> = keep.iter().filter(|k| ids.contains(k)).collect();
-    store.set_setting(
-        VOUCHED,
-        still
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-            .as_bytes(),
-    )?;
+    let still: Vec<String> = keep.into_iter().filter(|k| ids.contains(k)).collect();
+    write_vouched_in(conn, &still)?;
     Ok(dropped)
+}
+
+/// A password change as one transaction (Codex review of #1027): the new hash is stored, every session but the one whose token
+/// hash is `keep_session` ends, and every unvouched passkey goes, or nothing changes. The hash is derived before, outside it.
+/// Returns how many sessions ended.
+pub(crate) fn commit_change(
+    store: &SqliteStore,
+    hashed: &str,
+    keep_session: &[u8],
+) -> Result<usize, PasswordError> {
+    commit(store, Some(hashed), Some(keep_session)).map(|revoked| revoked.unwrap_or(0))
+}
+
+/// `agora password set` (#1029): stores the already derived `hashed`, ends every session and drops every unvouched passkey in one
+/// write transaction, or changes nothing. Returns how many sessions ended.
+pub fn set_and_sign_out_all(store: &SqliteStore, hashed: &str) -> Result<usize, PasswordError> {
+    commit(store, Some(hashed), None).map(|revoked| revoked.unwrap_or(0))
+}
+
+/// `agora password clear` (#1029): removes the password, ends every session and drops every unvouched passkey in one write
+/// transaction, or changes nothing. `None` when no password was set: then nothing changes either.
+pub fn clear_and_sign_out_all(store: &SqliteStore) -> Result<Option<usize>, PasswordError> {
+    commit(store, None, None)
+}
+
+/// The password becomes `hashed` (or none), the sessions end (all, or all but `keep_session`) and the unvouched passkeys go, in one
+/// write transaction. `None`, with nothing changed, when clearing and no password was set.
+fn commit(
+    store: &SqliteStore,
+    hashed: Option<&str>,
+    keep_session: Option<&[u8]>,
+) -> Result<Option<usize>, PasswordError> {
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    match hashed {
+        Some(hashed) => {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![SETTING, hashed.as_bytes()],
+            )?;
+        }
+        None => {
+            if tx.execute("DELETE FROM settings WHERE key = ?1", params![SETTING])? == 0 {
+                return Ok(None);
+            }
+        }
+    }
+    let revoked = match keep_session {
+        Some(keep) => tx.execute("DELETE FROM sessions WHERE token_hash != ?1", params![keep])?,
+        None => tx.execute("DELETE FROM sessions", [])?,
+    };
+    drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(Some(revoked))
 }
 
 /// Who is asking, as far as the hub can tell: the TCP peer address and a short summary of the user agent, for rate limits and the
@@ -803,5 +888,148 @@ mod tests {
         g.undo(first);
         let s = g.state.lock().unwrap();
         assert_eq!(s.by_address.get(&c.bucket()).unwrap().failures, 1);
+    }
+
+    #[test]
+    fn drop_unvouched_passkeys_propagates_store_error_without_deleting_passkeys() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO passkeys (id, public_key, sign_count, created_ms, user_id) VALUES ('pk-v', X'01', 0, 1, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        vouch_passkey(&store, "pk-v").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE settings", [])
+            .unwrap();
+        assert!(drop_unvouched_passkeys(&store).is_err());
+        let count: i64 = store
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM passkeys WHERE id = 'pk-v'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// A store with a password, two sessions, a vouched and an unvouched passkey, for the #1029 tests.
+    fn seeded() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        ScreenPassword::with_iterations(&store, 1_000)
+            .set("old screen password")
+            .unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (x'aa', 1, 9999999999999), (x'bb', 1, 9999999999999);
+                 INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES ('pk-v', x'01', 0, 1), ('pk-u', x'02', 0, 1);",
+            )
+            .unwrap();
+        }
+        vouch_passkey(&store, "pk-v").unwrap();
+        store
+    }
+
+    fn counts(store: &SqliteStore) -> (i64, Vec<String>) {
+        let conn = store.lock().unwrap();
+        let sessions = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        let passkeys = conn
+            .prepare("SELECT id FROM passkeys ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (sessions, passkeys)
+    }
+
+    /// Makes the last step of a change, writing the list of vouched passkeys, fail: after the hash, the sessions and the passkeys.
+    fn fail_the_vouched_write(store: &SqliteStore) {
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_vouched_update BEFORE UPDATE ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;
+                 CREATE TRIGGER fail_vouched_insert BEFORE INSERT ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+    }
+
+    /// #1029: `agora password set` stores the hash, ends every session and drops the unvouched passkeys together.
+    #[test]
+    fn set_and_sign_out_all_ends_every_session_and_drops_unvouched_passkeys() {
+        let store = seeded();
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        assert_eq!(set_and_sign_out_all(&store, &hashed), Ok(2));
+        assert!(ScreenPassword::new(&store).verify("new screen password"));
+        assert_eq!(counts(&store), (0, vec!["pk-v".to_string()]));
+    }
+
+    /// #1029: a `set` that fails at its last step changes nothing: the old password, the sessions and the passkeys stay.
+    #[test]
+    fn a_set_that_fails_part_way_changes_nothing() {
+        let store = seeded();
+        fail_the_vouched_write(&store);
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        assert!(matches!(
+            set_and_sign_out_all(&store, &hashed),
+            Err(PasswordError::Store(_))
+        ));
+        let screen = ScreenPassword::new(&store);
+        assert!(screen.verify("old screen password"));
+        assert!(!screen.verify("new screen password"));
+        assert_eq!(
+            counts(&store),
+            (2, vec!["pk-u".to_string(), "pk-v".to_string()])
+        );
+    }
+
+    /// #1029: `agora password clear` removes the password, ends every session and drops the unvouched passkeys together; with no
+    /// password set it changes nothing.
+    #[test]
+    fn clear_and_sign_out_all_ends_every_session_and_does_nothing_without_a_password() {
+        let store = seeded();
+        assert_eq!(clear_and_sign_out_all(&store), Ok(Some(2)));
+        assert!(!ScreenPassword::new(&store).is_set());
+        assert_eq!(counts(&store), (0, vec!["pk-v".to_string()]));
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (x'cc', 1, 9999999999999);
+                 INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES ('pk-u', x'02', 0, 1);",
+            )
+            .unwrap();
+        assert_eq!(clear_and_sign_out_all(&store), Ok(None));
+        assert_eq!(
+            counts(&store),
+            (1, vec!["pk-u".to_string(), "pk-v".to_string()])
+        );
+    }
+
+    /// #1029: a `clear` that fails at its last step changes nothing: the password, the sessions and the passkeys stay.
+    #[test]
+    fn a_clear_that_fails_part_way_changes_nothing() {
+        let store = seeded();
+        fail_the_vouched_write(&store);
+        assert!(matches!(
+            clear_and_sign_out_all(&store),
+            Err(PasswordError::Store(_))
+        ));
+        assert!(ScreenPassword::new(&store).verify("old screen password"));
+        assert_eq!(
+            counts(&store),
+            (2, vec!["pk-u".to_string(), "pk-v".to_string()])
+        );
     }
 }

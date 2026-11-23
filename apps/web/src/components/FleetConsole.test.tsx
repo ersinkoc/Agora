@@ -48,7 +48,8 @@ describe('the fleet console', () => {
   it('makes each count a pressable filter, and a zero count is not pressable', () => {
     const html = render(<FleetSummary counts={{ needs: 2, working: 0, finished: 1, failed: 0, agents: 3, machinesOnline: 1, machinesTotal: 1 }} filter="finished" onFilter={noop} />);
     expect(html.match(/aria-pressed="true"/g)).toHaveLength(1);
-    expect(html.match(/<button[^>]*disabled=""/g)).toHaveLength(2); // working and failed are zero
+    expect(html.match(/<button[^>]*class="kit-stat/g)).toHaveLength(2); // working and failed are zero: not buttons
+    expect(html.match(/<div class="kit-stat kit-stat--zero"/g)).toHaveLength(2);
   });
   it('says when it is calm, and shows a tile that says what each agent does from what the window has', () => {
     const html = console_({ fleet: [agent('b', { preview: 'Running cargo test' })], machines });
@@ -126,6 +127,22 @@ describe('empty, first-run, connecting and offline', () => {
     expect(html).toContain(t('address-copy'));
     expect(html).not.toContain('fleet-summary'); // zero counts would only be noise
   });
+  it('tells a person who is not the owner that no project is theirs yet, and does not offer the owner\'s setup (#904)', () => {
+    for (const html of [console_({ guest: true }), render(<FleetEmpty kind="empty" machines={[]} guest />)]) {
+      expect(html).toContain(t('fleet-guest-title'));
+      expect(html).toContain(t('fleet-guest-text'));
+      expect(html).not.toContain(t('fleet-empty-title'));
+      expect(html).not.toContain('agora hub code');
+      expect(html).not.toContain('agora node enroll');
+    }
+  });
+  it('does not offer a guest the owner\'s Add a machine on the first run either (#904)', () => {
+    const html = render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} guest />);
+    expect(html).toContain(t('fleet-firstrun-title'));
+    expect(html).not.toContain(t('fleet-add-machine'));
+    expect(html).not.toContain('agora hub code');
+    expect(render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} />)).toContain(t('fleet-add-machine'));
+  });
   it('offers the first agent when machines exist and none has started', () => {
     const html = console_({ machines: [machine('n1', { name: 'laptop' })] });
     expect(html).toContain(t('fleet-firstrun-title'));
@@ -199,15 +216,19 @@ describe('answering in the row', () => {
 
 describe('a tile', () => {
   const ctx = { group: 'machine' as const, now: NOW };
-  it('is a plain tile without the console context, and says Ended with an error for a failure', () => {
+  it('is a plain tile without the console context, and says Failed for a failure, in its name as on its pill', () => {
     expect(render(<AgentTile agent={agent('a')} />)).toContain('claude · a, Working');
-    expect(render(<AgentTile agent={agent('a', { state: 'finished', closed: true, exitCode: 1 })} />)).toContain('Ended with an error');
+    const failed = render(<AgentTile agent={agent('a', { state: 'finished', closed: true, exitCode: 1 })} />);
+    expect(failed).toContain('aria-label="claude · a, Failed"');
+    expect(failed).toContain('kit-pill kit-tone-danger');
   });
-  it('never draws a failure as finished: a cross and the words, no success mark', () => {
+  it('never draws a failure as finished: the red Failed pill with a cross, the exit code, no success mark (ADR-0102)', () => {
     const html = render(<AgentTile agent={agent('a', { state: 'finished', closed: true, exitCode: 2, endedMs: NOW - 1000 })} context={ctx} />);
-    expect(html).toContain('state--failed');
+    expect(html).toContain('tile--failed');
+    expect(html).toMatch(/<span class="kit-pill kit-tone-danger"><svg[^>]*>.*?d="M4 4l4 4M8 4l-4 4".*?<\/svg>Failed<\/span>/);
     expect(html).toContain('Exit code 2');
     expect(html).not.toContain('Finished');
+    expect(html).not.toContain('kit-tone-finished');
   });
   it('shows what it asks when it waits on a request, and invents nothing without data', () => {
     const waiting = render(<AgentTile agent={agent('a', { state: 'needs-you' })} context={{ ...ctx, ask: 'Edit src/auth.rs' }} />);
@@ -217,7 +238,7 @@ describe('a tile', () => {
     expect(bare).not.toContain('tile__where"></span>');
   });
   it('names the other side of the group: the project under a machine, the machine under a project', () => {
-    expect(render(<AgentTile agent={agent('a', { branch: 'fix-1' })} context={ctx} />)).toMatch(/login-fix<\/span><span class="tile__where">fix-1/);
+    expect(render(<AgentTile agent={agent('a', { branch: 'fix-1' })} context={ctx} />)).toMatch(/login-fix<\/span><\/span><span class="kit-tag kit-tag--mono">.*<span class="tile__where">fix-1/);
     expect(render(<AgentTile agent={agent('a')} context={{ ...ctx, group: 'project' }} />)).toContain('>laptop<');
   });
 });

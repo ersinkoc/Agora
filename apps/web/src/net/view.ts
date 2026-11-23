@@ -200,7 +200,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
   const e = ev as Record<string, any>;
   switch (ev.body) {
-    case 'workspaceRegistered': { const w = e.workspaceRegistered; v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged ?? 0 }); break; }
+    // A folder is registered again for each agent started in it, with no count (#1017): the machine's Git watcher counts it and says
+    // it again only when it changes, so a count already known for the folder stays.
+    case 'workspaceRegistered': { const w = e.workspaceRegistered; const known = v.workspaces.get(q(w.workspaceId)); v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged || known?.filesChanged || 0 }); break; }
     case 'agentWorkspaceBound': v.agentWorkspaces.set(q(e.agentWorkspaceBound.agentId), q(e.agentWorkspaceBound.workspaceId)); break;
     case 'workspaceStatusChanged': { const w = v.workspaces.get(q(e.workspaceStatusChanged.workspaceId)); if (w) w.filesChanged = e.workspaceStatusChanged.filesChanged ?? 0; break; }
     case 'nodeOnline': {
@@ -691,18 +693,22 @@ export function projectChoices(v: View): ProjectChoice[] {
 // `via`: the machine whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`). It is the
 // machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
 // call itself after the sender's machine.
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
+// `fromId` is the sender's key, so the team chat can draw its avatar; `toMachine` names the recipient's machine on a message between machines.
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string; fromId?: string; toMachine?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
-  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
-  const label = (id: string) => names.get(id) ?? id;
+  const byId = new Map(tiles(v).map((t) => [t.id, t]));
+  const label = (id: string) => byId.get(id)?.name ?? id;
   const machine = (id: string) => id.split('/')[0];
-  return v.messages.slice(-limit).reverse().map((m) => ({
-    from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
-    crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
-    ...(m.via ? { via: m.via } : {}),
-  }));
+  return v.messages.slice(-limit).reverse().map((m) => {
+    const crossMachine = m.to.includes('/') && machine(m.from) !== machine(m.to);
+    return {
+      from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs, crossMachine, fromId: m.from,
+      ...(crossMachine ? { toMachine: byId.get(m.to)?.machine ?? machine(m.to) } : {}),
+      ...(m.via ? { via: m.via } : {}),
+    };
+  });
 }
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.

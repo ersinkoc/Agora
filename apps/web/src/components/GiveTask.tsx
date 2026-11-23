@@ -9,7 +9,7 @@ import type { MachineModel, ProjectChoice } from '../net/view';
 import { Icon } from './Icon';
 import { NoAskBadge } from './NoAskBadge';
 import { StartAgent, type KindChoice } from './StartAgent';
-import { StateBadge } from './StateBadge';
+import { StatusPill } from './kit';
 
 /** What the ordinary start window needs (ADR-0095 step 3, "start a new one"): the same choices, checks and signed command as "Start an
  *  agent", with `launch` answering the new agent's id (on its machine) or the refusal's locale key. Nothing here starts an agent another way. */
@@ -64,10 +64,10 @@ export function GiveRow({ agent, depth, machines, onPick }: { agent: AgentTileMo
   const indent = depth === 0 ? '' : depth === 1 ? 'ms-5' : 'ms-10';
   return (
     <li className={indent} data-agent-id={agent.id}>
-      <button type="button" onClick={onPick} className="grid min-h-11 w-full min-w-0 gap-1 rounded-s border border-line bg-surface-0 px-3 py-2 text-start text-ink transition-colors duration-150 hover:bg-surface-2">
+      <button type="button" onClick={onPick} className="grid min-h-11 w-full min-w-0 gap-1 rounded-m border border-line bg-surface-1 px-3 py-2 text-start text-ink transition-colors duration-150 hover:border-line-strong hover:bg-surface-2">
         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <strong className="min-w-0 break-words text-sm">{plain(agent.name, OWNER_MAX)}</strong>
-          <StateBadge state={agent.state} />
+          <StatusPill state={agent.state} />
           <FreeBadge agent={agent} />
         </span>
         <span className="min-w-0 break-words text-xs text-muted">
@@ -91,7 +91,7 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
   );
   return (
     <div className="grid gap-3" data-give-step="confirm">
-      <dl className="m-0 grid gap-2 rounded-s border border-line bg-surface-0 p-3">
+      <dl className="m-0 grid gap-2 rounded-m border border-line bg-surface-1 p-3">
         {row(t('give-field-task'), plain(task.title, TITLE_MAX) || t('board-task-untitled'))}
         {row(t('give-field-agent'), plain(agent.name, FULL))}
         {row(t('give-field-kind'), plain(agent.kind ?? '', FULL))}
@@ -99,15 +99,15 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
         {row(t('give-field-project'), plain(task.project, FULL))}
       </dl>
       {actsFreelyNow(agent) && (
-        <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-needs-you/60 p-3 text-sm text-ink">
+        <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-danger/60 p-3 text-sm text-ink">
           <FreeBadge agent={agent} nested={false} />
           <span>{t('give-confirm-no-ask', { agent: plain(agent.name, FULL) })}</span>
         </p>
       )}
       <p className="muted m-0 text-sm">{t('give-confirm-body')}</p>
       <div className="flex flex-wrap justify-end gap-2">
-        <button ref={back} type="button" className="button min-h-11" disabled={busy} onClick={onBack}>{t('give-back')}</button>
-        <button type="button" className="button button--primary min-h-11" disabled={busy} onClick={onSend}>{busy ? t('give-sending') : t('give-send')}</button>
+        <button ref={back} type="button" className="kit-btn min-h-11" disabled={busy} onClick={onBack}>{t('give-back')}</button>
+        <button type="button" className="kit-btn kit-btn--primary min-h-11" disabled={busy} onClick={onSend}>{busy ? t('give-sending') : t('give-send')}</button>
       </div>
     </div>
   );
@@ -132,8 +132,8 @@ export function GiveOutcome({ result, agent, fresh, onClose, onBack, onSettled }
         ? <p role="status" className="m-0 text-sm text-ink">{t(result.queued ? (fresh ? 'give-queued-new' : 'give-queued') : 'give-sent', { agent: plain(agent.name, FULL) })}</p>
         : <p role={grant ? 'status' : 'alert'} className="m-0 text-sm text-ink">{t(result.key, result.args)}</p>}
       <div className="flex flex-wrap justify-end gap-2">
-        {!result.ok && !grant && <button type="button" className="button min-h-11" onClick={onBack}>{t('give-other-agent')}</button>}
-        <button ref={done} type="button" className="button button--primary min-h-11" onClick={onClose}>{t('give-done')}</button>
+        {!result.ok && !grant && <button type="button" className="kit-btn min-h-11" onClick={onBack}>{t('give-other-agent')}</button>}
+        <button ref={done} type="button" className="kit-btn kit-btn--primary min-h-11" onClick={onClose}>{t('give-done')}</button>
       </div>
     </div>
   );
@@ -156,7 +156,7 @@ function WaitingForAgent({ onBack }: { onBack: () => void }) {
   return (
     <div className="grid gap-3" data-give-step="waiting">
       <p role="status" className="m-0 text-sm text-ink">{t(late ? 'give-start-late' : 'give-start-waiting')}</p>
-      <div className="flex justify-end"><button type="button" className="button min-h-11" onClick={onBack}>{t('give-back')}</button></div>
+      <div className="flex justify-end"><button type="button" className="kit-btn min-h-11" onClick={onBack}>{t('give-back')}</button></div>
     </div>
   );
 }
@@ -165,7 +165,7 @@ function WaitingForAgent({ onBack }: { onBack: () => void }) {
 function StartForTaskButton({ main, onClick }: { main: boolean; onClick: () => void }) {
   return (
     <button type="button" data-give-start="" onClick={onClick}
-      className={main ? 'button button--primary min-h-11 justify-self-start' : 'button min-h-11 w-full justify-start border-dashed'}>
+      className={main ? 'kit-btn kit-btn--primary min-h-11 justify-self-start' : 'kit-btn min-h-11 w-full justify-start border-dashed'}>
       <Icon name="plus" className="size-4" />{t('give-start-new')}
     </button>
   );
@@ -231,11 +231,13 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
           onKeyPressCapture={(e) => { if (!armed.current) { e.preventDefault(); e.stopPropagation(); } }}
           onKeyUpCapture={(e) => { if (!armed.current && e.key === ' ') { e.preventDefault(); e.stopPropagation(); } }}
           onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
-          className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 gap-3 overflow-auto rounded-l border border-line bg-surface-1 p-5 shadow-card">
-          <Dialog.Title className="m-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title>
+          className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 gap-3 overflow-auto rounded-l border border-line bg-surface-raised p-5 shadow-pop">
+          {/* The kit's dialog header: an icon chip and the title. */}
+          <div className="flex min-w-0 items-center gap-3"><span aria-hidden className="kit-chip kit-tone-accent"><Icon name="board" className="size-4" /></span>
+            <Dialog.Title className="m-0 min-w-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title></div>
           {step.at === 'pick' && <>
             <p id="give-task-title" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</p>
-            {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-needs-you/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
+            {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-danger/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
             {candidates.length === 0
               ? <>
                 <p className="muted m-0 text-sm">{t(startable ? 'give-none-start' : starter ? 'give-none-plain' : 'give-none', { project: plain(task.project, FULL) })}</p>
@@ -248,7 +250,7 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
                 </ul>
                 {startable && <StartForTaskButton main={false} onClick={() => setStep({ at: 'start' })} />}
               </>}
-            <div className="flex justify-end"><Dialog.Close className="button min-h-11">{t('give-cancel')}</Dialog.Close></div>
+            <div className="flex justify-end"><Dialog.Close className="kit-btn min-h-11">{t('give-cancel')}</Dialog.Close></div>
           </>}
           {step.at === 'confirm' && (!chosen && step.fresh
             // Started, and not in the live view yet: the confirmation follows as soon as it shows up.
@@ -268,7 +270,7 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
  *  screen it grows to the tap size like every chip that acts (app.css). */
 export function GiveButton({ task }: { task: GiveTask }) {
   return (
-    <button type="button" className="ide-chip w-fit min-h-8 px-2.5 hover:border-accent hover:text-ink" aria-label={t('give-action-label', { title: plain(task.title, TITLE_MAX) || t('board-task-untitled') })}
+    <button type="button" className="kit-btn kit-btn--ghost kit-btn--sm w-fit -ms-1.5 text-accent" aria-label={t('give-action-label', { title: plain(task.title, TITLE_MAX) || t('board-task-untitled') })}
       onClick={() => giveAsk.ask(task)}>
       {t('give-action')}
     </button>

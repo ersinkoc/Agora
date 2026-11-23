@@ -11,10 +11,14 @@ terminals get the key bar when the screen is a touch screen.
 
 ## The flow
 
-1. **The list** (`#/`): **Needs you** first, then every machine (online first) with its agents, most urgent first and closed ones
-   last. A request shows who asks, on which machine, what it asks and its whole detail (any hidden character written out, as on a start request), with **Allow** and **Deny** as two large
-   buttons: one tap answers it. When the agent offers an answer it remembers (ADR-0101), **Allow always** is a third, full-width button
-   under them, with the note and the agent's own words; a request that offers only that shows it in Allow's place ([approvals.md](approvals.md)). Tapping the request's title, or an agent, opens it.
+1. **The list** (`#/`): the same stat tiles as Home, two to a row; **Needs you** first, then every machine (online first) with its
+   agents, most urgent first and closed ones last. Agents are kit rows: the agent's avatar, its name and folder, its state as a pill.
+   A request is the one request component ([approvals.md](approvals.md#one-request-three-sizes)) in its row size, stacked: the icon
+   chip, the avatar and the ask as the title ("claude · teal wants to change a file"), the machine, the action as one chip and its whole
+   detail (any hidden character written out, as on a start request), then **Deny** and **Allow** under it, each as wide as it can be.
+   When the agent offers an answer it remembers (ADR-0101), **Allow always** sits between them, with the note and the agent's own words;
+   a request that offers only that shows it in Allow's place. The arrow at the end of the title, or an agent row, opens the agent. An
+   agent that waits with no request open is its row on the needs tint.
 2. **An agent** (`#/agent/<id>`): **Back** (to the list), its name, state, machine and cost in the top bar; anything it asks, with
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
    needs you. Above the terminal, **N files changed** opens the review screen ([review.md](review.md)) and **Files** the file
@@ -22,13 +26,17 @@ terminals get the key bar when the screen is a touch screen.
    **What needs you stays in reach of the thumb**: a bar above the bottom bar (alone at the bottom of an agent) shows the first thing that
    needs you and how many there are. A plain yes or no that can be read whole there (the fleet console's rule, `decidableInline`: one
    short line each of action and detail, no hidden character, never a request to start an agent, never one that offers only an answer the
-   agent remembers, ADR-0101) has **Allow** and **Deny** as 52 px
-   buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
+   agent remembers, ADR-0101) is drawn as the same request component in its row size (who, where, the ask as one chip) with **Deny**
+   and **Allow** (the primary, last, as on every request) as 52 px buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
    structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
    decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.
-   A request that has just replaced another keeps Allow and Deny disabled for 600 ms (a tap meant for the one that went must not land on
-   the new one), and the bar answers one request at a time; it is announced politely (a status, not an alert) and a focus that was on its
-   button moves to the bar. It uses the fleet console's order (a request with no expiry never takes the bar from one about to lapse),
+   The list's cards and the bar keep T44 as every other surface does, with the shared guard (`useAnswerGuard`, #1048,
+   [approvals.md](approvals.md)): Allow and Deny do nothing for 600 ms after anything the card or the bar shows changed (a request that
+   has just replaced another, a card that came in above, the trust notice, the link row), after the person came back to the window and
+   after the link came back. A request is answered once for the whole window, also from one phone screen to the next: held while its
+   answer goes, **Answer sent** once it went (Allow and Deny stay off while it is listed), answerable again after a fresh dwell when it
+   failed. The bar also answers one request at a time: while its answer goes, the next request it shows waits. It is announced politely
+   (a status, not an alert) and a focus that was on its button moves to the bar. It uses the fleet console's order (a request with no expiry never takes the bar from one about to lapse),
    and a tab, no-break or wide space makes a request not plain.
    A phone has no card over the window (that is the desktop's, [main-window.md](main-window.md#needs-you-loudly)); this bar is its way of keeping Needs you in reach.
    While the link is down Allow and Deny are disabled everywhere on the phone and say why. The state of the link has a row of its own
@@ -44,9 +52,10 @@ when the hub's `public-url` is set ([notifications.md](../design/notifications.m
 ## Approvals stay exactly as safe
 
 Allow and Deny call the same signing as everywhere else: the browser's device key signs the answer and the machine checks it
-(ADR-0020, ADR-0028, ADR-0061). A second tap waits for the first. When a machine has reported whom it trusts and this device is not
-among them, the card says so before the tap and links to **This device**; the machine still decides, and nothing is skipped or
-softened on a phone. A phone is trusted like any device: a card on another trusted device, or `agora node trust` on the machine.
+(ADR-0020, ADR-0028, ADR-0061). A second tap sends nothing (the request is held until the first settles). When a machine that asks has
+reported whom it trusts and this device is not among them, one notice at the top of the requests names every such machine before the
+tap and links to **This device** (each card names its machine); the machine still decides, and nothing is skipped or softened on a
+phone. A phone is trusted like any device: a card on another trusted device, or `agora node trust` on the machine.
 
 ## The terminal key bar
 
@@ -68,7 +77,15 @@ the keyboard's own paste works in the terminal. The mapping lives in `apps/web/s
 
 ## Size, safe area, landscape
 
-- Every control in the phone window, the key bar and a page's title bar is at least 44 × 44 px; agent rows are 56 px tall.
+- Every control in the phone window, the key bar and a page's title bar is at least 44 × 44 px (the widget kit's controls too, on
+  any phone-sized window, touch or not); agent rows are 56 px tall; the bar's answers are 52 px.
+- In an agent's chat on a touch screen, every control in an entry takes a 44 × 44 px finger too. Rows (a group of steps, a step, a
+  thought, a change), a code block's header and the "Show all" buttons grow to 44 px. The small ones keep their drawn size and grow an invisible target instead:
+  the file chips (`.tap-target`, with their rows set wider apart so two targets never overlap), "Show the request", and a link in a
+  sentence (`.tap-inline`: padding above and below each piece, which never moves a line; where it meets the words of a link on the
+  next line, the words win). A reply's Copy sits under the reply. A
+  narrow window with a mouse keeps the dense sizes. `scripts/e2e-chat-touch.mjs` measures the targets in Chromium (#1073).
+- Text uses the type scale only (the screen title is the 16 px title step); no phone file has a pixel font size.
 - The page uses `viewport-fit=cover`; the bars keep out of the notch and the home indicator (`env(safe-area-inset-*)`), and pages
   keep out of a notch held sideways.
 - With the touch keyboard open the window follows the visible part of the page (`visualViewport`; `interactive-widget=resizes-content`
@@ -89,7 +106,7 @@ approvals do.
 `scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen, and with the High
 contrast and Large text themes at 360 and 390 px (44 px targets, the key bar fits); screenshots in both themes
 in `docs/screenshots/phone/`; the needs-you bar in `docs/screenshots/phone-needs-bar/` (390 × 844, both themes; 360 px and Turkish too). `scripts/e2e-phone-changes.mjs` opens the review screen and the file browser at 390 × 844 and the
-review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`, `apps/web/src/phone/PhoneDock.test.tsx` (presses the real buttons: never Allow for a start request or a pairing request, disabled while the link is down, one answer at a time).
+review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`, `apps/web/src/phone/PhoneDock.test.tsx` (presses the real buttons: never Allow for a start request or a pairing request, disabled while the link is down, one answer at a time), `apps/web/src/phone/phoneGuard.test.tsx` (the cards' and the bar's dwell, once-only answer and window holds, across screens; the row density; the trust notice; no pixel font size in a phone file). Redesign screenshots of every phone screen at 390 × 844 with touch, both themes: `docs/ux/screens/phone-redesign-*.png`.
 
 ## Not in this rung
 

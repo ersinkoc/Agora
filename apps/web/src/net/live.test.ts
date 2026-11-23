@@ -48,6 +48,9 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+    // The team chat draws the sender's avatar from its key, and names the other machine of a message between machines.
+    expect(m.map((x) => x.fromId)).toEqual(['a/x', 'a/x']);
+    expect(m.map((x) => x.toMachine)).toEqual(['b', undefined]);
   });
 
   it('lists a message between machines once, from its sender, marked, whichever copy comes first (#905)', () => {
@@ -597,6 +600,26 @@ describe('shared terminal size', () => {
     second.onopen?.();
     expect(shape(second)).toEqual(['subscribe', '120x40']);
     live.close();
+  });
+
+  it('unregisters wake listeners when the session is rejected', async () => {
+    let unwakeCalls = 0;
+    let rejected = false;
+    const sockets: FakeSocket[] = [];
+    connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      wake: () => () => { unwakeCalls++; },
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+      onRejected: () => { rejected = true; },
+    });
+    sockets[0]!.onopen?.();
+    sockets[0]!.onclose?.();
+    await new Promise((r) => setTimeout(r, 10));
+    sockets[1]!.onopen?.();
+    sockets[1]!.onclose?.();
+    expect(rejected).toBe(true);
+    expect(unwakeCalls).toBe(1);
   });
 });
 

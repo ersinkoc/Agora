@@ -291,7 +291,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
             </div>
             <div ref={scroller} className="min-h-0 flex-1 overflow-auto" onScroll={(e) => { const top = e.currentTarget.scrollTop; setView((v) => (Math.abs(v.top - top) < 1 ? v : { ...v, top })); }}>
               {listing === undefined || listing === 'loading' ? <div className="grid gap-1.5 p-3" aria-hidden>{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-4" />)}</div>
-                : listing === 'failed' ? <p role="alert" className="m-0 flex items-center gap-2 p-4 text-needs-you">{t('files-failed')}<button type="button" className="button" onClick={() => { generation.current++; setListings((l) => { const n = new Map(l); n.delete(dir); return n; }); }}>{t('changes-retry')}</button></p>
+                : listing === 'failed' ? <p role="alert" className="m-0 flex items-center gap-2 p-4 text-danger">{t('files-failed')}<button type="button" className="button" onClick={() => { generation.current++; setListings((l) => { const n = new Map(l); n.delete(dir); return n; }); }}>{t('changes-retry')}</button></p>
                 : listing.length === 0 ? <p className="muted m-0 p-4">{t('fm-empty')}</p>
                 : entries.length === 0 ? <p className="muted m-0 p-4">{t('files-no-match')}</p>
                 : <div className="relative" style={{ height: entries.length * ROW }}>{rowIndexes(first, last, focusIndex).map((i) => {
@@ -361,7 +361,7 @@ function TreeNode({ path, name, depth, listings, expanded, list, toggle, current
         <span className="min-w-0 truncate" dir="ltr">{name}</span>
       </div>
       {open && (l === 'loading' ? <p role="none" className="muted m-0 py-1 text-xs" style={{ paddingInlineStart: 36 + depth * 12 }}>…</p>
-        : l === 'failed' ? <p role="none" className="m-0 py-1 text-xs text-needs-you" style={{ paddingInlineStart: 36 + depth * 12 }}>{t('files-failed')}</p>
+        : l === 'failed' ? <p role="none" className="m-0 py-1 text-xs text-danger" style={{ paddingInlineStart: 36 + depth * 12 }}>{t('files-failed')}</p>
         : <div role="group">{kids.map((k) => <TreeNode key={k.name} path={joinPath(path, k.name)} name={k.name} depth={depth + 1} listings={listings} expanded={expanded} list={list} toggle={toggle} current={current} go={go} />)}</div>)}
     </div>
   );

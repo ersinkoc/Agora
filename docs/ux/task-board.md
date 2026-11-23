@@ -2,7 +2,7 @@
 
 Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
 
-- Columns: Open, Claimed, Done (and Blocked as a filter). The web window also opens a read-only board view (ADR-0095 step 1) from a project card in the Board panel, with the columns Backlog, Doing and Done, 200 cards per column plus "Show more"; task text is shown as plain text, cut short.
+- Columns: Open, Claimed, Done (and Blocked as a filter). The web window also opens a read-only board view (ADR-0095 step 1) from a project card in the Board panel, with the columns Backlog, Doing and Done, 200 cards per column plus "Show more"; task text is shown as plain text, cut short. Its look (redesign PR 12): the dialog is an overlay (raised surface, one shadow) with the kit's header (an icon chip, the title, an icon close); each column is a quiet frame headed by a mark in its hue (Backlog neutral, Doing working blue, Done finished green), its name and its count as a grey tag; the tasks are kit cards on surface-1 over the board's surface-0; the owner's state is the kit status pill; an empty column says so in a dashed frame, and a board with no tasks is the kit's empty state. "Give to an agent" is a small ghost button in the accent. Screens: `docs/ux/screens/polish-redesign-board-{dark,light}.png` (and `-phone-`).
 - **Give to an agent** (ADR-0095 step 2): a Backlog card has the action (keyboard reachable; on a touch screen it is a 44 px target), and every
   Backlog task is also found in the command palette as "Give to an agent: <title>". The picker lists only the running agents of the task's
   project on a connected machine, helpers right under the agent that started them; plain terminals and other projects' agents are never

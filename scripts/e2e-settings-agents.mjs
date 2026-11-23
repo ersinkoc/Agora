@@ -21,10 +21,14 @@ try {
   const text = await section.innerText();
   assert.match(text, /installed/i);
   assert.match(text, /not installed/i);
-  assert.match(text, /skips permission questions/);
+  // A kind that offers to act without asking carries the red bolt, its meaning in its name; its card, opened, labels the option.
+  assert.ok(await section.getByRole('img', { name: /skips permission questions/ }).count() > 0);
+  await section.locator('summary', { hasText: 'Present Agent' }).click();
+  assert.match(await section.innerText(), /skips permission questions/);
   assert.equal(await section.locator('img, a[href^="https://evil"]').count(), 0, 'untrusted text must stay plain');
   assert.match(text, /<img src=x/);
-  assert.equal(await section.getByRole('button').count(), 0, 'no install or save action');
+  // The only buttons are the machine choice (radios): nothing installs, starts or saves.
+  assert.equal(await section.locator('button:not([role="radio"])').count(), 0, 'no install or save action');
   assert.ok(await page.locator('nav a[href="#/device/agents"]').count() > 0);
   const wide = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
   assert.equal(wide, false, 'no horizontal page scroll');
