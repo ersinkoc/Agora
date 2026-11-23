@@ -1328,6 +1328,15 @@ impl Folders for SignedFolders<'_> {
     }
 }
 
+/// An error that says nothing about the folder asked for: the link, the hub or the machine failed (`client.unreachable`,
+/// `node.timeout`, `node.offline`, ...). Another folder would fail the same way.
+fn says_nothing_of_the_folder(code: &str) -> bool {
+    code.starts_with("client.")
+        || code.starts_with("node.")
+        || code.starts_with("hub.")
+        || code == "internal"
+}
+
 /// How the folder picker ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Browsed {
@@ -1380,6 +1389,8 @@ fn browse_folders(
     // #1099: the choice of projects is offered once the machine let this person look into one of them (a viewer is told at once);
     // asked once per machine in one dialogue, so going round the machines with `m` does not ask again.
     let mut probed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // #1099: the home folder tried once in place of a project folder that cannot be listed.
+    let mut home_tried = false;
     // What was shown before the last step: a step into a folder the hub refuses for the person's role goes back to it.
     let mut before: Option<(Nav, At, agora_protocol::v1::DirectoryEntries)> = None;
     let mut notice = String::new();
@@ -1452,11 +1463,19 @@ fn browse_folders(
                     }
                     Err(e) => {
                         // A folder that cannot be listed (gone, a secret one): back to where the picker opens, saying why.
-                        let mut fresh = nav_for(&node.node_id, *role);
+                        // Where this picker opens: the home folder for `Nav::machine`, so a home folder that fails ends here.
+                        let mut fresh = nav_for(&node.node_id, nav.role());
                         let mut start = fresh.start();
-                        if start == target && *role == Role::Unknown && !path.is_empty() {
-                            // #1099: with the role not known, the project folder itself: the home folder, where the owner's picker
-                            // always opened (a member is refused it once and goes on in their projects).
+                        if start == target
+                            && nav.role() == Role::Unknown
+                            && !path.is_empty()
+                            && !home_tried
+                            && !says_nothing_of_the_folder(&e.code)
+                        {
+                            // #1099: with the role not known, the project folder itself cannot be listed (gone, a secret one): the
+                            // home folder, where the owner's picker always opened (a member is refused it once and goes on in their
+                            // projects). Once per dialogue, and not when the link or the machine failed, which no folder would help.
+                            home_tried = true;
                             fresh = Nav::machine();
                             start = fresh.start();
                         }
@@ -7239,6 +7258,8 @@ mod folder_role_tests {
     struct Machine {
         answers: HashMap<(String, String), Result<DirectoryEntries, ErrorInfo>>,
         asked: Vec<(String, String)>,
+        /// Every request fails with this code (the link or the machine is gone).
+        dead: Option<String>,
     }
 
     impl Machine {
@@ -7273,6 +7294,14 @@ mod folder_role_tests {
     impl Folders for Machine {
         fn list(&mut self, node: &str, path: &str) -> Result<DirectoryEntries, ErrorInfo> {
             self.asked.push((node.into(), path.into()));
+            // A dialogue that asks again and again without reading a key never ends: stop it here instead.
+            assert!(self.asked.len() < 50, "asked without end: {:?}", self.asked);
+            if let Some(code) = &self.dead {
+                return Err(ErrorInfo {
+                    code: code.clone(),
+                    ..ErrorInfo::default()
+                });
+            }
             self.answers
                 .get(&(node.into(), path.into()))
                 .cloned()
@@ -7362,6 +7391,47 @@ mod folder_role_tests {
         assert_eq!(m.paths(), ["/srv/gone", ""]);
         assert_eq!(out, Browsed::Said(String::new()), "drawn, then cancelled");
         assert!(frames.last().unwrap().contains("/home/me"), "{frames:?}");
+    }
+
+    #[test]
+    fn a_picker_whose_folders_all_fail_ends_once_instead_of_asking_without_end() {
+        let say = Say(Catalog::english());
+        let failed = |code: &str| {
+            Browsed::Said(say.text(
+                key!("tui-folder-failed"),
+                &[("code", Arg::Str(code.into()))],
+            ))
+        };
+        let s = snapshot(&["/srv/mine"], &[]);
+        // The link is gone: no other folder is tried.
+        let mut m = Machine {
+            dead: Some("client.unreachable".into()),
+            ..Machine::default()
+        };
+        let (out, _) = browse(&mut m, &s, b"", &mut Role::Unknown);
+        assert_eq!(out, failed("client.unreachable"));
+        assert_eq!(m.paths(), ["/srv/mine"]);
+        // Neither the project folder nor the home folder can be listed: each asked once.
+        let mut m = Machine::default();
+        let (out, _) = browse(&mut m, &s, b"", &mut Role::Unknown);
+        assert_eq!(out, failed("directory.not_found"));
+        assert_eq!(m.paths(), ["/srv/mine", ""]);
+        // A subfolder that cannot be listed: back to the project folder, drawn again, then cancelled.
+        let mut m = Machine::default();
+        m.answers.insert(
+            ("n1".into(), "/srv/mine".into()),
+            Ok(DirectoryEntries {
+                path: "/srv/mine".into(),
+                entries: vec![agora_protocol::v1::DirectoryEntry {
+                    name: "api".into(),
+                    is_git: false,
+                }],
+                ..DirectoryEntries::default()
+            }),
+        );
+        let (out, _) = browse(&mut m, &s, b"\r", &mut Role::Unknown);
+        assert_eq!(out, Browsed::Said(String::new()));
+        assert_eq!(m.paths(), ["/srv/mine", "/srv/mine/api", "/srv/mine"]);
     }
 
     #[test]
