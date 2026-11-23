@@ -324,6 +324,103 @@ mod tests {
         );
     }
 
+    /// ADR-0049 Amendment A (#1049): a member chooses folders and starts agents inside a project granted on that machine; a viewer
+    /// granted the same project stays read-only; a folder outside it is refused as #1044 words a role refusal (the schema name).
+    #[test]
+    fn a_member_works_in_folders_of_a_granted_project_and_a_viewer_with_the_same_grant_does_not() {
+        let mut view = crate::projection::View::default();
+        view.apply(&v1::Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 1,
+            body: Some(v1::event::Body::CheckoutDiscovered(
+                v1::CheckoutDiscovered {
+                    checkout_id: "c1".into(),
+                    node_id: "n1".into(),
+                    project_id: "mine".into(),
+                    path: "/srv/mine".into(),
+                },
+            )),
+        });
+        let granted = || Some(["n1/mine".to_string()].into());
+        let member = Access {
+            projects: granted(),
+            ..who(Role::Member)
+        };
+        let viewer = Access {
+            projects: granted(),
+            ..who(Role::Viewer)
+        };
+        let scope = Scope::from_view(granted().unwrap_or_default(), &view);
+        let commands = |path: &str| {
+            [
+                (
+                    "DirectoryList",
+                    C::DirectoryList(v1::DirectoryList {
+                        path: path.into(),
+                        authorization: None,
+                    }),
+                ),
+                (
+                    "DirectoryInspect",
+                    C::DirectoryInspect(v1::DirectoryInspect {
+                        path: path.into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "AgentLaunch",
+                    C::AgentLaunch(v1::AgentLaunch {
+                        path: path.into(),
+                        project_id: "mine".into(),
+                        kind: "shell".into(),
+                        ..Default::default()
+                    }),
+                ),
+            ]
+        };
+        for (name, command) in commands("/srv/mine/api") {
+            assert_eq!(
+                route(&member, Some(&scope), &req("n1", command.clone())),
+                Route::Forward,
+                "{name}"
+            );
+            assert_eq!(
+                route(&viewer, Some(&scope), &req("n1", command)),
+                Route::Forbidden {
+                    action: name.into()
+                }
+            );
+        }
+        for path in ["/srv", "/srv/mine/../theirs", ""] {
+            for (name, command) in commands(path) {
+                assert_eq!(
+                    route(&member, Some(&scope), &req("n1", command.clone())),
+                    Route::Forbidden {
+                        action: name.into()
+                    },
+                    "{path}"
+                );
+                assert_eq!(
+                    route(&member, Some(&scope), &req("n2", command)),
+                    Route::Forbidden {
+                        action: name.into()
+                    },
+                    "{path} on another machine"
+                );
+            }
+        }
+        for (name, command) in commands("/srv/mine") {
+            assert_eq!(
+                route(&member, Some(&scope), &req("n2", command)),
+                Route::Forbidden {
+                    action: name.into()
+                },
+                "{name} on another machine"
+            );
+        }
+    }
+
     /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a person give 8 tasks a minute, no more,
     /// however many windows or connections they use.
     #[test]
