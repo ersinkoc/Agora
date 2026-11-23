@@ -199,6 +199,52 @@ describe('Allow and Deny wait out the dwell', () => {
   });
 });
 
+describe('the dialog keeps the shared guard (#1052, Codex)', () => {
+  it('an answer from the dialog that failed can be tried again after a fresh dwell, never before', async () => {
+    const onResolve = vi.fn(async () => false);
+    mount(list(ask('r1')), { onResolve });
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    await wait(0);
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    expect(card()!.textContent).not.toContain('Answer sent');
+    click('Allow'); // the fresh dwell has not passed
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    await wait(ATTENTION_DWELL_MS);
+    click('Allow');
+    expect(onResolve).toHaveBeenCalledTimes(2);
+  });
+  it('says "Answer sent" only once the answer went: while it is on its way the buttons are off and nothing says sent', async () => {
+    let done: (v: boolean) => void = () => undefined;
+    const onResolve = vi.fn(() => new Promise<boolean>((res) => { done = res; }));
+    mount(list(ask('r1')), { onResolve });
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    await wait(ATTENTION_DWELL_MS * 3);
+    expect(card()!.textContent).not.toContain('Answer sent');
+    expect(button('Allow')!.getAttribute('aria-disabled')).toBe('true');
+    click('Deny');
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    await act(async () => { done(true); });
+    await wait(0);
+    expect(card()!.textContent).toContain('Answer sent');
+    expect(button('Review')).toBeTruthy();
+  });
+  it('the person coming back and a press in the same batch send nothing (focus, or the tab shown again)', async () => {
+    const { onResolve } = mount(list(ask('r1')));
+    await wait(ATTENTION_DWELL_MS + 100);
+    const allow = button('Allow')!;
+    act(() => { window.dispatchEvent(new Event('focus')); allow.click(); });
+    expect(onResolve).not.toHaveBeenCalled();
+    await wait(ATTENTION_DWELL_MS + 100);
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); button('Allow')!.click(); });
+    expect(onResolve).not.toHaveBeenCalled();
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('leaving the card is never an answer', () => {
   it('Esc is Later: nothing is sent, the card closes and does not come back by itself', async () => {
     const { onResolve } = mount(list(ask('r1')));
