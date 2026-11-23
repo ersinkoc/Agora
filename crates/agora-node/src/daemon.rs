@@ -1472,10 +1472,17 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                             .collect(),
                     );
                 }
-                key if key.starts_with("device.") && key.ends_with(".projects") => {
+                key if key
+                    .strip_prefix("device.")
+                    .and_then(|s| s.strip_suffix(".projects"))
+                    .is_some() =>
+                {
                     // A named device with a value that names nothing is a device limited to nothing: a typo never widens.
-                    let id = &key["device.".len()..key.len() - ".projects".len()];
-                    if !id.is_empty() {
+                    if let Some(id) = key
+                        .strip_prefix("device.")
+                        .and_then(|s| s.strip_suffix(".projects"))
+                        .filter(|id| !id.is_empty())
+                    {
                         p.device_projects.insert(
                             id.to_string(),
                             v.split(',')
@@ -2499,6 +2506,7 @@ fn memory_moved(reported: u64, now: u64) -> bool {
 }
 
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
+/// It also makes every folder's count be said again: a start registers its folder with no count, even one already counted.
 fn watch_git(
     sup: &Mutex<Supervisor>,
     ev: &EventSink,
@@ -2559,10 +2567,13 @@ fn watch_git(
             }
         }
         let until = Instant::now() + GIT_POLL;
-        while Instant::now() < until
-            && !stop.load(Ordering::Acquire)
-            && !wake.swap(false, Ordering::AcqRel)
-        {
+        while Instant::now() < until && !stop.load(Ordering::Acquire) {
+            if wake.swap(false, Ordering::AcqRel) {
+                // A start registers its folder again with no count (#1017), also a folder another agent shares, whose changes are
+                // the same: every folder's count is said again, so it follows that registration for the hub and every window.
+                last.clear();
+                break;
+            }
             std::thread::sleep(TICK);
         }
     }
@@ -3443,6 +3454,31 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_policy_handles_overlapping_device_projects_key_without_panicking() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-test-device-projects-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        std::fs::write(
+            &file,
+            "device.projects = p1\ndevice..projects = p2\ndevice.dev1.projects = p1, p2\n",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(p.problems, vec!["device.projects".to_string()]);
+        assert_eq!(
+            p.skip_permissions,
+            crate::launch_options::SkipPermissions::Forbid
+        );
+        assert!(!p.device_projects.contains_key(""));
+        assert!(p
+            .device_projects
+            .get("dev1")
+            .is_some_and(|s| s.contains("p1") && s.contains("p2") && s.len() == 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
