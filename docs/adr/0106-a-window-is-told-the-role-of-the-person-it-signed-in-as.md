@@ -113,7 +113,7 @@ message Welcome {
 ## Build status
 
 - **Built:** steps 1 and 2 in #1139 (the schema, the fixtures in `schema/fixtures/person-role/`, the hub), and step 3 in the clients
-  pull request that closes #1099.
+  #1141, which closes #1099.
 - **Open questions answered as proposed.** A hub not in team mode sends `PERSON_ROLE_OWNER`, and `Welcome` carries no grants.
 - **Delivery differs from the Decision's wording.** A window sends no `Hello`: it opens with `Subscribe`, and the hub built a `Welcome`
   for nodes only. A window-sent `Hello` would be refused by an older hub, so the hub sends the window an unasked `Welcome` as its
