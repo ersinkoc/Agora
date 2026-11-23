@@ -225,8 +225,9 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// ADR-0089 decision 7, review of #1103 (N9): a confined agent cannot read the chat transcripts in the node's data folder, which the node
-/// protects for every confined agent (`node_private_paths`).
+/// ADR-0089 decision 7, review of #1103 (N9): a confined agent cannot read the chat transcripts in the node's data folder when that
+/// folder is outside every folder the agent may read, as the node's home under the user's home is. On Linux this holds because no
+/// grant reaches it (Landlock only allows; `protect` is ignored there): a data folder under `/tmp` or `/var` would be readable (#1114).
 #[test]
 fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
     if !agora_platform::sandbox_supported() {

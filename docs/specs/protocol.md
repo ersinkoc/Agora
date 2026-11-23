@@ -458,7 +458,7 @@ no text, ADR-0058). Entry ids increase per agent; a client ignores an id it alre
 
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
-secret values of 8 bytes or more replaced, also a piece of one at the edge of a streamed text or on the cut of a long tool output,
+secret values of 8 bytes or more replaced, also a piece of one at the edge of a streamed text or on the middle cut of a long tool output, thought or tool arguments,
 and as JSON escapes it in a tool's arguments; ids are never changed). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
 before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
 shows (a rotated file keeps that mark even when no whole entry fits): ids never start again at 1, unless the file was purged or

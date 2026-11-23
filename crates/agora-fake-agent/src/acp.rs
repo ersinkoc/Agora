@@ -300,7 +300,8 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 }
             }
             "session/load" if load_session => {
-                // ACP: the conversation is replayed as updates of the loaded session before the answer.
+                // ACP: the conversation is replayed as updates of the loaded session, answered at once after the last (as a real
+                // agent does, so the bridge may still hold the last text when the answer comes).
                 let sid = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -314,8 +315,6 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         &sid,
                         json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": line}}),
                     )?;
-                    // Each its own entry: past the bridge's 150 ms text window.
-                    std::thread::sleep(Duration::from_millis(200));
                 }
                 reply(
                     out,

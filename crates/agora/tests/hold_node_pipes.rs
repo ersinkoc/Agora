@@ -1323,13 +1323,26 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
     wait_for("both turns on disk", || {
         on_disk(&rig, &id, "hello-1") && on_disk(&rig, &id, "hello-2")
     });
-    let count = |node: &Node, text: &str| chat(node, &id).iter().filter(|e| e.text == text).count();
+    // Contained, not equal: replayed pieces may arrive joined into one entry.
+    let count = |node: &Node, text: &str| {
+        chat(node, &id)
+            .iter()
+            .filter(|e| e.text.contains(text))
+            .count()
+    };
     let on_disk_count = |text: &str| {
         std::fs::read_to_string(transcript_file(&rig, &id))
             .unwrap_or_default()
-            .matches(&format!("\"text\":\"{text}\""))
+            .matches(text)
             .count()
     };
+    let texts = |node: &Node| {
+        chat(node, &id)
+            .iter()
+            .filter(|e| e.kind == v1::ChatKind::Text as i32)
+            .count()
+    };
+    let before = texts(&node);
     drop(node);
     for round in 0..2 {
         let node = rig.node_without_holder();
@@ -1348,6 +1361,9 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
         wait_for("the resumed agent to be idle", || {
             state_of(&node, &id) == Some(AgentState::Idle)
         });
+        // Nothing of the replay was added: as many of the agent's texts as before the restart (and one per round since).
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(texts(&node), before + round, "{:#?}", chat(&node, &id));
         let word = format!("after-{round}");
         prompt(&node, &id, &word);
         wait_for("the answer after the resume", || said(&node, &id, &word));

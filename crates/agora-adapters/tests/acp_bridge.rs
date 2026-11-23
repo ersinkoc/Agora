@@ -1078,6 +1078,15 @@ fn acp_session_identity_child() {
                 );
                 continue;
             }
+            // Review of #1103 (B1): a replay that ends with text, answered at once.
+            "session/load" if sid == "text-last" => {
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"last words"}}}}),
+                );
+                json!({})
+            }
             "session/load" if sid == "replayed" => {
                 for update in [
                     json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"restored history"}}),
@@ -1295,6 +1304,26 @@ fn a_replaced_sessions_prompt_does_not_mark_an_idle_exit_as_a_turn() {
         .unwrap();
     assert_eq!(log["params"]["stage"], "idle");
     assert_eq!(log["params"]["exit_code"], "21");
+}
+
+/// Review of #1103 (B1): what an agent replays when it loads a session reaches the node before the answer to `session/start`, text
+/// it was still holding for its 150 ms window included: the node takes everything before that answer as the replay.
+#[test]
+fn a_loaded_sessions_replay_comes_before_its_answer() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    let loaded = node.call("session/start", json!({"resumeSessionId":"text-last"}));
+    assert_eq!(loaded["result"]["sessionId"], "text-last");
+    let messages = node.messages();
+    let answer = messages
+        .iter()
+        .position(|m| m.get("id") == loaded.get("id") && m.get("result").is_some())
+        .expect("the answer");
+    let history = messages
+        .iter()
+        .position(|m| m["params"]["text"]["text"] == "last words")
+        .expect("the replayed text, before the answer");
+    assert!(history < answer, "{messages:#?}");
 }
 
 #[test]

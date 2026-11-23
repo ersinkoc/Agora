@@ -42,7 +42,8 @@
 //! **Bounds** (ADR-0089 decision 2). Per agent 32 MiB by default, only lowered by the node policy `chat.history_max_bytes` (0 writes
 //! nothing); over it, the newest half is written to a new file that replaces the old one (whole lines, a header that says
 //! `truncated`). A file is removed `chat.history_days` (30 by default, only lowered; 0: once its agent ended) after its agent ended,
-//! as the session ledger says, or after its last write for an agent the ledger no longer knows; never while its agent runs or is
+//! as the session ledger says (the file's time is set to it, so it holds after the ledger forgets the agent), or after its last write
+//! for an agent the ledger no longer knows; never while its agent runs or is
 //! offered for Resume. A fresh start ("Start again") that went through moves the earlier file aside as `<id>.earlier.jsonl`
 //! (replacing an older one), which follows its agent. Over 2 GiB in all, the files of agents that are not kept go, oldest first.
 //! Leftovers of a rewrite go. Checked when the node starts and every hour. `agora history purge` removes the folder.
@@ -50,7 +51,8 @@
 //! **Secrets** (ADR-0089 decision 7). The values of the secrets this node holds (`<data>/secrets`, and the environment variables its
 //! policy passes to agents, ADR-0084), of 8 bytes or more, are replaced by `<redacted>` before a line is written: in every text, and
 //! as JSON escapes them in a tool's arguments. What an agent streams arrives in pieces and a long tool output is cut in its middle,
-//! so a piece of a value (4 bytes or more) at the edge of a text or on the cut is replaced too; a piece shorter than that is left.
+//! so a piece of a value (4 bytes or more) at the edge of a text or on the middle cut of an output, a thought or a tool's arguments
+//! is replaced too; a piece shorter than that is left.
 //! Ids (`call_id`, `approval_id`) are never changed. A secret the node does not hold cannot be found in what an agent or a tool
 //! printed; the file is as sensitive as the terminal, and its mode is what protects it.
 //!
@@ -495,10 +497,11 @@ fn redact_split(s: &mut String, known: &[String]) {
     }
 }
 
-/// A tool output the node cut (head and tail kept, `chat::MAX_OUTPUT_BYTES` in all): the head ends within 3 bytes before half of it
-/// (on a character boundary), so a value cut there is looked for on both sides of each such place.
-fn redact_cut_output(s: &mut String, known: &[String]) {
-    let half = crate::chat::MAX_OUTPUT_BYTES / 2;
+/// A text the node cut in its middle (head and tail kept, `max` bytes in all): the head ends within 3 bytes before half of it (on a
+/// character boundary), so a value cut there is looked for on both sides of each such place. Run before the whole values are
+/// replaced, which would move the cut.
+fn redact_cut(s: &mut String, max: usize, known: &[String]) {
+    let half = max / 2;
     for cut in (half.saturating_sub(3)..=half.min(s.len())).rev() {
         if !s.is_char_boundary(cut) {
             continue;
@@ -527,11 +530,23 @@ fn redacted(line: &Line, known: &[String]) -> Line {
     if let Line::Entry(e, side) = &mut line {
         // Not `call_id` or `approval_id`: ids the node matches later (a call that finishes after a restart), never a value it holds.
         // The text and the output are what an agent streams in pieces: a value split between two entries is found at their edges.
+        // Middle cuts first (a whole value replaced before them would move them): a cut tool output, and a thought or a tool's
+        // arguments as long as their cap (the node keeps their head and tail).
+        if e.output_truncated {
+            redact_cut(&mut e.output, crate::chat::MAX_OUTPUT_BYTES, known);
+        }
+        if e.kind == agora_protocol::v1::ChatKind::Thought as i32
+            && e.text.len() + 4 > crate::chat::MAX_THOUGHT_BYTES
+        {
+            redact_cut(&mut e.text, crate::chat::MAX_THOUGHT_BYTES, known);
+        }
+        if let Some((_, args)) = &mut side.tool {
+            if args.len() + 4 > crate::chat::MAX_ENTRY_BYTES {
+                redact_cut(args, crate::chat::MAX_ENTRY_BYTES, known);
+            }
+        }
         redact_split(&mut e.text, known);
         redact_split(&mut e.output, known);
-        if e.output_truncated {
-            redact_cut_output(&mut e.output, known);
-        }
         redact(&mut e.path, known);
         for v in e.params.values_mut() {
             redact(v, known);
@@ -773,7 +788,20 @@ impl Store {
                     files.push((modified, meta.len(), path, true));
                     continue;
                 }
-                Kept::EndedAt(t) => t.max(ms(modified)),
+                Kept::EndedAt(t) => {
+                    // The ledger forgets an ended agent after 14 days; the file then ages from its last write. Stamping that with
+                    // the end time keeps "after the agent ended" true then (an agent idle for long before it ended).
+                    if ms(modified) < t {
+                        // An existing file of the node's private folder, opened only to set its time (nothing is written).
+                        let _ = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .and_then(|f| {
+                                f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_millis(t))
+                            });
+                    }
+                    t.max(ms(modified))
+                }
                 Kept::Unknown => ms(modified),
             };
             if now_ms.saturating_sub(since) >= keep_ms {
@@ -1320,6 +1348,44 @@ mod tests {
             "{body}"
         );
         assert!(body.contains(&format!("a{REDACTED} the end")));
+        // A whole value in the head too: the piece on the cut is still found (the cut is looked at first).
+        let mut e = full();
+        e.output = format!(
+            "sk-very-secret-1234{}sk-very-se{}",
+            "a".repeat(half - 29),
+            "t-1234 the end"
+        );
+        e.output_truncated = true;
+        store
+            .write(&batch(
+                "b",
+                7,
+                vec![Line::Entry(Box::new(e), Side::default())],
+            ))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("b").unwrap()).unwrap();
+        assert!(
+            !body.contains("sk-very-se") && !body.contains("t-1234 the"),
+            "{body}"
+        );
+        // And a thought as long as its cap.
+        let half = crate::chat::MAX_THOUGHT_BYTES / 2;
+        let mut e = full();
+        e.kind = agora_protocol::v1::ChatKind::Thought as i32;
+        e.text = format!(
+            "{}sk-very-se{}",
+            "b".repeat(half - 10),
+            "t-1234 ".repeat(half / 7)
+        );
+        store
+            .write(&batch(
+                "c",
+                7,
+                vec![Line::Entry(Box::new(e), Side::default())],
+            ))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("c").unwrap()).unwrap();
+        assert!(!body.contains("sk-very-se"), "the head's piece");
     }
 
     /// Review of #1103 (N2, N3): a value with `"` or `\` is found where it is JSON-escaped (a tool's arguments); ids are never
@@ -1392,6 +1458,12 @@ mod tests {
         };
         // Nothing is old yet; the leftover goes.
         assert_eq!(store.sweep(&status, SystemTime::now()), 1);
+        // The idle agent's file now carries its end time, so it keeps it once the ledger forgot the agent.
+        let stamped = std::fs::metadata(store.path("idle-long").unwrap())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(ms(stamped), ms(later) - DAY_MS);
         // Three days on: the unknown agents' files go (both of the fresh agent's), the others stay.
         assert_eq!(store.sweep(&status, later), 3);
         for kept in ["running", "offered", "idle-long"] {

@@ -333,10 +333,11 @@ references are at main `9760e901`.
     failed write drops the batch (not retried), keeps the ring and says `chat.history_not_saved` once in that conversation.
   - Secrets: the node's stored values and the environment variables its policy passes to agents, of 8 bytes or more, in every text and
     JSON-escaped in a tool's arguments; a piece of 4 bytes or more at the edge of a text (a value streamed across two entries) or on the
-    cut of a long output; ids never changed.
+    middle cut of a long output, thought or tool arguments; ids never changed.
   - Bounds: `chat.history_max_bytes` (32 MiB, only lowered, as ADR-0089 decision 2 says "lowers ... the defaults"; the newest half
     kept in a new file that says it was cut), `chat.history_days` (30, only lowered; 0: once the agent ended), counted from when the agent
-    ended as the ledger says, never for one running or offered for Resume; 2 GiB per node; `agora history purge`.
+    ended as the ledger says (the file's time is set to it, so it holds after the ledger forgets the agent), never for one running or
+    offered for Resume; 2 GiB per node; `agora history purge`.
   - Seeding: the ring is filled from the file's end (at most 4 MiB) on take-up, before the ticker reads the holder, and on resume (read
     before the resume, applied under the supervisor's lock once it went through, so a refused one changes nothing). Seeded entries are
     held to the live path's shapes and bounds, ids below 2^52. A fresh start's file is moved aside (`<id>.earlier.jsonl`, replacing an
