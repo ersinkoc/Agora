@@ -48,6 +48,9 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+    // The team chat draws the sender's avatar from its key, and names the other machine of a message between machines.
+    expect(m.map((x) => x.fromId)).toEqual(['a/x', 'a/x']);
+    expect(m.map((x) => x.toMachine)).toEqual(['b', undefined]);
   });
 
   it('lists a message between machines once, from its sender, marked, whichever copy comes first (#905)', () => {

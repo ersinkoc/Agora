@@ -2,15 +2,17 @@
 //! that runs the hub. It talks to the **running** hub as the owner (the token in `<hub dir>/token`, the same way as every owner
 //! command that is not a database read), because the switch and the waiting requests live in the hub's memory.
 //!
-//! `open` is also the owner's screen for the moment: it stays in the foreground, shows each machine that asks to join with its
-//! number, and asks whether the number on that machine is the same. The window cards (web, terminal) are a later step; until then
-//! this is where the owner compares and answers. After one machine was approved it closes the switch again.
+//! `open` is also an owner's screen: it stays in the foreground, shows each machine that asks to join with its number, and asks
+//! whether the number on that machine is the same. The owner's windows (web, `agora tui`) show the same cards and may answer first:
+//! the question here then ends and says so (#942). After one machine was approved, here or in a window, the hub is closed to new
+//! machines again (the hub does that itself when it takes the approval) and this ends.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agora_i18n::key;
+use agora_platform::Confirmation;
 use agora_protocol::v1::{self, command_ok, command_request::Command};
 use agora_tui::client::{Hub, PairNote, Session, Update};
 
@@ -32,6 +34,11 @@ const MIN_THINK: Duration = Duration::from_millis(700);
 
 /// How many answers that came too fast are ignored (and asked again) before the request is denied.
 const TOO_FAST_TRIES: u32 = 3;
+
+/// The wait before an answer counts when the question moved to another machine by itself (#942): the request asked about before
+/// ended somewhere else while the owner may have been typing an answer to it, so a key meant for that one must not answer this one.
+/// A key sooner than this is thrown away and the wait starts again, as often as it happens (never a deny).
+const NEXT_THINK: Duration = Duration::from_secs(2);
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -480,7 +487,7 @@ fn open(
     say.out(key!("pair-open-waiting"), &[]);
     let _ = std::io::stdout().flush();
     let until = minutes.map(|m| Instant::now() + Duration::from_secs(m * 60));
-    watch(say, &mut session, until)
+    watch(say, &mut session, until, status.closes_at_ms)
 }
 
 /// What the owner answered to a question.
@@ -536,37 +543,143 @@ pub(crate) fn ask_line(say: &Say, question: &str) -> Option<String> {
     None
 }
 
-/// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the terminal went.
-fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
-    let mut waiting: std::collections::VecDeque<v1::PairRequested> = Default::default();
-    let mut ended: std::collections::HashSet<Vec<u8>> = Default::default();
-    let mut last_status = Instant::now();
-    loop {
-        // A connection that ended answers at once, so carrying on would spin and wait for a hub that is gone.
-        if let Update::Closed = session.next(Duration::from_millis(250)) {
-            return fail_hub(say, "client.unreachable");
+/// How a question about a card ended.
+enum CardAnswer {
+    /// The owner answered here.
+    Said(Answer),
+    /// The request ended before an answer here (`PairOutcome`): the owner answered in a window, it ran out, the machine stopped
+    /// asking, or the hub closed to new machines (#942).
+    Elsewhere(i32),
+    /// The connection to the hub ended.
+    HubGone,
+}
+
+/// The owner's screen: the connection to the hub, the cards waiting their turn and how the requests the hub told of ended.
+struct Board<'a> {
+    session: &'a mut Session,
+    waiting: std::collections::VecDeque<v1::PairRequested>,
+    ended: std::collections::HashMap<Vec<u8>, i32>,
+    gone: bool,
+    /// The last question ended without an answer typed here (the request was decided somewhere else, ran out or closed), so the
+    /// next one comes without a keystroke: it is set apart and answered only after [`NEXT_THINK`]. Cleared by an answer typed here.
+    moved_on: bool,
+}
+
+impl Board<'_> {
+    /// Takes in what the hub sent within `wait`: new machine cards wait their turn, endings are remembered. False once the
+    /// connection ended (a connection that ended answers at once, so carrying on would spin and wait for a hub that is gone).
+    fn pump(&mut self, wait: Duration) -> bool {
+        if self.gone {
+            return false;
         }
-        for note in session.take_pair_notes() {
+        if let Update::Closed = self.session.next(wait) {
+            self.gone = true;
+            return false;
+        }
+        for note in self.session.take_pair_notes() {
             match note {
                 PairNote::Requested(c) if c.kind == v1::PairKind::Machine as i32 => {
-                    if !waiting.iter().any(|w| w.pair_id == c.pair_id) {
-                        waiting.push_back(c);
+                    if !self.waiting.iter().any(|w| w.pair_id == c.pair_id) {
+                        self.waiting.push_back(c);
                     }
                 }
-                // A browser asks to sign in: that is for a window (a later step); it waits there.
+                // A browser asks to sign in: that is for a window; it waits there.
                 PairNote::Requested(_) => {}
                 PairNote::Decided(d) => {
-                    ended.insert(d.pair_id);
+                    self.ended.insert(d.pair_id, d.outcome);
                 }
             }
         }
+        true
+    }
+
+    /// Asks `question` about the request `pair_id` at the terminal (the discipline of [`ask`]: the terminal only, typed-ahead input
+    /// discarded, a first key that comes too fast is ignored three times, then no) while the hub is still listened to, so the
+    /// question ends as soon as that request ended somewhere else: answered in a window, run out, or closed (#942).
+    ///
+    /// `moved_on`: the question came without a keystroke, after another one ended elsewhere. Then the first key must come at least
+    /// [`NEXT_THINK`] after the question (instead of [`MIN_THINK`]); one that comes sooner is thrown away with everything typed
+    /// before it, and the question and its wait start again, however often (a key meant for the last request never denies this one).
+    fn ask(&mut self, say: &Say, question: &str, pair_id: &[u8], moved_on: bool) -> CardAnswer {
+        let yes = say.text(key!("cli-devices-yes"), &[]);
+        let think = if moved_on { NEXT_THINK } else { MIN_THINK };
+        let (mut tries, mut told) = (0, false);
+        while tries < TOO_FAST_TRIES {
+            let mut out = std::io::stdout();
+            let _ = write!(out, "{question} ");
+            let _ = out.flush();
+            let read = {
+                let mut stop = || {
+                    // Everything the hub sent so far (a frame per call; nothing waits here).
+                    for _ in 0..8 {
+                        if !self.pump(Duration::ZERO) {
+                            return true;
+                        }
+                    }
+                    self.ended.contains_key(pair_id)
+                };
+                agora_platform::read_confirmation_until(think, &mut stop)
+            };
+            let _ = writeln!(out);
+            if self.gone {
+                return CardAnswer::HubGone;
+            }
+            match read {
+                Ok(Confirmation::Line(line)) => {
+                    return CardAnswer::Said(if crate::trustcli::is_yes(&line, &yes) {
+                        Answer::Yes
+                    } else {
+                        Answer::No
+                    })
+                }
+                Ok(Confirmation::TooSoon) if moved_on => {
+                    if !std::mem::replace(&mut told, true) {
+                        say.out(key!("pair-next-too-fast"), &[]);
+                    }
+                }
+                Ok(Confirmation::TooSoon) => {
+                    tries += 1;
+                    say.out(key!("pair-too-fast"), &[]);
+                }
+                Ok(Confirmation::Stopped) => {
+                    return self
+                        .ended
+                        .get(pair_id)
+                        .map_or(CardAnswer::HubGone, |o| CardAnswer::Elsewhere(*o))
+                }
+                Err(_) => return CardAnswer::Said(Answer::Gone),
+            }
+        }
+        CardAnswer::Said(Answer::No)
+    }
+}
+
+/// The owner's screen: cards in, answers out, until a machine was approved (here or in a window), the time given ended, the switch
+/// closed or the terminal went.
+///
+/// `opened_until` is the `closes_at_ms` the hub answered to this command's `PairOpen`: it names the opening this command made (any
+/// other opening has another deadline), so the command never closes an opening that is not its own.
+fn watch(say: &Say, session: &mut Session, until: Option<Instant>, opened_until: u64) -> ExitCode {
+    let mut board = Board {
+        session,
+        waiting: Default::default(),
+        ended: Default::default(),
+        gone: false,
+        moved_on: false,
+    };
+    let mut last_status = Instant::now();
+    loop {
+        if !board.pump(Duration::from_millis(250)) {
+            return fail_hub(say, "client.unreachable");
+        }
         if until.is_some_and(|t| Instant::now() >= t) {
-            return close_and_say(say, session, key!("pair-time-up"));
+            return time_up(say, board.session, opened_until);
         }
         // The switch may have been closed from somewhere else, or ran out.
         if last_status.elapsed() >= STATUS_EVERY {
             last_status = Instant::now();
-            let still_open = session
+            let still_open = board
+                .session
                 .command_info("", Command::PairStatus(v1::PairStatus {}), WAIT)
                 .map_err(|e| e.code)
                 .and_then(|ok| status_of(Ok(ok)))
@@ -576,11 +689,16 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         }
-        while let Some(card) = waiting.pop_front() {
-            if ended.contains(&card.pair_id) {
+        while let Some(card) = board.waiting.pop_front() {
+            if board.ended.contains_key(&card.pair_id) {
                 continue;
             }
             let number = grouped(&card.number);
+            // A question that comes by itself, after the last one ended elsewhere, is set apart so it is not taken for that one.
+            let moved_on = board.moved_on;
+            if moved_on {
+                say.out(key!("pair-card-next"), &[]);
+            }
             say.out(
                 key!("pair-card"),
                 &[
@@ -590,35 +708,65 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
                     ("number", number.as_str().into()),
                 ],
             );
-            match ask(say, &say.text(key!("pair-card-ask"), &[])) {
-                Answer::Gone => {
+            let question = say.text(key!("pair-card-ask"), &[]);
+            let answer = board.ask(say, &question, &card.pair_id, moved_on);
+            let approval = match answer {
+                CardAnswer::HubGone => return fail_hub(say, "client.unreachable"),
+                CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
+                CardAnswer::Said(Answer::Gone) => {
                     say.out(key!("pair-input-ended"), &[]);
                     return ExitCode::SUCCESS;
                 }
-                Answer::No => {
-                    match session.command_info(
+                CardAnswer::Said(Answer::No) => {
+                    match board.session.command_info(
                         "",
                         Command::PairDeny(v1::PairDeny {
                             pair_id: card.pair_id.clone(),
                         }),
                         WAIT,
                     ) {
-                        Ok(_) => say.out(key!("pair-denied-now"), &[]),
-                        Err(e) => refusal(say, &e),
+                        Ok(_) => {
+                            say.out(key!("pair-denied-now"), &[]);
+                            board.moved_on = false;
+                            continue;
+                        }
+                        Err(e) => match refused(say, &mut board, &card.pair_id, &e) {
+                            Approval::Refused => {
+                                board.moved_on = false;
+                                continue;
+                            }
+                            other => other,
+                        },
                     }
                 }
-                Answer::Yes => match approve(say, session, &card) {
-                    Approval::Done => {
-                        // One machine per opening: close the switch again, which is the safer thing to forget.
-                        say.out(
-                            key!("pair-approved"),
-                            &[("name", card.name.as_str().into())],
-                        );
-                        return close_and_say(say, session, key!("pair-closed-after"));
+                CardAnswer::Said(Answer::Yes) => approve(say, &mut board, &card),
+            };
+            match approval {
+                Approval::Done => {
+                    say.out(
+                        key!("pair-approved"),
+                        &[("name", card.name.as_str().into())],
+                    );
+                    return closed_after_approval(say, board.session, opened_until);
+                }
+                Approval::Elsewhere(outcome) => {
+                    // The next question comes without a keystroke.
+                    board.moved_on = true;
+                    let name = [("name", card.name.as_str().into())];
+                    match v1::PairOutcome::try_from(outcome) {
+                        Ok(v1::PairOutcome::Approved) => {
+                            say.out(key!("pair-card-approved-elsewhere"), &name);
+                            return closed_after_approval(say, board.session, opened_until);
+                        }
+                        Ok(v1::PairOutcome::Denied) => {
+                            say.out(key!("pair-card-denied-elsewhere"), &name);
+                        }
+                        _ => say.out(key!("pair-card-ended"), &name),
                     }
-                    Approval::Refused => {}
-                    Approval::Stop => return ExitCode::SUCCESS,
-                },
+                }
+                Approval::Refused => board.moved_on = false,
+                Approval::Stop => return ExitCode::SUCCESS,
+                Approval::HubGone => return fail_hub(say, "client.unreachable"),
             }
         }
     }
@@ -628,10 +776,13 @@ enum Approval {
     Done,
     Refused,
     Stop,
+    /// The request ended somewhere else before an answer here reached the hub (`PairOutcome`).
+    Elsewhere(i32),
+    HubGone,
 }
 
 /// Approves the card; if the name belongs to a machine that already joined, asks once more whether to replace it.
-fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approval {
+fn approve(say: &Say, board: &mut Board<'_>, card: &v1::PairRequested) -> Approval {
     let send = |s: &mut Session, replace: bool| {
         s.command_info(
             "",
@@ -642,36 +793,141 @@ fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approv
             WAIT,
         )
     };
-    match send(session, false) {
+    match send(board.session, false) {
         Ok(_) => Approval::Done,
         Err(e) if e.code == "pair.state" && state_is(&e, "name_in_use") => {
             let question = say.text(
                 key!("pair-replace-ask"),
                 &[("name", card.name.as_str().into())],
             );
-            match ask(say, &question) {
-                Answer::Gone => {
+            // Asked because of a key typed here, so the ordinary rules.
+            match board.ask(say, &question, &card.pair_id, false) {
+                CardAnswer::HubGone => Approval::HubGone,
+                CardAnswer::Elsewhere(outcome) => Approval::Elsewhere(outcome),
+                CardAnswer::Said(Answer::Gone) => {
                     say.out(key!("pair-input-ended"), &[]);
                     Approval::Stop
                 }
-                Answer::No => {
+                CardAnswer::Said(Answer::No) => {
                     // The request stays pending on the hub; this screen leaves it to its own time.
                     say.out(key!("pair-left-waiting"), &[]);
                     Approval::Refused
                 }
-                Answer::Yes => match send(session, true) {
+                CardAnswer::Said(Answer::Yes) => match send(board.session, true) {
                     Ok(_) => Approval::Done,
-                    Err(e) => {
-                        refusal(say, &e);
-                        Approval::Refused
-                    }
+                    Err(e) => refused(say, board, &card.pair_id, &e),
                 },
             }
         }
-        Err(e) => {
-            refusal(say, &e);
-            Approval::Refused
+        Err(e) => refused(say, board, &card.pair_id, &e),
+    }
+}
+
+/// The hub refused an answer typed here. When that is because the request was answered or ended somewhere else just before (the
+/// window was quicker), its ending is on its way to this screen (window notices come at most once a second): wait for it a moment
+/// and say how it ended instead of the refusal. Any other refusal is said as it is.
+fn refused(say: &Say, board: &mut Board<'_>, pair_id: &[u8], e: &v1::ErrorInfo) -> Approval {
+    let not_pending = matches!(
+        e.code.as_str(),
+        "pair.state" | "pair.unknown" | "pair.expired" | "pair.closed"
+    ) && !state_is(e, "name_in_use");
+    if not_pending {
+        let end = Instant::now() + Duration::from_millis(1500);
+        while !board.ended.contains_key(pair_id) && Instant::now() < end {
+            if !board.pump(Duration::from_millis(100)) {
+                return Approval::HubGone;
+            }
         }
+        if let Some(outcome) = board.ended.get(pair_id) {
+            return Approval::Elsewhere(*outcome);
+        }
+    }
+    refusal(say, e);
+    Approval::Refused
+}
+
+/// Where the hub's switch is, measured against the opening this command made.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// Closed: by an approval (a hub with #942 closes itself when it takes one), by a window, or by its time.
+    Closed,
+    /// Still the opening this command made (the same deadline `PairOpen` answered).
+    Ours,
+    /// Open, but by another opening (a window or another `agora pair open` opened it again): never this command's to close.
+    Other { closes_at_ms: u64 },
+    /// The hub's answer did not come or could not be read: nothing is closed on a guess.
+    Unknown(String),
+}
+
+/// Reads a `PairStatus` answer against `opened_until`, the `closes_at_ms` of this command's own `PairOpen`. Every opening has its
+/// own deadline (the hub's clock in milliseconds, set again by each `PairOpen`), so the same deadline means the same opening.
+fn opening_of(status: Result<v1::PairStatusResult, String>, opened_until: u64) -> Opening {
+    match status {
+        Err(e) => Opening::Unknown(e),
+        Ok(s) if !s.open => Opening::Closed,
+        Ok(s) if s.closes_at_ms == opened_until => Opening::Ours,
+        Ok(s) => Opening::Other {
+            closes_at_ms: s.closes_at_ms,
+        },
+    }
+}
+
+fn opening_now(session: &mut Session, opened_until: u64) -> Opening {
+    let status = session
+        .command_info("", Command::PairStatus(v1::PairStatus {}), WAIT)
+        .map_err(|e| e.code)
+        .and_then(|ok| status_of(Ok(ok)));
+    opening_of(status, opened_until)
+}
+
+fn say_other_or_unknown(say: &Say, opening: &Opening) -> ExitCode {
+    match opening {
+        Opening::Other { closes_at_ms } => {
+            say.out(
+                key!("pair-reopened-elsewhere"),
+                &[("minutes", minutes_left(*closes_at_ms).into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Opening::Unknown(reason) => {
+            say.err(
+                key!("pair-status-unknown"),
+                &[("reason", reason.as_str().into())],
+            );
+            ExitCode::from(1)
+        }
+        Opening::Closed | Opening::Ours => ExitCode::SUCCESS,
+    }
+}
+
+/// After an approval, here or in a window: one machine per opening, which the hub keeps itself since #942 (it closes the switch when
+/// it takes the approval). So on such a hub this sends no `PairClose` at all: it reads the status and says the hub is closed.
+/// - A hub that still has **this command's own opening** open after an approval is one from before #942, the only kind that leaves
+///   it open: that opening is closed from here (the legacy fallback). Known limit: reading the status and then closing are two
+///   commands, so an opening made between them (within that round trip, on such an old hub only) would be closed too.
+/// - An opening that is **not this command's** (the owner opened a new round in a window meanwhile) is left alone and the screen says
+///   so; and when the status cannot be read nothing is closed and the owner is told to look (#942, Codex review).
+fn closed_after_approval(say: &Say, session: &mut Session, opened_until: u64) -> ExitCode {
+    match opening_now(session, opened_until) {
+        Opening::Closed => {
+            say.out(key!("pair-closed-after"), &[]);
+            ExitCode::SUCCESS
+        }
+        Opening::Ours => close_and_say(say, session, key!("pair-closed-after")),
+        other => say_other_or_unknown(say, &other),
+    }
+}
+
+/// The time given with `--minutes` is up: this command closes its own opening, and only that (the same status-then-close limit as the
+/// legacy fallback above). One that is already closed, or that a window opened again, is not this command's to close.
+fn time_up(say: &Say, session: &mut Session, opened_until: u64) -> ExitCode {
+    match opening_now(session, opened_until) {
+        Opening::Closed => {
+            say.out(key!("pair-closed-now"), &[]);
+            ExitCode::SUCCESS
+        }
+        Opening::Ours => close_and_say(say, session, key!("pair-time-up")),
+        other => say_other_or_unknown(say, &other),
     }
 }
 
@@ -699,6 +955,31 @@ fn close_and_say(say: &Say, session: &mut Session, why: &'static str) -> ExitCod
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// #942 Codex review: only the opening this command made is ever its to close; a closed hub, another opening, and a status that
+    /// did not come are told apart.
+    #[test]
+    fn only_this_commands_own_opening_is_its_to_close() {
+        let st = |open: bool, closes_at_ms: u64| {
+            Ok(v1::PairStatusResult {
+                open,
+                closes_at_ms,
+                pending: 0,
+            })
+        };
+        assert_eq!(opening_of(st(false, 0), 5_000), Opening::Closed);
+        assert_eq!(opening_of(st(true, 5_000), 5_000), Opening::Ours);
+        assert_eq!(
+            opening_of(st(true, 9_000), 5_000),
+            Opening::Other {
+                closes_at_ms: 9_000
+            }
+        );
+        assert_eq!(
+            opening_of(Err("client.unreachable".into()), 5_000),
+            Opening::Unknown("client.unreachable".into())
+        );
+    }
 
     #[test]
     fn a_number_is_shown_in_two_groups() {

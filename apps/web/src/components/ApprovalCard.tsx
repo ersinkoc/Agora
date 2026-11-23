@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef } from 'react';
+import { useId, useRef } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { approvalName } from '../net/approvalText';
@@ -6,11 +6,11 @@ import { detailText } from '../net/tool';
 import { visible, type ApprovalModel } from '../net/view';
 import { kindOf } from './AgentTile';
 import { AlwaysNote, AlwaysOnly, alwaysNoteId, type AlwaysSurface } from './AllowAlways';
-import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, useNarrow } from './ApprovalRequest';
+import { ApprovalRequest, AnswerButtons, ASK_ICON, askKind, askTitle, type ApprovalDensity, useNarrowPane } from './ApprovalRequest';
 import { Icon } from './Icon';
 import { AgentAvatar } from './kit';
-import { StartApproval, type StartChoice } from './StartApproval';
-import { SkipApproval } from './SkipApproval';
+import { ReviewableRequest } from './ReviewRequest';
+import type { StartChoice } from './StartApproval';
 import { requestShown, useAnswerGuard, type AnswerGuard, type AnswerResult } from './useAnswerGuard';
 
 // The short form names the command or file; what the agent asked for, in full, stays one click (or key) away before Allow.
@@ -44,11 +44,7 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
   onOpen?: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const narrow = useNarrow(host) && !!narrowable;
-  // The buttons move under the text when the pane gets narrow (and back): a ready Allow must not move under a click, so the dwell restarts.
-  const drawn = useRef(narrow);
-  const { restart } = guard;
-  useLayoutEffect(() => { if (drawn.current !== narrow) { drawn.current = narrow; restart(); } }, [narrow, restart]);
+  const narrow = useNarrowPane(host, narrowable, guard.restart);
   const name = agent?.name || approvalName(x);
   const d = x.detail ? detailText(x.detail) : '';
   const ask = visible(d ? `${x.action} · ${d}` : x.action);
@@ -93,12 +89,10 @@ export function ApprovalCard({ approval, busy, agent, guard, onResolve, onOpen }
 }) {
   const own = useOwnGuard(approval, agent);
   const g = guard ?? own;
-  const send = (go: () => AnswerResult) => g.answer(approval.id, go);
-  // ADR-0057: a request to start an agent shows everything it asks for.
-  if (approval.start) return <StartApproval approval={approval} start={approval.start} busy={busy || !g.canAnswer(approval.id)} onResolve={(ok, choice) => send(() => onResolve(ok, choice))} />;
-  // ADR-0090 Amendment A: a switch to a mode that skips permission questions, in the machine's own rendering.
-  // It keeps its own guards (its Allow dwell and one-click lock, and Deny always available: main-window.md), not this list's.
-  if (approval.skip || approval.skipUnknown) return <SkipApproval approval={approval} busy={busy} onResolve={(ok) => onResolve(ok)} />;
+  // ADR-0057 and ADR-0090 Amendment A (redesign PR 5): a request to start an agent, or to let one act without asking, is a short card with
+  // Review, which shows everything it asks for before Allow. A start's answers go through this list's guard; a switch keeps its own
+  // guards (its Allow dwell and one-click lock, and Deny always available: main-window.md), not this list's.
+  if (approval.start || approval.skip || approval.skipUnknown) return <ReviewableRequest approval={approval} agent={agent} guard={g} busy={busy} onOpen={onOpen} onResolve={onResolve} />;
   return <PlainRequest approval={approval} density="card" surface="card" agent={agent} busy={busy} guard={g} onOpen={onOpen}
-    onAnswer={(ok, always) => send(() => (always ? onResolve(true, undefined, true) : onResolve(ok)))} />;
+    onAnswer={(ok, always) => g.answer(approval.id, () => (always ? onResolve(true, undefined, true) : onResolve(ok)))} />;
 }

@@ -93,8 +93,8 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Failed | danger red (ADR-0102) | cross in a ring | none |
 
 An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
-status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2); the screens that still draw it in neutral ink (the
-agent list, the phone list) switch over as they adopt the kit.
+status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2) and the phone's lists (PR 13); the screens that still
+draw it in neutral ink (the agent list) switch over as they adopt the kit.
 
 ### Agent identity
 - Each agent kind shows its brand mark (provider logos used per their trademark guidelines; models.dev provides
@@ -121,9 +121,13 @@ agent list, the phone list) switch over as they adopt the kit.
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
   reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
-  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Until the rest follow,
-  existing overlays use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label.
-  Amber means only "needs you" everywhere (PR 3).
+  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8), and
+  My machines and its forget dialog have (PR 9), their animated links gone. The Agents list, the pane tabs and bars, the rail and the file
+  rows carry the avatar and a tinted selection with no bar (PR 7). The chat view, the board and the Usage panel are on the kit
+  (PR 12; `docs/ux/screens/polish-redesign-*`): one status pill, the agent avatar in each turn, the acts-freely sign as a red-tinted tag
+  beside Mode, board columns with a mark and hue, Usage stat tiles. Until the rest follow, existing overlays (except the command
+  palette) use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label. Amber
+  means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.
@@ -132,21 +136,27 @@ agent list, the phone list) switch over as they adopt the kit.
 - **Tokens first:** colors, type, spacing, radius, motion, and state colors defined once in `design/tokens`
   and generated for the web client (CSS variables), desktop, and TUI (truecolor/256-color mapping).
 - **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
-  the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
+  the person's own, checked for WCAG AA contrast before they are shown (the derived colours below too, as a warning). Text and spacing sizes are rem-based so a theme's
   text size (and the browser's) scales them; components never use pixel font sizes.
 - **Widget kit** (`apps/web/src/components/kit/`): one widget per job, and every new or changed screen reuses them instead of setting
   its own padding, border or colour:
   Button (primary, secondary, ghost, danger, danger-ghost; sm and md), StatusPill and Pill, Tag, AgentAvatar (the agent's colour and
   the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
-  SettingRow, SegmentedControl (a radio group: arrows move and choose), Toggle (a switch; red when it lets an agent act without asking),
+  SettingRow, SegmentedControl (a radio group: arrows move and choose; red when its chosen item lets an agent act without asking), Toggle (a switch; red when it lets an agent act without asking),
   StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
-  (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
+  (icon, title, one line, at most one action; Home's first run, the one page-sized empty state, has a primary and a secondary action),
+  CopyChip (a command or id in mono with Copy; where the clipboard is missing or refuses, it selects the text and says to copy it with
+  the keyboard), Tooltip, KeyValue and ConfirmDialog (a question before something destructive: an overlay with a red icon chip, the safe
+  answer first and focused, the destructive answer as a red button). They use tokens only and logical properties, grow to the 44 px
   touch target on a touch screen, and respect reduced motion.
 - **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
   (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed
   per scheme in `tokens.css`, never the theme's on-accent, so a theme cannot make a filled danger button unreadable), `--surface-raised`,
-  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint reaches 4.5:1 in every built-in theme, and control indicators (a switch's track and thumb, a
-  filled button, a selected ring, the focus ring) reach 3:1; a test computes both from the real tokens. The `--line-*` hairlines are
+  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint, the red on every surface and an agent's initial on its badge reach 4.5:1 in every built-in
+  theme, and control indicators (a switch's track and thumb, a filled button, a selected ring, the focus ring, a role's icon on its chip)
+  reach 3:1; a test computes both from the real tokens. The theme editor computes the same pairs from one shared table
+  (`themes/tints.ts`) for a person's own theme and warns about any below its minimum (`themes.md`); the test holds that table equal to
+  the kit's rules. The `--line-*` hairlines are
   decoration around a tinted surface whose icon and words carry the meaning, never the only sign of a control or a state, so they are
   only held visible (about 1.5–2:1), not to 3:1.
 - **Component gallery:** every component rendered in all states, both themes, and an RTL locale; this is the

@@ -79,8 +79,12 @@ try {
   await ms.init();
   const asked = ms.tool('agent_start', { kind: 'fake-acp', prompt: 'help with the tests' }, 120000);
   await step('the helper request is answered in the window', async () => {
-    await page.getByText(/asks to start fake-acp/).first().waitFor({ timeout: 30000 });
-    await page.getByRole('button', { name: 'Allow', exact: true }).locator('visible=true').first().click();
+    await page.getByText(/asks to start a fake-acp/).first().waitFor({ timeout: 30000 });
+    // Redesign PR 5: the card is a summary; Allow is in Review, after its own dwell (approvals.md "Start and switch requests").
+    await page.getByRole('button', { name: /^Read the whole request from/ }).locator('visible=true').first().click();
+    const review = page.locator('[data-review-dialog]');
+    await review.getByRole('button', { name: 'Allow', exact: true }).and(page.locator(':enabled')).waitFor({ timeout: 5000 });
+    await review.getByRole('button', { name: 'Allow', exact: true }).click();
   });
   const helper = await asked.catch(e => ({ error: true, value: e.message }));
   check(!helper.error && /agent-\d+/.test(helper.value?.agent_id ?? ''), `the helper started: ${JSON.stringify(helper.value)}`);

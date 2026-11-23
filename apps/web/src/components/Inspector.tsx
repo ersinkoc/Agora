@@ -13,6 +13,7 @@ import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
 import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
+import { TeamChat } from './TeamChat';
 
 import { PairCards, type PairingUi } from './Pairing';
 import { pathParts } from '../net/paneTools';
@@ -86,7 +87,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
     {open && <section ref={panel} tabIndex={-1} className="inspector__panel" id="inspector-panel" role="tabpanel" aria-labelledby={`rail-${active}`}
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }}>
       <div className="flex h-9 flex-none items-center justify-between gap-2 border-b border-line ps-3 pe-1">
-        <h2 className="m-0 truncate">{label}</h2>
+        <h2 className="panel-title">{label}</h2>
         <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -141,9 +142,10 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
   useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
-  // An agent is listed once: by its request's card when it has one (the card opens the agent), else by its row (it waits in its terminal).
-  // A start or a switch to act without asking keeps the row until those cards can open the agent themselves (redesign PR 5).
-  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.start && !x.skip && !x.skipUnknown);
+  // An agent is listed once: by its request's card when it has one (the card opens the agent: a start's and a switch's too, redesign PR 5),
+  // else by its row (it waits in its terminal). A switch's card of a shape this window does not understand can be dismissed here, so its
+  // agent keeps its row.
+  const carded = (id: string) => approvals.some((x) => x.agentId === id && !x.skipUnknown);
   const agentOf = (id: string) => fleet.find((a) => a.id === id) ?? attention.find((a) => a.id === id);
   // T44 (`useAnswerGuard`, as Home's queue): the cards' answers do nothing for a short dwell after anything on this list moved or changed
   // (the rows, the notice and the machines asking to join above the cards; a card's request, agent and status), after the person came
@@ -168,14 +170,9 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         </li>)}
       </ul>)}
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
-    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <ul className="m-0 grid list-none gap-2 p-0">
-        {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
-          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}{m.via ? <span className="ide-chip ms-1.5">{t('message-via', { machine: m.via })}</span> : null}</div>
-          <div className="mt-1 break-words text-muted">{m.body}</div>
-        </li>)}
-      </ul>)}
+    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <TeamChat messages={messages} fleet={fleet} now={now} />)}
     {tab === 'usage' && <UsagePanel fleet={fleet} now={now} />}
-    {tab === 'board' && boards.length === 0 && <p className="muted">{t('layout-board-empty')}</p>}
+    {tab === 'board' && boards.length === 0 && <EmptyState icon="board" title={t('empty-board-title')} hint={t('empty-board-hint')} />}
   </>;
 }
 

@@ -411,14 +411,14 @@ describe('start a new agent for the task', () => {
     expect(dialog().textContent).toContain('No agent of shop is running on a connected machine that can take tasks. Start one for this task.');
     const main = dialog().querySelector('[data-give-start]') as HTMLButtonElement;
     expect(main.textContent).toBe('Start a new agent for this task');
-    expect(main.className).toContain('button--primary');
+    expect(main.className).toContain('kit-btn--primary');
     expect(main.className).toContain('min-h-11');
     act(() => root.unmount());
     root = createRoot(host);
     render(<GiveDialog task={theTask} give={withStart([agent('n1/a-1')], vi.fn())} onClose={() => {}} />);
     const entry = dialog().querySelector('[data-give-start]') as HTMLButtonElement;
     expect(entry.textContent).toBe('Start a new agent for this task');
-    expect(entry.className).not.toContain('button--primary');
+    expect(entry.className).not.toContain('kit-btn--primary');
     expect(entry.className).toContain('min-h-11');
     // Under the list of agents, not instead of it.
     expect(dialog().querySelector('[data-agent-id]')).not.toBeNull();
@@ -455,7 +455,8 @@ describe('start a new agent for the task', () => {
     expect(button('Start', win)).toBeUndefined();
     click(button('Use this folder', win));
     await flush();
-    const radios = [...startWindow()!.querySelectorAll('[role=radiogroup] [role=radio]')].map((r) => r.textContent);
+    // An agent card is named by the kind's name alone (its letter and its Terminal or Chat tag are not part of the name).
+    const radios = [...startWindow()!.querySelectorAll('[role=radiogroup] [role=radio]')].map((r) => r.getAttribute('aria-label') ?? r.textContent);
     expect(radios).toContain('Claude Code');
     expect(radios).not.toContain('Shell'); // a plain terminal cannot take a task
   });

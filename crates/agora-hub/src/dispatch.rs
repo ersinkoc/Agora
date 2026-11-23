@@ -271,6 +271,59 @@ mod tests {
         );
     }
 
+    /// #1044: clients tell the hub's refusal for a person's role from a machine's refusal for a limited device by `action`: the hub names
+    /// the refused command's schema name, a node names its own lowercase action (`directory`, `grant.create`, `approval.resolve`). The
+    /// window and the terminal client word a start, a folder, a resume and an answer for the person when it is the schema name.
+    #[test]
+    fn a_refusal_for_a_persons_role_names_the_refused_command_by_its_schema_name() {
+        let member = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Member)
+        };
+        let scope = Scope::from_view(
+            member.projects.clone().unwrap(),
+            &crate::projection::View::default(),
+        );
+        let commands = [
+            ("AgentLaunch", C::AgentLaunch(v1::AgentLaunch::default())),
+            ("AgentStart", C::AgentStart(v1::AgentStart::default())),
+            ("AgentResume", C::AgentResume(v1::AgentResume::default())),
+            (
+                "DirectoryInspect",
+                C::DirectoryInspect(v1::DirectoryInspect::default()),
+            ),
+            (
+                "DirectoryList",
+                C::DirectoryList(v1::DirectoryList::default()),
+            ),
+            (
+                "ApprovalResolve",
+                C::ApprovalResolve(v1::ApprovalResolve::default()),
+            ),
+        ];
+        for (name, command) in commands {
+            let refused = Route::Forbidden {
+                action: name.into(),
+            };
+            assert_eq!(
+                route(&who(Role::Viewer), None, &req("n1", command.clone())),
+                refused
+            );
+            assert_eq!(route(&member, Some(&scope), &req("n1", command)), refused);
+        }
+        // What the window asks for its cost is the owner's only (it stops asking when the hub says the session is not the owner's).
+        assert_eq!(
+            route(
+                &member,
+                Some(&scope),
+                &req("", C::UsageReport(v1::UsageReport::default()))
+            ),
+            Route::Forbidden {
+                action: "UsageReport".into()
+            }
+        );
+    }
+
     /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a person give 8 tasks a minute, no more,
     /// however many windows or connections they use.
     #[test]

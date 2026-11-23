@@ -1043,6 +1043,7 @@ impl Pairing {
 
     /// Approve: terminal and one-shot. Only a request that is still pending and inside its time, and not while another approval for
     /// the same node id is waiting or being issued: only one of them could get the certificate (`name_in_use`, it stays pending, F811).
+    /// An approval closes the switch and ends the other requests (one machine per opening, #942); a refused one changes nothing.
     pub fn approve(&mut self, now: u64, pair_id: &[u8], replace: bool) -> Result<(), Refusal> {
         self.tick(now);
         let id = self.decidable(pair_id)?;
@@ -1061,7 +1062,24 @@ impl Pairing {
             pair_id: id,
             outcome: Outcome::Approved,
         });
+        self.close_after_approval(now);
         Ok(())
+    }
+
+    /// One machine per opening, whoever approved (#942): an approval closes the switch and ends every request still undecided, as
+    /// closing does, but not as a failure for anyone. Unlike [`Self::close`] it leaves every approval alone (this one and any from
+    /// an earlier opening that its connection has not collected yet), so each is still handed to its own connection, once.
+    fn close_after_approval(&mut self, now: u64) {
+        self.open_until = None;
+        let undecided: Vec<PairId> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| matches!(s.phase, Phase::Awaiting | Phase::Pending))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in undecided {
+            self.end(&id, Outcome::Closed, now, false);
+        }
     }
 
     /// Deny: terminal. A deny counts as a failure for the address (section 7).
@@ -1670,12 +1688,84 @@ mod tests {
         assert!(matches!(p.verdict(ConnId(1), 2_102), Verdict::Approved(_)));
         assert_eq!(p.verdict(ConnId(1), 2_103), Verdict::Closed);
 
+        // The approval closed the switch (#942): the next request comes after the owner opened it again.
+        p.open(2_900);
         let id = pending(&mut p, 3_000, 2, 11, &Machine::new(2));
         p.deny(3_100, &id).unwrap();
         assert_eq!(p.approve(3_101, &id, false), Err(Refusal::State("denied")));
         assert_eq!(p.deny(3_102, &id), Err(Refusal::State("denied")));
         assert_eq!(p.verdict(ConnId(2), 3_103), Verdict::Denied);
         assert_eq!(p.verdict(ConnId(2), 3_104), Verdict::Closed);
+    }
+
+    /// #942 (RM-07): one machine per opening is the hub's rule, whoever approves (a window, `agora pair open`). The approval closes the
+    /// switch and ends every other request still undecided (not a failure for anyone), and the approved one is still collected by
+    /// its own connection, once.
+    #[test]
+    fn an_approval_closes_the_switch_ends_the_other_requests_and_keeps_its_own() {
+        let mut p = open_hub();
+        let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        let b = pending(&mut p, 2_000, 2, 11, &Machine::new(2));
+        let (c, _) = start(&mut p, 2_050, peer(3, 12), &Machine::new(3)).unwrap();
+        let (_, cursor) = p.notes_after(2_060, 0);
+        p.approve(2_100, &a, false).unwrap();
+        let s = p.status(2_100);
+        assert!(!s.open, "the switch stayed open after an approval");
+        assert_eq!((s.closes_at_ms, s.pending), (0, 0));
+        // The others are over: closed, nothing to approve, and their connections are told the switch closed.
+        assert_eq!(p.approve(2_110, &b, false), Err(Refusal::State("closed")));
+        assert_eq!(p.verdict(ConnId(2), 2_120), Verdict::Closed);
+        assert_eq!(p.verdict(ConnId(3), 2_120), Verdict::Closed);
+        assert_eq!(p.approve(2_130, &c, false), Err(Refusal::Unknown));
+        // The windows are told: the approval, then the other card ended (the one that never revealed had no card).
+        let (notes, _) = p.notes_after(2_140, cursor);
+        assert_eq!(
+            notes,
+            vec![
+                Note::Decided {
+                    pair_id: a,
+                    outcome: Outcome::Approved
+                },
+                Note::Decided {
+                    pair_id: b,
+                    outcome: Outcome::Closed
+                },
+            ]
+        );
+        // A new machine is refused until the owner opens again.
+        assert_eq!(
+            start(&mut p, 2_150, peer(4, 13), &Machine::new(4)).unwrap_err(),
+            Refusal::Closed
+        );
+        // The approved request is still handed to its own connection, once.
+        let Verdict::Approved(issue) = p.verdict(ConnId(1), 2_200) else {
+            panic!("the approval was lost when the switch closed")
+        };
+        assert_eq!(issue.node_id, "laptop");
+        assert_eq!(p.verdict(ConnId(1), 2_300), Verdict::Closed);
+        // Closing after an approval is no failure: nobody is locked out, and the owner can open again.
+        for last in [10, 11, 12] {
+            assert!(p.limits().locked(Kind::Machine, ip(last), 2_400).is_none());
+        }
+        p.open(2_500);
+        assert!(p.status(2_500).open);
+    }
+
+    /// A refused approval (`name_in_use` while another approval for that name is in flight) is no approval: the switch stays open and
+    /// the request stays pending.
+    #[test]
+    fn a_refused_approval_leaves_the_switch_open() {
+        let mut p = open_hub();
+        let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        p.approve(2_100, &a, false).unwrap();
+        p.open(2_200);
+        let b = pending(&mut p, 2_300, 2, 11, &Machine::new(2));
+        assert_eq!(
+            p.approve(2_400, &b, false),
+            Err(Refusal::State("name_in_use"))
+        );
+        assert!(p.status(2_400).open);
+        assert_eq!(p.pending_node_id(&b), Some("laptop"));
     }
 
     #[test]
@@ -1711,6 +1801,8 @@ mod tests {
         // The owning connection dies before it collected the approval: void.
         p.connection_closed(ConnId(1), 2_150);
         assert_eq!(p.verdict(ConnId(1), 2_160), Verdict::Closed);
+        // The approval closed the switch (#942); the owner opens it again for the retry.
+        p.open(2_165);
         // A new connection naming the same pair id has nothing; it must start again with fresh nonces.
         assert_eq!(
             reveal(&mut p, 2_170, peer(2, 10), &id, &m).unwrap_err(),
@@ -2208,13 +2300,15 @@ mod tests {
     }
 
     /// F811: two requests for one node id. While one approval waits or is being issued, the other cannot be approved (only one can
-    /// get the certificate, and the windows would be told "approved" for both); it stays pending until that connection ends.
+    /// get the certificate, and the windows would be told "approved" for both); it stays pending until that connection ends. Since
+    /// an approval closes the switch (#942), the second request is one made after the owner opened it again.
     #[test]
     fn a_second_approval_for_a_node_id_in_flight_is_name_in_use() {
         let mut p = open_hub();
         let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        p.approve(2_050, &a, false).unwrap();
+        p.open(2_060);
         let b = pending(&mut p, 2_100, 2, 11, &Machine::new(2));
-        p.approve(2_200, &a, false).unwrap();
         assert_eq!(
             p.approve(2_300, &b, true),
             Err(Refusal::State("name_in_use"))
@@ -2235,8 +2329,9 @@ mod tests {
     fn an_issued_approval_lets_its_node_id_go_while_its_connection_stays_open() {
         let mut p = open_hub();
         let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        p.approve(2_050, &a, false).unwrap();
+        p.open(2_060);
         let b = pending(&mut p, 2_100, 2, 11, &Machine::new(2));
-        p.approve(2_200, &a, false).unwrap();
         assert!(matches!(p.verdict(ConnId(1), 2_300), Verdict::Approved(_)));
         p.issued(ConnId(1));
         assert_eq!(p.approve(2_400, &b, true), Ok(()));

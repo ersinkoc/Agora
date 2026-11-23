@@ -20,6 +20,8 @@ back to normal. Or, in the window: **This device → Screen password**
 every window), and each change is in the Activity page. The new password, the sign-outs and the passkeys it removes (see
 below) change together: if any part fails, nothing changes and the window or the command (exit 1) says so.
 
+The sign-in page is a card since the redesign (`screens/entry-redesign-signin-*`); the two pictures below show the older page, with the same fields.
+
 ![The sign-in page asks for the screen password on another machine](../screenshots/screen-password/signin-password-dark.png)
 ![The same in the light theme](../screenshots/screen-password/signin-password-light.png)
 

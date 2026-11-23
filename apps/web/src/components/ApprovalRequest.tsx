@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { t } from '../i18n';
 import { approvalName } from '../net/approvalText';
 import type { ApprovalModel } from '../net/view';
@@ -40,7 +40,7 @@ export function askTitle(x: Pick<ApprovalModel, 'action' | 'start' | 'skip' | 's
   return t(`approval-ask-${kind}`, { name });
 }
 
-export function ApprovalRequest({ density, icon, avatar, title, where, titleEnd, children, actions, foot, stacked, alert, titleWrap, className = '' }: {
+export function ApprovalRequest({ density, icon, avatar, title, where, titleEnd, children, actions, foot, stacked, alert, titleWrap, className = '', attrs }: {
   density: ApprovalDensity;
   icon: IconName;
   avatar?: ReactNode;
@@ -60,13 +60,15 @@ export function ApprovalRequest({ density, icon, avatar, title, where, titleEnd,
   // The attention dialog makes the title its own (Radix's Dialog.Title, which names the dialog).
   titleWrap?: (title: ReactElement) => ReactNode;
   className?: string;
+  // Marks for a screen or a test to find the request by (`data-…`).
+  attrs?: Record<`data-${string}`, string>;
 }) {
   const id = useId();
   // Under `titleWrap` the wrapper gives the title its id (an `id` key here, even undefined, would replace it).
   const head = <p {...(titleWrap ? {} : { id })} className="kit-callout__title approval-req__title">{avatar}<span className="approval-req__text"><span className="approval-req__ask">{title}</span>{where ? <span className="approval-req__where">{where}</span> : null}</span>{titleEnd}</p>;
   const cls = ['kit-callout kit-tone-needs approval-req', `approval-req--${density}`, stacked && 'approval-req--stacked', className].filter(Boolean).join(' ');
   return (
-    <section className={cls} data-density={stacked ? 'row' : density} aria-labelledby={titleWrap ? undefined : id} role={alert ? 'alert' : undefined}>
+    <section {...attrs} className={cls} data-density={stacked ? 'row' : density} aria-labelledby={titleWrap ? undefined : id} role={alert ? 'alert' : undefined}>
       <span aria-hidden className="kit-chip"><Icon name={icon} /></span>
       {titleWrap ? titleWrap(head) : head}
       {children ? <div className="kit-callout__body">{children}</div> : null}
@@ -124,5 +126,14 @@ export function useNarrow(ref: RefObject<HTMLElement | null>, below = NARROW_PX)
     ro.observe(el);
     return () => ro.disconnect();
   }, [ref, below]);
+  return narrow;
+}
+
+// A card in a pane (`narrowable`): whether it is drawn narrow now. The buttons move under the text when the pane gets narrow (and back): a
+// ready Allow must not move under a click, so the surface's dwell restarts (`restart`, the guard's).
+export function useNarrowPane(ref: RefObject<HTMLElement | null>, narrowable: boolean | undefined, restart: () => void): boolean {
+  const narrow = useNarrow(ref) && !!narrowable;
+  const drawn = useRef(narrow);
+  useLayoutEffect(() => { if (drawn.current !== narrow) { drawn.current = narrow; restart(); } }, [narrow, restart]);
   return narrow;
 }

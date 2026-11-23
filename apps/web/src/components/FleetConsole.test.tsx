@@ -127,6 +127,22 @@ describe('empty, first-run, connecting and offline', () => {
     expect(html).toContain(t('address-copy'));
     expect(html).not.toContain('fleet-summary'); // zero counts would only be noise
   });
+  it('tells a person who is not the owner that no project is theirs yet, and does not offer the owner\'s setup (#904)', () => {
+    for (const html of [console_({ guest: true }), render(<FleetEmpty kind="empty" machines={[]} guest />)]) {
+      expect(html).toContain(t('fleet-guest-title'));
+      expect(html).toContain(t('fleet-guest-text'));
+      expect(html).not.toContain(t('fleet-empty-title'));
+      expect(html).not.toContain('agora hub code');
+      expect(html).not.toContain('agora node enroll');
+    }
+  });
+  it('does not offer a guest the owner\'s Add a machine on the first run either (#904)', () => {
+    const html = render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} guest />);
+    expect(html).toContain(t('fleet-firstrun-title'));
+    expect(html).not.toContain(t('fleet-add-machine'));
+    expect(html).not.toContain('agora hub code');
+    expect(render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} />)).toContain(t('fleet-add-machine'));
+  });
   it('offers the first agent when machines exist and none has started', () => {
     const html = console_({ machines: [machine('n1', { name: 'laptop' })] });
     expect(html).toContain(t('fleet-firstrun-title'));

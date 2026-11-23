@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { t } from '../../i18n';
 import { AGENT_COLOUR_NAMES } from '../../themes/tokens';
 import { Icon } from '../Icon';
-import { AgentAvatar, Button, Callout, Card, EmptyState, KeyValue, ListRow, Pill, SegmentedControl, SettingRow, StatTile, StatusMark, StatusPill, Tag, Toggle, Tooltip, type ButtonVariant } from '.';
+import { AgentAvatar, Button, Callout, Card, CopyChip, EmptyState, KeyValue, ListRow, Pill, SegmentedControl, SettingRow, StatTile, StatusMark, StatusPill, Tag, Toggle, Tooltip, type ButtonVariant } from '.';
 
 // The widget kit in every state, for the gallery (one per theme panel). Demo data only; nothing here is sent anywhere.
 const VARIANTS: ButtonVariant[] = ['primary', 'secondary', 'ghost', 'danger', 'danger-ghost'];
@@ -95,6 +95,9 @@ export function KitGallery() {
           <Card><EmptyState icon="chat" title={t('empty-messages-title')} line={t('empty-messages-hint')} action={<Button variant="primary" size="sm">{t('action-start-agent')}</Button>} /></Card>
           <Card><EmptyState ok icon="check" title={t('empty-changes-title')} line={t('empty-changes-hint')} /></Card>
         </div>
+      </Section>
+      <Section title={t('kit-copy')}>
+        <div className="grid max-w-md gap-2"><CopyChip text="agora hub login" /></div>
       </Section>
       <Section title={t('kit-rtl')}>
         <div dir="rtl" className="grid gap-2">

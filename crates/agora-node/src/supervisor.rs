@@ -2740,7 +2740,11 @@ impl Supervisor {
         if let Some(policy) = policy_refusal(self.skip_permissions, e.confinement) {
             return Err(SupervisorError::OptionForbidden(
                 e.agent.kind.clone(),
-                ask.option_id.clone(),
+                // The id `skip_ask` names (#1033): a mode's is the value, a config option's its own.
+                match ask.kind {
+                    SkipKind::Mode => ask.value.clone(),
+                    SkipKind::Config => ask.option_id.clone(),
+                },
                 policy,
             ));
         }
@@ -3243,7 +3247,8 @@ impl Supervisor {
             let session = hub.session()?;
             let (pid, master) = match session.start(&request) {
                 Ok(started) => started,
-                // It does not know how to start this (a program that is not there, an id in use): the node's own start says why.
+                // It does not know how to start this (a program that is not there, an id in use) or keeps all the agents it can
+                // (`MAX_HELD_AGENTS`, #983): the node's own start runs it or says why.
                 Err(LinkError::Refused(HolderRefusal::Failed | HolderRefusal::AgentExists, _)) => {
                     return None
                 }
@@ -4658,7 +4663,8 @@ fn launch_held_adapter(
         }
         let pid = match session.start_pipe(&request) {
             Ok(pid) => pid,
-            // It does not know how to start this (a program that is not there): the node's own start says why.
+            // It does not know how to start this (a program that is not there) or keeps all the agents it can (`MAX_HELD_AGENTS`,
+            // #983): the node's own start runs it or says why.
             Err(LinkError::Refused(HolderRefusal::Failed, _)) => return None,
             // An earlier run of this agent is still in the holder (its end was not collected): it is ended, then started again.
             Err(LinkError::Refused(HolderRefusal::AgentExists, _)) => {
@@ -5458,16 +5464,17 @@ mod adapter_option_tests {
             value_name: String::new(),
             epoch,
         };
+        // With the id the refusal names: a mode's id, a config option's own (#1033).
         let asks = [
-            ask(SkipKind::Mode, "mode", "bypass"),
-            ask(SkipKind::Config, "approvals", "turbo"),
+            (ask(SkipKind::Mode, "mode", "bypass"), "bypass"),
+            (ask(SkipKind::Config, "approvals", "turbo"), "approvals"),
         ];
         for confinement in NOT_CONFINED {
             launched(&mut sup, &id, confinement, Level::Worktree);
-            for ask in &asks {
+            for (ask, refused) in &asks {
                 match sup.prepare_skip_apply(ask) {
                     Err(e) => assert!(
-                        forbidden_by_confined_only(&e, &ask.option_id),
+                        forbidden_by_confined_only(&e, refused),
                         "{confinement:?} {:?}: {e:?}",
                         ask.kind
                     ),
@@ -5479,7 +5486,7 @@ mod adapter_option_tests {
             }
         }
         launched(&mut sup, &id, Confinement::Confined, Level::Off);
-        for ask in &asks {
+        for (ask, _) in &asks {
             match sup.prepare_skip_apply(ask) {
                 Err(SupervisorError::NotFound(_)) => {}
                 Err(e) => panic!(
@@ -6092,6 +6099,52 @@ mod adapter_option_tests {
         assert_eq!(
             adapter_error(HostError::Timeout).to_protocol().code,
             ErrorCode::Internal
+        );
+    }
+
+    /// #1033: a switch that skips permissions refused by the policy names the same option when it is asked (`skip_ask`) and when an
+    /// approved card is applied after the policy changed (`prepare_skip_apply`): a mode's id (the value; never the word `mode`), and a
+    /// config option's own id.
+    #[test]
+    fn a_refused_switch_names_the_mode_id_or_the_config_id_when_asked_and_when_applied() {
+        use crate::launch_options::SkipPermissions as S;
+        let (mut sup, id) = switch_rig();
+        let option = |r: Result<Prepared, SupervisorError>| match r {
+            Err(err) => {
+                let err = err.to_protocol();
+                assert_eq!(err.code, ErrorCode::AgentOptionForbidden);
+                match err.params.get("option") {
+                    Some(agora_protocol::ParamValue::Str(s)) => s.clone(),
+                    other => panic!("option: {other:?}"),
+                }
+            }
+            Ok(_) => panic!("not refused"),
+        };
+        let ask = |r: Result<Prepared, SupervisorError>| match r {
+            Ok(Prepared::Ask(ask)) => ask,
+            _ => panic!("not asked"),
+        };
+
+        sup.set_skip_permissions(S::Allow);
+        let mode = ask(sup.prepare_set_option(&id, OptionKind::Mode, "bypass"));
+        let approvals = ask(sup.prepare_set_config(&id, "approvals", "turbo"));
+        sup.set_skip_permissions(S::Forbid);
+        assert_eq!(
+            option(sup.prepare_set_option(&id, OptionKind::Mode, "bypass")),
+            "bypass"
+        );
+        assert_eq!(
+            option(sup.prepare_skip_apply(&mode).map(Prepared::Call)),
+            "bypass",
+            "the approved mode, by its id"
+        );
+        assert_eq!(
+            option(sup.prepare_set_config(&id, "approvals", "turbo")),
+            "approvals"
+        );
+        assert_eq!(
+            option(sup.prepare_skip_apply(&approvals).map(Prepared::Call)),
+            "approvals"
         );
     }
 }

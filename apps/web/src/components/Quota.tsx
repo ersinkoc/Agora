@@ -13,10 +13,11 @@ const TICK_MS = 30_000;
 interface QuotaValue { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; now: number }
 const Ctx = createContext<QuotaValue>({ obs: [], machines: new Map(), now: 0 });
 
-export function QuotaProvider({ obs, machines, children }: { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; children: ReactNode }) {
-  const [now, setNow] = useState(() => Date.now());
+// `fixedNow`: a clock that never moves, for the gallery, so a capture of it says the same times every run.
+export function QuotaProvider({ obs, machines, children, fixedNow }: { obs: readonly QuotaObs[]; machines: ReadonlyMap<string, string>; children: ReactNode; fixedNow?: number }) {
+  const [now, setNow] = useState(() => fixedNow ?? Date.now());
   useEffect(() => {
-    if (obs.length === 0) return;
+    if (obs.length === 0 || fixedNow !== undefined) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
     return () => clearInterval(id);
@@ -59,7 +60,7 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
   const observed = t('quota-observed', { when: ago(now - b.ageMs, now) });
   if (b.state === 'reset') {
     return <li className="grid gap-0.5 py-1.5" data-state="reset">
-      <div className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate">{label}</span><span className="flex-none rounded-xs border border-line bg-surface-2 px-1.5 text-xs text-muted">{t('quota-reset')}</span></div>
+      <div className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate">{label}</span><span className="kit-tag flex-none">{t('quota-reset')}</span></div>
       <p className="m-0 text-xs text-muted">{t('quota-reset-note', { when: resetAtText(b.resetsAtMs, now) })} · {observed}</p>
     </li>;
   }
@@ -70,7 +71,7 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
   return <li className="grid gap-1 py-1.5" data-state={b.state} data-level={b.level}>
     <div className="flex min-w-0 items-baseline gap-2">
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {stale && <span className="flex-none rounded-xs border border-line bg-surface-2 px-1.5 text-xs text-muted">{t('quota-stale')}</span>}
+      {stale && <span className="kit-tag flex-none">{t('quota-stale')}</span>}
       {!stale && b.level !== 'normal' && <span className={`flex-none rounded-xs border px-1.5 text-xs text-needs-you ${b.level === 'critical' ? 'border-needs-you bg-needs-you/15 font-semibold' : 'border-needs-you/60'}`}>{t('quota-chip', { percent })}</span>}
       {(stale || b.level === 'normal') && <span className="flex-none text-xs text-muted">{t('quota-percent', { percent })}</span>}
     </div>
@@ -81,18 +82,20 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
   </li>;
 }
 
-/** The "Plan limits" section of the Usage panel. */
-export function QuotaSection({ fleet }: { fleet: readonly AgentTileModel[] }) {
+/** The "Plan limits" section of the Usage panel. `hideEmpty`: drawn only when a tool reported something (the panel's own empty state already
+ * says that nothing has been reported yet). */
+export function QuotaSection({ fleet, hideEmpty }: { fleet: readonly AgentTileModel[]; hideEmpty?: boolean }) {
   const { obs, machines, now } = useQuota();
   const view = useMemo(() => quotaView(obs, fleet, machines, now), [obs, fleet, machines, now]);
   const empty = view.tools.length === 0 && view.unknown.length === 0;
+  if (empty && hideEmpty) return null;
   return <section className="grid gap-1" aria-label={t('usage-limits-title')}>
-    <h3 className="m-0 text-xs font-semibold tracking-wider text-muted uppercase">{t('usage-limits-title')}</h3>
-    {empty && <p className="muted m-0 rounded-s border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>}
+    <h3 className="panel-section-title">{t('usage-limits-title')}</h3>
+    {empty && <p className="muted m-0 rounded-m border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>}
     {view.tools.map((tool) => {
       const several = tool.machines.length > 1 || machines.size > 1;
       const name = toolName(tool.tool);
-      return <div key={tool.tool} className="rounded-s border border-line bg-surface-0 px-3 py-1.5">
+      return <div key={tool.tool} className="rounded-m border border-line bg-surface-0 px-3 py-2">
         <strong className="block truncate font-medium" title={name}>{name}</strong>
         {tool.machines.map((m) => <div key={m.machineId} className="grid">
           {several && <span className="mt-1 truncate text-xs text-muted" title={m.machine}>{m.machine}</span>}
