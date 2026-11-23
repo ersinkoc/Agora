@@ -313,7 +313,6 @@
   .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
 }
 
-@keyframes flow { to { stroke-dashoffset: -24; } }
 @keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
@@ -323,7 +322,6 @@
 @keyframes soft-pulse { 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: no-preference) { .skeleton { animation: soft-pulse 1.6s ease-in-out infinite; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
-@media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
 @media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
 
 /* xterm paints its scroll area black by default; let the pane's own (themed) background show. */
@@ -501,6 +499,59 @@
   .kit-kv dt { @apply text-muted; font-size: var(--text-caption); padding-block-start: 1px; }
   .kit-kv dd { @apply m-0 min-w-0 break-words; }
   .kit-kv__mono { @apply font-mono; font-size: var(--text-caption); }
+
+  /* A dialog (the one elevation, ADR-0102): the raised surface and the overlay shadow; a destructive one leads with a danger chip. */
+  .kit-dialog { @apply grid gap-4 rounded-l border border-line text-ink; padding: 1.25rem; background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+
+  /* My machines (redesign PR 9): a header with Add a machine, request cards, the strip of counts, one card per machine. No diagram. */
+  .machines { @apply grid gap-4; }
+  .machines__head { @apply flex flex-wrap items-center justify-between gap-3; }
+  .machines-add { @apply gap-3 outline-none; }
+  .machines-add__title { @apply m-0 font-semibold text-ink normal-case tracking-normal; font-size: var(--text-strong); }
+  .machines-add__steps { @apply m-0 grid gap-3 ps-5; list-style: decimal; }
+  .machines-add__steps > li { @apply grid gap-2 ps-1; }
+  .machines-cmd { @apply w-max max-w-full rounded-xs border border-line bg-surface-2 px-2 py-1 font-mono text-ink; font-size: var(--text-caption); }
+  .hub-strip { @apply flex flex-wrap items-center gap-x-4 gap-y-3; padding: 0.75rem 1rem; }
+  .hub-strip__mark { @apply grid size-8 flex-none place-items-center rounded-s bg-accent font-bold text-on-accent; }
+  .hub-strip__name { @apply m-0 font-semibold text-ink normal-case tracking-normal; font-size: var(--text-body); }
+  .hub-strip__stats { @apply m-0 ms-auto flex flex-wrap gap-y-2; }
+  .hub-stat { @apply flex flex-col-reverse justify-end px-4; }
+  .hub-stat + .hub-stat { @apply border-s border-line; }
+  .hub-stat dt { @apply text-muted; font-size: var(--text-caption); }
+  .hub-stat dd { @apply m-0 font-semibold text-ink; font-size: var(--text-title); font-variant-numeric: tabular-nums; }
+  .hub-stat small { @apply font-medium text-muted; font-size: var(--text-caption); }
+  @media (max-width: 40rem) { .hub-strip__stats { @apply ms-0 grid w-full grid-cols-2 gap-y-3; } .hub-stat { @apply px-0; } .hub-stat + .hub-stat { @apply border-0; } }
+  .machines__grid { @apply m-0 grid list-none gap-3 p-0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); }
+  .machines__grid > li { @apply grid; }
+  .machine-card { @apply content-start gap-3 outline-none; }
+  .machine-card--away { @apply border-dashed; }
+  .machine-card--add { @apply min-h-40 content-center justify-items-center gap-1.5 border-dashed bg-transparent px-6 text-center; }
+  .machine-card--add > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }
+  .machine-card__head { @apply flex min-w-0 items-start gap-3; }
+  .machine-card__name { @apply font-semibold text-ink; font-size: var(--text-title); }
+  .machine-card__foot { @apply flex flex-wrap items-start gap-2 border-t border-line pt-3; }
+  .machine-card__foot--away { @apply items-center; }
+  .machine-card__actions { @apply flex min-w-0 flex-1 flex-wrap items-center gap-2; }
+  .os-tile { @apply grid size-9 flex-none place-items-center rounded-s border border-line bg-surface-2 text-muted; }
+  .os-tile > svg { @apply size-4.5; }
+  .machine-meter { @apply grid gap-1.5; }
+  .machine-meter__row { @apply flex justify-between gap-3 text-muted; font-size: var(--text-caption); }
+  .machine-meter__row > span:last-child { @apply whitespace-nowrap; }
+  .machine-meter__bar { @apply h-1.5 overflow-hidden rounded-full bg-surface-2; }
+  .machine-meter__bar > span { @apply block h-full rounded-full bg-accent; width: var(--share); }
+  .machines-old { @apply gap-3; }
+  /* The forget dialog: the machine as a bordered row, and the choice to refuse it as a bordered row with a box. */
+  .forget-row { @apply flex min-w-0 items-center gap-3 rounded-s border border-line px-3 py-2.5; }
+  .forget-row--check { @apply cursor-pointer items-start; }
+  .forget-row input { @apply flex-none; margin-block-start: 0.2rem; }
+  /* A request to join or sign in (ADR-0065): the "needs you" tint, an icon chip, who asks, then the number and its two presses. Wide (on
+     My machines) the two sit side by side and wrap under each other when there is no room. */
+  .pair-card { @apply grid gap-3 rounded-m border p-4 text-ink; background: var(--kit-tint); border-color: var(--kit-line); }
+  .pair-card--float { box-shadow: var(--shadow-pop); }
+  .pair-card__who, .pair-card__decide { @apply grid min-w-0 content-start gap-3; }
+  .pair-card--wide { @apply flex flex-wrap items-start gap-x-8; }
+  .pair-card--wide > .pair-card__who { flex: 1 1 18rem; }
+  .pair-card--wide > .pair-card__decide { flex: 0 1 24rem; }
 
   .kit-gallery { @apply grid gap-4; container-type: inline-size; }
   .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }

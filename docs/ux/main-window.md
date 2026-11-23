@@ -20,21 +20,47 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 **Close agent** ends a running agent of any kind (the same `agent.stop` as `agora agent stop`, no new message): in the **⋯** menu of its row in the agent list (shown on hover or focus, always on a touch screen), in the **⋯** menu of its pane or full-size header, on the phone's agent screen, in the command palette ("Close agent: name", which opens the agent and asks there), and, in a chat agent's message box, by typing `/exit` or `/quit` (never sent as text; if the agent offers a command of that name, that one is sent instead). It asks first, inline in the page: "Ends this agent. Its conversation stays in the closed list until you remove it.", plus "It is working now: the current turn will be lost." while the agent works or waits for an answer; one click on **Close agent** is enough for an idle agent, **Keep it running** leaves it. The target is always the agent of the clicked item, one confirm at a time. A refusal shows its reason from the error code (not allowed, the machine's policy, a permission that is still needed, offline, ...) and the agent keeps running; after a close the agent is in the closed list with the usual **Remove from this list** and **Remove for everyone**. It is a different control from **Stop turn**, which only ends the turn.
 
-## Hub and machines
+## My machines
 
-![Hub and machines](screens/network-dark.png)
+![My machines](screens/machines-redesign-list-dark.png)
 
-`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
+`#/machines` (**My machines**, redesign PR 9) lists every machine your Agora knows as a card, built from the widget kit; nothing on it
+moves by itself (the old diagram with animated links is gone):
+
+- **Header:** one line on what the page is and **Add a machine** (the primary action). It shows the steps: allow a new machine to join
+  (the existing switch for new machines, which only its own button opens, for 10 minutes), run `agora join` on that machine, and approve
+  here only if the two numbers match. Without an owner's session (or in the demo) the steps are a hint only.
+- **A request to join** (ADR-0065), when there is one, comes next as a request card in the "needs you" tint: who asks (name, system and
+  address, each on a row of its own, so a chosen name cannot pass for an address), the number in two groups of three in the 28 px display
+  size, then **Deny** and **Numbers match…**. The second press, **Yes, the numbers match**, works only after the question has been up for
+  half a second, as everywhere else. On this page the request is shown in place, so it does not also float over the window.
+- **Your Agora:** a strip with four counts: machines online ("2 of 3"), agents running, how many need you (amber only above zero) and the
+  memory Agora uses on all the machines.
+- **A machine online:** its system as an icon tile, its name, "Linux · 0.3.35 · heard 4 seconds ago" (ADR-0070), an **Online** pill, its
+  agents as rows (avatar, name, the acts-without-asking sign, a state pill; a failed one in red), a meter of the memory Agora uses there
+  (its share of the total over all machines, with the amount and the open terminals), and **Start an agent here**, **New terminal** (with
+  a live link) and **⋯** (copy the machine ID, agent settings). The machine ID is shown once, beside the name, and only when the name does
+  not already say it (two machines may share a host name).
+- **A machine offline** has a dashed card, "last seen", a note when agents were running there ("2 agents were running: they keep going and
+  report back when it connects", nodes are autonomous) and a red ghost **Forget…**. An offline machine also shows "last seen" on its row
+  in the agent list and in its tooltip.
+- **Add a machine** ends the list as a dashed card with the `agora join` hint; it opens the same steps.
+
+![One machine](screens/machines-redesign-one-machine-light.png)
+![A machine offline](screens/machines-redesign-offline-dark.png)
+![A request to join](screens/machines-redesign-join-request-light.png)
 
 **Old machines** (ADR-0073): a machine not seen for more than a day is listed apart, folded, under **n old machines**, and is not
 offered for new agents. An offline machine has **Forget…**, and the old ones have **Clean up…**: one dialog lists them, ticked,
 with when each was last seen and how many agents were running then, and one box also refuses them if they connect again (a new join
-code is needed then). The hub forgets them for every window (`node.forget`, owner only); what they did stays in the history and the
-costs, and a machine that connects again comes back with the agents it still runs. `agora hub machines` does the same from the hub's
+code is needed then). The dialog is a destructive one (ADR-0102): a red icon chip, the machine as a row, the refuse choice as a
+bordered row with its box, then **Keep** (first, and focused) and **Forget ⟨name⟩** (or **Forget n**) in red. Your Agora forgets them
+for every window (`node.forget`, owner only); what they did stays in the history and the costs, and a machine that connects again comes
+back with the agents it still runs. A refusal is shown on the machine's row in red. `agora hub machines` does the same from the hub's
 machine.
 
-![Old machines](screens/old-machines-dark.png)
-![Cleaning up old machines](screens/old-machines-cleanup-light.png)
+![Forgetting a machine](screens/machines-redesign-forget-light.png)
+![My machines on a phone](screens/machines-redesign-list-phone-dark.png)
 
 ## Layout (editor-style, 2026-11-12)
 

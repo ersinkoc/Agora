@@ -1,4 +1,6 @@
+import type { PairingUi } from './components/Pairing';
 import type { AgentTileModel } from './model';
+import type { MachineModel } from './net/view';
 import type { QuotaObs } from './net/quota';
 
 // Demo data for the gallery and the first Home screen until the hub connection feeds the store.
@@ -76,3 +78,33 @@ export const demoQuota: QuotaObs[] = [
   { machineId: 'build', tool: 'codex', window: 'minutes:30', usedPercent: 12, resetsAtMs: Date.now() + 10 * MIN, observedAtMs: Date.now() - 50 * MIN },
   { machineId: 'winpc', tool: 'codex', window: 'five_hour', usedPercent: 74, resetsAtMs: Date.now() - 20 * MIN, observedAtMs: Date.now() - 6 * 60 * MIN },
 ];
+
+// My machines in the gallery (redesign PR 9), on a fixed clock so its screenshots and the visual baselines never drift: two machines
+// online with their agents, one offline for two hours with agents still running there, one old (not seen for nine days), and a request
+// to join waiting for the owner.
+export const GALLERY_NOW = 1_700_000_000_000;
+const MB = 1024 * 1024;
+export const galleryMachines: MachineModel[] = [
+  { id: 'blackview', name: 'blackview', os: 'linux', online: true, agentsRunning: 4, lastSeenMs: GALLERY_NOW - 4_000, memoryBytes: 17 * MB, build: '0.3.35', terminalsOpen: 6 },
+  { id: 'mac', name: 'mac', os: 'macos', online: true, agentsRunning: 2, lastSeenMs: GALLERY_NOW - 9_000, memoryBytes: 5.6 * MB, build: '0.3.35', terminalsOpen: 2 },
+  { id: 'win', name: 'win', os: 'windows', online: false, agentsRunning: 2, lastSeenMs: GALLERY_NOW - 2 * 3_600_000, build: '0.3.34' },
+  { id: 'linux-test', name: 'linux', os: 'linux', online: false, agentsRunning: 0, lastSeenMs: GALLERY_NOW - 9 * 86_400_000, build: '0.3.2' },
+];
+const onMachine = (id: string, machineId: string, name: string, kind: string, accent: string, rest: Partial<AgentTileModel>): AgentTileModel =>
+  ({ id, name, kind, accent: `var(--agent-${accent})`, machine: machineId, machineId, workspace: 'login-fix', state: 'working', preview: '', ...rest });
+export const galleryMachineAgents: AgentTileModel[] = [
+  onMachine('g1', 'blackview', 'claude · plum', 'claude', 'violet', { state: 'needs-you' }),
+  onMachine('g2', 'blackview', 'codex · teal', 'codex', 'teal', { state: 'needs-you' }),
+  onMachine('g3', 'blackview', 'opencode · sky', 'opencode', 'sky', { skipsPermissions: true }),
+  onMachine('g4', 'blackview', 'claude · amber', 'claude', 'amber', { state: 'finished' }),
+  onMachine('g5', 'mac', 'codex · mint', 'codex', 'mint', {}),
+  onMachine('g6', 'mac', 'gemini · rose', 'gemini', 'rose', { state: 'finished', closed: true, exitCode: 1 }),
+];
+export const galleryPairing: PairingUi = {
+  cards: [{ id: 'pair-desk', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: GALLERY_NOW + 240_000, pairId: new Uint8Array([1]) }],
+  recent: [],
+  window: { open: false, closesAtMs: 0, pending: 1 },
+  offline: false,
+  onAnswer: async () => 'ok',
+  onOpen: async () => true,
+};

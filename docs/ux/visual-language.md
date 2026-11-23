@@ -110,7 +110,7 @@ the kit (redesign PRs 2 and 3).
   shadows. **One elevation** (ADR-0102): overlays only (dialogs, menus, the palette, toasts, tooltips) use the raised surface
   (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
 - **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
-  reach them as they adopt the kit (the redesign plan's PRs 2–13): until then tiles keep their coloured edge and their shadow, existing
+  reach them as they adopt the kit (the redesign plan's PRs 2–13; My machines and its forget dialog already have, and their animated links are gone): until then tiles keep their coloured edge and their shadow, existing
   overlays use the older `--shadow`, errors and change counts are still amber in places, and the global `h2` is still an uppercase label.
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.

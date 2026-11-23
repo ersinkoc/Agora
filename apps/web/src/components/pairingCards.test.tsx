@@ -76,7 +76,7 @@ describe('the card an owner answers (ADR-0065)', () => {
     expect(asking).toContain('Yes, the numbers match');
     expect(asking).toContain('Go back');
     // A press of Approve does not exist on that screen: the only way on is the explicit yes.
-    expect(asking).not.toContain('>Approve<');
+    expect(asking).not.toContain('>Numbers match…<');
     // "Go back" returns to the start with nothing sent.
     expect(pairCardReducer(s, { type: 'back' }).step).toBe('idle');
     // The yes does nothing until the question has been up for MIN_THINK_MS (`armed`).
@@ -148,6 +148,7 @@ describe('a request to join in the fleet console', () => {
     expect(html).toContain('Review the request from \u2068laptop\u2069');
     expect(html).toContain('Compare its number with the one on its screen before you approve.');
     expect(html).not.toContain('Approve');
+    expect(html).not.toContain('Numbers match');
     expect(html).not.toContain('Allow');
     // The row does not show the number: the owner sees it in the card, next to the machine's own screen.
     expect(html).not.toContain('482');

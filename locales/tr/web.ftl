@@ -138,7 +138,7 @@ pair-address = Adres
 pair-number = Numara
 pair-failed = Yanıtınız gönderilemedi. Yeniden deneyin.
 pair-deny = Reddet
-pair-approve = Onayla
+pair-approve = Numaralar aynı…
 pair-machine-compare = Yeni makinedeki numarayla karşılaştırın. Yalnızca aynıysa onaylayın.
 pair-browser-compare = O tarayıcıdaki numarayla karşılaştırın. Yalnızca aynıysa onaylayın.
 pair-expires-in = { $time } içinde sona erer
@@ -214,7 +214,7 @@ idle-lock-hint-no-password = Yalnızca bu tarayıcıda saklanır. Kullanılmayan
 audit-action-sign-out = Çıkış yaptı
 audit-action-password-set = Ekran parolasını ayarladı
 audit-action-password-clear = Ekran parolasını kaldırdı
-machines-title = Makineleriniz
+machines-title = Makinelerim
 machines-empty = Henüz bağlı makine yok.
 machine-online = Çevrimiçi
 machine-offline = Çevrimdışı
@@ -661,16 +661,11 @@ theme-label = Renk düzeni
 theme-system = Sistemi izle
 ide-shared = Paylaşılan
 ide-memory = Bu makinedeki ajanların kullandığı bellek
-network-hub = Hub'ınız
+network-hub = Agora'nız
 network-build = Bu makinede çalışan sürüm
 network-never = hiç
 network-heard = { $when } duyuldu
 network-last-seen = son görülme: { $when }
-network-online =
-    { $total ->
-        [one] { $total } makineden { $online } tanesi çevrimiçi
-       *[other] { $total } makineden { $online } tanesi çevrimiçi
-    }
 network-terminals =
     { $count ->
         [one] { $count } terminal açık
@@ -958,16 +953,54 @@ forget-machine-agents = { $count ->
     [one] o sırada bir ajan çalışıyordu; orada hâlâ çalışıyor olabilir
    *[other] o sırada { $count } ajan çalışıyordu; orada hâlâ çalışıyor olabilirler
 }
-forget-machines-refuse = Yeniden bağlanırlarsa reddet (her biri yeni bir katılım kodu ister)
 forget-machines-cancel = Kalsın
 forget-machines-confirm = { $count ->
     [one] Unut
    *[other] { $count } makineyi unut
 }
-forget-machine-reason-forbidden = Makineleri yalnızca hub'ın sahibi unutabilir.
+forget-machine-reason-forbidden = Makineleri yalnızca sahibi unutabilir.
 forget-machine-reason-online = Yeniden bağlandı, bu yüzden unutulmadı.
-forget-machine-reason-gone = Hub bu makineyi artık tanımıyor.
-forget-machine-reason-other = Hub unutamadı. Yeniden deneyin.
+forget-machine-reason-gone = Agora'nız bu makineyi artık tanımıyor.
+forget-machine-reason-other = Unutulamadı. Yeniden deneyin.
+
+# My machines as cards (the redesign's PR 9): the page's header, the steps to add a machine, the strip of counts, a machine's card.
+machines-intro = Agora'nıza bağlı her makine. Bir makine uzaktayken ajanları orada çalışmaya devam eder.
+machines-add = Makine ekle
+machines-add-step-allow = Yeni bir makinenin katılmasına izin verin. 10 dakika açık kalır.
+machines-add-step-run = Yeni makinede şu komutu çalıştırın:
+machines-add-command = agora join
+machines-add-step-compare = Ardından iki ekranda da bir numara görünür. Yalnızca ikisi aynıysa burada onaylayın.
+machines-add-hint = Yeni makinelere izin verin, o makinede agora join çalıştırın, sonra numarayı burada karşılaştırın.
+machines-stat-of = / { $total }
+machines-stat-online = makine çevrimiçi
+machines-stat-agents = { $count ->
+    [one] ajan çalışıyor
+   *[other] ajan çalışıyor
+}
+machines-stat-needs = { $count ->
+    [one] sizi bekliyor
+   *[other] sizi bekliyor
+}
+machines-stat-memory = Agora'nın kullandığı bellek
+machine-memory = Bu makinede Agora
+machine-memory-share = Agora'nın tüm makinelerinizde kullandığı belleğin %{ $percent } kadarı
+machine-start-here = Burada bir ajan başlat
+machine-new-terminal = Yeni terminal
+machine-more = { $name } için diğer işlemler
+machine-copy-id = Makine kimliğini kopyala
+machine-agent-settings = Ajan ayarları
+machine-away-agents = { $count ->
+    [one] Bir ajan çalışıyordu
+   *[other] { $count } ajan çalışıyordu
+}
+machine-away-explain = { $name } üzerinde çalışmaya devam ederler. Yaptıkları, makine yeniden bağlandığında burada görünür.
+machine-not-back = Geri gelmeyecek mi?
+forget-machine-explain = Makine ve biten ajanları her pencereden kalkar. Geçmişi ve kullanımı kalır. Yeniden bağlanırsa geri gelir.
+forget-machine-refuse = Yeniden bağlanırsa reddet
+forget-machine-refuse-hint = Yeni bir katılım kodu gerekir.
+forget-machines-refuse-title = Yeniden bağlanırlarsa reddet
+forget-machines-refuse-hint = Her biri yeni bir katılım kodu ister.
+forget-machine-confirm-one = { $name } makinesini unut
 
 # ADR-0066: bir türün aldığı model ve efor, başlatma penceresinde.
 setting-default = Ajanın kendi varsayılanı
