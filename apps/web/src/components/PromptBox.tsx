@@ -3,7 +3,7 @@ import { t } from '../i18n';
 import type { AgentTileModel, SessionModel } from '../model';
 import { isRich, mergeLines, noticeText, queuedNote, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
-import { atBottom, grew, jumped, keepPosition, scrolled, start, type Follow } from '../net/follow';
+import { atBottom, grew, jumped, keepPosition, laidOut, resized, scrolled, sizeOf, start, type Follow, type Size } from '../net/follow';
 import { refusalKey, type ActionResult } from '../net/refusal';
 import { applyCommand, filterCommands, slashQuery, stepIndex, uniqueCommands } from '../net/slash';
 import { endedGroups, flagOf, transcript, windowed } from '../net/transcript';
@@ -67,6 +67,12 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   // Older entries are being drawn above the reader: the height before, and the diff to scroll to once they are in.
   const before = useRef<number | undefined>(undefined);
   const goAfter = useRef<string | undefined>(undefined);
+  // #1060: what the scroll handler and the size observer need without waiting for a render: whether the log follows, its sizes when last
+  // seen, and whether the log itself was just resized (the scroll event of an offset the resize clamped can come a frame later, with the
+  // sizes already back).
+  const followingNow = useRef(true);
+  const seenSize = useRef<Size | undefined>(undefined);
+  const resizing = useRef(false);
   const composedAt = useRef(0);
   const all = useMemo(() => transcript(lines), [lines]);
   const view = useMemo(() => windowed(all, shown), [all, shown]);
@@ -93,12 +99,15 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     return () => sub.close();
   }, [source]);
 
+  // To the newest entry, remembering the sizes it was pinned at: the scroll event this causes is then not taken for a resize.
+  const pin = useCallback(() => { const el = log.current; if (!el) return; el.scrollTop = el.scrollHeight; seenSize.current = sizeOf(el); }, []);
+
   // Older entries were drawn above the reader (it runs when `shown` changes, which is when they appear): keep the same line in view, never
   // leave the position for a later streamed chunk to consume. Then a pending "go to this file" finishes.
   useLayoutEffect(() => {
     const el = log.current;
     if (!el) return;
-    if (before.current !== undefined) { el.scrollTop = keepPosition(el.scrollTop, before.current, el.scrollHeight); before.current = undefined; }
+    if (before.current !== undefined) { el.scrollTop = keepPosition(el.scrollTop, before.current, el.scrollHeight); before.current = undefined; seenSize.current = sizeOf(el); }
     const path = goAfter.current;
     goAfter.current = undefined;
     if (path) reveal(path);
@@ -113,18 +122,51 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     const added = total - seen.current;
     seen.current = total;
     if (!el) return;
-    if (follow.following) el.scrollTop = el.scrollHeight;
+    if (follow.following) pin();
     else if (added > 0) setFollow((f) => grew(f, added));
   }, [lines, agent.state]); // eslint-disable-line react-hooks/exhaustive-deps
-  const onScroll = useCallback(() => { const el = log.current; if (el) setFollow((f) => scrolled(f, atBottom(el))); }, []);
-  const toLatest = () => { const el = log.current; if (el) el.scrollTop = el.scrollHeight; setFollow(jumped()); };
-  const earlier = () => { before.current = log.current?.scrollHeight; setShown((n) => n + PAGE); };
+  useLayoutEffect(() => { followingNow.current = follow.following; }, [follow.following]);
+  // A scroll while following that came with a size change of the log or its content (a window or pane resize, the composer growing) is the
+  // browser moving the offset, not the reader: back to the bottom, still following (#1060). Any other scroll is the reader's.
+  const onScroll = useCallback(() => {
+    const el = log.current;
+    if (!el) return;
+    if (followingNow.current && (resizing.current || resized(seenSize.current, el))) { pin(); return; }
+    seenSize.current = sizeOf(el);
+    const bottom = atBottom(el);
+    followingNow.current = bottom;
+    setFollow((f) => scrolled(f, bottom));
+  }, [pin]);
+  // The log or its content changed size: while following it stays on the newest entry, even when the resize sends no scroll event. A change
+  // of the log's own height also marks the next frames' scroll events as the resize's (one more frame for a late clamp).
+  useEffect(() => {
+    const el = log.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (laidOut(seenSize.current) && el.clientHeight !== seenSize.current.clientHeight) {
+        resizing.current = true;
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => { resizing.current = false; }); });
+      }
+      if (followingNow.current) pin(); else seenSize.current = sizeOf(el);
+    });
+    observer.observe(el);
+    if (el.firstElementChild) observer.observe(el.firstElementChild);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [pin]);
+  // Leaving the tail on purpose (older entries, a file's change) is the reader moving: the resize rule must not pull them back.
+  const leave = () => { followingNow.current = false; setFollow((f) => scrolled(f, false)); };
+  const toLatest = () => { pin(); followingNow.current = true; setFollow(jumped()); };
+  const earlier = () => { before.current = log.current?.scrollHeight; leave(); setShown((n) => n + PAGE); };
   const reveal = (path: string): boolean => {
     const target = [...(log.current?.querySelectorAll<HTMLElement>('[data-diff-path]') ?? [])].reverse().find((d) => d.dataset.diffPath === path);
     if (!target) return false;
     // The change may sit in a row of a folded group: open every fold around it.
     for (let el: HTMLElement | null = target; el; el = el.parentElement) if (el instanceof HTMLDetailsElement) el.open = true;
     target.scrollIntoView?.({ block: 'center' });
+    const el = log.current;
+    if (el && !atBottom(el)) leave();
     return true;
   };
   // A file whose change is older than what is drawn: draw earlier entries (keeping the position), then go to it.

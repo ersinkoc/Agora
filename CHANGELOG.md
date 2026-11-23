@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A chat log that follows its newest entry keeps following when the window or its pane is resized (or the composer grows), instead of stopping and showing "Jump to latest" as if you had scrolled away; scrolling up yourself, or going to a file's change from Files changed, still leaves the bottom (#1060).
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
 - A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
 - When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
