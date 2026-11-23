@@ -539,16 +539,9 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
     let id = started(&rig, &node);
     let agent = AgentId::new(id.clone());
     let pid = pid_of(&node, &id);
-    // The adapter reports its modes and config options once, after it says it is idle, and never again by itself: the next node knows
-    // them only from what this one recorded in the kept session (#932). A line the holder handed to this node counts as had, so one this
-    // node read but had not recorded when it stopped is gone for the next node too: wait until both reports are kept.
-    wait_for("the modes and config options in the kept session", || {
-        let kept = node.ledger.kept_session(&id);
-        kept.options.is_some_and(|o| !o.modes.is_empty())
-            && kept
-                .config
-                .is_some_and(|c| c.options.iter().any(|o| o.id == "auto_approve"))
-    });
+    // The adapter reports its modes and config options once, after it says it is idle, and never again by itself. The node is stopped
+    // without waiting for them: the next node has them whether this one recorded them (the kept session, #932), read them and did not
+    // record them (the holder's `seen` lines, ADR-0104), or never read them (`fresh`). Until #1080 the middle case lost them.
     drop(node);
     std::thread::sleep(Duration::from_millis(500));
     std::fs::write(
@@ -751,6 +744,134 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
             .lock()
             .unwrap()
             .skips_permissions_now(&agent)
+    });
+}
+
+/// The current mode and the value of `auto_approve` in the kept session file (`kept-<id>.pb`), as the node wrote it.
+fn kept_on_disk(rig: &Rig, id: &str) -> (Option<String>, Option<String>) {
+    use prost::Message;
+    let (mut mode, mut auto) = (None, None);
+    let Ok(bytes) = std::fs::read(rig.root.join(format!("data/sessions/kept-{id}.pb"))) else {
+        return (mode, auto);
+    };
+    let mut bytes: &[u8] = &bytes;
+    while let Ok(ev) = v1::Event::decode_length_delimited(&mut bytes) {
+        match ev.body {
+            Some(v1::event::Body::AgentSessionOptions(o)) => mode = Some(o.current_mode),
+            Some(v1::event::Body::AgentSessionConfig(c)) => {
+                auto = c
+                    .options
+                    .into_iter()
+                    .find(|o| o.id == "auto_approve")
+                    .map(|o| o.current);
+            }
+            _ => {}
+        }
+    }
+    (mode, auto)
+}
+
+/// What the supervisor holds of an adapter agent's session: its current mode and the value of `auto_approve`.
+fn reported(sup: &agora_node::supervisor::Supervisor, agent: &AgentId) -> (String, String) {
+    use agora_adapters::host::AdapterEvent;
+    use agora_node::supervisor::SupervisorEvent;
+    let (mut mode, mut auto) = (String::new(), String::new());
+    for e in sup.session_events(agent) {
+        match e {
+            SupervisorEvent::Adapter {
+                event: AdapterEvent::Options { options, .. },
+                ..
+            } => mode = options.current_mode,
+            SupervisorEvent::Adapter {
+                event: AdapterEvent::Config { options, .. },
+                ..
+            } => {
+                if let Some(o) = options.into_iter().find(|o| o.id == "auto_approve") {
+                    auto = o.current;
+                }
+            }
+            _ => {}
+        }
+    }
+    (mode, auto)
+}
+
+/// #1080, ADR-0104 decision 1: the agent switches itself to a mode that skips permissions and turns on an option, and its node reads
+/// both reports and stops before it records them. The holder counted both lines as given (`seen`) when it handed them over, so they
+/// never come back as new, and the kept file still has the start's. The next node takes the newest of each from `seen` over the file.
+///
+/// The race of the issue (1 run in 15), made deterministic: the test holds the supervisor, so the node's own ticker cannot take the
+/// adapter's events, and runs the tick itself and drops what it returns, as a node killed between reading a line and recording its
+/// event loses it.
+#[test]
+fn reports_a_node_read_and_did_not_record_before_it_stopped_reach_the_next_node() {
+    let _serial = serial();
+    let rig = Rig::with_args("unrecorded", &["--modes"]);
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    let pid = pid_of(&node, &id);
+    wait_for("the start's modes and config options on disk", || {
+        kept_on_disk(&rig, &id) == (Some("default".into()), Some("false".into()))
+    });
+    {
+        let mut sup = node.supervisor.lock().unwrap();
+        assert!(!sup.skips_permissions_now(&agent));
+        sup.adapter_prompt(&agent, "mode:bypassPermissions", false)
+            .expect("prompt");
+        sup.adapter_prompt(&agent, "config:auto_approve=true", false)
+            .expect("prompt");
+        // Read (the node had both lines and made its events), never recorded: the events are dropped here.
+        wait_for("the node to have read both reports", || {
+            drop(sup.tick(Instant::now()));
+            reported(&sup, &agent) == ("bypassPermissions".into(), "true".into())
+        });
+        assert!(sup.skips_permissions_now(&agent));
+    }
+    node.mesh.unregister(&agent);
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    assert_eq!(
+        kept_on_disk(&rig, &id),
+        (Some("default".into()), Some("false".into())),
+        "the node recorded the reports after all: the test no longer shows #1080"
+    );
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid, "a new process stands for it");
+    {
+        let sup = node.supervisor.lock().unwrap();
+        assert_eq!(
+            reported(&sup, &agent),
+            ("bypassPermissions".into(), "true".into()),
+            "the next node took the stale kept file over the reports its holder had"
+        );
+        assert!(
+            sup.skips_permissions_now(&agent),
+            "the new node checks the kept agent as if it asks"
+        );
+    }
+    // Said to the hub as such, and recorded, so a later node has them from the file too.
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let shown = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert_eq!(
+        shown
+            .session
+            .options
+            .as_ref()
+            .map(|o| o.current_mode.as_str()),
+        Some("bypassPermissions")
+    );
+    assert!(shown.session.config.as_ref().is_some_and(|c| c
+        .options
+        .iter()
+        .any(|o| o.id == "auto_approve" && o.current == "true")));
+    wait_for("the newer reports in the kept file", || {
+        kept_on_disk(&rig, &id) == (Some("bypassPermissions".into()), Some("true".into()))
     });
 }
 

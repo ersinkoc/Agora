@@ -57,3 +57,6 @@ section, append-only). Tests: node kill with a structured agent mid-turn, with a
   them and resume brings them back. The node records the version it agreed in `<home>/run/hold.link`; `agora doctor` (a warning, same exit status) and
   `agora status` read it and say so, and the node logs `holder.link_v1` once. See `docs/specs/holder-link.md`. Still not built: the window's "kept" and
   "continued" words (needs a field in the agent snapshot, so a schema change and its own ADR step), Windows, and decision 5.
+- Decision 3 amended by ADR-0104 decision 1 (#1080): on take-up the newest `session/options`, `session/config` and `session/commands` of the agent's
+  session in the `seen` lines also replace the kept session file's copy, because they replace the last report and so reading one twice changes
+  nothing. Chat, usage and state are still not taken from `seen`. See "How the node uses it" in `docs/specs/holder-link.md`.

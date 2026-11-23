@@ -312,3 +312,9 @@ references are at main `9760e901`.
    kill, so up to 5 s of merged usage per agent is lost on every planned stop (the follow-up PR #522 names), and so is everything else in flight. Proposed:
    yes, as its own step after O1. The node drops itself on `SIGTERM` with a deadline under the supervisor's and systemd's stop timeouts,
    and exits anyway when the deadline passes. The holder keeps the agents either way.
+
+## Build status
+
+- Step 1 (O1, #1080) is built: `agora_adapters::host::replay` reads the `seen` lines once for the waiting requests and the newest options, config
+  and commands of the recorded session (or a report that names none), and `adopt_held_pipe` puts those over the kept file's before bounding and
+  judging them. Tested with a node whose reports were read and not recorded before it stopped (`hold_node_pipes`). Steps 2 to 5 are not built.
