@@ -73,11 +73,13 @@ The hub does not send terminal previews to the web client yet, so today the line
 
 | State | What it says | Next step |
 | --- | --- | --- |
-| Connecting, nothing known | "Connecting to your hub…" (it does not claim there are no machines yet) | none |
-| Hub unreachable, nothing known | "Cannot reach your hub", agents keep running | Retry now |
+| Connecting, nothing known | "Connecting to your Agora…" (it does not claim there are no machines yet) | none |
+| Hub unreachable, nothing known | "Cannot reach your Agora", agents keep running | Retry now |
 | Fresh hub: no machine, no agent | "Connect your first machine" | the two commands (`agora hub code`, `agora node enroll …`) with Copy, and the machines page |
-| Machines connected, no agent | "Your machines are ready. Start the first agent." | Start an agent; the terminal command |
+| Machines connected, no agent | "Your machines are ready. Start the first agent." | **Start an agent**; **Add a machine** (shows the two join commands and the window for new machines in place; it opens nothing by itself); the terminal command |
 | Hub unreachable, something known | what was known, with a note that it may be out of date | Retry now |
+
+Each of these is centred (redesign PR 11): the kit's icon chip, a title, one line, then its actions and any command in a copy chip. Where the clipboard is missing or refuses, the chip selects the command and says to copy it with the keyboard. Screenshots: `screens/entry-redesign-home-first-run-*`, `screens/entry-redesign-home-add-machine-*`.
 
 ## Rules it follows
 

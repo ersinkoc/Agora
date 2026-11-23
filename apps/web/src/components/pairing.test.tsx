@@ -117,7 +117,7 @@ describe('signing in by approval (ADR-0065 decision 6)', () => {
     expect(waiting).toContain('731-004');
     expect(waiting).not.toContain('<form');
     // A passkey still works while it waits.
-    expect(renderToStaticMarkup(<SignInPage onSubmit={() => {}} onPasskey={() => {}} approval={{ number: '731004', state: 'waiting' }} />)).toContain('Sign in with a passkey');
+    expect(renderToStaticMarkup(<SignInPage onSubmit={() => {}} onPasskey={() => {}} approval={{ number: '731004', state: 'waiting' }} />)).toContain('Use a passkey');
   });
 
   it('speaks Turkish', () => {

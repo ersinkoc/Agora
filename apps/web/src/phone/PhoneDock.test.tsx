@@ -250,6 +250,6 @@ describe('the phone bar for what needs you', () => {
   it('shows one notice of the offline link, not two banners', () => {
     home([ask('p1')], { link: 'offline', onRetry: () => undefined });
     expect(host.querySelectorAll('[role=status]:not(.phone-dock)').length).toBe(1);
-    expect(host.textContent).not.toContain('Hub unreachable');
+    expect(host.textContent).not.toContain('Cannot reach your Agora');
   });
 });

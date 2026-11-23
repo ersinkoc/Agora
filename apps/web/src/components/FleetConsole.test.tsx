@@ -136,6 +136,13 @@ describe('empty, first-run, connecting and offline', () => {
       expect(html).not.toContain('agora node enroll');
     }
   });
+  it('does not offer a guest the owner\'s Add a machine on the first run either (#904)', () => {
+    const html = render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} guest />);
+    expect(html).toContain(t('fleet-firstrun-title'));
+    expect(html).not.toContain(t('fleet-add-machine'));
+    expect(html).not.toContain('agora hub code');
+    expect(render(<FleetEmpty kind="first-run" machines={[machine('n1', { name: 'laptop' })]} />)).toContain(t('fleet-add-machine'));
+  });
   it('offers the first agent when machines exist and none has started', () => {
     const html = console_({ machines: [machine('n1', { name: 'laptop' })] });
     expect(html).toContain(t('fleet-firstrun-title'));

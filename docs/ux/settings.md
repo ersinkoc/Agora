@@ -16,7 +16,7 @@
 
 ## Interface language
 
-The sign-in screen, Home header and focused agent view offer **Language**: **Browser default**, **English**, **Türkçe**.
+The sign-in screen (a quiet select in the sign-in card's footer), Home header and focused agent view offer **Language**: **Browser default**, **English**, **Türkçe**.
 The default follows the browser language, falling back to English for unsupported languages. An explicit selection takes effect
 immediately and is remembered in this browser for this hub; it also updates other tabs. Returning to **Browser default** removes
 the override. This setting is independent of machine/agent languages and is available before signing in.
