@@ -182,7 +182,7 @@ pub struct Side {
     /// This entry is the plan a new plan replaces in place.
     pub plan: bool,
     /// Where the node cut something out of the entry's texts (not written; for the writer's redaction).
-    pub cuts: Cuts,
+    pub cuts: Box<Cuts>,
 }
 
 /// Review of #1103 (N1): places in an entry's texts where the node cut something out (its head and tail kept, or its end dropped):
@@ -1560,10 +1560,10 @@ mod tests {
                 vec![Line::Entry(
                     Box::new(e),
                     Side {
-                        cuts: Cuts {
+                        cuts: Box::new(Cuts {
                             output: vec![half],
                             ..Cuts::default()
-                        },
+                        }),
                         ..Side::default()
                     },
                 )],
@@ -1590,10 +1590,10 @@ mod tests {
                 vec![Line::Entry(
                     Box::new(e),
                     Side {
-                        cuts: Cuts {
+                        cuts: Box::new(Cuts {
                             output: vec![half],
                             ..Cuts::default()
-                        },
+                        }),
                         ..Side::default()
                     },
                 )],
@@ -1620,10 +1620,10 @@ mod tests {
                 vec![Line::Entry(
                     Box::new(e),
                     Side {
-                        cuts: Cuts {
+                        cuts: Box::new(Cuts {
                             text: vec![half],
                             ..Cuts::default()
-                        },
+                        }),
                         ..Side::default()
                     },
                 )],

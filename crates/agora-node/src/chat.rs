@@ -499,7 +499,7 @@ impl Transcript {
                 let mut c = self.cuts.get(&e.entry_id).cloned().unwrap_or_default();
                 // A tool call still running: its output and arguments may stop inside a value the next version completes.
                 c.provisional = e.kind == ChatKind::ToolCall as i32 && !finished(e.status);
-                c
+                Box::new(c)
             },
         }
     }
@@ -3423,7 +3423,6 @@ mod review2 {
 
 /// Review of #1103, round 3: the reviewer's probes, as regression tests (adapted: no quiet timer any more, so its `HOLD_MS` is a
 /// plain 5 s; the bridge and pre-bound cases assert instead of printing; the measurements are ignored by default).
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod review3 {
@@ -3845,14 +3844,14 @@ mod review3perf {
         );
         run(
             "pem4k",
-            vec!["Q".repeat(1) + &"abcdefghij".repeat(400)],
+            vec!["Q".to_string() + &"abcdefghij".repeat(400)],
             40,
             20_000,
             10,
         );
         run(
             "pem8k",
-            vec!["Q".repeat(1) + &"abcdefghij".repeat(800)],
+            vec!["Q".to_string() + &"abcdefghij".repeat(800)],
             40,
             20_000,
             10,
@@ -3968,7 +3967,7 @@ mod property {
         fn chance(&mut self, percent: usize) -> bool {
             self.below(100) < percent
         }
-        fn pick<'a>(&mut self, of: &'a [char]) -> char {
+        fn pick(&mut self, of: &[char]) -> char {
             of[self.below(of.len())]
         }
     }
