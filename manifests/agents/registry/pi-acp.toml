@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id pi-acp, version 0.0.35. Untested in Agora until someone runs it.
+kind = "registry-pi-acp"
+display_name = "pi ACP"
+version = "0.0.35"
+min_engine = 1
+
+[structured]
+acp = { argv = ["npx", "--yes", "pi-acp@0.0.35"] }

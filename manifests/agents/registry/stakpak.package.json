@@ -1,0 +1,72 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Stakpak",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-darwin-aarch64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-darwin-x86_64.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-linux-aarch64.tar.gz"
+        },
+        "linux-aarch64-musl": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": "8312b611b5a635ea7411555f082b0fb3b6d644f99007d2c6a1f30fc6c13e725d",
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-linux-aarch64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-linux-x86_64.tar.gz"
+        },
+        "linux-x86_64-musl": {
+          "cmd": "./stakpak",
+          "env_names_not_copied": [],
+          "sha256": "1e923d6b632e6bda743b3f48c40914f657853478647c26d0a47729a7728490c6",
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-linux-x86_64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./stakpak.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-windows-x86_64.zip"
+        }
+      },
+      "provides": [
+        "stakpak"
+      ]
+    }
+  ],
+  "name": "registry-stakpak",
+  "skipped": [],
+  "source": {
+    "id": "stakpak",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/stakpak/agent/blob/main/LICENSE",
+    "repository": "https://github.com/stakpak/agent",
+    "version": "0.3.88",
+    "website": "https://stakpak.dev"
+  },
+  "tested": false
+}

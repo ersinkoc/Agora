@@ -130,6 +130,10 @@ doctor-skip-permissions = { $detail ->
 doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır anlaşılamadı; bunlar düzelene kadar hiçbir ajan izin sorularını atlayamaz.
 doctor-show-secret = Dosya tarayıcısı ve inceleme ekranı, bir projeye bakabilen herkese gizli dosyaları (.env dosyaları, özel anahtarlar, ...) olduğu gibi gösteriyor (politika: files.show_secret = true).
 doctor-agent-unsafe = { $detail }: `{ $program }` Agora tarafından kurulmuş, ancak klasörü ya da dosyası güvenli değil (başka bir kullanıcı değiştirebilir); bu yüzden kullanılmıyor: varsa PATH üzerindeki kullanılır. `agora agent install` ile yeniden kurun ya da kurulum klasörlerini yalnızca size ait yapın.
+doctor-registry-kinds = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } biliniyor, Agora'da denenmedi; bunlardan { $ready } tanesi programını bu makinede buluyor. Penceredeki Ayarlar → Ajanlar hepsini listeler.
 doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-cert-node = Bu makinenin hub sertifikası { $detail ->

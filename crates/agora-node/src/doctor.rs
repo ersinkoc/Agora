@@ -583,11 +583,22 @@ fn writable(dir: &Path) -> bool {
 /// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
 /// or `folder`), the program looked for (`$program`) and whether it is found (`agent-installed`), not found (`agent-missing`) or found
 /// without the right to run it (`agent-broken`). The agent's own version is not shown: no manifest has a version command yet. A folder file that cannot be read is named; its
-/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
+/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load. The ACP registry's kinds (ADR-0092) are one
+/// line, `registry-kinds` (`$detail`: how many, `$ready`: how many find their program), not one per kind: there are dozens, most are
+/// not installed, and a missing one is not a problem.
 fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
     let (loaded, problems) = crate::manifests::load(dir);
     let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
+    let (mut registry, mut registry_ready) = (0usize, 0usize);
     for l in loaded {
+        if l.source == crate::manifests::Source::Registry {
+            registry += 1;
+            let program = crate::manifests::program(&l.manifest).unwrap_or_default();
+            if !program.is_empty() && locate_in(home, program).is_some_and(|f| runnable(f.path())) {
+                registry_ready += 1;
+            }
+            continue;
+        }
         let program = crate::manifests::program(&l.manifest)
             .unwrap_or_default()
             .to_string();
@@ -630,6 +641,11 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
             u.args = vec![("program", program)];
             out.push(u);
         }
+    }
+    if registry > 0 {
+        let mut c = check("registry-kinds", Status::Ok, registry.to_string());
+        c.args = vec![("ready", registry_ready.to_string())];
+        out.push(c);
     }
     for (p, _) in problems {
         let name = p
@@ -761,8 +777,16 @@ mod tests {
         assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
         assert_eq!(
             find(&checks, "manifests")[0].detail,
-            (crate::manifests::BUILT_IN.len() + 1).to_string()
+            crate::manifests::load(Path::new("")).0.len().to_string()
         );
+        // The registry's kinds are one line, not a warning per kind that is not installed.
+        let registry = find(&checks, "registry-kinds");
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry[0].status, Status::Ok);
+        assert!(registry[0].detail.parse::<usize>().unwrap() >= 40);
+        assert!(!checks
+            .iter()
+            .any(|c| c.detail.starts_with(crate::manifests::REGISTRY_PREFIX)));
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
@@ -996,7 +1020,7 @@ mod tests {
         assert_eq!(checks[0].id, "manifests");
         assert_eq!(
             checks[0].detail,
-            (crate::manifests::BUILT_IN.len() + 3).to_string()
+            (crate::manifests::load(Path::new("")).0.len() + 2).to_string()
         );
         let of = |kind: &str| checks.iter().find(|c| c.detail == kind).unwrap();
         assert_eq!(of("demo").id, "agent-installed");

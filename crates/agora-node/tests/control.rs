@@ -1380,8 +1380,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             .map(|k| (k.kind, k.display_name))
             .collect()
     };
+    // ADR-0092: the ACP registry's converted agents are offered too, each under `registry-<id>`.
     let shipped: Vec<String> = agora_node::manifests::BUILT_IN
         .iter()
+        .chain(agora_node::manifests::REGISTRY)
         .map(|(_, text)| {
             agora_adapters::Manifest::parse(text)
                 .expect("shipped manifest")
@@ -1397,9 +1399,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             s.sort();
             s
         },
-        "every shipped kind and the built-in shell, nothing else"
+        "every shipped kind, the registry's and the built-in shell, nothing else"
     );
     assert_eq!(listed["shell"], "Shell");
+    assert!(listed.keys().filter(|k| k.starts_with("registry-")).count() >= 40);
     // With no file at all, the user's shell starts.
     let started = c.call(start_cmd("shell"));
     assert!(started.is_ok(), "{started:?}");

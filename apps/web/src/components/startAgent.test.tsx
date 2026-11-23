@@ -71,6 +71,25 @@ describe('the start window, agent cards', () => {
     expect(card('Codex').hasAttribute('data-selected')).toBe(true);
   });
 
+  it('puts installed ACP registry kinds in their own Untested group, leaves out the ones it cannot find and never preselects one (ADR-0092)', async () => {
+    const kinds: KindChoice[] = [
+      { kind: 'registry-amp', name: 'Amp', installed: true, level: 3, program: 'npx' },
+      ...KINDS,
+      { kind: 'registry-goose', name: 'goose', installed: false, level: 3, program: 'goose' },
+    ];
+    await open({ loadKinds: async () => kinds });
+    expect(radios('Which agent').map((r) => r.getAttribute('aria-label'))).toEqual(['Codex', 'Claude Code', 'Amp', 'Gemini CLI', 'Old agent']);
+    const text = group('Which agent').textContent ?? '';
+    expect(text.indexOf('Claude Code')).toBeLessThan(text.indexOf('Untested'));
+    expect(text.indexOf('Untested')).toBeLessThan(text.indexOf('Amp'));
+    expect(card('Amp').textContent).toContain('Untested');
+    expect(checked('Which agent')?.getAttribute('aria-label')).toBe('Codex');
+    // Only registry kinds: still nothing untested is chosen for the person.
+    act(() => root.unmount()); root = createRoot(host);
+    await open({ loadKinds: async () => [kinds[0]!] });
+    expect(checked('Which agent')).toBeUndefined();
+  });
+
   it('has no group labels when every kind is installed', async () => {
     await open({ loadKinds: async () => KINDS.filter((k) => k.installed) });
     expect(group('Which agent').textContent).not.toContain('Installed');

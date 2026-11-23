@@ -137,4 +137,8 @@ export const demoSettingsKinds = [
   { kind: 'wrongstack', name: 'WrongStack', installed: true, level: 2, program: 'wrongstack', settings: [], options: [skip] },
   { kind: 'fake-adapter', name: 'Fake chat agent', installed: true, level: 4, program: 'agora-fake-agent', settings: [], options: [] },
   { kind: 'opencode-acp', name: 'opencode', installed: false, level: 3, program: 'opencode', settings: [], options: [] },
+  // ADR-0092: ACP registry agents (untested in Agora): one the machine can start through npx, two it cannot find.
+  { kind: 'registry-qwen-code', name: 'Qwen Code', installed: true, level: 3, program: 'npx', settings: [], options: [] },
+  { kind: 'registry-goose', name: 'goose', installed: false, level: 3, program: 'goose', settings: [], options: [] },
+  { kind: 'registry-kiro', name: 'Kiro CLI', installed: false, level: 3, program: 'kiro-cli', settings: [], options: [] },
 ];

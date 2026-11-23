@@ -1,0 +1,56 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Amp",
+  "installers": [
+    {
+      "args": [],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./amp-acp",
+          "env_names_not_copied": [],
+          "sha256": "ca3315e3e54ea85c7e5db09d19a1908cd2ea149c8e83a728cefb814c7a490edf",
+          "url": "https://github.com/tao12345666333/amp-acp/releases/download/v0.13.0/amp-acp-darwin-aarch64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./amp-acp",
+          "env_names_not_copied": [],
+          "sha256": "75aeeb10a346276151fb38812a8aafd95d108765e794da0e1ff30b0aebfc6752",
+          "url": "https://github.com/tao12345666333/amp-acp/releases/download/v0.13.0/amp-acp-darwin-x86_64.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./amp-acp",
+          "env_names_not_copied": [],
+          "sha256": "ad7e1c23ec29bf47f757d656fc4c9a957dd60533da034213a6bc7d33d1813d32",
+          "url": "https://github.com/tao12345666333/amp-acp/releases/download/v0.13.0/amp-acp-linux-aarch64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./amp-acp",
+          "env_names_not_copied": [],
+          "sha256": "205c819383b6fd389b408120ebea9cdde5c2957530b5ce4ebc912998d4118f8b",
+          "url": "https://github.com/tao12345666333/amp-acp/releases/download/v0.13.0/amp-acp-linux-x86_64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "amp-acp.exe",
+          "env_names_not_copied": [],
+          "sha256": "5bb7aad1f40f6a1c41a81dbb566bf550a00a627da41508b035cca8765a1422dd",
+          "url": "https://github.com/tao12345666333/amp-acp/releases/download/v0.13.0/amp-acp-windows-x86_64.zip"
+        }
+      },
+      "provides": [
+        "amp-acp"
+      ]
+    }
+  ],
+  "name": "registry-amp-acp",
+  "skipped": [],
+  "source": {
+    "id": "amp-acp",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/tao12345666333/amp-acp/blob/main/LICENSE",
+    "repository": "https://github.com/tao12345666333/amp-acp",
+    "version": "0.13.0"
+  },
+  "tested": false
+}

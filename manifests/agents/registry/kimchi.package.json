@@ -1,0 +1,60 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Kimchi",
+  "installers": [
+    {
+      "args": [
+        "--mode",
+        "acp"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./bin/kimchi",
+          "env_names_not_copied": [],
+          "sha256": "2d66ddb853741c04b452f93964a5b533273f1195b9b9031f4bb71fe464d06fd7",
+          "url": "https://github.com/getkimchi/kimchi/releases/download/v1.37.6/kimchi_darwin_arm64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./bin/kimchi",
+          "env_names_not_copied": [],
+          "sha256": "ca176f628f1cbd853423b63384277998b854be891b4db313a89c904d6bf98728",
+          "url": "https://github.com/getkimchi/kimchi/releases/download/v1.37.6/kimchi_darwin_amd64.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./bin/kimchi",
+          "env_names_not_copied": [],
+          "sha256": "c2a3fe6e7038ad7b0b165ce962577a151722804a1804aa6767e02d7fa37dee1a",
+          "url": "https://github.com/getkimchi/kimchi/releases/download/v1.37.6/kimchi_linux_arm64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./bin/kimchi",
+          "env_names_not_copied": [],
+          "sha256": "3df984fd2e98c9a76201cc8d192208d6dbb6f6394bee2a539b139d1e68c91333",
+          "url": "https://github.com/getkimchi/kimchi/releases/download/v1.37.6/kimchi_linux_amd64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./bin/kimchi.exe",
+          "env_names_not_copied": [],
+          "sha256": "381e36b89f39066ad1a8aa696ad3695cf15f0b6639c043041fe46c963cfae732",
+          "url": "https://github.com/getkimchi/kimchi/releases/download/v1.37.6/kimchi_windows_amd64.zip"
+        }
+      },
+      "provides": [
+        "kimchi"
+      ]
+    }
+  ],
+  "name": "registry-kimchi",
+  "skipped": [],
+  "source": {
+    "id": "kimchi",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/getkimchi/kimchi/blob/master/LICENSE",
+    "repository": "https://github.com/getkimchi/kimchi",
+    "version": "1.37.6",
+    "website": "https://kimchi.dev"
+  },
+  "tested": false
+}

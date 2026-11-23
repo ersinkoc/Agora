@@ -643,6 +643,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("agent-broken", _) => key!("doctor-agent-broken"),
             ("agent-unsafe", _) => key!("doctor-agent-unsafe"),
+            ("registry-kinds", _) => key!("doctor-registry-kinds"),
             ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
@@ -692,7 +693,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
             (
                 "manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub"
-                | "holder-old",
+                | "holder-old" | "registry-kinds",
                 Ok(n),
             ) => Arg::Num(n),
             _ => c.detail.as_str().into(),

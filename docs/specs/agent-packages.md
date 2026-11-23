@@ -69,6 +69,14 @@ entries of the signed list. The two do not fork; the differences, all deliberate
 `tests/agent_packages.rs::converter_output_fits_the_entry_format_after_review` runs a real converter fixture (`goose`) through this
 parser to keep the two aligned.
 
+The drafts for the whole registry are committed as `manifests/agents/registry/<id>.package.json` (unsigned; no release step signs an
+agent list yet, so nothing in the repository is a signed entry). Two shapes of real entries: uvx's own `name@version` pin is read as
+`name==version`; a `binary` whose program has a different name on each platform (`tool-linux-amd64`, `tool-windows-arm64.exe`) gets
+`provides = [<registry id>]`, the one name the installer leaves on the path for all of them, and the manifest runs that name (the
+arguments must still be the same on every platform, else `registry.inconsistent_command`). An entry the registry's own
+`quarantine.json` names is skipped (`registry.quarantined`), and a `repository`, `website` or `license_url` that is not an `https://`
+address under the URL rule above refuses the entry (`registry.bad_url`).
+
 ## Rung 3: `agora agent install` (binary-download only)
 `agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]` installs one agent program on the machine the owner is
 typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with the network and the signature tool behind traits) and

@@ -274,13 +274,14 @@ describe('Agents', () => {
     render(<AgentsSettings machines={machines} loadKinds={load} />);
     await flush();
     const cards = () => [...host.querySelectorAll('.set-kind')];
-    expect(cards().map((c) => c.querySelector('.set-kind__title')?.textContent)).toEqual(['Antigravity', 'Claude Code', 'Codex', 'Fake chat agent', 'WrongStack', 'opencode']);
+    // Hand-made kinds first, the ACP registry's (untested) after them, in each group; the ones it cannot find under "Add an agent".
+    expect(cards().map((c) => c.querySelector('.set-kind__title')?.textContent)).toEqual(['Antigravity', 'Claude Code', 'Codex', 'Fake chat agent', 'WrongStack', 'Qwen Code', 'opencode', 'goose', 'Kiro CLI']);
     const claude = cards()[1]!;
     expect(claude.querySelector('.kit-avatar')?.textContent).toBe('C');
     const bolt = claude.querySelector('[role="img"]')!;
     expect(bolt.getAttribute('aria-label')).toContain('skips permission questions');
     expect(cards()[0]!.querySelector('[role="img"]')).toBeNull();
-    const missing = cards()[5]!;
+    const missing = cards()[6]!;
     expect(missing.className).toContain('set-kind--missing');
     expect(missing.textContent).toContain('Not installed');
     // The rest is in the card, read by opening it (a native disclosure: Enter and Space open it).
@@ -298,6 +299,53 @@ describe('Agents', () => {
     // An offline machine that never answered says so.
     key(group.querySelector('[aria-checked="true"]')!, 'ArrowRight');
     expect(host.textContent).toContain(t('agents-none-known'));
+  });
+});
+
+describe('Add an agent (ADR-0092)', () => {
+  const load = vi.fn(async () => demoSettingsKinds);
+  it('lists every kind the machine has or misses, the registry ones with version, licence, a repository link and an Untested mark', async () => {
+    localStorage.clear();
+    render(<AgentsSettings machines={machines.slice(0, 1)} loadKinds={load} />);
+    await flush();
+    const add = host.querySelector('.set-kinds-add')!;
+    expect(add.querySelector('h4')?.textContent).toBe('Add an agent 3');
+    const titles = [...add.querySelectorAll('.set-kind__title')].map((e) => e.textContent);
+    expect(titles).toEqual(['opencode', 'goose', 'Kiro CLI']);
+    const card = (name: string) => [...host.querySelectorAll('.set-kind')].find((c) => c.querySelector('.set-kind__title')?.textContent === name)!;
+    const goose = card('goose');
+    // The mark is on the face; a hand-made kind has none.
+    expect(goose.querySelector('.set-kind__face')!.textContent).toContain('Untested');
+    expect(card('opencode').textContent).not.toContain('Untested');
+    expect(card('Codex').textContent).not.toContain('Untested');
+    // Its icon is a mask over the text colour, never markup; a kind without one keeps its letter.
+    const icon = goose.querySelector<HTMLElement>('.kit-avatar__icon')!;
+    expect(icon.style.getPropertyValue('--icon')).toMatch(/^url\(/);
+    expect(goose.querySelector('.kit-avatar svg, .kit-avatar img')).toBeNull();
+    const more = goose.querySelector('.set-kind__more')!.textContent ?? '';
+    expect(more).toContain('Version1.60.2');
+    expect(more).toContain('LicenseApache-2.0');
+    expect(more).toContain('Listed byACP registry');
+    expect(more).toContain('cannot find goose');
+    expect(more).toContain('Nobody has tried it in Agora yet');
+    const link = goose.querySelector<HTMLAnchorElement>('a[href]')!;
+    expect(link.href).toBe('https://github.com/block/goose');
+    expect(link.rel).toBe('noopener noreferrer');
+    expect(link.target).toBe('_blank');
+    expect(link.textContent).toBe('github.com/block/goose');
+    // One that starts through npx says that it downloads its pinned version the first time.
+    expect(card('Qwen Code').querySelector('.set-kind__more')!.textContent).toContain('Starting it runs npx');
+    // Nothing here is a button: looking runs nothing, installs nothing.
+    expect([...host.querySelectorAll('button')]).toEqual([]);
+  });
+
+  it('has the same words in Turkish', async () => {
+    setLanguage('tr');
+    localStorage.clear();
+    render(<AgentsSettings machines={machines.slice(0, 1)} loadKinds={load} />);
+    await flush();
+    expect(host.querySelector('.set-kinds-add h4')?.textContent).toBe('Ajan ekle 3');
+    expect(host.textContent).toContain('Denenmedi');
   });
 });
 

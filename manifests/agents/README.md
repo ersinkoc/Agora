@@ -8,6 +8,21 @@ to `BUILT_IN` there, a test fails until you do). A file in the node's manifests 
 
 Shipped: `antigravity-acp` (`agy acp`, unverified against the real program yet), `opencode-acp` (opencode as an ACP server; unverified against the real program yet), `claude-code` (screens captured from Claude Code 2.1.319), `codex` (codex-cli 0.167.0) `wrongstack-acp` (the same agent as an ACP server, L2: no terminal, so no screens) and `wrongstack` (WrongStack 1.5.3; fixtures are the rows of the 120x40 screen as plain text, replayed from a raw capture, because its animated side panels made the raw streams megabytes long). Fixtures are raw terminal output (`<name>.screen`, captured on a 120x40 terminal) with the expected result in `<name>.expect` (`<state> <rule id>` or `none`); `crates/agora-adapters/tests/shipped_manifests.rs` checks every manifest against its screens.
 
+## The ACP registry (`registry/`, ADR-0092)
+`registry/` holds the agents of the official ACP registry (`github.com/agentclientprotocol/registry`), converted by
+`cargo run -p agora-adapters --example registry_convert -- <registry clone> manifests/agents/registry <commit> <date>` and reviewed
+in a pull request. Nothing in it is written by hand and nodes never read the registry. Per agent: `<id>.toml` (an L2 manifest of
+kind `registry-<id>`, `[structured] acp`, no launch options), `<id>.package.json` (the unsigned ADR-0087 draft a reviewer turns into
+signed-list entries, `docs/specs/agent-packages.md`) and `icons/<id>.svg` (only when the icon passed `check_icon`: a plain one-colour
+drawing of at most 16 KiB). `catalog.json` is what the window's "Add an agent" list shows, `SKIPPED` names each entry left out with
+its reason code, and `SOURCE` the registry commit and date. Every `.toml` is compiled in (`REGISTRY` in
+`crates/agora-node/src/manifests.rs`; a test fails until the list matches the folder). These kinds are **untested**: nobody has run
+them through Agora. A hand-made kind of the same `kind`, or one named by the registry id (`antigravity-acp` for
+`registry-antigravity-acp`), wins and the registry one is not offered. At registry commit `6f2077c` (2026-11-23): 46 entries, 41
+converted; left out: `agoragentic-acp`, `deepagents`, `minion-code` and `vtcode` (`registry.quarantined`: the registry holds them back
+itself) and `antigravity-acp` (`registry.inconsistent_command`: its arguments differ per platform; the hand-made `antigravity-acp`
+covers it). `registry-opencode` runs the same `opencode acp` as the hand-made `opencode-acp`; both are listed.
+
 Launch options (ADR-0059, `[[launch.option]]`, `min_engine = 2`): only flags checked on a real version are declared, each with the
 version in a comment. `claude-code`: `--dangerously-skip-permissions` (Claude Code 2.1.323); `codex`:
 `--dangerously-bypass-approvals-and-sandbox` (codex-cli 0.167.1); `wrongstack`: `--yolo` (WrongStack 1.6.0; it still asks for the
