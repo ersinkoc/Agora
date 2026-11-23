@@ -1,8 +1,8 @@
 # 0107. `agent.list` lists the agents a node found interrupted
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-23 (the maintainer, in the merger chat: "Accept and build" for ADR-0107).
 
 Origin: issue #1121, found while fixing #1120 (PR #1122, merged as 1d02ecda).
 
@@ -59,7 +59,7 @@ The local control socket has no event stream, so the CLI cannot get `AgentInterr
    without one shows nothing about them on the command line for 14 days, and `agora agent stop` on a still-running survivor works on an
    id the list never showed.
 
-## Decision (proposed)
+## Decision
 
 Option 2.
 
