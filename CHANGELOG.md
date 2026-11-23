@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A machine that disconnects while the hub cannot write to its database (busy or failing) is now shown offline as soon as the hub can write again, instead of staying online in every window until it came back or the hub restarted (#996).
 - A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change from the window now stores the new password, signs out the other sessions and removes passkeys added without the password all together or not at all, and a passkey is added together with the record of whether the password was given.
 - A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
 - When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
