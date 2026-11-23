@@ -348,7 +348,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   whatever the lengths of the lines (a flood of one-byte lines is tested).
 - **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
   collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
-  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. Only an end counts (the
+  child exited, or a signal killed it): a stopped agent (`SIGSTOP`, a debugger) is not ended, whatever the system's `waitid` reports for it. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
   `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
   counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only

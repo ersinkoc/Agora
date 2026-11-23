@@ -1192,6 +1192,39 @@ mod tests {
     }
 
     /// Letting go of a held terminal ends its read and closes the node's copy of the master (a copy that kept reading would take output
+    /// A pipe agent that is stopped (`SIGSTOP`) has not ended: the holder neither reports an end nor ends its group (review of #1108,
+    /// on macOS a stopped adapter was killed and its node saw it exit).
+    #[test]
+    fn a_stopped_pipe_agent_is_not_taken_for_ended() {
+        let mut p = HeldProcess::start(
+            &["sleep".to_string(), "30".to_string()],
+            None,
+            &[(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )],
+        )
+        .unwrap();
+        let pid = p.pid() as libc::pid_t;
+        // SAFETY: plain system calls on a child of this test.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        let end = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < end {
+            assert!(
+                p.try_wait().unwrap().is_none(),
+                "a stopped agent was taken for ended"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGCONT) },
+            0,
+            "the stopped agent was ended"
+        );
+        p.kill_and_reap();
+    }
+
     /// meant for the next node), and ends nothing: the agent runs on and its terminal can be read again.
     #[test]
     fn letting_go_of_a_held_terminal_ends_the_read_and_not_the_agent() {
@@ -1356,6 +1389,12 @@ impl HeldProcess {
     }
 }
 
+/// `siginfo_t.si_code` of a child that ended: exited, killed by a signal, killed with a core dump (the same values on Linux and macOS,
+/// which the `libc` crate names on Linux only).
+const CLD_EXITED: libc::c_int = 1;
+const CLD_KILLED: libc::c_int = 2;
+const CLD_DUMPED: libc::c_int = 3;
+
 /// Whether the child `pid` has ended, without collecting it (`waitid` with `WEXITED | WNOHANG | WNOWAIT`): an ended child stays a
 /// zombie, so its pid (and the group and session it led) stay its own until it is collected.
 fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
@@ -1376,7 +1415,10 @@ fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
         };
         if r == 0 {
             // SAFETY: filled in by a successful waitid; zero when the child has not ended (WNOHANG).
-            return Ok(unsafe { info.si_pid() } != 0);
+            let pid = unsafe { info.si_pid() };
+            // Only an end counts: a child that was stopped (`SIGSTOP`, a debugger) is not ended, whatever a system's `waitid` reports
+            // for it (the holder would otherwise end its group, a stopped agent being killed; seen on macOS).
+            return Ok(pid != 0 && [CLD_EXITED, CLD_KILLED, CLD_DUMPED].contains(&info.si_code));
         }
         let e = io::Error::last_os_error();
         match e.raw_os_error() {

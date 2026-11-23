@@ -1591,7 +1591,8 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
     wait_for("the request", || requested(&node).is_some());
     let approval = requested(&node).unwrap().approval_id;
     // The adapter cannot answer while it is stopped: the decision's delivery waits for it.
-    let paused = Paused::new(pid_of(&node, &id));
+    let adapter = pid_of(&node, &id);
+    let paused = Paused::new(adapter);
     let socket = node.socket().unwrap().to_path_buf();
     let signature = key
         .sign(
@@ -1616,8 +1617,16 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
             )
         })
     };
-    std::thread::sleep(Duration::from_millis(500));
+    // The decision was verified and left the queue; what follows is in memory (the call is queued for the adapter at once). The stop
+    // must come after that: a decision that only reaches the adapter after the node let it go was not delivered, and is rightly
+    // recorded so (a fixed wait was too short on a slow macOS runner, where the verification itself took longer).
+    wait_for("the decision to leave the queue", || {
+        node.approvals.pending_count() == 0
+    });
+    std::thread::sleep(Duration::from_millis(300));
     drop(node);
+    // A stopped agent has not ended: the holder keeps it (on macOS it once took the stop for an end and killed it).
+    assert!(alive(adapter), "the stopped adapter was ended");
     drop(paused);
     let answer = deciding.join().unwrap();
     let node = rig.node();
