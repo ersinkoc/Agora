@@ -118,6 +118,8 @@ struct Save {
     woken: bool,
     /// `chat.history_not_saved` was said in this conversation.
     said: bool,
+    /// A fresh start: the earlier session's file is moved aside (keeping this highest id) before the next batch is written.
+    fresh: Option<u64>,
 }
 
 impl Save {
@@ -131,6 +133,7 @@ impl Save {
             bytes: 0,
             woken: false,
             said: false,
+            fresh: None,
         }
     }
 
@@ -907,16 +910,22 @@ impl ChatBoard {
     }
 
     /// ADR-0060, ADR-0089 decision 5: a resume went through (called before its adapter's first words are read): the transcript is
-    /// seeded with what [`Self::read_seed`] gave, and a fresh start moves the earlier session's file aside so the new one begins a file
-    /// of its own. A resume that is refused calls nothing, and leaves the file and the ring as they were.
+    /// seeded with what [`Self::read_seed`] gave. For a fresh start the earlier session's file is to be moved aside: only marked here
+    /// (no file is touched under the supervisor's lock), and moved by the writer before it writes anything of the new session, so a
+    /// batch never lands in the file being moved (review of #1103, N5 and N8). A resume that is refused calls nothing.
     pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
+        let Some(seed) = seed else {
+            return;
+        };
+        let high = seed.high;
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        t.seed(seed, now_ms);
         if fresh {
-            if let Some(store) = &self.store {
-                store.move_aside(agent.as_str(), seed.as_ref().map_or(0, |s| s.high));
+            if let Some(s) = &mut t.save {
+                s.fresh = Some(high);
+                s.wake.notify();
             }
-        }
-        if let Some(seed) = seed {
-            self.seed(agent, seed, now_ms);
         }
     }
 
@@ -945,9 +954,11 @@ impl ChatBoard {
             let Some(s) = &mut t.save else {
                 continue;
             };
-            if s.dirty.is_empty() && s.evicted.is_empty() && s.removed.is_empty() {
+            if s.dirty.is_empty() && s.evicted.is_empty() && s.removed.is_empty() && s.fresh.is_none()
+            {
                 continue;
             }
+            let fresh = s.fresh.take();
             let dirty = std::mem::take(&mut s.dirty);
             let evicted = std::mem::take(&mut s.evicted);
             let removed = std::mem::take(&mut s.removed);
@@ -969,6 +980,7 @@ impl ChatBoard {
                 agent: agent.clone(),
                 high: t.next_id,
                 lines,
+                fresh,
             });
         }
         out
@@ -2820,6 +2832,14 @@ mod tests {
         assert_eq!(new.read_seed(&a, false).unwrap().entries.len(), 2);
         new.resumed(&a, seed, true, 2);
         assert!(new.snapshot(&a).is_empty());
+        // Review of #1103 (N5, N8): no file is touched there (that runs under the supervisor's lock); the writer moves it, before
+        // anything of the new session, even when nothing new was said yet.
+        assert_eq!(s.read("a").entries.len(), 2);
+        let batches = new.take_unsaved();
+        assert_eq!((batches.len(), batches[0].fresh, batches[0].lines.len()), (1, Some(2), 0));
+        s.write(&batches[0]).unwrap();
+        assert!(s.read("a").entries.is_empty());
+        assert_eq!(s.read("a").high, 2);
         new.push_item(&a, &ChatItem::Text("z".into()), 3);
         assert_eq!(new.snapshot(&a)[0].entry_id, 3);
         save(&new);

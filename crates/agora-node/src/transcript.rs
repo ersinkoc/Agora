@@ -144,6 +144,9 @@ pub struct Batch {
     /// The highest entry id given to the agent so far.
     pub high: u64,
     pub lines: Vec<Line>,
+    /// ADR-0089 decision 5: the agent was started again fresh: its earlier file is moved aside, keeping this highest id, before the
+    /// lines are written. The writer does both, so nothing else writes the file meanwhile (review of #1103, N8).
+    pub fresh: Option<u64>,
 }
 
 /// What the file gives back: the newest version of each entry still in it, oldest first, and the highest id ever given.
@@ -614,6 +617,9 @@ impl Store {
 
     /// Appends a batch to its agent's file (made private, with its header, when new), then keeps the file within its bound.
     pub fn write(&self, batch: &Batch) -> io::Result<()> {
+        if let Some(high) = batch.fresh {
+            self.move_aside(batch.agent.as_str(), high);
+        }
         if self.limits.max_bytes == 0 || batch.lines.is_empty() {
             return Ok(());
         }
@@ -898,6 +904,7 @@ mod tests {
             agent: AgentId::new(agent),
             high,
             lines,
+            fresh: None,
         }
     }
 
