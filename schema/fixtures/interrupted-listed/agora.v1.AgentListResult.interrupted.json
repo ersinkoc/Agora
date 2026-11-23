@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "agentId": "agent-2",
+      "kind": "claude-code",
+      "state": "AGENT_STATE_DONE",
+      "worktreeId": "/home/u/work/a",
+      "running": false
+    }
+  ],
+  "interrupted": [
+    {
+      "agentId": "agent-3",
+      "kind": "codex",
+      "projectId": "demo",
+      "folder": "/home/u/work/b",
+      "parentAgentId": "agent-2",
+      "resumable": true,
+      "startedAtMs": "1700000000000",
+      "interruptedAtMs": "1700000600000",
+      "lastState": "AGENT_STATE_WORKING",
+      "stillRunning": true
+    }
+  ]
+}

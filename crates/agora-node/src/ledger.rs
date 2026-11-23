@@ -514,6 +514,24 @@ impl Entry {
         !self.ended && self.interrupted_at_ms != 0
     }
 
+    /// ADR-0060: the `AgentInterrupted` the node says for this entry, the one builder for the event announced to the hub and the row
+    /// `agent.list` gives (ADR-0107), so the two never differ. `resumable`: [`Supervisor::offers_resume`](crate::supervisor::Supervisor::offers_resume).
+    /// Reads whether its process still runs (a look at the system): callers build it outside the supervisor's lock.
+    pub fn interrupted_event(&self, resumable: bool) -> v1::AgentInterrupted {
+        v1::AgentInterrupted {
+            agent_id: self.agent_id.clone(),
+            kind: self.kind.clone(),
+            project_id: self.project_id.clone(),
+            folder: self.folder.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            resumable,
+            started_at_ms: self.started_at_ms,
+            interrupted_at_ms: self.interrupted_at_ms,
+            last_state: proto_state(&self.last_state) as i32,
+            still_running: self.still_running(),
+        }
+    }
+
     /// The process it ran as, when one was recorded.
     pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
         (self.pid > 1 && self.process_started != 0).then(|| agora_platform::ProcessIdentity {

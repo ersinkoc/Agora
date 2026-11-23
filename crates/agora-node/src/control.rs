@@ -722,9 +722,25 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .as_ref()
                 .map(|l| l.ended(crate::daemon::now_ms()))
                 .unwrap_or_default();
+            // ADR-0107: the agents it found interrupted and still offers (oldest id first), read before the lock as well.
+            let found = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.interrupted())
+                .unwrap_or_default();
             // One lock for the whole answer (the mutex is not reentrant).
             let sup = ctx.sup();
             let views = sup.list();
+            // An id the supervisor holds (one being resumed or started again) is listed from the supervisor only. Whether Resume is
+            // offered is decided here, under the lock, as the node's announcement decides it.
+            let interrupted: Vec<(crate::ledger::Entry, bool)> = found
+                .into_iter()
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| {
+                    let resumable = sup.offers_resume(&e);
+                    (e, resumable)
+                })
+                .collect();
             let earlier: Vec<v1::AgentSummary> = kept
                 .into_iter()
                 .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
@@ -770,8 +786,18 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     a.agent_id.clone(),
                 )
             });
+            drop(sup);
+            // Each row is the `AgentInterrupted` the node announces for it (the same builder), built after the lock is released: whether
+            // its process still runs is a look at the system.
+            let interrupted = interrupted
+                .iter()
+                .map(|(e, resumable)| e.interrupted_event(*resumable))
+                .collect();
             Ok(v1::CommandOk {
-                result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+                result: Some(Ok_::AgentList(v1::AgentListResult {
+                    agents,
+                    interrupted,
+                })),
             })
         }
         Cmd::WorkspaceQuery(q) => {
@@ -1493,7 +1519,7 @@ fn stop_survivor(
     }
     ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
-        let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
+        let resumable = ctx.sup().offers_resume(&e);
         ev.agent_interrupted(&e, resumable);
     }
     Ok(())
