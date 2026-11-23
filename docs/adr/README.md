@@ -118,3 +118,4 @@ Date: YYYY-MM-DD
 | 0099 | A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell rejected 2026-11-22) | Accepted |
 | 0100 | The terminal repaint carries the program's modes and its history | Accepted |
 | 0101 | A structured agent can be allowed always for its session | Accepted |
+| 0102 | A window gets recent Team chat history | Proposed |
