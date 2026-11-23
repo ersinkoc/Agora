@@ -44,7 +44,10 @@ the snapshot would be in no snapshot and never come live". That is this bug.
   prunes it. There is no index by event kind or project: finding messages means reading payloads. Message bodies are in the event store
   already; ADR-0049 keeps them out of the audit table only.
 - *Filtered per person.* A member or viewer receives a live `MessagePosted` only when its sender agent is in a granted project
-  (`crates/agora-hub/src/scope.rs:266`: "it is theirs only when the sender is theirs"). `MessagePosted` names no node, so `is_forged`
+  (`crates/agora-hub/src/scope.rs:266`: "it is theirs only when the sender is theirs"). The lookup qualifies `from_agent_id` with the
+  producer (`qualified`, `projection.rs:281`), so only the **sender's own copy** is ever admitted: a receiver's copy, whose `from` is
+  already `<origin>/<agent>`, and so every `#channel` copy, reaches the owner only (the test
+  `a_message_between_machines_is_the_members_by_the_senders_own_copy_only`, `scope.rs:632`). `MessagePosted` names no node, so `is_forged`
   never refuses it (`projection.rs:253`); a node can write any `from`, and the web marks a copy that only another machine vouches for
   with `via` (#905).
 - *Held by the web.* `View.messages` keeps the newest 50 (`MAX_MESSAGES`, `apps/web/src/net/view.ts:118`), pairs the two copies of a
@@ -124,11 +127,17 @@ snapshot with two messages, one pair of copies of a message between machines), n
 
 ### 2. The hub keeps a tail per project
 
-- `View` keeps, per project of the **sender** agent (`<node>/<project>`, the project `scope.rs:266` decides by), the newest **50**
-  `MessagePosted` events and at most **256 KiB** of their encoded size, whichever is smaller, dropping the oldest. A message whose sender
-  the hub cannot place in a project (an agent it never saw, a `from` naming an unknown agent) goes to one ring of the same limits that
-  only the owner's snapshot reads. Over all rings, at most **8 MiB**, dropping the oldest across projects. Entries are shared, so the
-  view's clone under the lock does not copy bodies.
+- `View` keeps, per project (`<node>/<project>`), the newest **50** `MessagePosted` events and at most **256 KiB** of their encoded
+  size, whichever is smaller, dropping the oldest. Over all rings, at most **8 MiB**, dropping the oldest across projects. Entries are
+  shared, so the view's clone under the lock does not copy bodies.
+- **Placement uses only what the producer can vouch for: its own agents.** A message goes to the ring of the project of
+  `<producer>/<from_agent_id>` when that is an agent the hub knows (the sender's own copy, the one `scope.rs:266` admits); otherwise
+  to the ring of `<producer>/<to>` when that is a known agent (a receiver's copy of a message between machines, and each `#channel`
+  copy); otherwise to one more ring of the same limits that only the owner's snapshot reads. Each entry records whether it was
+  placed by its sender (it passes the live rule) or by its recipient.
+- **The hub never resolves an already-qualified `from` to another machine's agent.** A node can write any `from` (T13): resolving it
+  would let a forged sender into the ring, and the snapshot, of a project its machine does not host. Placing a receiver's copy by its
+  own recipient only bounds it per project; it does not make it a member's (decision 3).
 - Copies are kept as stored: both copies of a message between machines, and each receiver's copy of a `#channel` message. The hub does
   not pair or deduplicate; the window does, exactly as for live events (#905). (A channel message to many agents can fill the tail with
   copies; that is what the live stream shows today too.)
@@ -139,8 +148,9 @@ snapshot with two messages, one pair of copies of a message between machines), n
 ### 3. What one window is sent
 
 - From the rings the window may see: the owner's shown view (ADR-0073: no sender under a forgotten machine; no sender that is a
-  forgotten agent, ADR-0053), a member's or viewer's cut view (the sender in a granted project, the same `Scope` that cuts the rest of
-  the snapshot).
+  forgotten agent, ADR-0053), a member's or viewer's cut view: only entries placed by their sender, in a granted project, the
+  rule live events follow (`Scope::admit`), so a member gets in history exactly the copies they would have got live. Receiver and
+  `#channel` copies stay the owner's, as live today; whether members should see them is not this ADR's change (open question 5).
 - The newest **50** in log order, then fewer until they encode to at most **256 KiB** together, sent **oldest first**. 50 is the web's
   `MAX_MESSAGES`; 256 KiB leaves the rest of the snapshot three quarters of the 1 MiB frame (16 maximal bodies; real messages are much
   smaller). The limits are hub constants, named in `docs/specs/protocol.md`, not policy.
@@ -163,7 +173,7 @@ than failing the snapshot.
 ## Consequences
 
 - **Fixed.** A window that opens, reloads or reconnects into a snapshot shows the recent Team chat, for the owner, members and viewers
-  alike, and the PR #1025 test no longer has to wait for the snapshot before sending to be correct.
+  alike. (PR #1025's test still waits for the snapshot: it asserts a live event. A new test covers send, then open.)
 - **Schema.** One appended field and one fixture (ADR-0006); `schema-breaking` stays green.
 - **Hub.** The rings in `View`, their fold and rebuild, the per-window selection in the snapshot builder (`snapshot_of` and the scope's
   `filter_view`), tests. Memory: at most 8 MiB of message events; a subscribe clones up to (projects + 1) × 50 pointers under the lock.
@@ -204,7 +214,10 @@ than failing the snapshot.
 3. **Messages of a forgotten agent (ADR-0053).** Proposed: left out of the snapshot, like the agent; still in the log.
 4. **Limits: 50 messages and 256 KiB per window, 50 and 256 KiB per project, 8 MiB per hub?** Proposed: yes; they are constants and can
    be tuned without a schema change.
-5. **Retention of message text in the hub's log**, which keeps it for good today. Out of scope; a separate issue if the maintainer wants
+5. **Members and receiver copies.** A member never sees a receiver's copy or a `#channel` copy, live or in history, so a message sent
+   to their agent from another project's agent is invisible to them. Proposed: unchanged here; a separate issue if the maintainer wants
+   it, since it means trusting a receiver's word for who sent it.
+6. **Retention of message text in the hub's log**, which keeps it for good today. Out of scope; a separate issue if the maintainer wants
    one.
 
 ## Build order (each its own PR, after acceptance)
