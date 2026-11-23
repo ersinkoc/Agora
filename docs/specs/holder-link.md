@@ -297,7 +297,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
   asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
   its last unwritten second is said dropped too). The transcript is
-  written in batches at most a second apart (the newest pieces of a stream up to 5 s later while the node holds a secret value), so a
+  written in batches at most a second apart (while the node holds a secret value, the agent's newest words in a turn wait for what
+  follows or the turn's end), so a
   kill loses at most those: they were shown live, are not in the file,
   and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines the old node read
   from the holder (the holder counts them given) and had not yet recorded are lost too, as before.

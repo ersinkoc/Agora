@@ -12,6 +12,7 @@ pub mod perm;
 pub mod registry;
 pub mod registry_convert;
 pub mod rules;
+pub mod text;
 pub mod usage;
 
 pub use manifest::{Manifest, ManifestError};

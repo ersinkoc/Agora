@@ -2373,12 +2373,27 @@ impl Node {
                                 SupervisorEvent::ReplayedChat { agent, items } => {
                                     chat.replayed(agent, items, now);
                                 }
+                                // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in
+                                // a turn; leaving one (or ending) closes them.
+                                SupervisorEvent::StateChanged { agent, state } => {
+                                    chat.set_working(
+                                        agent,
+                                        *state == agora_core::AgentState::Working,
+                                    );
+                                }
+                                SupervisorEvent::Exited { agent, .. } => {
+                                    chat.set_working(agent, false);
+                                }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
+                                    if let SupervisorEvent::GaveUp { agent, .. } = e {
+                                        chat.set_working(agent, false);
+                                    }
                                     restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    chat.set_working(agent, false);
                                     // The spawner first: a start the agent waited for is withdrawn and its slot released, before
                                     // the queue drops the request.
                                     spawner.agent_ended(agent);

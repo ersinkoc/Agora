@@ -175,6 +175,8 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         ));
         let board = ChatBoard::saving(std::sync::Arc::clone(&st));
         let agent = AgentId::new("agent-s");
+        // In a turn: the newest words are held back, and each take joins the carry, the words written and those held.
+        board.set_working(&agent, true);
         let (mut take, mut write) = (Vec::new(), Vec::new());
         let mut now = 1_000_000u64;
         for _ in 0..runs {

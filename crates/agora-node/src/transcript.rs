@@ -31,10 +31,9 @@
 //! write that was cut short starts on a line of its own. A write that fails (a full disk, a folder that cannot be made) drops that
 //! batch and is not tried again: the entries stay in the ring, the agent is not touched, and its conversation says once
 //! `chat.history_not_saved`. The writer is the only one that writes, rotates or moves a file aside, so none of these races another.
-//! While the node holds a secret value, the newest pieces of the agent's streamed text and thinking (within the longest value's
-//! length of the stream's end) wait until more follows, another entry ends the stream, or it has been quiet for `chat::HOLD_MS` (5 s),
-//! so a value split between pieces is whole before any piece of it is written (see **Secrets**). A node that is killed loses at most
-//! the last batch (up to a second or 64 KiB) and, with a secret value held, the held pieces (up to 5 s more of a stream).
+//! While the node holds a secret value and the agent is in a turn, its newest words (less than the longest value's length of them)
+//! wait until more words follow or the turn ends (see **Secrets**). A node that is killed loses at most the last batch (up to a
+//! second or 64 KiB) and, with a secret value held, those held words.
 //!
 //! **Seeding** (ADR-0104 C1). On take-up and on resume the ring is filled from the file's end, every entry held to the live path's
 //! shapes and bounds (`chat::seeded_entry`) and ids kept below 2^52. A permission still pending there is shown cancelled, and a prompt
@@ -51,21 +50,46 @@
 //! (replacing an older one), which follows its agent. Over 2 GiB in all, the files of agents that are not kept go, oldest first.
 //! Leftovers of a rewrite go. Checked when the node starts and every hour. `agora history purge` removes the folder.
 //!
-//! **Secrets** (ADR-0089 decision 7; review of #1103). The values of the secrets this node holds (`<data>/secrets`, and the
-//! environment variables its policy passes to agents, ADR-0084), of 8 bytes or more, are replaced by `<redacted>` before a line is
-//! written:
-//! - whole, in every text, also as JSON escapes them (a tool's arguments and a call's text, which is made again from them);
-//! - whole across the pieces of the agent's streamed text and thinking: consecutive pieces are joined, with what came before and
-//!   after them, and each piece's part of a value is replaced, however many pieces it spans (the newest are held back, above);
-//! - as a piece (4 bytes or more) on each side of a place the node cut a text: the middle cut of a tool output, a thought or a tool's
-//!   arguments (also the 64 KiB cut made before cleaning, whose place is kept), and the end of a text cut to 16 KiB. A word that only
-//!   begins like a value counts only there, so elsewhere it is left; at a real cut it may be replaced too.
+//! **Secrets** (ADR-0089 decision 7; review of #1103, rounds 1 to 3). The values of the secrets this node holds (`<data>/secrets`,
+//! and the environment variables its policy passes to agents, ADR-0084), of 8 bytes or more, are kept out of the file by two
+//! mechanisms only:
+//! - **(a) whole values**, raw and as `serde_json` escapes them, every occurrence (overlapping ones too): in every text of a line, and
+//!   in the agent's words (its text and thinking) as one stream across the pieces they came in, joined with the words held back
+//!   after them and with the last words written before them (the carry, in memory);
+//! - **(b) fragments** (4 bytes or more) at every place a value may have been cut (an edge): a value's start just before an edge,
+//!   its end just after one, and a part of a value between two neighbouring edges.
 //!
-//! The bridge (`agora acp-bridge`) removes escape sequences from a tool's output before its own 64 KiB cut, so the node never keeps
-//! the place that cut joins. Not covered: a value shorter than 8 bytes, a piece shorter than 4 bytes at a cut, the cuts another
-//! adapter makes on its own (and the bridge's other cuts: arguments over 64 KiB, plan text, a diff, a line over the node's limit),
-//! a value split between pieces that the ring dropped before they were written (a flood), and a secret the node does not hold. Ids
-//! (`call_id`, `approval_id`) are never changed. The file is as sensitive as the terminal, and its mode is what protects it.
+//! Every place agent text is cut, split, spliced, partly redacted or written before it is final, and what covers it:
+//!
+//! | Where | What happens to the text | Covered by |
+//! | --- | --- | --- |
+//! | bridge: message and thought chunks | joined in 150 ms / 4 KiB windows, so a value spans entries | (a) over the stream; its newest words held while the turn runs |
+//! | bridge: tool output, cut to 64 KiB | head and tail kept | cleaned as the node cleans it and redacted before the cut, so its length does not change after it; the node keeps 8 + 8 KiB of it and never this place |
+//! | bridge: arguments (64 KiB), plan step (4 KiB), location path (4 KiB) | head and tail kept | cleaned as the node cleans that field first; the node keeps less of each (8 + 8 KiB, 256 + 256 bytes, 512 + 512 bytes), never this place |
+//! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place |
+//! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges |
+//! | bridge: stderr tail (400 bytes, cut at the front) | into a notice's parameters | (b): both ends of every notice parameter are edges |
+//! | bridge: a line over 4 MiB, every long string halved (`fit_line`) | head and tail kept | **not covered** (an item that large does not reach it in practice) |
+//! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step and permission label 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
+//! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB | end dropped | recorded (`cap_end`): (b); a parameter's ends always are edges |
+//! | node: a tool call's text, a plan's text | made of the call's arguments, the plan's steps | made again by the writer from the redacted parts |
+//! | node: a tool call still running | its output and arguments are written as they are, then replaced | (b): the end of a version not final is an edge |
+//! | node: a prompt, a queued prompt or a notice between the agent's words | entries between pieces of one value | not a break: the stream is the agent's words only |
+//! | node: the ring drops words not written yet (a flood) | written before what follows | the carry keeps the value's start; their end is an edge (b) |
+//! | writer: the turn ends (the agent leaves Working) | held words written | the end of a turn is not an edge |
+//! | writer: words said outside a turn, a stop's flush (`take_unsaved`) | written without what may follow | the end is an edge (b); the carry joins what follows in this node |
+//! | take-up and resume (seeding) | the earlier node's carry is gone | the start of the next words is an edge (b) |
+//! | Start again | the earlier session's words flushed, the new session starts | as a stop's flush; the new session has no carry |
+//! | rotation | the newest whole lines kept | nothing split |
+//!
+//! Every cut in the node's chat code and the bridge goes through those helpers or is listed with why it needs no record
+//! (`chat::every_cut`), and a seeded random test drives the whole path (`chat::property`, 600 cases by default). Not covered: a value
+//! shorter than 8 bytes; a fragment shorter than 4 bytes; a word that only begins (or ends) like a value is replaced too when it
+//! stands at an edge; cuts another adapter makes on its own (#1123) and the bridge's `fit_line` halving; JSON forms of a value other
+//! than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; an adapter that says it is idle before its last words (the words
+//! before are written with no edge after them); words the ring dropped and that the carry no longer reaches; and a secret the node
+//! does not hold. Ids (`call_id`, `approval_id`) are never changed. What the window is sent live is not redacted (#1147). The file is
+//! as sensitive as the terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
 //! remove the file; retention does.
@@ -168,6 +192,27 @@ pub struct Cuts {
     pub text: Vec<usize>,
     pub output: Vec<usize>,
     pub args: Vec<usize>,
+    /// A tool call's tool name, each of its paths, each plan step, and a notice's parameters by key.
+    pub tool: Vec<usize>,
+    pub paths: Vec<Vec<usize>>,
+    pub steps: Vec<Vec<usize>>,
+    pub params: Vec<(String, Vec<usize>)>,
+    /// The entry is a version that is not final yet (a tool call still running): its output and arguments may end inside a value
+    /// the next version completes, so each of their ends counts as a place cut too.
+    pub provisional: bool,
+}
+
+impl Cuts {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+            && self.output.is_empty()
+            && self.args.is_empty()
+            && self.tool.is_empty()
+            && self.paths.iter().all(Vec::is_empty)
+            && self.steps.iter().all(Vec::is_empty)
+            && self.params.iter().all(|(_, c)| c.is_empty())
+            && !self.provisional
+    }
 }
 
 /// Review of #1103 (N1): consecutive pieces of the agent's streamed text and thinking, joined, so a value split between pieces is found
@@ -177,6 +222,9 @@ pub struct Cuts {
 pub struct Run {
     pub text: String,
     pub parts: Vec<RunPart>,
+    /// Places in `text` where a value may have been cut: the start of words whose earlier part an earlier node wrote, and the end of
+    /// words written before what follows them (a stop's flush, words said outside a turn).
+    pub edges: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,71 +529,155 @@ pub fn fold(text: &str) -> Seed {
     }
 }
 
-/// How far around a place the node cut a piece is looked for (the isolates' balance can move a place by a character or two).
-const SEAM_SLACK: usize = 4;
+/// What `agora acp-bridge` puts where its own shape check replaced something (it may be part of a node secret value: the rest is
+/// then beside it).
+pub const BRIDGE_MARK: &str = "[redacted]";
 
-/// Where each known value occurs whole in `s`.
+/// Mechanism (a): every occurrence of each known value whole in `s`, overlapping ones too.
 fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
     // A needle longer than the text is skipped before the search is set up (its setup costs the needle's length).
-    for k in known.iter().filter(|k| k.len() <= s.len()) {
-        out.extend(s.match_indices(k.as_str()).map(|(i, m)| i..i + m.len()));
-    }
-}
-
-/// The longest piece (at least [`MIN_PIECE`] bytes, shorter than the whole value) of a known value that `s` ends with as its start,
-/// as a byte count; 0 for none.
-fn ends_with_start(s: &str, known: &[String]) -> usize {
-    let b = s.as_bytes();
-    let mut best = 0;
-    for k in known {
-        let k = k.as_bytes();
-        let longest = (k.len() - 1).min(b.len());
-        for n in (MIN_PIECE.max(best + 1)..=longest).rev() {
-            if b[b.len() - n..] == k[..n] && s.is_char_boundary(b.len() - n) {
-                best = n;
+    for k in known.iter().filter(|k| !k.is_empty() && k.len() <= s.len()) {
+        let mut from = 0;
+        while let Some(i) = s[from..].find(k.as_str()) {
+            let at = from + i;
+            out.push(at..at + k.len());
+            // The next search starts one character on, so an occurrence overlapping this one is found too.
+            from = at + s[at..].chars().next().map_or(1, char::len_utf8);
+            if from > s.len() - k.len() {
                 break;
             }
         }
     }
-    best
 }
 
-/// The longest piece of a known value that `s` starts with as its end, as a byte count; 0 for none.
-fn starts_with_end(s: &str, known: &[String]) -> usize {
+/// The prefix function of `k` (KMP): for each length, the longest proper prefix of `k[..len]` that is also its suffix.
+fn prefix_function(k: &[u8]) -> Vec<usize> {
+    let mut f = vec![0; k.len()];
+    let mut q = 0;
+    for i in 1..k.len() {
+        while q > 0 && k[i] != k[q] {
+            q = f[q - 1];
+        }
+        if k[i] == k[q] {
+            q += 1;
+        }
+        f[i] = q;
+    }
+    f
+}
+
+/// A value to look for, with what finding its pieces needs, made once per write: its bytes and prefix function, forwards and
+/// reversed.
+struct Needle {
+    k: Vec<u8>,
+    f: Vec<usize>,
+    rk: Vec<u8>,
+    rf: Vec<usize>,
+}
+
+fn needles(known: &[String]) -> Vec<Needle> {
+    known
+        .iter()
+        .map(|v| {
+            let k = v.as_bytes().to_vec();
+            let rk: Vec<u8> = k.iter().rev().copied().collect();
+            Needle {
+                f: prefix_function(&k),
+                rf: prefix_function(&rk),
+                k,
+                rk,
+            }
+        })
+        .collect()
+}
+
+/// The longest `n` (at least [`MIN_PIECE`], shorter than `k`) with `a` ending in `k[..n]`, where `ok(n)` (a character boundary)
+/// holds; 0 for none. Linear in `k`'s length (KMP), however `a` and `k` repeat. `f` is `k`'s prefix function.
+fn overlap(a: &[u8], k: &[u8], f: &[usize], ok: impl Fn(usize) -> bool) -> usize {
+    if k.len() <= MIN_PIECE {
+        return 0;
+    }
+    let mut q = 0;
+    for &c in &a[a.len().saturating_sub(k.len() - 1)..] {
+        while q > 0 && (q == k.len() || c != k[q]) {
+            q = f[q - 1];
+        }
+        if c == k[q] {
+            q += 1;
+        }
+    }
+    if q == k.len() {
+        q = f[q - 1];
+    }
+    while q >= MIN_PIECE && !ok(q) {
+        q = f[q - 1];
+    }
+    if q >= MIN_PIECE {
+        q
+    } else {
+        0
+    }
+}
+
+/// Mechanism (b), fragments: at each place in `edges`, the longest start of a known value (4 bytes or more) that ends there and the
+/// longest end of one that begins there; and between two neighbouring places, a span that is part of a known value (a piece cut on
+/// both sides, such as one between the bridge's mark and the end of a version not final yet).
+fn fragments(s: &str, edges: &[usize], known: &[Needle], out: &mut Vec<Range<usize>>) {
+    let mut edges: Vec<usize> = edges
+        .iter()
+        .copied()
+        .filter(|&e| e <= s.len() && s.is_char_boundary(e))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
     let b = s.as_bytes();
-    let mut best = 0;
-    for k in known {
-        let k = k.as_bytes();
-        let longest = (k.len() - 1).min(b.len());
-        for n in (MIN_PIECE.max(best + 1)..=longest).rev() {
-            if b[..n] == k[k.len() - n..] && s.is_char_boundary(n) {
-                best = n;
-                break;
+    for &e in &edges {
+        for n in known {
+            let before = overlap(&b[..e], &n.k, &n.f, |q| s.is_char_boundary(e - q));
+            if before > 0 {
+                out.push(e - before..e);
+            }
+            // The end of a value beginning at `e`: reversed, the start of the reversed value ending there.
+            let head = &b[e..(e + n.k.len().saturating_sub(1)).min(b.len())];
+            let rev_head: Vec<u8> = head.iter().rev().copied().collect();
+            let after = overlap(&rev_head, &n.rk, &n.rf, |q| s.is_char_boundary(e + q));
+            if after > 0 {
+                out.push(e..e + after);
             }
         }
     }
-    best
+    for w in edges.windows(2) {
+        let (a, z) = (w[0], w[1]);
+        let span = &b[a..z];
+        if z - a >= MIN_PIECE
+            && known
+                .iter()
+                .any(|n| n.k.len() > z - a && n.k.windows(span.len()).any(|w| w == span))
+        {
+            out.push(a..z);
+        }
+    }
 }
 
-/// Review of #1103 (N1): at each place the node cut `s` (within [`SEAM_SLACK`] bytes), a piece of a known value on either side: the
-/// value's start before the place, its end after it. Only at a real cut: elsewhere a value counts only whole, so a word that merely
-/// begins like a value is left (probe 4).
-fn pieces(s: &str, cuts: &[usize], known: &[String], out: &mut Vec<Range<usize>>) {
-    for &c in cuts {
-        for at in c.saturating_sub(SEAM_SLACK)..=(c + SEAM_SLACK).min(s.len()) {
-            if !s.is_char_boundary(at) {
-                continue;
-            }
-            let end = ends_with_start(&s[..at], known);
-            if end > 0 {
-                out.push(at - end..at);
-            }
-            let start = starts_with_end(&s[at..], known);
-            if start > 0 {
-                out.push(at..at + start);
-            }
-        }
-    }
+/// The places on either side of every mark the bridge left.
+fn bridge_marks(s: &str) -> Vec<usize> {
+    s.match_indices(BRIDGE_MARK)
+        .flat_map(|(i, m)| [i, i + m.len()])
+        .collect()
+}
+
+/// A field redacted: its whole values, and fragments at `edges` (with the bridge's marks).
+fn redact_field(
+    s: &mut String,
+    known: &[String],
+    pieces: &[Needle],
+    mut edges: Vec<usize>,
+    mut ranges: Vec<Range<usize>>,
+) {
+    whole(s, known, &mut ranges);
+    edges.extend(bridge_marks(s));
+    fragments(s, &edges, pieces, &mut ranges);
+    mask(s, ranges);
 }
 
 /// `s` with each of `ranges` (merged where they touch) replaced by [`REDACTED`]. The ranges are on character boundaries.
@@ -576,12 +708,14 @@ fn mask(s: &mut String, mut ranges: Vec<Range<usize>>) {
     *s = out;
 }
 
-/// What to replace in each line's text, from the batch's runs: every whole value in a run, in the part of it each line holds.
-fn run_masks(batch: &Batch, known: &[String]) -> Vec<Vec<Range<usize>>> {
+/// What to replace in each line's text, from the batch's runs of the agent's words: every whole value in a run, and fragments at its
+/// edges, in the part of it each line holds.
+fn run_masks(batch: &Batch, known: &[String], pieces: &[Needle]) -> Vec<Vec<Range<usize>>> {
     let mut masks = vec![Vec::new(); batch.lines.len()];
     for run in &batch.runs {
         let mut found = Vec::new();
         whole(&run.text, known, &mut found);
+        fragments(&run.text, &run.edges, pieces, &mut found);
         for r in &found {
             for p in &run.parts {
                 let (Some(line), a, b) = (p.line, r.start.max(p.start), r.end.min(p.end)) else {
@@ -598,39 +732,55 @@ fn run_masks(batch: &Batch, known: &[String]) -> Vec<Vec<Range<usize>>> {
     masks
 }
 
-/// `line` with every known secret value replaced (ADR-0089 decision 7; review of #1103, N1 to N3): a value whole anywhere in a text
-/// (also where JSON escapes it); in the agent's streamed words also one split between pieces (`text_mask`, from the runs); and a
-/// piece of one at each place the node cut a text. Not `call_id` or `approval_id`: ids the node matches later, never a value. A tool
-/// call's text is made again from its redacted tool and arguments, as the node made it from them.
-fn redacted(line: &Line, known: &[String], text_mask: Vec<Range<usize>>) -> Line {
+/// `line` with every known secret value replaced (ADR-0089 decision 7; review of #1103): (a) a value whole anywhere in a text, also
+/// where JSON escapes it, and in the agent's words across the pieces they came in (`text_mask`, from the runs); (b) a fragment at each
+/// place a value may have been cut: every cut the node made (`Side::cuts`), the bridge's marks, the ends of a version not final yet,
+/// and both ends of a notice's parameters (the bridge cuts a stderr tail at its front). Not `call_id` or `approval_id`: ids, never a
+/// value. A tool call's text and a plan's text are made again from their redacted parts, as the node made them.
+fn redacted(
+    line: &Line,
+    known: &[String],
+    pieces: &[Needle],
+    text_mask: Vec<Range<usize>>,
+) -> Line {
     let mut line = line.clone();
     if known.is_empty() {
         return line;
     }
     if let Line::Entry(e, side) = &mut line {
-        let mut r = text_mask;
-        whole(&e.text, known, &mut r);
-        pieces(&e.text, &side.cuts.text, known, &mut r);
-        mask(&mut e.text, r);
-        let mut r = Vec::new();
-        whole(&e.output, known, &mut r);
-        pieces(&e.output, &side.cuts.output, known, &mut r);
-        mask(&mut e.output, r);
-        let plain = |s: &mut String| {
-            let mut r = Vec::new();
-            whole(s, known, &mut r);
-            mask(s, r);
+        let c = std::mem::take(&mut side.cuts);
+        redact_field(&mut e.text, known, pieces, c.text.clone(), text_mask);
+        let open = |s: &String, mut cuts: Vec<usize>| {
+            if c.provisional {
+                cuts.push(s.len());
+            }
+            cuts
         };
-        plain(&mut e.path);
-        e.params.values_mut().for_each(plain);
-        e.paths.iter_mut().for_each(|p| plain(&mut p.path));
-        e.plan_steps.iter_mut().for_each(|s| plain(&mut s.text));
+        let edges = open(&e.output, c.output.clone());
+        redact_field(&mut e.output, known, pieces, edges, Vec::new());
+        redact_field(&mut e.path, known, pieces, Vec::new(), Vec::new());
+        for (k, v) in e.params.iter_mut() {
+            let mut edges = vec![0, v.len()];
+            if let Some((_, cuts)) = c.params.iter().find(|(key, _)| key == k) {
+                edges.extend(cuts);
+            }
+            redact_field(v, known, pieces, edges, Vec::new());
+        }
+        for (i, p) in e.paths.iter_mut().enumerate() {
+            let edges = c.paths.get(i).cloned().unwrap_or_default();
+            redact_field(&mut p.path, known, pieces, edges, Vec::new());
+        }
+        for (i, st) in e.plan_steps.iter_mut().enumerate() {
+            let edges = c.steps.get(i).cloned().unwrap_or_default();
+            redact_field(&mut st.text, known, pieces, edges, Vec::new());
+        }
+        if e.kind == agora_protocol::v1::ChatKind::Plan as i32 && !e.plan_steps.is_empty() {
+            e.text = crate::chat::plan_text(&e.plan_steps);
+        }
         if let Some((tool, args)) = &mut side.tool {
-            plain(tool);
-            let mut r = Vec::new();
-            whole(args, known, &mut r);
-            pieces(args, &side.cuts.args, known, &mut r);
-            mask(args, r);
+            redact_field(tool, known, pieces, c.tool.clone(), Vec::new());
+            let edges = open(args, c.args.clone());
+            redact_field(args, known, pieces, edges, Vec::new());
             if e.kind == agora_protocol::v1::ChatKind::ToolCall as i32 {
                 e.text = crate::chat::tool_text(tool, args);
             }
@@ -741,10 +891,11 @@ impl Store {
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         agora_platform::ensure_private_dir(&self.dir)?;
         let known = self.known_secrets();
-        let masks = run_masks(batch, &known);
+        let pieces = needles(&known);
+        let masks = run_masks(batch, &known, &pieces);
         let mut out = Vec::new();
         for (line, m) in batch.lines.iter().zip(masks) {
-            out.extend(encode_line(batch.high, &redacted(line, &known, m)));
+            out.extend(encode_line(batch.high, &redacted(line, &known, &pieces, m)));
         }
         let mut f = agora_platform::open_append_private(&path)?;
         let len = f.metadata()?.len();

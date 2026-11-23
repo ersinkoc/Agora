@@ -331,11 +331,14 @@ references are at main `9760e901`.
   - The chat path only marks changed ids; one writer thread takes the batch under the board's lock at most once a second or per 64 KiB,
     and encodes, replaces the node's own secret values and appends after letting it go. It alone writes, rotates and moves files. A
     failed write drops the batch (not retried), keeps the ring and says `chat.history_not_saved` once in that conversation.
-  - Secrets: the node's stored values and the environment variables its policy passes to agents, of 8 bytes or more: whole in every
-    text and JSON-escaped; whole across the pieces of the agent's streamed text and thinking (joined with their neighbours; while the
-    node holds a value, the newest pieces of a stream wait up to 5 s until a value in them is whole); and as a piece of 4 bytes or more
-    on each side of a place the node cut a text. The bridge removes escapes from a tool's output before its own cut. Ids never changed.
-    Not covered: cuts other adapters make themselves and the bridge's other cuts (listed in T61).
+  - Secrets (rebuilt over three review rounds): the node's stored values and the environment variables its policy passes to
+    agents, of 8 bytes or more, kept out by two mechanisms only: (a) whole values, raw and JSON-escaped, every occurrence, in every
+    text and across the agent's words as one stream (joined with a carry of the last words written, in memory; while the node holds
+    a value and the agent is in a turn, its newest words wait until more follow or the turn ends); (b) fragments of 4 bytes or more
+    at every edge (each cut the node makes and records, the bridge's marks, the ends of a tool call's version not final yet, the end
+    of words written before what follows them, the start of words after a take-up). The bridge cleans and redacts before its own
+    cuts, so the node never keeps their place. The inventory of every site and the residuals are in the `transcript.rs` module doc
+    and T61; `chat::every_cut` fails on a new unrecorded cut, and `chat::property` (600 seeded cases) is the acceptance gate.
   - Bounds: `chat.history_max_bytes` (32 MiB, only lowered, as ADR-0089 decision 2 says "lowers ... the defaults"; the newest half
     kept in a new file that says it was cut), `chat.history_days` (30, only lowered; 0: once the agent ended), counted from when the agent
     ended as the ledger says (the file's time is set to it, so it holds after the ledger forgets the agent), never for one running or
@@ -355,6 +358,6 @@ references are at main `9760e901`.
     (`sandboxed_agent`); node unit tests and `agora-bench transcript`.
   - Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
     file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
-    does not flush the last batch (step 5); a kill loses the last batch and, while the node holds a secret value, the held pieces of a
-    stream (up to 5 s).
+    does not flush the last batch (step 5); a kill loses the last batch and, while the node holds a secret value, the words held back
+    (less than the longest value's length).
 - Step 5 is not built.
