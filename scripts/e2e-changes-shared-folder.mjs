@@ -52,6 +52,14 @@ try {
   check(await row.count() === 1, 'after a reload (the hub\'s snapshot): the folder is listed once with 3 changed files');
   check((await row.innerText()).includes('Shared folder'), 'the row says the changes belong to the shared folder, not to one agent');
   check(await panel.getByText('All clean').count() === 0, 'the panel does not say All clean');
+  check(await row.getAttribute('title') === `${proj} · laptop`, 'the row\'s tooltip gives the whole path and the machine');
+  // The throw-away project's path is long: what leads to the folder gives way, the folder's name is shown whole inside the panel.
+  const name = row.getByText('/proj', { exact: true });
+  const nameBox = await name.boundingBox();
+  const lead = await name.evaluate((e) => { const d = e.previousElementSibling; return d ? d.scrollWidth > d.clientWidth : false; });
+  const area0 = await panel.boundingBox();
+  check(lead && !!nameBox && !!area0 && nameBox.x + nameBox.width <= area0.x + area0.width && await name.evaluate((e) => e.scrollWidth <= e.clientWidth),
+    'a long path is cut in the middle: the folder name stays in view');
   const count = await row.getByText('3 files changed').boundingBox();
   const area = await panel.boundingBox();
   check(!!count && !!area && count.x >= area.x && count.x + count.width <= area.x + area.width, 'the count is inside the panel, not cut off by a long path');

@@ -104,3 +104,11 @@ export function filterEntries(items: readonly FileItem[], query: string): FileIt
 }
 
 export const parentOf = (path: string): string => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
+
+// A folder's path for a narrow row, in two parts: what leads to the folder, which gives way first (it ends in an ellipsis), and the
+// folder's own name with its separator, which stays in view (`/home/someone/Co…/login-fix`) at any width. The row's tooltip has it whole.
+export function pathParts(path: string): { dir: string; name: string } {
+  const sep = path.includes('\\') && !path.includes('/') ? '\\' : '/';
+  const at = path.replace(/[\\/]+$/, '').lastIndexOf(sep);
+  return at <= 0 ? { dir: '', name: path } : { dir: path.slice(0, at), name: path.slice(at) };
+}
