@@ -176,6 +176,8 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentCancelTurn(a) => s.agent = Some(a.agent_id.clone()),
         // ADR-0095: the agent, so a project grant is matched against the agent's real project, never the command's `project_id`.
         Cmd::TaskDispatch(a) => s.agent = Some(a.agent_id.clone()),
+        // ADR-0108: the hub passes the person's forget on with the node's own id of the agent; an agent grant covers it.
+        Cmd::AgentForget(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }

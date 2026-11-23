@@ -65,6 +65,8 @@ fn hubside(node_id: &str) -> Hubside {
                 "workspace.directory".into(),
                 "directory.list".into(),
                 "agent.launch_settings".into(),
+                // ADR-0108
+                "agent.forget.local".into(),
             ],
             required: vec![],
         },
@@ -2182,6 +2184,103 @@ fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running
         .agents
         .iter()
         .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+/// ADR-0108: forgetting an interrupted agent in the window reaches its machine: the saved conversation is gone from the machine's
+/// disk and the agent is no longer offered for Resume there, also after the node starts again.
+#[test]
+fn forgetting_an_agent_in_the_window_removes_its_conversation_and_resume_offer_on_its_machine() {
+    // Routed commands run on the node's local socket.
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_protocol::v1::{self, event::Body};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("forget-node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    // An earlier process of the node ran agent-1 and stopped with it: interrupted, offered for Resume, its conversation on disk.
+    {
+        let ledger = agora_node::ledger::Ledger::open(&cfg.data_dir, 1).unwrap();
+        ledger.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-1".into(),
+                project_id: "proj".into(),
+                node_id: "laptop".into(),
+                worktree_id: dir.join("wt").join("a").to_string_lossy().into_owned(),
+                kind: "shell".into(),
+                level: 2,
+                ..Default::default()
+            }),
+            1,
+        );
+    }
+    let transcripts = cfg.data_dir.join(agora_node::transcript::TRANSCRIPTS_DIR);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let file = transcripts.join("agent-1.jsonl");
+    let earlier = transcripts.join("agent-1.earlier.jsonl");
+    std::fs::write(&file, b"{\"format\":\"chat-transcript\",\"version\":1}\n").unwrap();
+    std::fs::write(
+        &earlier,
+        b"{\"format\":\"chat-transcript\",\"version\":1}\n",
+    )
+    .unwrap();
+
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the interrupted agent to be listed", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    assert_eq!(session.forget_agent("laptop/agent-1"), Ok(()));
+    wait("the machine to remove the conversation", || {
+        !file.exists() && !earlier.exists()
+    });
+    wait("the machine's answer to settle the forget", || {
+        hub.state.hub.forgets().pending("laptop").is_empty()
+    });
+    // Resume is no longer offered: the node does not hold it as interrupted any more.
+    let mut local = agora_node::control::Client::connect(&cfg.socket).unwrap();
+    let resumed = local
+        .call(v1::command_request::Command::AgentResume(v1::AgentResume {
+            agent_id: "agent-1".into(),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert_eq!(
+        resumed.err().map(|e| e.code).as_deref(),
+        Some("agent.not_interrupted")
+    );
+    drop(local);
+    drop(node);
+    // Nor after the node starts again.
+    let ledger = agora_node::ledger::Ledger::open(&cfg.data_dir, 2).unwrap();
+    assert!(ledger.interrupted().is_empty());
+    assert!(ledger.get("agent-1").is_none());
+    assert!(!file.exists());
 }
 
 #[test]

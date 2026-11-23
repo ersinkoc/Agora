@@ -67,8 +67,11 @@
 //! a value split between pieces that the ring dropped before they were written (a flood), and a secret the node does not hold. Ids
 //! (`call_id`, `approval_id`) are never changed. The file is as sensitive as the terminal, and its mode is what protects it.
 //!
-//! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
-//! remove the file; retention does.
+//! **Forget** (ADR-0108). A person who forgets a closed agent in the window (`agent.forget`) makes the hub send the node `AgentForget`
+//! (capability `agent.forget.local`). The node drops the agent's ring and its unsaved marks at once
+//! ([`crate::chat::ChatBoard::forget`]), and the writer removes `<id>.jsonl` and `<id>.earlier.jsonl` after it has written every batch
+//! it took before ([`Store::delete`]): a batch taken before the forget lands first and is removed with the rest, and none is taken
+//! after it. With no writer running (it could not start, or it has ended), the caller removes them itself, as nothing else writes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -234,6 +237,11 @@ fn file_stem(agent: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
     .then_some(agent)
+}
+
+/// ADR-0108: whether `agent` is an id this store keeps a file for (a plain name), the check a forget's id must pass.
+pub fn plain_id(agent: &str) -> bool {
+    file_stem(agent).is_some()
 }
 
 fn header(truncated: bool) -> Vec<u8> {
@@ -819,6 +827,21 @@ impl Store {
         }
     }
 
+    /// ADR-0108: removes the agent's transcript and its earlier session's (`<id>.earlier.jsonl`). Fine when there is none. Called by
+    /// the writer only (or with no writer running), so no batch lands in a file being removed.
+    pub fn delete(&self, agent: &str) -> io::Result<()> {
+        let (Some(path), Some(earlier)) = (self.path(agent), self.earlier_path(agent)) else {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        };
+        for p in [path, earlier] {
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// ADR-0089 decision 2: removes the files of agents that closed more than [`Limits::days`] ago, then, over [`NODE_MAX_BYTES`] in
     /// all, the oldest files of agents that are not kept. `status` tells, for the agents whose files are there, which the node keeps
     /// whatever their age (running, or interrupted and offered for Resume) and when the others ended; an agent it does not know ages
@@ -1005,9 +1028,19 @@ pub fn spawn_writer(
     let (Some(store), Some(wake)) = (board.store(), board.wake()) else {
         return Ok(None);
     };
+    /// Says the writer no longer runs when its thread ends, however it ends.
+    struct Running(Arc<crate::chat::ChatBoard>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.set_writer_running(false);
+        }
+    }
+    board.set_writer_running(true);
+    let running = Running(Arc::clone(&board));
     std::thread::Builder::new()
         .name("agora-transcripts".into())
         .spawn(move || {
+            let _running = running;
             let mut swept: Option<std::time::Instant> = None;
             let mut failed: HashMap<AgentId, ()> = HashMap::new();
             while !stop.load(Ordering::Acquire) {
@@ -1021,6 +1054,8 @@ pub fn spawn_writer(
                 }
                 let due = board.take_due(crate::daemon::now_ms());
                 write_batches(&board, &store, due, &mut failed);
+                // ADR-0108: after the batches it took, so a batch taken before a forget never brings a removed file back.
+                board.run_forgets();
             }
         })
         .map(Some)
@@ -1035,6 +1070,8 @@ pub fn flush(board: &crate::chat::ChatBoard) {
         let all = board.take_unsaved();
         write_batches(board, &store, all, &mut HashMap::new());
     }
+    // ADR-0108: a forget the writer had not reached before it ended.
+    board.run_forgets();
 }
 
 /// Writes `batches`; a failed write is logged once per agent in `failed` and said in its conversation.
@@ -1075,6 +1112,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// ADR-0108: a forget empties the ring at once and removes both files after the batch the writer took before it, which therefore
+    /// cannot bring the file back; nothing of the agent is taken after it, and a take-up or resume finds nothing to seed from.
+    #[test]
+    fn a_forget_removes_both_files_after_a_batch_taken_before_it_and_nothing_comes_back() {
+        use agora_adapters::host::ChatItem;
+        let dir = temp("forget");
+        let store = Arc::new(Store::new(&dir, Limits::default(), None));
+        let board = crate::chat::ChatBoard::saving(Arc::clone(&store));
+        board.set_writer_running(true);
+        let a = AgentId::new("agent-3");
+        let other = AgentId::new("agent-4");
+        board.push_item(&a, &ChatItem::Text("first".into()), 1);
+        board.push_item(&other, &ChatItem::Text("kept".into()), 1);
+        for b in board.take_unsaved() {
+            store.write(&b).unwrap();
+        }
+        let earlier = store.dir().join("agent-3.earlier.jsonl");
+        std::fs::write(&earlier, b"{}\n").unwrap();
+        // The writer takes a batch, and the person forgets the agent before it is written.
+        board.push_item(&a, &ChatItem::Text("late".into()), 2);
+        let taken = board.take_due(3);
+        assert!(taken.iter().any(|b| b.agent == a));
+        let answer = board.forget(&a);
+        assert!(board.snapshot(&a).is_empty(), "the ring is empty at once");
+        assert!(
+            answer.try_recv().is_err(),
+            "the writer runs: it removes the files, not the caller"
+        );
+        board.push_item(&other, &ChatItem::Text("more".into()), 4);
+        for b in &taken {
+            store.write(b).unwrap();
+        }
+        assert!(store.path("agent-3").unwrap().exists());
+        board.run_forgets();
+        assert_eq!(answer.try_recv(), Ok(true));
+        assert!(!store.path("agent-3").unwrap().exists());
+        assert!(!earlier.exists());
+        assert!(
+            store.path("agent-4").unwrap().exists(),
+            "another agent's file stays"
+        );
+        let later = board.take_unsaved();
+        assert!(
+            later.iter().all(|b| b.agent != a),
+            "nothing of it is taken after"
+        );
+        assert_eq!(store.read("agent-3").high, 0);
+        assert!(board.read_seed(&a, false).is_none());
+        // With no writer running, the caller removes the files itself; an agent with no file is fine.
+        board.set_writer_running(false);
+        assert_eq!(board.forget(&other).try_recv(), Ok(true));
+        assert!(!store.path("agent-4").unwrap().exists());
+        assert_eq!(board.forget(&AgentId::new("agent-9")).try_recv(), Ok(true));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn text(id: u64, t: &str) -> Line {

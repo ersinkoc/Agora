@@ -2054,6 +2054,222 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
     );
 }
 
+/// ADR-0108: a node's handshake offering `caps`.
+async fn handshake_offering(c: &mut Conn<TcpStream>, caps: &[&str]) {
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: caps.iter().map(|c| (*c).to_string()).collect(),
+        build: "t".into(),
+        locale: None,
+    };
+    c.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(recv(c).await.kind, kinds::WELCOME);
+    c.send(&f(
+        STREAM_CONTROL,
+        kinds::RESUME,
+        v1::Resume::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(c).await.kind, kinds::RESUME_OK);
+}
+
+/// The next command the hub sends the node, or `None` when none comes within `wait`.
+async fn command_to_node(c: &mut Conn<TcpStream>, wait: Duration) -> Option<v1::CommandRequest> {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        let fr = match tokio::time::timeout(left, c.recv()).await {
+            Ok(Ok(Some(fr))) => fr,
+            _ => return None,
+        };
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 0) {
+            return Some(v1::CommandRequest::decode(fr.payload.as_slice()).unwrap());
+        }
+    }
+}
+
+/// A client's forget and the hub's answer, past the events the client hears meanwhile.
+async fn forget_answer(client: &mut Conn<TcpStream>, id: &str) -> v1::CommandResponse {
+    let req = v1::CommandRequest {
+        request_id: format!("forget-{id}"),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::AgentForget(v1::AgentForget {
+            agent_id: id.into(),
+        })),
+    };
+    client
+        .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+        .await
+        .unwrap();
+    loop {
+        let fr = recv(client).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            return v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+        }
+    }
+}
+
+async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !ok() {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// ADR-0108: a forget of a closed agent whose machine is offline is owed to it; when it connects it is sent the forget (the node's own
+/// id), again on the next connection if this one ends before it answers, and once it answers nothing is owed. A machine that does not
+/// offer `agent.forget.local` is never sent one.
+#[tokio::test]
+async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_answers() {
+    const CAP: &str = "agent.forget.local";
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec![CAP.into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    // Each machine ran an agent that has ended, then went away.
+    for (node, offers) in [("n1", true), ("n2", false)] {
+        let (mut conn, task) = node_conn(&st, node).await;
+        handshake_offering(&mut conn, if offers { &[CAP] } else { &[] }).await;
+        let exited = Body::AgentExited(v1::AgentExited {
+            agent_id: "agent-3".into(),
+            exit_code: 0,
+        });
+        for (i, b) in [online(node), agent(node, "agent-3"), exited]
+            .into_iter()
+            .enumerate()
+        {
+            conn.send(&f(
+                STREAM_EVENTS,
+                kinds::EVENT,
+                event(node, i as u64 + 1, b),
+            ))
+            .await
+            .unwrap();
+            next_ack(&mut conn).await;
+        }
+        drop(conn);
+        let _ = task.await;
+        until("the machine to leave", || {
+            !st.hub.router().is_connected(node)
+        })
+        .await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    for id in ["n1/agent-3", "n2/agent-3"] {
+        let r = forget_answer(&mut client, id).await;
+        assert!(
+            matches!(r.result, Some(command_response::Result::Ok(_))),
+            "{r:?}"
+        );
+    }
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    assert_eq!(st.hub.forgets().pending("n2"), vec!["agent-3"]);
+
+    // n1 connects and is sent the forget; its connection ends before it answers: still owed.
+    let (mut n1, task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut n1, &[CAP]).await;
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(ref f)) if f.agent_id == "agent-3"
+    ));
+    drop(n1);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+
+    // Again on the next connection; this time it answers (here: refused, the agent runs there), and nothing is owed any more.
+    let (mut n1, _task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut n1, &[CAP]).await;
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(_))
+    ));
+    let answer = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(command_response::Result::Err(
+            agora_protocol::Error::new(agora_protocol::ErrorCode::AgentRunning)
+                .with("agent_id", "agent-3")
+                .to_info(),
+        )),
+    };
+    n1.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the answer to settle the forget", || {
+        st.hub.forgets().pending("n1").is_empty()
+    })
+    .await;
+
+    // A forget while it is connected goes at once, and an `ok` settles it.
+    let r = forget_answer(&mut client, "n1/agent-3").await;
+    assert!(
+        matches!(r.result, Some(command_response::Result::Ok(_))),
+        "{r:?}"
+    );
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(_))
+    ));
+    let ok = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        })),
+    };
+    n1.send(&f(STREAM_COMMANDS, 1, ok.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the ok to settle the forget", || {
+        st.hub.forgets().pending("n1").is_empty()
+    })
+    .await;
+
+    // n2 does not offer the capability: it is never sent the forget, which stays owed.
+    let (mut n2, _t2) = node_conn(&st, "n2").await;
+    handshake_offering(&mut n2, &[]).await;
+    assert!(command_to_node(&mut n2, Duration::from_millis(500))
+        .await
+        .is_none());
+    assert_eq!(st.hub.forgets().pending("n2"), vec!["agent-3"]);
+}
+
 /// The audit outcome of the newest `AgentList` row, once it is no longer `sent` (or `sent` after `wait`).
 async fn agent_list_outcome(st: &ServerState, wait: Duration) -> String {
     let end = tokio::time::Instant::now() + wait;
