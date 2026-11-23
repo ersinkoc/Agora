@@ -165,7 +165,10 @@ never takes `replaced` as offline, and ignores a `NodeLink` from any producer bu
 (`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
 current connection ends. A hub that starts has no connection: every node its rebuilt view shows online is recorded offline
 before it accepts connections (`NodeOffline`, then `NodeLink { up: false, reason: closed }` for the node's latest generation,
-or 0, with `last_heard_ms` the node's last time in the log). The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+or 0, with `last_heard_ms` the node's last time in the log). An end the store refuses to record (busy, I/O error) is kept in
+memory, in order, and written before any later hub fact (so a node that dials again is recorded down, then up, and its new
+connection is refused while the end still cannot be written) and by a retry that waits 100 ms, doubling up to 5 s, until the store works (#996); the
+machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
@@ -348,7 +351,10 @@ the check is refused). An owner confirms its association; metadata is not an acc
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+and HEAD for the workspace. Each agent started in a folder registers it again, also a folder other agents share; such a
+registration leaves `files_changed` at 0, and the node sends the folder's `WorkspaceStatusChanged` after it, even when the
+counts did not change, so the latest counts follow it (#1017). A registration the node restates (a resync) carries the
+counts it last sent. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
 workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
 are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
@@ -454,7 +460,7 @@ no text, ADR-0058). Entry ids increase per agent; a client ignores an id it alre
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
 project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
 
-`BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
+`BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. A node that goes offline and comes back to a shared project is asked again, also when the hub records its end late, together with its next connection (#1036). Sent only to nodes that offer the capability `board.join`.
 
 `GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them. A grant covers commands only while the device that signed it is still trusted on the node, in the same term and within its limits: when that device is removed or revoked, its endorsement runs out, or its limits no longer allow the grant's scope, the grant ends and `GrantList` no longer shows it; trusting the device again does not bring it back.
 
