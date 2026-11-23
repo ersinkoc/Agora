@@ -73,9 +73,11 @@
   .ide-tab { @apply flex h-9 min-w-[7rem] max-w-[13.75rem] shrink items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
   .tab-strip .ide-tab[data-cut] { visibility: hidden; }
   /* A tab's floor, in rem so it holds at any zoom: an agent's tab keeps its avatar (who it is, always), about eight characters of its name
-     and an ellipsis, its state and the close button; the tab in front a little more. The avatar, the marks and the button never shrink; the
+     and an ellipsis, its state and the close button (more with the bolt); the tab in front a little more. The name gives way from the front,
+     so the colour word that tells two agents of one kind apart stays ("cl… · teal", Workspace.tsx `PaneName`). The avatar, the marks and the button never shrink; the
      title is what gives way and it always ends in an ellipsis. The strip scrolls instead, and its "more" menu lists what is cut off. */
   .ide-tab:has(> .kit-avatar) { min-width: 10rem; }
+  .ide-tab:has(> .kit-avatar):has(> [data-no-ask]) { min-width: 11.5rem; }
   .ide-tab[aria-selected='true'] { min-width: 8.5rem; }
   .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: 11rem; }
   /* The tab in front never shrinks for the others (they scroll away and the "more" menu lists them): its whole name shows, up to the tab's
@@ -368,17 +370,19 @@
 
 /* Redesign PR 7: narrow panes. Outside the layers on purpose, so a utility on the same element (`flex`, `truncate`) cannot undo them. */
 /* A pane's bar is measured by its own width (a pane can be far narrower than the window): split and maximize fold into its ⋯ menu first,
-   then a tab or the pane's title keeps only the avatar and the state, with the name in its tooltip and still its accessible name. */
+   then a tab or the pane's title keeps only the avatar and the state, with the name in its tooltip and still its accessible name. The
+   thresholds are where at least 48 px of the name (about six characters) still shows with the bolt beside it; below them a sliver of
+   letters would say less than the avatar does (scripts/e2e-explorer-no-bars.mjs sweeps the widths across them). */
 .pane-bar { container: pane-bar / inline-size; }
 .tab-strip { container: tab-strip / inline-size; }
 @container pane-bar (max-width: 26rem) { .pane-bar [data-pane-tool='split'] { display: none; } }
 @container pane-bar (max-width: 18rem) { .pane-bar [data-pane-tool='maximize'] { display: none; } }
-@container pane-bar (max-width: 11rem) { .pane-bar [data-pane-name] { @apply sr-only; } }
+@container pane-bar (max-width: 13rem) { .pane-bar [data-pane-name] { @apply sr-only; } }
 /* An agent's pane is measured as a whole (not its header row: a size container there would hold the header's own menus under the
    terminal): below 24rem the header drops the machine and the branch, which stay in its tooltip. */
 .agent-body { container: agent-body / inline-size; }
 @container agent-body (max-width: 24rem) { .agent-body [data-crumb] { display: none; } }
-@container tab-strip (max-width: 10rem) {
+@container tab-strip (max-width: 11rem) {
   .tab-strip .ide-tab, .tab-strip .ide-tab:has(> .kit-avatar), .tab-strip .ide-tab[aria-selected='true'], .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: auto; }
   .ide-tab [data-pane-name] { @apply sr-only; }
 }

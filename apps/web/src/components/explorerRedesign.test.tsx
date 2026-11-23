@@ -171,7 +171,7 @@ describe('no bar on one side (the stylesheet and the components)', () => {
   it('folds a narrow pane by its own width and keeps the avatar when the name goes', () => {
     expect(css).toMatch(/\.pane-bar \{ container: pane-bar \/ inline-size; \}/);
     expect(css).toMatch(/@container pane-bar \(max-width: 26rem\) \{ \.pane-bar \[data-pane-tool='split'\] \{ display: none; \} \}/);
-    expect(css).toMatch(/@container tab-strip \(max-width: 10rem\) \{[^}]*\{ min-width: auto; \}\s*\.ide-tab \[data-pane-name\] \{ @apply sr-only; \}/);
+    expect(css).toMatch(/@container tab-strip \(max-width: 11rem\) \{[^}]*\{ min-width: auto; \}\s*\.ide-tab \[data-pane-name\] \{ @apply sr-only; \}/);
     expect(css).not.toMatch(/\[data-pane-name\] \{ display: none/); // hidden from sight only: it stays the tab's accessible name
   });
 });

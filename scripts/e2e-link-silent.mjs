@@ -1,6 +1,6 @@
 // ADR-0070 acceptance, in a real browser: links that go silent without ending, and a hub that is killed and started again.
 //  1. A frozen machine: its node process is stopped (SIGSTOP), so its connection stays open and says nothing, as a laptop that
-//     slept looks to the hub. The window shows it offline with "offline · 25 sec" (how long) within the hub's silence deadline (25 s). When it runs
+//     slept looks to the hub. The window shows it offline with "offline · 25 sec" (the Agents list) or "last seen" within the hub's silence deadline (25 s). When it runs
 //     again (SIGCONT) it is online again by itself, and its agent is still running (nothing was reset).
 //  2. A frozen hub (SIGSTOP past the deadline): the window says "Hub unreachable"; after SIGCONT the window and the machine are back.
 //  3. A killed hub (SIGKILL), started again at once on the same data and port: the window and the machine are back.
@@ -52,7 +52,7 @@ try {
     const offMs = await timed(page.waitForSelector(`${machine}[data-online="false"]`, { timeout: NOTICE_MS }).then(() => true, () => false));
     check(offMs > 0, `the window shows the frozen laptop offline (after ${offMs} ms)`);
     const seen = await page.locator(`${machine} [data-last-seen]`).first().innerText().catch(() => '');
-    check(/offline · /.test(seen), `with how long it has been away ("${seen}")`);
+    check(/offline · |last seen/.test(seen), `with how long it has been away or when it was last seen ("${seen}")`);
     await wait(5000);
     process.kill(node, 'SIGCONT');
     const backMs = await timed(online('true'));

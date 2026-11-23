@@ -8,15 +8,17 @@
 //      agent's avatar whole and inside the bar, and either at least 48 px of the name or (below the threshold) no name at all, kept as
 //      the accessible name and the tooltip: never a sliver of letters. Split and maximize have folded into the ⋯ menu. The agent's header
 //      keeps the folder readable (the machine and the branch leave it).
+//      The pane widths are swept across both thresholds, with the bolt in the tab in front and then in the lone pane.
 //   3. Keyboard selection still works: Enter on an Agents-list row puts it in front, the arrow keys move between tabs, and the file manager's
 //      arrows move the focus from row to row.
 //
 //   cd apps/web && npm ci && npm run gen && npm run build
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-explorer-no-bars.mjs
-//   AGORA_SCREENSHOTS=docs/ux/screens PW_DIR=… node scripts/e2e-explorer-no-bars.mjs   # also writes explorer-redesign-{desktop,narrow,files}-{dark,light}.png
+//   4. On a touch screen that keeps this window (a tablet in landscape, 1180 × 820), the rows and Clear are touch-sized and still have no bar.
+//   AGORA_SCREENSHOTS=docs/ux/screens PW_DIR=… node scripts/e2e-explorer-no-bars.mjs   # also writes explorer-redesign-{desktop,narrow,files,touch}-{dark,light}.png
 //
 // A phone (narrower than 700 px) draws its own single column with no Agents list, tabs or pane bars (phone.md), so there is nothing of
-// this change to check there.
+// this change to check there; the touch pass is the nearest real screen.
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -95,8 +97,8 @@ function identity() {
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
 let failed = 0;
 const check = (ok, message, detail = '') => { if (ok) console.log(`ok   ${message}`); else { failed++; console.log(`FAIL ${message}${detail ? `\n  ${detail}` : ''}`); } };
-const open = async (viewport, scheme) => {
-  const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce' });
+const open = async (viewport, scheme, extra = {}) => {
+  const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce', ...extra });
   await ctx.addInitScript(() => { try { localStorage.setItem('agora.attention.mode', 'off'); } catch { /* the check runs without it */ } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => check(false, `no page error (${e.message})`));
@@ -163,24 +165,46 @@ for (const scheme of ['dark', 'light']) {
     check(f.count >= 6 && chosen >= 2 && f.problems.length === 0, `${scheme}: ${f.count} file rows and file tabs (${chosen} chosen, one with keyboard focus) have no bar on one side`, f.problems.join('\n  '));
     await ctx.close();
   }
-  // 2: two narrow panes.
-  {
+  // 2: two narrow panes. A: the tab in front acts without asking (the bolt takes room), the lone pane does not; B: the other way round.
+  //    Each is drawn at 1100 px, then swept from 1240 down to 1030 px in 10 px steps (bars from about 290 down to 190 px), so the
+  //    widths just above each threshold are checked too.
+  for (const [setup, tabsFirst, solo] of [['A', [1, 3], /claude · teal/], ['B', [3, 1], /codex · teal/]]) {
     const { ctx, page } = await open({ width: 1100, height: 800 }, scheme);
-    for (const n of [1, 3]) { await page.locator('[data-agent-row]').nth(n).click(); await page.waitForTimeout(250); }
+    for (const n of tabsFirst) { await page.locator('[data-agent-row]').nth(n).click(); await page.waitForTimeout(250); }
     await page.locator('.pane-bar [data-pane-tool="split"]').first().click();
     await page.waitForTimeout(300);
-    await page.getByRole('button', { name: /claude · teal/ }).last().click();
+    await page.getByRole('button', { name: solo }).last().click();
     await page.waitForTimeout(400);
-    if (shots) await page.screenshot({ path: join(shots, `explorer-redesign-narrow-${scheme}.png`), animations: 'disabled' });
+    if (shots && setup === 'A') await page.screenshot({ path: join(shots, `explorer-redesign-narrow-${scheme}.png`), animations: 'disabled' });
     const { bars, heads } = await page.evaluate(identity);
-    check(bars.length >= 2, `${scheme}: ${bars.length} narrow pane bars show an agent`, JSON.stringify(bars));
-    for (const b of bars) {
-      const named = b.shown >= 48 || (b.hiddenName && b.tip.includes(b.name));
-      check(b.avatar && named && b.folded, `${scheme}: a ${b.width} px pane bar keeps the avatar and ${b.hiddenName ? 'the name as its tooltip' : `${b.shown} px of "${b.name}"`}, its split and maximize folded into ⋯`, JSON.stringify(b));
-    }
-    for (const h of heads) check(h.crumbs === 0 && h.folder >= 24, `${scheme}: a ${h.width} px agent header shows its folder (${h.folder} px), not single letters`, JSON.stringify(h));
+    check(bars.length >= 2, `${scheme} ${setup}: ${bars.length} narrow pane bars show an agent`, JSON.stringify(bars));
+    const named = (b) => b.avatar && (b.shown >= 48 || (b.hiddenName && b.tip.includes(b.name)));
+    for (const b of bars) check(named(b) && b.folded, `${scheme} ${setup}: a ${b.width} px pane bar keeps the avatar and ${b.hiddenName ? 'the name as its tooltip' : `${b.shown} px of "${b.name}"`}, its split and maximize folded into ⋯`, JSON.stringify(b));
+    for (const h of heads) check(h.crumbs === 0 && h.folder >= 24, `${scheme} ${setup}: a ${h.width} px agent header shows its folder (${h.folder} px), not single letters`, JSON.stringify(h));
     const r = await page.evaluate(inspect, '.tab-strip [role=tab]');
-    check(r.problems.length === 0, `${scheme}: narrow tabs and bars have no bar on one side`, r.problems.join('\n  '));
+    check(r.problems.length === 0, `${scheme} ${setup}: narrow tabs have no bar on one side`, r.problems.join('\n  '));
+    const bad = [];
+    let seen = 0;
+    for (let width = 1240; width >= 1030; width -= 10) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(100);
+      for (const b of (await page.evaluate(identity)).bars) { seen++; if (!named(b)) bad.push(`${width}: ${JSON.stringify(b)}`); }
+    }
+    check(seen >= 40 && bad.length === 0, `${scheme} ${setup}: across ${seen} bar widths from about 290 to 190 px, a bar shows the avatar and at least 48 px of the name, or the avatar alone`, bad.join('\n  '));
+    await ctx.close();
+  }
+  // 4: a touch screen that keeps this window (a tablet in landscape): the rows and tabs grow to the touch size, still without bars.
+  {
+    const { ctx, page } = await open({ width: 1180, height: 820 }, scheme, { hasTouch: true, isMobile: true });
+    await page.locator('[data-agent-row]').nth(1).tap();
+    await page.waitForTimeout(300);
+    await page.locator('[data-agent-row]').nth(3).tap();
+    await page.waitForTimeout(300);
+    if (shots) await page.screenshot({ path: join(shots, `explorer-redesign-touch-${scheme}.png`), animations: 'disabled' });
+    const size = await page.evaluate(() => ({ row: Math.round(document.querySelector('[data-agent-row]').getBoundingClientRect().height), tab: Math.round(document.querySelector('.tab-strip [role=tab]').getBoundingClientRect().height), clear: Math.round([...document.querySelectorAll('button')].find((b) => b.textContent === 'Clear')?.getBoundingClientRect().height ?? 0) }));
+    check(size.row >= 44 && size.clear >= 44, `${scheme} touch: an Agents-list row and Clear are touch-sized (${JSON.stringify(size)})`);
+    const r = await page.evaluate(inspect, '[data-agent-row], aside .ide-row, .tab-strip [role=tab], .rail__btn');
+    check(r.count >= 15 && r.problems.length === 0, `${scheme} touch: ${r.count} rows, tabs and rail icons have no bar on one side`, r.problems.join('\n  '));
     await ctx.close();
   }
 }

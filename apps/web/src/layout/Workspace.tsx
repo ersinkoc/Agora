@@ -162,7 +162,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                   className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={label(p)}
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <AgentAvatar accent={pa.accent} kind={agentKind(pa)} size="s" /> : <Icon name="layout" className="size-3.5 text-muted" />}
-                  <span className="min-w-0 truncate" data-pane-name>{label(p)}</span>
+                  <PaneName text={label(p)} />
                   {pa && <NoAskBadge agent={pa} nested bare />}
                   {pa && <StatusMark state={pa.state} failed={endedWithError(pa)} />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
@@ -173,7 +173,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
         ) : (
           <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
-            <span className="min-w-0 truncate font-medium" title={label(front)} data-pane-name>{label(front)}</span>
+            <PaneName text={label(front)} className="font-medium" />
             {a && <NoAskBadge agent={a} bare />}
             {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
             {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
@@ -342,5 +342,17 @@ function DividerLine({ d, host, dispatch }: { d: Divider; host: { current: HTMLD
       }}>
       <span aria-hidden className={`absolute bg-transparent group-hover:bg-accent/40 group-focus-visible:bg-accent group-active:bg-accent/60 ${row ? 'inset-y-0 start-[3px] w-0.5' : 'inset-x-0 top-[3px] h-0.5'}`} />
     </div>
+  );
+}
+
+// A pane's or tab's name gives way from the front, never its last part ("cl… · teal", "Changes · cl… · amber"): the avatar already shows
+// the kind's letter, and the colour word is what tells two agents of one kind apart. A name without " · " ends in an ellipsis as usual.
+function PaneName({ text, className = '' }: { text: string; className?: string }) {
+  const cut = text.lastIndexOf(' · ');
+  if (cut <= 0) return <span className={`min-w-0 truncate ${className}`} data-pane-name>{text}</span>;
+  return (
+    <span className={`truncate flex min-w-0 ${className}`} data-pane-name>
+      <span className="min-w-[1.5ch] truncate">{text.slice(0, cut)}</span><span className="flex-none whitespace-pre">{text.slice(cut)}</span>
+    </span>
   );
 }
