@@ -1,7 +1,8 @@
 /* Design tokens (docs/ux/visual-language.md §3). `--diff-removed` is a content colour (like syntax colours), not a state and not a theme
-   token: amber stays "needs you", so a deleted line is red. Components use only these variables, never raw values; the Tailwind theme in
+   token: amber stays "needs you", so a deleted line is red. It is also the one danger red (ADR-0102), and `--on-danger` is the fixed
+   label colour on it, so no theme can make a filled danger button unreadable. Components use only these variables, never raw values; the Tailwind theme in
    app.css maps onto them (ADR-0036). Dark-first, light-equal. Color is reserved for agent state and one brand accent;
-   `--agent-*` are the colours an agent is told apart by (its tile's edge, its name: "claude · amber"), assigned, never a state, darker in Light so
+   `--agent-*` are the colours an agent is told apart by (its avatar, its name: "claude · amber"), assigned, never a state, darker in Light so
    they stay visible on a white surface (at least 3:1, a test checks it).
    A theme (docs/ux/themes.md) sets these same variables on the page; the values here are the Dark and Light themes, shown until
    the script has applied the chosen one (src/themes/tokens.ts holds the same values; a test keeps them equal). */
@@ -49,6 +50,7 @@
   --state-idle: #8b8b96;
   --state-unknown: #8f8f9b;
   --diff-removed: #f87171;
+  --on-danger: #0b0b14;
   --agent-amber: #ffb454;
   --agent-teal: #4fd1c5;
   --agent-violet: #a78bfa;
@@ -75,6 +77,7 @@
   --state-idle: #5b5b68;
   --state-unknown: #6a6a76;
   --diff-removed: #a82117;
+  --on-danger: #ffffff;
   --agent-amber: #b45309;
   --agent-teal: #0f766e;
   --agent-violet: #6d28d9;
@@ -103,6 +106,7 @@
     --state-idle: #5b5b68;
     --state-unknown: #6a6a76;
     --diff-removed: #a82117;
+  --on-danger: #ffffff;
     --agent-amber: #b45309;
     --agent-teal: #0f766e;
     --agent-violet: #6d28d9;

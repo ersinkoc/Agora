@@ -24,8 +24,8 @@ const NO_SESSION: SessionModel = { modes: [], models: [], currentMode: '', curre
 
 // A notice (ADR-0058): something went wrong or changed in the conversation, said by the window from the code the adapter sent.
 const notice = (line: ChatLine) => (
-  <div role="note" className="flex max-w-3xl items-start gap-2 rounded-m border border-needs-you/60 bg-surface-1 px-3 py-2 text-[0.8125rem] break-words whitespace-pre-wrap text-ink">
-    <Icon name="warn" className="mt-0.5 size-3.5 flex-none text-needs-you" /><span className="min-w-0"><span className="sr-only">{t('chat-error-label')}: </span>{noticeText(line, t)}</span>
+  <div role="note" className="flex max-w-3xl items-start gap-2 rounded-m border border-danger/60 bg-surface-1 px-3 py-2 text-[0.8125rem] break-words whitespace-pre-wrap text-ink">
+    <Icon name="warn" className="mt-0.5 size-3.5 flex-none text-danger" /><span className="min-w-0"><span className="sr-only">{t('chat-error-label')}: </span>{noticeText(line, t)}</span>
   </div>
 );
 
@@ -288,7 +288,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
             {actions.cancelTurn && rich && !dropAsk && <button type="button" className="text-xs underline underline-offset-2 hover:text-ink" onClick={() => setDropAsk(true)}>{t('queue-drop')}</button>}
           </div>
           {dropAsk && (
-            <div role="alertdialog" aria-label={t('queue-drop-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+            <div role="alertdialog" aria-label={t('queue-drop-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
               <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('queue-drop-title')}</strong><span className="text-muted">{t('queue-drop-body', { count: queue.waiting.length })}</span></div>
               <button type="button" className="button px-3 py-1 text-xs" disabled={stopping === 'busy'} onClick={() => void stopTurn(true)}>{t('queue-drop-yes')}</button>
               <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => setDropAsk(false)}>{t('queue-drop-no')}</button>
@@ -335,8 +335,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           <NoAskBadge agent={agent} />
           <AsksLessChip agent={agent} />
           <span className="flex-1" />
-          {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
-          {stopFailed && <span role="status" className="text-xs text-needs-you">{t(stopFailed)}</span>}
+          {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-danger'}`}>{sentText}</span>}
+          {stopFailed && <span role="status" className="text-xs text-danger">{t(stopFailed)}</span>}
           <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>
           {/* Ends this turn only: the agent stays and can be asked again. Not the same as stopping the agent. */}
           {canStop && <button type="button" className="button gap-1.5 px-3 text-removed" disabled={stopping === 'busy'} title={t('turn-stop-hint')} aria-label={`${t('turn-stop')}. ${t('turn-stop-hint')}`} onClick={() => void stopTurn(false)}>

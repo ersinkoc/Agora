@@ -725,6 +725,18 @@ impl Boards {
         out
     }
 
+    /// #1036: `nodes` went offline since the last look (see [`Boards::membership`]): they are no longer remembered as members of
+    /// any project, as a look while they were offline would have recorded, so each is asked again when it is back.
+    pub fn forget_members(&self, nodes: &BTreeSet<String>) {
+        if nodes.is_empty() {
+            return;
+        }
+        let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        for members in j.members.values_mut() {
+            members.retain(|n| !nodes.contains(n));
+        }
+    }
+
     /// `node` will not answer for `project` (it is offline, or too old to know `BoardJoin`): calls stop waiting for it.
     pub fn join_settled(&self, node: &str, project: &str) {
         let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());

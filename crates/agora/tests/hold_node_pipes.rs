@@ -468,9 +468,6 @@ fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node
     wait_for("the answer", || said(&node, &id, "hello again"));
 }
 
-/// #932: a structured agent the holder kept runs on in the mode it was in, and that mode makes it act without asking. After the node
-/// restarts it is shown and checked so: the new node puts back what the agent last reported of its session (the adapter is not asked
-/// again), so the hub's view has its modes with the skipping one in use, and `skips_permissions_now` says so.
 /// ADR-0101, Codex review of PR #1007: an adapter the holder runs is unconfined by design. A node that confines agents and allows
 /// "always" only for confined ones (`skip_permissions = confined_only`) still takes it up, and never counts it as confined: the
 /// card offers no "always" and an always answer is refused. (The node's sandbox setting alone, which the check read before, says
@@ -619,6 +616,9 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
     );
 }
 
+/// #932: a structured agent the holder kept runs on in the mode it was in, and that mode makes it act without asking. After the node
+/// restarts it is shown and checked so: the new node puts back what the agent last reported of its session (the adapter is not asked
+/// again), so the hub's view has its modes with the skipping one in use, and `skips_permissions_now` says so.
 #[test]
 fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipping_after_its_node_restarts(
 ) {

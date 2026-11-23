@@ -1,31 +1,40 @@
-import { t } from '../i18n';
-import { approvalName } from '../net/approvalText';
-import { detailText } from '../net/tool';
 import type { ApprovalModel } from '../net/view';
-import { StateMark } from './StateBadge';
-import { FullRequest } from './ApprovalCard';
-import { StartApproval, type StartChoice } from './StartApproval';
-import { SkipApproval } from './SkipApproval';
-import { AlwaysNote, AlwaysOnly, allowAlwaysWord, alwaysNoteId } from './AllowAlways';
+import { PlainRequest, useOwnGuard, type RequestAgent } from './ApprovalCard';
+import { ReviewableRequest } from './ReviewRequest';
+import type { StartChoice } from './StartApproval';
+import type { AnswerGuard, AnswerResult } from './useAnswerGuard';
 
-// What one agent waits on, with Allow and Deny: the same row in the window and in the full-size view.
-// `pinned`: drawn as a card above a chat composer (rounded, tinted, with a shadow) instead of a full-width bar under the pane's header.
-export function ApprovalBanner({ approval: x, onResolve, pinned }: { approval: ApprovalModel; onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void; pinned?: boolean }) {
-  // ADR-0057: a request to start an agent shows everything it asks for (read-only where it cannot be answered).
-  if (x.start) return <StartApproval approval={x} start={x.start} busy={!onResolve} onResolve={(ok, choice) => onResolve?.(x, ok, choice)} />;
-  if (x.skip || x.skipUnknown) return <SkipApproval approval={x} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />;
-  return (
-    <div role="alert" className={pinned ? 'flex flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-needs-you/55 bg-needs-you/8 px-3.5 py-2.5 shadow-card' : 'flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2'}>
-      <StateMark state="needs-you" />
-      <div className={`min-w-0 flex-1 ${x.always ? 'basis-48' : ''}`}><strong className={`block ${pinned ? 'line-clamp-2' : 'truncate'}`}>{t('approval-title', { name: approvalName(x) })}</strong><span className={`block text-xs text-muted ${pinned ? 'line-clamp-2' : 'truncate'}`} title={x.detail || undefined}>{x.action}{x.detail ? ` · ${detailText(x.detail)}` : ''}</span>{x.detail && <FullRequest detail={x.detail} />}<AlwaysOnly approval={x} className="mt-1" /></div>
-      {onResolve && <div className={x.always ? 'flex flex-wrap items-center gap-2' : 'contents'}>
-        {x.always?.only
-          ? <button type="button" className="button button--primary px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x, 'banner')} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>
-          : <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>}
-        <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button>
-        {x.always && !x.always.only && <button type="button" className="button px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x, 'banner')} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>}
-      </div>}
-      {x.always && <AlwaysNote approval={x} surface="banner" className="basis-full" />}
-    </div>
-  );
+// What one agent waits on, in its pane: above the terminal, or (`pinned`) above a chat's composer. The same request card as the side
+// panel's (redesign PR 4), which a pane narrower than 360 px draws in the row density with the buttons under the text. `guard` is the
+// surface's (one dwell for every card it draws, T44); a banner drawn alone has its own. Every answer but a switch's goes through it.
+export function ApprovalBanner({ approval: x, agent, guard, onResolve, pinned }: {
+  approval: ApprovalModel;
+  agent?: RequestAgent;
+  guard?: AnswerGuard;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  pinned?: boolean;
+}) {
+  const own = useOwnGuard(x, agent);
+  const g = guard ?? own;
+  const send = (go: () => AnswerResult) => g.answer(x.id, go);
+  // ADR-0057 and ADR-0090 Amendment A (redesign PR 5): a start, or a switch to act without asking, is a short card with Review, which
+  // shows the whole request (read-only where it cannot be answered). A switch keeps its own guards (its Allow dwell and one-click lock,
+  // and Deny always available: main-window.md), not the surface's.
+  const card = x.start || x.skip || x.skipUnknown
+    ? <ReviewableRequest approval={x} agent={agent} guard={g} alert narrowable onResolve={onResolve ? (ok, choice) => onResolve(x, ok, choice) : undefined} />
+    : <PlainRequest approval={x} density="card" surface="banner" agent={agent} alert narrowable guard={g}
+    onAnswer={onResolve ? (ok, always) => send(() => (always ? onResolve(x, true, undefined, true) : onResolve(x, ok))) : undefined} />;
+  // Above a terminal it sits in the pane with a margin of its own; above a composer the composer's column holds it.
+  return pinned ? card : <div className="px-2 pt-2 empty:hidden">{card}</div>;
+}
+
+// Every banner one surface draws (a pane, the full-size screen), under that surface's guard.
+export function ApprovalBanners({ approvals, agent, guard, onResolve, pinned }: {
+  approvals: readonly ApprovalModel[];
+  agent?: RequestAgent;
+  guard: AnswerGuard;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  pinned?: boolean;
+}) {
+  return <>{approvals.map((x) => <ApprovalBanner key={x.id} approval={x} agent={agent} guard={guard} onResolve={onResolve} pinned={pinned} />)}</>;
 }
