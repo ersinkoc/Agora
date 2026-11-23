@@ -1542,8 +1542,10 @@ pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
 
 /// True where [`Sandbox::deny`] is kept only by the node refusing the start (#1114): Linux, whose Landlock rules can only allow, so a
 /// node path below a folder an agent is given (a `--data` under `/tmp`, `/var` or `/opt`) would be open to it. There the node refuses
-/// to start a confined agent whose read or write grants reach one of its own paths. macOS enforces `deny` in the Seatbelt profile, and
-/// Windows keeps the node's files out by their ACLs and the agent's restricted token. Callers use this instead of a `cfg`.
+/// to start a confined agent whose read or write grants reach one of its own paths. macOS enforces `deny` in the Seatbelt profile. On
+/// Windows the check does not run either: there the node's files are out of reach when their ACLs leave the agent's restricted token
+/// out (the default folders under the user's profile; a data folder that `Users` may read is not checked, #1114). Callers use this
+/// instead of a `cfg`.
 pub const PROTECTED_PATHS_BY_REFUSAL: bool = cfg!(target_os = "linux");
 
 /// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents

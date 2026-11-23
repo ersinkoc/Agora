@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-- Security, Linux: a node whose data folder (`--data`) or agent types folder (`--manifests`) lies inside a folder confined agents may read or write (`/tmp`, `/var`, `/opt`, `/etc`, `/run`, or one named in the policy) no longer starts confined agents, which could read its stored secrets, its session ledger and its chat transcripts there; the start is refused (`agent.sandbox_unavailable`, reason `protected_path_reachable`) and `agora doctor` names the folder. Before, only a reachable control token was refused. Keep the node's folder under your home (`~/.agora`, the default). macOS and Windows keep these folders closed themselves and are unchanged (#1114).
+- Security, Linux: a node whose data folder (`--data`) or agent types folder (`--manifests`) lies inside a folder confined agents may read or write (`/tmp`, `/var`, `/opt`, `/etc`, `/run`, or one named in the policy) no longer starts confined agents, which could read its stored secrets, its session ledger and its chat transcripts there; the start is refused (`agent.sandbox_unavailable`, reason `protected_path_reachable`) and `agora doctor` names the folder. Before, only a reachable control token was refused. Keep the node's folder under your home (`~/.agora`, the default). macOS keeps these folders closed itself; macOS and Windows are unchanged (#1114).
 
 ## 0.3.36
 
