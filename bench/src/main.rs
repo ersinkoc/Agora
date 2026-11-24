@@ -265,6 +265,10 @@ fn transcript(args: &[String]) -> ExitCode {
         "with a 52-byte secret: take {:.1} us, write {:.2} ms | with an 8 KiB secret: take {:.1} us, write {:.2} ms (p50, one stream, newest pieces held)",
         r.take_52_p50_us, r.write_52_p50_ms, r.take_8k_p50_us, r.write_8k_p50_ms
     );
+    println!(
+        "a 16 KiB output dense with edges, an 8 KiB value held: write {:.2} ms (p50)",
+        r.write_dense_8k_p50_ms
+    );
     if let Some(path) = out {
         match serde_json::to_string_pretty(&r) {
             Ok(json) if std::fs::write(&path, &json).is_ok() => {}

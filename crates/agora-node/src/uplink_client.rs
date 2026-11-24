@@ -833,20 +833,51 @@ where
                         }
                     }
                 }
-                // A terminal subscription: a thread bridges the node's local stream to this connection.
+                // A terminal or chat subscription: a thread bridges the node's local stream to this connection.
                 (stream, 0) if stream >= FIRST_DYNAMIC_STREAM => {
                     let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
                         continue;
                     };
+                    // Only a command that opens a stream may come on one (protocol.md, terminal relay). Any other is refused here,
+                    // whatever the hub does: carried to the control socket it would skip every check `run_local_on` makes on stream 1.
+                    // So is a second one on a stream that is still open: it would take the first one's place and leave it running.
+                    let open = relays
+                        .0
+                        .get(&stream)
+                        .is_some_and(|a| a.load(Ordering::Acquire));
+                    if open
+                        || !req
+                            .command
+                            .as_ref()
+                            .is_some_and(crate::control::opens_stream)
+                    {
+                        let _ = answers_tx.send(misplaced(req.request_id));
+                        continue;
+                    }
+                    // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
+                    // a refused subscription included (the grant is judged on the relay's own thread, off this loop).
                     let alive = Arc::new(AtomicBool::new(true));
+                    // Streams whose relay ended (refused, exited, closed by the node) are not closed by the hub; drop them here so the
+                    // map stays as small as the relays that run (#1144 review).
+                    relays.0.retain(|_, a| a.load(Ordering::Acquire));
                     relays.0.insert(stream, Arc::clone(&alive));
-                    let (socket, answers, out) = (
+                    let (socket, answers, out, grants) = (
                         commands.map(std::path::Path::to_path_buf),
                         answers_tx.clone(),
                         relay_tx.clone(),
+                        grants.clone(),
                     );
                     tokio::task::spawn_blocking(move || {
-                        relay_terminal(socket.as_deref(), &req, stream, &alive, &answers, &out);
+                        relay_terminal(
+                            socket.as_deref(),
+                            &req,
+                            grants.as_deref(),
+                            stream,
+                            &alive,
+                            &answers,
+                            &out,
+                        );
+                        alive.store(false, Ordering::Release);
                     });
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
@@ -917,18 +948,28 @@ impl Drop for Relays {
 fn relay_terminal(
     socket: Option<&std::path::Path>,
     req: &CommandRequest,
+    grants: Option<&crate::grants::Grants>,
     stream: u32,
     alive: &AtomicBool,
     answers: &tokio::sync::mpsc::UnboundedSender<CommandResponse>,
     out: &tokio::sync::mpsc::Sender<Frame>,
 ) {
     use agora_protocol::{Error, ErrorCode};
+    // The stream is let go before the answer is sent, so a request the hub sends on it after reading the refusal is not
+    // taken for a second one on a stream still open (#1144 review).
     let refuse = |e: Error| {
+        alive.store(false, Ordering::Release);
         let _ = answers.send(CommandResponse {
             request_id: req.request_id.clone(),
             result: Some(command_response::Result::Err(e.to_info())),
         });
     };
+    // ADR-0041: a subscription the policy lists needs a live grant here as much as on stream 1 (`run_local_on`).
+    if let (Some(g), Some(c)) = (grants, &req.command) {
+        if let Err(e) = g.gate(c, crate::grants::now_ms()) {
+            return refuse(e);
+        }
+    }
     let Some(socket) = socket else {
         return refuse(
             Error::new(ErrorCode::NodePolicyDenied)
@@ -943,6 +984,9 @@ fn relay_terminal(
         return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
     };
     let accepted = matches!(resp.result, Some(command_response::Result::Ok(_)));
+    if !accepted {
+        alive.store(false, Ordering::Release);
+    }
     let _ = answers.send(resp);
     while accepted && alive.load(Ordering::Acquire) {
         match local.read_frame(Some(Duration::from_millis(200))) {
@@ -960,6 +1004,18 @@ fn relay_terminal(
     // The local stream ended without an exit frame (the node closed it): tell the hub so the client can resubscribe.
     if alive.load(Ordering::Acquire) && accepted {
         let _ = out.blocking_send(frame(stream, STREAM_CLOSE, Vec::new()));
+    }
+}
+
+/// The answer to a command on a stream it may not use (protocol.md, terminal relay): `protocol.invalid_message {field: stream_id}`.
+fn misplaced(request_id: String) -> CommandResponse {
+    CommandResponse {
+        request_id,
+        result: Some(command_response::Result::Err(
+            agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                .with("field", "stream_id")
+                .to_info(),
+        )),
     }
 }
 
@@ -1133,16 +1189,13 @@ fn run_local_on(
             None => {}
         }
     }
-    if matches!(
-        req.command,
-        Some(
-            command_request::Command::TerminalSubscribe(_)
-                | command_request::Command::ChatSubscribe(_)
-        )
-    ) {
-        return fail(
-            Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),
-        );
+    // A command that opens a stream needs a stream of its own (protocol.md, terminal relay).
+    if req
+        .command
+        .as_ref()
+        .is_some_and(crate::control::opens_stream)
+    {
+        return misplaced(req.request_id.clone());
     }
     // ADR-0082: the control token is for the local socket only; the hub neither knows nor may probe it, so the command is not
     // carried to the socket (where a wrong token would end the node's own kept connection).

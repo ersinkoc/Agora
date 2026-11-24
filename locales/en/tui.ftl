@@ -160,6 +160,8 @@ tui-split-status = { $online }/{ $total } { $total ->
        *[other] agents
     } · { $waiting } need you
 tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · a ask · v devices · q quit
+# ADR-0106: a viewer's list shows only the keys that read.
+tui-split-keys-viewer = ↑↓ choose · Enter open · a ask · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel
@@ -171,6 +173,8 @@ tui-folder-more = … more folders than shown (the first { $n })
 tui-folder-unsupported = That machine cannot list its folders yet (update it).
 tui-folder-failed = Could not open that folder ({ $code }).
 tui-folder-role = Your role does not let you choose this folder. Ask the owner.
+# ADR-0106: a key that changes something, pressed in a viewer's window. Nothing was sent.
+tui-viewer-watching = You can watch here. Starting, stopping and answering requests need a member's role. Ask the owner.
 tui-folder-identity = This folder's project changed since an agent last ran here. Press y to start anyway, any other key to cancel.
 tui-forgot = Removed from the list.
 tui-forget-running = It is still running: stop it first (x).
@@ -217,7 +221,9 @@ tui-tool-other = Step
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · o files · b board · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-tree-viewer = Ctrl K commands · Enter open · N next that needs you · r changes · o files · b board · a ask · Tab next part · i details · q quit
 tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
+tui-app-keys-terminal-viewer = Ctrl-] or F12 back to the list · You are watching: your keys are not sent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
 tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
@@ -345,6 +351,7 @@ tui-board-col-done-empty = Nothing finished yet.
 tui-board-untitled = Untitled task
 tui-board-more = and { $count } more
 tui-board-keys = ↑↓ choose · Enter or g give a Backlog task to an agent · q or Esc back
+tui-board-keys-viewer = ↑↓ choose · q or Esc back
 tui-board-backlog-only = Only a task in Backlog can be given to an agent.
 tui-machine-name-id = { $name } · { $id }
 tui-give-title = Give to an agent

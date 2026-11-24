@@ -1192,8 +1192,7 @@ mod tests {
     }
 
     /// Letting go of a held terminal ends its read and closes the node's copy of the master (a copy that kept reading would take output
-    /// A pipe agent that is stopped (`SIGSTOP`) has not ended: the holder neither reports an end nor ends its group (review of #1108,
-    /// on macOS a stopped adapter was killed and its node saw it exit).
+    /// A pipe agent that is stopped (`SIGSTOP`) has not ended: the holder neither reports an end nor ends its group (review of #1108).
     #[test]
     fn a_stopped_pipe_agent_is_not_taken_for_ended() {
         let mut p = HeldProcess::start(
@@ -1416,8 +1415,8 @@ fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
         if r == 0 {
             // SAFETY: filled in by a successful waitid; zero when the child has not ended (WNOHANG).
             let pid = unsafe { info.si_pid() };
-            // Only an end counts: a child that was stopped (`SIGSTOP`, a debugger) is not ended, whatever a system's `waitid` reports
-            // for it (the holder would otherwise end its group, a stopped agent being killed; seen on macOS).
+            // Only an end counts: a child that was stopped (`SIGSTOP`, a debugger) is never taken for ended, whatever a system's
+            // `waitid` reports (with only `WEXITED` neither Linux nor macOS reports another state: a defence, which costs nothing).
             return Ok(pid != 0 && [CLD_EXITED, CLD_KILLED, CLD_DUMPED].contains(&info.si_code));
         }
         let e = io::Error::last_os_error();

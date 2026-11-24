@@ -973,7 +973,7 @@ impl LocalStream {
 
     /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
     /// writability (an error or hang-up counts as ready, so the send itself reports it). Windows: pipe writes are not polled, so
-    /// this returns `Ok(true)` at once and the caller keeps its own bound on the send.
+    /// this returns `Ok(true)` at once and the send is bounded by its write timeout ([`Self::set_write_timeout`]).
     pub fn wait_writable(&self, timeout: std::time::Duration) -> io::Result<bool> {
         #[cfg(unix)]
         {
@@ -988,7 +988,9 @@ impl LocalStream {
     }
 
     /// How long a send may wait for the peer to take what it sent (`None`: for ever). Past it the send fails with `WouldBlock` or
-    /// `TimedOut`. Windows pipes have no such limit yet: the call does nothing there.
+    /// `TimedOut`, having sent nothing, so it can be tried again. A zero timeout is refused (`InvalidInput`). Windows: the pending
+    /// pipe write is cancelled at the timeout, and while a timeout is set one send writes at most 16 KiB, because only a write no
+    /// larger than the pipe's buffer is sure to have sent nothing when it is cancelled (measured, #1089).
     pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         #[cfg(unix)]
         {
@@ -996,8 +998,7 @@ impl LocalStream {
         }
         #[cfg(windows)]
         {
-            let _ = timeout;
-            Ok(())
+            self.inner.set_write_timeout(timeout)
         }
     }
 
@@ -1458,8 +1459,8 @@ pub struct Sandbox {
     /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
     /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
-    /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
-    /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
+    /// refuses to start an agent whose grants contain the control token file (ADR-0082) or any of these paths
+    /// ([`PROTECTED_PATHS_BY_REFUSAL`], #1114); Windows keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
     pub deny: Vec<PathBuf>,
     /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
     /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
@@ -1539,6 +1540,14 @@ pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
 /// Linux, whose Landlock rules do not restrict connecting to a pathname socket. macOS closes the node's home in the Seatbelt profile
 /// and Windows refuses the pipe to a restricted token. Callers use this instead of a `cfg`.
 pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
+
+/// True where [`Sandbox::deny`] is kept only by the node refusing the start (#1114): Linux, whose Landlock rules can only allow, so a
+/// node path below a folder an agent is given (a `--data` under `/tmp`, `/var` or `/opt`) would be open to it. There the node refuses
+/// to start a confined agent whose read or write grants reach one of its own paths. macOS enforces `deny` in the Seatbelt profile. On
+/// Windows the check does not run either: there the node's files are out of reach when their ACLs leave the agent's restricted token
+/// out (the default folders under the user's profile; a data folder that `Users` may read is not checked, #1114). Callers use this
+/// instead of a `cfg`.
+pub const PROTECTED_PATHS_BY_REFUSAL: bool = cfg!(target_os = "linux");
 
 /// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents
 /// itself (Windows joins in a later step).

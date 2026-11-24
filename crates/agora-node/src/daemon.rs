@@ -950,18 +950,7 @@ impl EventSink {
     /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
     /// id and its kind can continue one.
     pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
-        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
-            agent_id: e.agent_id.clone(),
-            kind: e.kind.clone(),
-            project_id: e.project_id.clone(),
-            folder: e.folder.clone(),
-            parent_agent_id: e.parent_agent_id.clone(),
-            resumable,
-            started_at_ms: e.started_at_ms,
-            interrupted_at_ms: e.interrupted_at_ms,
-            last_state: crate::ledger::proto_state(&e.last_state) as i32,
-            still_running: e.still_running(),
-        }));
+        self.record(Body::AgentInterrupted(e.interrupted_event(resumable)));
     }
 
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
@@ -1845,7 +1834,7 @@ impl Node {
         }
         // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
         for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+            events.agent_interrupted(&e, sup.offers_resume(&e));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1935,7 +1924,7 @@ impl Node {
                     found
                         .into_iter()
                         .map(|e| {
-                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            let resumable = s.offers_resume(&e);
                             (e, resumable)
                         })
                         .collect()
@@ -2355,10 +2344,14 @@ impl Node {
                                 }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
+                                    if let SupervisorEvent::GaveUp { agent, .. } = e {
+                                        chat.set_working(agent, false);
+                                    }
                                     restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    chat.set_working(agent, false);
                                     // The spawner first: a start the agent waited for is withdrawn and its slot released, before
                                     // the queue drops the request.
                                     spawner.agent_ended(agent);
@@ -2374,6 +2367,14 @@ impl Node {
                                 }
                                 other => chat_event(&chat, &mesh, other, now),
                             }
+                        }
+                        // Review of #1103, round 3: the state each agent is in, as a backstop for a change no event carried (the
+                        // transcript writer holds an agent's newest words only while it works).
+                        for v in &views {
+                            chat.set_working_if_known(
+                                &v.id,
+                                v.running && v.state == agora_core::AgentState::Working,
+                            );
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
                             // ADR-0090 Amendment A: nobody decided a switch in time: nothing is applied, and no adapter asked.
@@ -2949,6 +2950,14 @@ fn chat_event(
         // was purged, never written, or the agent never spoke here).
         SupervisorEvent::ReplayedChat { agent, items } => {
             chat.replayed(agent, items, now);
+        }
+        // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in a turn; leaving one
+        // (or ending) closes them.
+        SupervisorEvent::StateChanged { agent, state } => {
+            chat.set_working(agent, *state == agora_core::AgentState::Working);
+        }
+        SupervisorEvent::Exited { agent, .. } => {
+            chat.set_working(agent, false);
         }
         _ => {}
     }

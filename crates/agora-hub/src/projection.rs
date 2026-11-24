@@ -2704,6 +2704,85 @@ mod tests {
         assert_eq!(f.view.messages.projects["n1/p"], before);
     }
 
+    #[test]
+    fn recent_team_chat_uses_only_the_remaining_snapshot_frame_budget() {
+        use agora_protocol::frame::DEFAULT_MAX_PAYLOAD;
+        use agora_protocol::v1::{ApprovalRequested, PositionedEvent};
+
+        let mut f = Fed::new();
+        for i in 0..500 {
+            let node = format!("machine-{}", i / 50);
+            let agent = format!("agent-{i}");
+            f.agent(&node, &agent, &format!("project-{}", i / 10));
+            if i < 450 {
+                f.push(ev(
+                    &node,
+                    1,
+                    Body::ApprovalRequested(ApprovalRequested {
+                        agent_id: agent,
+                        approval_id: format!("approval-{i}"),
+                        action: "review".into(),
+                        detail: "Example pending review detail. ".repeat(64),
+                        expires_at_ms: 60_000,
+                        ..Default::default()
+                    }),
+                ));
+            }
+        }
+        let no_history = crate::server::snapshot_of(&f.view, f.pos);
+        assert!(no_history.encoded_len() < DEFAULT_MAX_PAYLOAD);
+        println!("CONTROL OK: fleet state fits without history");
+
+        let body = "Example team update. ".repeat(560);
+        for _ in 0..20 {
+            f.say("machine-0", "agent-0", "agent-1", &body);
+        }
+        let eligible = f.view.recent_messages();
+        assert_eq!(eligible.len(), 20);
+        let snapshot = crate::server::snapshot_of(&f.view, f.pos);
+        let actual = snapshot.encoded_len();
+        if actual > DEFAULT_MAX_PAYLOAD {
+            println!("PROBLEM CONFIRMED: expected <= {DEFAULT_MAX_PAYLOAD}, actual {actual}");
+        }
+        assert!(
+            actual <= DEFAULT_MAX_PAYLOAD,
+            "snapshot uses {actual} bytes"
+        );
+        let history = &snapshot.recent_messages;
+        assert!(!history.is_empty());
+        assert!(history.len() < eligible.len());
+        let first = eligible.len() - history.len();
+        assert!(history
+            .iter()
+            .zip(&eligible[first..])
+            .all(|(a, b)| a.pos == b.pos));
+
+        let mut one_more = snapshot.clone();
+        let previous = &eligible[first - 1];
+        one_more.recent_messages.insert(
+            0,
+            PositionedEvent {
+                pos: previous.pos,
+                event: Some(previous.event.clone()),
+            },
+        );
+        assert!(one_more.encoded_len() > DEFAULT_MAX_PAYLOAD);
+        assert_eq!(snapshot.agents, no_history.agents);
+        assert_eq!(snapshot.approvals, no_history.approvals);
+
+        let padding = DEFAULT_MAX_PAYLOAD - no_history.encoded_len() - 8;
+        f.view
+            .approvals
+            .values_mut()
+            .next()
+            .expect("approval")
+            .detail
+            .push_str(&" ".repeat(padding));
+        let almost_full = crate::server::snapshot_of(&f.view, f.pos);
+        assert!(almost_full.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert!(almost_full.recent_messages.is_empty());
+    }
+
     /// ADR-0103: a busy project does not push a quiet one's messages out of its ring.
     #[test]
     fn a_busy_project_does_not_push_a_quiet_ones_messages_out() {

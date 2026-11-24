@@ -760,12 +760,48 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             if !l.node_id.is_empty() && l.node_id != ctx.node_id {
                 return Err(Error::new(ErrorCode::NodeOffline).with("node_id", l.node_id.as_str()));
             }
+            // #1120: the agents an earlier process of this node ran that ended and are still kept (ADR-0060), read before the
+            // supervisor's lock is taken (never both at once). Listed as that process listed them: stopped, in their folder.
+            let kept = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.ended(crate::daemon::now_ms()))
+                .unwrap_or_default();
+            // ADR-0107: the agents it found interrupted and still offers (oldest id first), read before the lock as well.
+            let found = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.interrupted())
+                .unwrap_or_default();
             // One lock for the whole answer (the mutex is not reentrant).
             let sup = ctx.sup();
-            let agents = sup
-                .list()
+            let views = sup.list();
+            // An id the supervisor holds (one being resumed or started again) is listed from the supervisor only. Whether Resume is
+            // offered is decided here, under the lock, as the node's announcement decides it.
+            let interrupted: Vec<(crate::ledger::Entry, bool)> = found
                 .into_iter()
-                .map(|v| {
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| {
+                    let resumable = sup.offers_resume(&e);
+                    (e, resumable)
+                })
+                .collect();
+            let earlier: Vec<v1::AgentSummary> = kept
+                .into_iter()
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| v1::AgentSummary {
+                    state: crate::ledger::proto_state(&e.last_state) as i32,
+                    agent_id: e.agent_id,
+                    kind: e.kind,
+                    worktree_id: e.folder,
+                    terminal_id: String::new(),
+                    running: false,
+                    restarts: 0,
+                })
+                .collect();
+            let mut agents: Vec<v1::AgentSummary> = earlier
+                .into_iter()
+                .chain(views.into_iter().map(|v| {
                     let has_terminal = sup.terminal(&v.id).is_some();
                     v1::AgentSummary {
                         agent_id: v.id.as_str().to_string(),
@@ -786,10 +822,27 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         running: v.running,
                         restarts: v.restarts,
                     }
-                })
+                }))
+                .collect();
+            // One list in id order (`agent-2` before `agent-10`), whether a row comes from the ledger or the supervisor (#1122 review).
+            agents.sort_by_key(|a| {
+                (
+                    crate::ledger::id_number(&a.agent_id).unwrap_or(u64::MAX),
+                    a.agent_id.clone(),
+                )
+            });
+            drop(sup);
+            // Each row is the `AgentInterrupted` the node announces for it (the same builder), built after the lock is released: whether
+            // its process still runs is a look at the system.
+            let interrupted = interrupted
+                .iter()
+                .map(|(e, resumable)| e.interrupted_event(*resumable))
                 .collect();
             Ok(v1::CommandOk {
-                result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+                result: Some(Ok_::AgentList(v1::AgentListResult {
+                    agents,
+                    interrupted,
+                })),
             })
         }
         Cmd::WorkspaceQuery(q) => {
@@ -1511,7 +1564,7 @@ fn stop_survivor(
     }
     ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
-        let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
+        let resumable = ctx.sup().offers_resume(&e);
         ev.agent_interrupted(&e, resumable);
     }
     Ok(())
@@ -2035,6 +2088,15 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
+/// Whether `cmd` may arrive on a dynamic stream (3+): the commands that open one (protocol.md, "Terminal relay", "Chat transcript
+/// stream", `PreviewConnect`). Every other command belongs on stream 1, where the hub's commands pass the node's routed checks.
+pub(crate) fn opens_stream(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_) | Cmd::PreviewConnect(_)
+    )
+}
+
 fn handle_request(
     frame: &Frame,
     ctx: &Arc<ControlContext>,
@@ -2068,6 +2130,19 @@ fn handle_request(
             &req.request_id,
             Err(Error::new(ErrorCode::AuthUnauthenticated)),
         );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
+    // relay). Before the idempotency claim, so a refused request stores nothing.
+    let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+    let misplaced = match &req.command {
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
+        None => dynamic,
+    };
+    if misplaced {
+        let resp = response(&req.request_id, Err(invalid("stream_id")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
