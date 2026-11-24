@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -99,7 +99,7 @@ pub enum Output {
     /// The process ended; no more data follows.
     Exited(ExitStatus),
     /// This subscriber fell behind and chunks were dropped (the terminal and other subscribers are not
-    /// slowed down). Call [`TerminalHandle::resync`] for a fresh snapshot and continue from there.
+    /// slowed down). Call [`OutputSubscription::resync`] for a fresh snapshot and continue from there.
     Lagged,
 }
 
@@ -112,6 +112,8 @@ struct Subscriber {
 pub struct OutputSubscription {
     rx: Receiver<Output>,
     lagged: Arc<AtomicBool>,
+    /// F1500: the terminal this subscription is of, not kept by it (its end still disconnects `rx`).
+    terminal: Weak<Inner>,
 }
 
 impl OutputSubscription {
@@ -126,6 +128,12 @@ impl OutputSubscription {
             return Ok(Output::Lagged);
         }
         Ok(item)
+    }
+
+    /// [`TerminalHandle::resync`] on the terminal this subscription is of, never on another (F1500: after a restart the agent's
+    /// terminal is the next process's). `None` once that terminal is gone.
+    pub fn resync(&self) -> Option<Snapshot> {
+        self.terminal.upgrade().map(|inner| resync_in(&inner, self))
     }
 }
 
@@ -548,13 +556,7 @@ impl TerminalHandle {
     /// After [`Output::Lagged`]: discard what is queued, clear the lag, and return a fresh snapshot that
     /// the following items continue from. Never with history (ADR-0100 decision 2): a window that wants it subscribes again.
     pub fn resync(&self, sub: &OutputSubscription) -> Snapshot {
-        let repaint = {
-            let g = self.inner.lock();
-            while sub.rx.try_recv().is_ok() {}
-            sub.lagged.store(false, Ordering::Release);
-            Repaint::capture(g.term.as_ref(), g.seq, g.exit)
-        };
-        repaint.into_snapshot()
+        resync_in(&self.inner, sub)
     }
 
     /// How the process ended, once it has. Cheap: no screen is copied (the supervisor polls this).
@@ -632,7 +634,11 @@ impl TerminalWatch {
         (
             frames,
             repaint.into_snapshot(),
-            OutputSubscription { rx, lagged },
+            OutputSubscription {
+                rx,
+                lagged,
+                terminal: Arc::downgrade(&self.inner),
+            },
         )
     }
 }
@@ -648,6 +654,16 @@ impl Drop for TerminalHandle {
             let _ = t.join();
         }
     }
+}
+
+fn resync_in(inner: &Inner, sub: &OutputSubscription) -> Snapshot {
+    let repaint = {
+        let g = inner.lock();
+        while sub.rx.try_recv().is_ok() {}
+        sub.lagged.store(false, Ordering::Release);
+        Repaint::capture(g.term.as_ref(), g.seq, g.exit)
+    };
+    repaint.into_snapshot()
 }
 
 fn bump(inner: &Inner, f: impl FnOnce(&mut Shared)) {
