@@ -3239,6 +3239,13 @@ mod idempotency_tests {
 
         // Runs `pump` for one subscription on this thread and returns the frames it wrote.
         let relay = |s: &Subscribed, stream: u32| -> Vec<Frame> {
+            // The case needs a subscriber that fell behind: say so instead of relaying (and blocking on) a queue that did not
+            // overflow on this platform. Looking does not take the lag away.
+            assert_eq!(
+                s.sub.recv_timeout(Duration::ZERO),
+                Ok(Output::Lagged),
+                "the subscriber did not fall behind"
+            );
             let sock = dir.join(format!("p{stream}.sock"));
             let listener = local_listen(&sock).unwrap();
             let mut client = local_connect(&sock).unwrap();
