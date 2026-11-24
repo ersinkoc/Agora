@@ -1370,6 +1370,8 @@ node sets. The window's button and the terminal client's key come with the next 
 The first slice reserves `mesh.task_handoff.v1` on the hub–node link and adds generation 1 wire types. The hub and node will
 advertise the capability once their queue and durable inbox paths are implemented. The hub must have negotiated the capability
 with the receiver before sending the new command. An older peer connects normally and uses the current best-effort handoff path.
+Until a node advertises the capability, it answers `DeliverTaskHandoff` with `protocol.capability_missing`
+(`capability = mesh.task_handoff.v1`), on the hub link before any grant or signed-command check, and on its local socket.
 
 - **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
   A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
