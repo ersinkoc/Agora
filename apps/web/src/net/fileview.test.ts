@@ -67,6 +67,15 @@ describe('search in a file', () => {
     expect(findMatches(['Işık ılık'], 'ı').map((m) => m.start)).toEqual([0, 2, 5, 7]);
     expect(findMatches(['[a] (b)'], '[a]')).toEqual([{ line: 0, start: 0, end: 3 }]);
   });
+  it('finds any punctuation as itself, a hyphen too, ignoring case or not', () => {
+    expect(findMatches(['run --watch here'], '--watch')).toEqual([{ line: 0, start: 4, end: 11 }]);
+    expect(findMatches(['x Foo-Bar y'], 'Foo-Bar')).toEqual([{ line: 0, start: 2, end: 9 }]);
+    expect(findMatches(['a -> b'], '->')).toEqual([{ line: 0, start: 2, end: 4 }]);
+    for (const c of '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') {
+      expect(findMatches([`x${c}y ${c}`], c)).toEqual([{ line: 0, start: 1, end: 2 }, { line: 0, start: 4, end: 5 }]);
+      expect(findMatches([`a${c}B A${c}B`], `A${c}B`)).toEqual([{ line: 0, start: 4, end: 7 }]);
+    }
+  });
   it('finds nothing for an empty query and stops at the limit', () => {
     expect(findMatches(lines, '')).toEqual([]);
     expect(findMatches(['aaaa'], 'a', 2)).toHaveLength(2);
