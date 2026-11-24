@@ -1,7 +1,7 @@
 // The agent tree with a large fleet (docs/design/performance.md: "500 agents across 50 projects, scroll at 60 fps"; picking an agent
 // within the 50 ms navigation budget). Starts a hub on a throw-away home, seeds it with scripts/perf-seed-agents.py (10 machines x
 // 5 projects x 10 agents by default; AGORA_PERF_FLEET="nodes projects agents" to change), signs in with headless Chromium and prints:
-// warm reload until every agent row is in the DOM (not a paint measurement), DOM size and heap, scroll frame gaps, programmatic
+// warm reload until the fleet is loaded and near-viewport rows exist, DOM size and heap, scroll frame gaps, programmatic
 // row click to frame, and local tree-filter change to frame. Long tasks are counted separately by phase start time. The seeded
 // fleet has no live node connections or terminal streams; this does not measure live view-to-model updates.
 //
@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const bin = process.env.AGORA_PERF_BIN ?? join(root, 'target/debug/agora');
 const web = process.env.AGORA_PERF_WEB_DIR ?? join(root, 'apps/web/dist');
+const screenshots = process.env.AGORA_SCREENSHOTS;
 const home = mkdtempSync(join(tmpdir(), 'agora-perf-tree-'));
 const hubDir = join(home, 'hub');
 const env = { ...process.env, AGORA_HOME: home, AGORA_LANG: 'en' };
@@ -53,13 +54,30 @@ try {
   browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
   const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } })).newPage();
   const rows = 'aside nav li button.ide-row';
+  const waitForRows = () => page.waitForFunction(([selector, count]) => {
+    const mounted = document.querySelectorAll(selector).length;
+    const fleetSize = document.querySelector('aside nav')?.dataset.agentCount;
+    return fleetSize === undefined ? mounted >= count : Number(fleetSize) >= count && mounted > 0;
+  }, [rows, total], { timeout: 30_000 });
   await page.goto(`https://${addr}/`);
   await page.fill('input', code);
   await page.click('button:has-text("Sign in")');
-  await page.waitForFunction(([s, n]) => document.querySelectorAll(s).length >= n, [rows, total], { timeout: 30_000 });
+  await waitForRows();
+  const counts = await page.evaluate(() => {
+    const nav = document.querySelector('aside nav');
+    return {
+      machines: nav.querySelectorAll('[data-machine-id]').length,
+      projects: nav.closest('aside').querySelectorAll('select option:not([value=""])').length,
+    };
+  });
+  const expectedMachines = Number(fleet[0]);
+  const expectedProjects = expectedMachines * Number(fleet[1]);
+  if (counts.machines !== expectedMachines || counts.projects !== expectedProjects) {
+    throw new Error(`After loading ${total} agents, expected ${expectedMachines} machines and ${expectedProjects} projects, got ${counts.machines} machines and ${counts.projects} projects`);
+  }
   const t0 = Date.now();
   await page.reload();
-  await page.waitForFunction(([s, n]) => document.querySelectorAll(s).length >= n, [rows, total], { timeout: 30_000 });
+  await waitForRows();
   const domRowsReadyMs = Date.now() - t0;
   await page.waitForTimeout(500);
   const result = await page.evaluate(async (s) => {
@@ -68,6 +86,14 @@ try {
     const nav = document.querySelector('aside nav');
     const size = { rows: nav.querySelectorAll('li button.ide-row').length, treeNodes: nav.querySelectorAll('*').length,
       pageNodes: document.querySelectorAll('*').length, heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) : null };
+    const visible = () => {
+      const { top, bottom } = nav.getBoundingClientRect();
+      return [...document.querySelectorAll(s)].filter(row => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > top && rect.top < bottom;
+      });
+    };
+    const firstRow = visible()[0]?.dataset.agentRow;
     const long = [];
     const observer = new PerformanceObserver((l) => long.push(...l.getEntries()));
     observer.observe({ type: 'longtask' });
@@ -78,17 +104,42 @@ try {
       await new Promise((r) => requestAnimationFrame(r));
       const now = performance.now(); gaps.push(now - last); last = now;
     }
-    nav.scrollTop = 0;
-    await frame(); // Include settling the final scroll-to-top in the scroll window.
+    nav.scrollTop = nav.scrollHeight;
+    await frame();
+    nav.scrollTop = nav.scrollHeight;
+    await frame();
+    const lastRow = visible().at(-1)?.dataset.agentRow;
+    if (!firstRow || !lastRow || (nav.scrollHeight > nav.clientHeight * 2 && firstRow === lastRow)) {
+      throw new Error('Scroll did not reveal the bottom of the fleet');
+    }
     phases.scroll.end = performance.now();
-    const all = [...document.querySelectorAll(s)];
     const pick = [];
+    let delayedPickSamples = 0;
     phases.pick.start = performance.now();
     for (let i = 1; i <= 12; i++) {
-      const t = performance.now(); all[Math.floor(i * all.length / 13)].click(); await frame(); pick.push(performance.now() - t);
+      nav.scrollTop = i * (nav.scrollHeight - nav.clientHeight) / 13;
+      await frame();
+      await frame();
+      let inView = visible();
+      if (inView.length === 0) {
+        delayedPickSamples++;
+        const deadline = performance.now() + 250;
+        do {
+          await frame();
+          inView = visible();
+        } while (inView.length === 0 && performance.now() < deadline);
+      }
+      const row = inView[Math.floor(inView.length / 2)];
+      if (!row) throw new Error(`No agent visible at scroll sample ${i}`);
+      const t = performance.now();
+      row.click();
+      await frame();
+      pick.push(performance.now() - t);
       await new Promise((r) => setTimeout(r, 150));
     }
     phases.pick.end = performance.now();
+    nav.scrollTop = 0;
+    await frame();
     const input = document.querySelector('aside input[type=search]');
     const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     const filter = [];
@@ -107,9 +158,41 @@ try {
     return { ...size, scrollFrameMs: { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), max: pct(gaps, 1) },
       longTasksWhileScrolling: counts.scroll, longTasksWhilePicking: counts.pick, longTasksWhileFiltering: counts.filter,
       longTasksOutsidePhases: long.length - counts.scroll - counts.pick - counts.filter, longTasksTotal: long.length,
-      pickToFrameMs: { p50: pct(pick, 0.5), p95: pct(pick, 0.95) }, filterToFrameMs: { p50: pct(filter, 0.5), p95: pct(filter, 0.95) } };
+      delayedPickSamples, pickToFrameMs: { p50: pct(pick, 0.5), p95: pct(pick, 0.95) }, filterToFrameMs: { p50: pct(filter, 0.5), p95: pct(filter, 0.95) } };
   }, rows);
-  console.log(JSON.stringify({ fleet: fleet.join('x'), agents: total, fixture: 'static-fleet-no-live-nodes-or-terminal-streams', domRowsReadyMs, ...result }, null, 1));
+  const explorerNav = page.locator('aside nav').first();
+  const agents = explorerNav.locator('[data-agent-row]');
+  await page.locator('aside input[type=search]').fill('');
+  await explorerNav.evaluate(nav => { nav.scrollTop = 0; });
+  await waitForRows();
+  // The keyboard must continue in reading order as scrolling reveals the next set of rows.
+  const visited = new Set();
+  if (total >= 120) {
+    const first = agents.first();
+    const firstId = await first.getAttribute('data-agent-row');
+    await first.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(id => document.querySelector('aside nav [aria-current="true"]')?.getAttribute('data-agent-row') === id, firstId);
+
+    for (let i = 0; i < 40; i++) {
+      await page.keyboard.press('Tab');
+      const id = await page.evaluate(() => document.activeElement?.getAttribute('data-agent-row'));
+      if (id) visited.add(id);
+    }
+    if (visited.size < 12) throw new Error(`Keyboard visited only ${visited.size} rows`);
+  }
+  if (screenshots) {
+    const explorer = page.getByRole('complementary', { name: 'Agents', exact: true });
+    await explorerNav.evaluate(nav => {
+      document.activeElement?.blur();
+      nav.scrollTop = 0;
+    });
+    for (const colorScheme of ['dark', 'light']) {
+      await page.emulateMedia({ colorScheme });
+      await explorer.screenshot({ path: join(screenshots, `explorer-windowing-${colorScheme}.png`) });
+    }
+  }
+  console.log(JSON.stringify({ fleet: fleet.join('x'), agents: total, fixture: 'static-fleet-no-live-nodes-or-terminal-streams', domRowsReadyMs, ...counts, keyboardRowsVisited: visited.size, ...result }, null, 1));
 } finally {
   try {
     await browser?.close();

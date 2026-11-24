@@ -407,7 +407,8 @@ size guards and require a workspace used by a managed session. Hub members/viewe
 ### Node-local control socket
 
 A node serves the same commands on a local socket (owner-only; `agora node run`, default `$AGORA_HOME/node.sock`)
-so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
+so it can be driven with no hub. Local commands and replies are protobuf payloads in the binary frame envelope above.
+`CommandRequest` goes on stream 1 with kind 0 and
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client (`ChatSubscribe` and `PreviewConnect` too; any
