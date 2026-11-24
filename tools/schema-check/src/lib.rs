@@ -1,7 +1,7 @@
 //! Breaking-change check for `schema/` (ADR-0006, ADR-0009): a published message is never changed.
 //!
 //! Compares a base schema (for example the target branch) with the current one. Anything the base declared
-//! must still exist with the same meaning. Adding messages, fields, enums, and enum values is allowed.
+//! must still exist with the same meaning. Adding messages, non-required fields, enums, and enum values is allowed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
