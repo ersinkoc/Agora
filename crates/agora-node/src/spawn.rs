@@ -1037,9 +1037,10 @@ fn tail_within(lines: Vec<String>, max: usize) -> Vec<String> {
 
 impl Helpers for Spawner {
     fn start(&self, caller: &AgentId, a: &StartArgs) -> Result<u64, Error> {
-        self.stopping()?;
         let folder_shown = a.folder.clone().unwrap_or_default();
         let refuse = |e: Error| self.refused(caller, &a.kind, &folder_shown, e);
+        // Recorded as every refusal is (`agent_start_refused`).
+        self.stopping().map_err(refuse)?;
         if a.node
             .as_deref()
             .is_some_and(|n| !n.is_empty() && n != self.node_id)
