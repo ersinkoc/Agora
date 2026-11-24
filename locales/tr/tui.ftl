@@ -97,6 +97,7 @@ tui-send-failed = Gönderilemedi ({ $code }).
 tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-pick-page = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; sonraki sayfa için n'ye basın ({ $page } / { $pages }); başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
+tui-start-group-untested = Denenmedi (ACP kayıt defterinden, henüz Agora'da denenmedi)
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
 tui-start-signed-only = { $name } başlarken programını indirir; bu yüzden makine onu yalnızca bu cihaz başlatmayı imzaladığında başlatır: f tuşuna basın ve klasörünü seçin.
 tui-start-missing-item = { $name } (`{ $program }`)

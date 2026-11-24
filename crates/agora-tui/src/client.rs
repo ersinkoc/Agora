@@ -366,6 +366,41 @@ pub struct Kind {
     pub program: String,
 }
 
+/// ADR-0092: the prefix of every kind a machine converted from the ACP registry (`agora_adapters::registry_convert`); such a kind is
+/// untested in Agora. A hand-made kind of the same name or id has already replaced it on the machine.
+pub const REGISTRY_PREFIX: &str = "registry-";
+
+/// Whether `kind` is one of the ACP registry's (ADR-0092), by its name as the window tells it (`registry-<id>`).
+pub fn is_registry_kind(kind: &str) -> bool {
+    kind.starts_with(REGISTRY_PREFIX)
+}
+
+/// A machine's kinds as the start pickers list them (#1134), each group in the machine's own order, as the window's Start does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartKinds {
+    /// The installed hand-made kinds: listed first.
+    pub installed: Vec<Kind>,
+    /// The installed ACP registry kinds: listed after them, under "Untested".
+    pub untested: Vec<Kind>,
+    /// The hand-made kinds whose program the machine cannot find. A registry kind that is not installed is left out: there are
+    /// dozens, and the window's Settings → Agents lists them under "Add an agent".
+    pub missing: Vec<Kind>,
+}
+
+/// Sorts `all` into [`StartKinds`]; nothing is chosen for the person.
+pub fn start_kinds(all: Vec<Kind>) -> StartKinds {
+    let mut out = StartKinds::default();
+    for k in all {
+        match (k.installed, is_registry_kind(&k.kind)) {
+            (true, false) => out.installed.push(k),
+            (true, true) => out.untested.push(k),
+            (false, false) => out.missing.push(k),
+            (false, true) => {}
+        }
+    }
+    out
+}
+
 /// ADR-0065: what the hub tells an owner's window about pairing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PairNote {
@@ -2908,5 +2943,48 @@ mod same_process_tests {
         assert!(seen.note(&at(8, taken_up)), "a fresh snapshot is wanted");
         assert_eq!(seen.configs.options.get("mac/agent-1"), Some(&vec![option]));
         assert!(!seen.configs_changed);
+    }
+}
+
+#[cfg(test)]
+mod start_kinds_tests {
+    use super::{is_registry_kind, start_kinds, Kind};
+
+    fn k(kind: &str, installed: bool) -> Kind {
+        Kind {
+            kind: kind.into(),
+            name: kind.into(),
+            installed,
+            program: String::new(),
+        }
+    }
+
+    /// #1134: installed hand-made kinds, then installed registry ones, each in the machine's order; missing registry ones are left out.
+    #[test]
+    fn registry_kinds_follow_the_hand_made_ones_and_missing_ones_are_left_out() {
+        let got = start_kinds(vec![
+            k("registry-gemini", true),
+            k("claude", true),
+            k("registry-goose", false),
+            k("codex", false),
+            k("registry-qwen-code", true),
+            k("shell", true),
+        ]);
+        let ids = |v: &[Kind]| v.iter().map(|k| k.kind.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&got.installed), ["claude", "shell"]);
+        assert_eq!(
+            ids(&got.untested),
+            ["registry-gemini", "registry-qwen-code"]
+        );
+        assert_eq!(ids(&got.missing), ["codex"]);
+        assert_eq!(start_kinds(Vec::new()), super::StartKinds::default());
+    }
+
+    #[test]
+    fn a_registry_kind_is_told_by_its_prefix_only() {
+        assert!(is_registry_kind("registry-gemini"));
+        assert!(!is_registry_kind("gemini"));
+        assert!(!is_registry_kind("my-registry-gemini"));
+        assert!(!is_registry_kind("registry"));
     }
 }

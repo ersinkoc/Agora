@@ -101,6 +101,7 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-pick-page = Start which agent on { $machine }? Press its number, n for the next page ({ $page } of { $pages }), any other key cancels.
 tui-start-item = { $n }  { $name }
+tui-start-group-untested = Untested (from the ACP registry, not yet tried in Agora)
 tui-start-none = No agent is installed on { $machine }.
 tui-start-signed-only = { $name } downloads its program when it starts, so the machine starts it only when this device signs the start: press f and choose its folder.
 tui-start-missing-item = { $name } (`{ $program }`)
