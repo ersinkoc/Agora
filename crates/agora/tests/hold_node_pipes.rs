@@ -1722,7 +1722,11 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
             .unwrap()
             .adapter_lines_written(&agent)
     };
-    let started_with = lines();
+    // Counted absolutely, not from a baseline read now: a line is counted only after its write returns, so a stalled writer could
+    // leave a read here one short and a late count would then stand in for the next line. Starting the agent writes `initialize` and
+    // `session/new`; the prompt is the third line and the decision the fourth (checked after the stop, so a change to the start fails
+    // here instead of making the wait pass early).
+    const STARTUP_LINES: usize = 2;
     prompt(&node, &id, "ask");
     let requested = |node: &Node| {
         node.events
@@ -1735,13 +1739,14 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
     };
     wait_for("the request", || requested(&node).is_some());
     // The prompt's line is counted (the writer counts a line after the holder took it, so a stalled writer may not have yet).
-    wait_for("the prompt's line to be counted", || lines() > started_with);
+    wait_for("the prompt's line to be counted", || {
+        lines() > STARTUP_LINES
+    });
     let approval = requested(&node).unwrap().approval_id;
     // The adapter cannot answer while it is stopped: the decision's delivery waits for it.
     let adapter = pid_of(&node, &id);
     let paused = Paused::new(adapter);
     // Nothing else is sent to the agent while its request waits: the next line written is the decision.
-    let before = lines();
     let socket = node.socket().unwrap().to_path_buf();
     let signature = key
         .sign(
@@ -1771,7 +1776,14 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
     // here (500 ms, which failed once on a macOS runner for a cause not established, then 300 ms) let a runner that stalls the writer
     // longer fail the test (#1150); the line counted as written is what a let-go answers as given (`Detached`), not `Exited`. The
     // supervisor is locked for each look only: the decision takes it to make its call.
-    wait_for("the decision's line to be written", || lines() > before);
+    wait_for("the decision's line to be written", || {
+        lines() >= STARTUP_LINES + 2
+    });
+    assert_eq!(
+        lines(),
+        STARTUP_LINES + 2,
+        "the start, the prompt and the decision"
+    );
     drop(node);
     // A stopped agent has not ended: the holder keeps it.
     assert!(alive(adapter), "the stopped adapter was ended");
