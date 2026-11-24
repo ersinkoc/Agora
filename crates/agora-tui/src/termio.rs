@@ -9,6 +9,8 @@
 //! switches them while this client watches (`docs/ux/terminal-fidelity.md`). Everything a program sends is untrusted text: nothing here
 //! executes or opens anything; the caller decides, after showing the user what it would do.
 
+use std::net::Ipv6Addr;
+
 use agora_vt::Modes;
 
 /// Which events the program asked to be told about (DECSET 9, 1000, 1002, 1003).
@@ -461,7 +463,7 @@ pub fn safe_link(uri: &str) -> Option<&str> {
     };
     if let Some(host) = authority.strip_prefix('[') {
         let close = host.find(']')?;
-        if close == 0 {
+        if close == 0 || host[..close].parse::<Ipv6Addr>().is_err() {
             return None;
         }
         let rest = &host[close + 1..];
@@ -501,12 +503,22 @@ pub fn link_in_row(chars: &[char], at: usize) -> Option<String> {
         .rev()
         .find(|&i| starts(i, "http://") || starts(i, "https://"))?;
     let mut last = run.len();
-    while last > first
-        && matches!(
-            run[last - 1],
+    while last > first {
+        let trailing = run[last - 1];
+        if trailing == ']' {
+            let text = &run[first..last];
+            let opens = text.iter().filter(|&&c| c == '[').count();
+            let closes = text.iter().filter(|&&c| c == ']').count();
+            if opens == closes {
+                break;
+            }
+        }
+        if !matches!(
+            trailing,
             '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | ')' | ']' | '}' | '>' | '"'
-        )
-    {
+        ) {
+            break;
+        }
         last -= 1;
     }
     if start + last <= at {

@@ -1,6 +1,6 @@
 //! Project identity: optional portable UUID (ADR-0052), Git discovery (ADR-0003), or node-local folder.
 
-use std::fmt;
+use std::{fmt, net::Ipv6Addr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectError {
@@ -131,6 +131,9 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let host = if host_port.starts_with('[') {
         let end = host_port.find(']').ok_or(ProjectError::InvalidRemote)? + 1;
         let (host, port) = host_port.split_at(end);
+        if host[1..host.len() - 1].parse::<Ipv6Addr>().is_err() {
+            return Err(ProjectError::InvalidRemote);
+        }
         if !port.is_empty() && port.strip_prefix(':').is_none_or(|port| !valid_port(port)) {
             return Err(ProjectError::InvalidRemote);
         }
