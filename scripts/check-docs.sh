@@ -40,6 +40,15 @@ for pair in $(grep -oE "ADR-[0-9]{4} (Accepted|Proposed|Superseded|Rejected)" do
   actual=$(sed -n 's/^Status: *\([A-Za-z]*\).*/\1/p' "$f" | head -n 1)
   [ "$actual" = "$claimed" ] || { echo "docs/capabilities.md: ADR-$n is $actual, the table says $claimed"; fail=1; }
 done
+# changelog.d: every fragment is CHANGELOG bullets (lines starting "- ", continuation lines indented), never empty; CHANGELOG.md keeps
+# its "## Next" section for the release to fold them into.
+for f in changelog.d/*.md; do
+  [ -e "$f" ] || continue
+  [ "$(basename "$f")" = README.md ] && continue
+  if ! grep -q '^- ' "$f"; then echo "$f: no '- ' bullet"; fail=1; fi
+  if grep -nvE '^(- |  |$)' "$f" | grep -q .; then echo "$f: a line that is neither a bullet nor an indented continuation"; fail=1; fi
+done
+grep -q '^## Next$' CHANGELOG.md || { echo "CHANGELOG.md: no '## Next' section"; fail=1; }
 # Every Fluent key used must exist in the source locale (placeholder until the i18n lint exists).
 [ -f locales/en/main.ftl ] || { echo "locales/en/main.ftl missing"; fail=1; }
 exit $fail
