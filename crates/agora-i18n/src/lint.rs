@@ -332,12 +332,19 @@ pub fn rust_keys(src: &str) -> Vec<String> {
 }
 
 fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        return Ok(());
+    }
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
         let name = e.file_name();
-        if p.is_dir() {
+        let file_type = e.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             if name != "target" && name != ".git" && name != "node_modules" {
                 walk(&p, ext, out)?;
             }
