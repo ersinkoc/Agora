@@ -649,19 +649,33 @@ fn bump(inner: &Inner, f: impl FnOnce(&mut Shared)) {
     inner.advance(g);
 }
 
-/// How often an idle actor checks that the child still exists. Normally the output channel closing ends the
+/// How often the actor checks that the child still exists, idle or not (F1480). Normally the output channel closing ends the
 /// loop at once; this only matters when a descendant that escaped the process group keeps the PTY open.
 const IDLE_CHECK: Duration = Duration::from_secs(1);
 
 fn run(mut pty: Box<dyn Pty>, inner: &Inner) {
+    // F1480: a descendant outside the process group that keeps the terminal open and writes more often than `IDLE_CHECK` never lets
+    // the channel go quiet, so the child is also looked for at that pace while output flows (one clock read per chunk). Once it is
+    // gone, what it printed last still has one more `IDLE_CHECK` to reach the screen before the loop ends.
+    let mut next_check = Instant::now() + IDLE_CHECK;
+    let mut ended = false;
     loop {
         match pty.output().recv_timeout(IDLE_CHECK) {
-            Ok(chunk) => bump(inner, |s| {
-                s.term.feed(&chunk);
-                if !s.subscribers.is_empty() {
-                    broadcast(s, &Output::Data(Arc::from(chunk)));
+            Ok(chunk) => {
+                bump(inner, |s| {
+                    s.term.feed(&chunk);
+                    if !s.subscribers.is_empty() {
+                        broadcast(s, &Output::Data(Arc::from(chunk)));
+                    }
+                });
+                if Instant::now() >= next_check {
+                    if ended {
+                        break;
+                    }
+                    ended = matches!(pty.try_wait(), Ok(Some(_)));
+                    next_check = Instant::now() + IDLE_CHECK;
                 }
-            }),
+            }
             // Closed: the process side of the terminal is gone (killed or exited).
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {

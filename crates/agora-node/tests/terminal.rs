@@ -432,3 +432,75 @@ fn a_subscriber_joining_mid_stream_gets_the_programs_style_and_input_modes() {
     assert!(mirror.modes().bracketed_paste && mirror.modes().application_cursor);
     h.kill().unwrap();
 }
+
+/// F1480: a program that left a descendant outside the terminal's process group (its own session) writing to the terminal every
+/// 0.1 s, in `dir`; the descendant ends when `STOP` appears there or `dir` is removed (at most 30 s). `None` without `sh` and `setsid`.
+#[cfg(unix)]
+fn with_busy_descendant(dir: &std::path::Path, tail: &str) -> Option<TerminalHandle> {
+    let setsid = std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("setsid").is_file()));
+    if !sh_on_path() || !setsid {
+        eprintln!("skipped: needs sh and setsid on PATH");
+        return None;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    // The program goes on only once the descendant runs on its own.
+    let script = format!(
+        "setsid sh -c ': > STARTED; i=0; while [ -e STARTED ] && [ ! -e STOP ] && [ $i -lt 300 ]; do echo tick; i=$((i+1)); sleep 0.1; done' & \
+         while [ ! -e STARTED ]; do sleep 0.05; done; echo LEADER-DONE; {tail}"
+    );
+    let mut cfg = PtyConfig::new(vec!["sh".into(), "-c".into(), script]);
+    cfg.cwd = Some(dir.to_path_buf());
+    let h = TerminalHandle::start(spawn(&cfg).expect("spawn"), TerminalOptions::default())
+        .expect("start");
+    wait_for(&h, "the descendant writing after the program's line", |s| {
+        s.lines
+            .iter()
+            .position(|l| l.contains("LEADER-DONE"))
+            .is_some_and(|at| s.lines.iter().skip(at + 1).any(|l| l.contains("tick")))
+    });
+    Some(h)
+}
+
+/// F1480: the end of a program is seen while such a descendant keeps writing (the actor never goes idle), so the supervisor reports
+/// it and restarts a crash.
+#[cfg(unix)]
+#[test]
+fn the_end_is_seen_while_a_descendant_keeps_writing() {
+    let dir = std::env::temp_dir().join(format!("agora-f1480-end-{}", std::process::id()));
+    let Some(h) = with_busy_descendant(&dir, "exit 3") else {
+        return;
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    while h.exit_status().is_none() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let seen = h.exit_status();
+    std::fs::write(dir.join("STOP"), b"").unwrap();
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(seen.and_then(|s| s.code), Some(3), "the end was not seen");
+}
+
+/// F1480: dropping the handle (a stop, which the supervisor does under its lock) returns while such a descendant keeps writing.
+#[cfg(unix)]
+#[test]
+fn a_stop_returns_while_a_descendant_keeps_writing() {
+    let dir = std::env::temp_dir().join(format!("agora-f1480-stop-{}", std::process::id()));
+    let Some(h) = with_busy_descendant(&dir, "sleep 30") else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(h);
+        let _ = tx.send(());
+    });
+    let returned = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    // The descendant ends, so the drop ends either way.
+    std::fs::write(dir.join("STOP"), b"").unwrap();
+    dropper.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(returned, "dropping the handle did not return");
+}
+
