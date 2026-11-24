@@ -6,7 +6,9 @@
 //! - the writer's time under the board's lock to take one batch (the clones of the changed entries), for a second's worth of a busy
 //!   agent;
 //! - the writer's time to encode, redact and append that batch (off the lock and off every agent's path);
-//! - seeding at take-up: reading the end of a full file (at most 4 MiB of it) and filling the ring.
+//! - seeding at take-up: reading the end of a full file (at most 4 MiB of it) and filling the ring;
+//! - #1147, the live path: one piece of the agent's words added and sent to a follower, redacted, in a turn, with no value held, one
+//!   of 52 bytes, one of 8 KiB, 64 of 8,000 bytes, and the 52-byte value itself streamed in 4-byte pieces (each held, then sent).
 
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,18 @@ pub struct TranscriptReport {
     /// held (p50, ms): linear in the text, whatever the number of edges.
     #[serde(default)]
     pub write_dense_8k_p50_ms: f64,
+    /// #1147: mean time to add one 200-byte piece of the agent's words and send it to a follower, in a turn, with no value held, a
+    /// 52-byte one, an 8 KiB one and 64 of 8,000 bytes; and with the 52-byte value streamed in 4-byte pieces among the words (ns).
+    #[serde(default)]
+    pub live_none_ns: f64,
+    #[serde(default)]
+    pub live_52_ns: f64,
+    #[serde(default)]
+    pub live_8k_ns: f64,
+    #[serde(default)]
+    pub live_64x8000_ns: f64,
+    #[serde(default)]
+    pub live_split_52_ns: f64,
     /// The file seeding reads, and the time to read its end and fill the ring (p50, max).
     pub seed_file_bytes: u64,
     pub seed_p50_ms: f64,
@@ -243,6 +257,79 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         percentile(&mut times, 0.5).as_secs_f64() * 1e3
     };
 
+    let live = |tag: &str, values: Vec<String>, split: bool| -> std::io::Result<f64> {
+        let home = dir.join(tag);
+        std::fs::create_dir_all(&home)?;
+        let secrets = agora_node::credentials::SecretStore::in_data(&home);
+        for (i, v) in values.iter().enumerate() {
+            let secret = agora_node::credentials::Secret::new(v)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            secrets
+                .set(&format!("BENCH{i}"), &secret)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        }
+        if !values.is_empty() {
+            settled(secrets.dir())?;
+        }
+        let st = std::sync::Arc::new(Store::new(
+            &home,
+            Limits::default(),
+            Some(agora_node::credentials::SecretStore::in_data(&home)),
+        ));
+        let board = ChatBoard::saving(st);
+        let agent = AgentId::new("agent-live");
+        board.set_working(&agent, true);
+        let (_, sub) = board.follow(&agent);
+        let pieces: Vec<String> = if split {
+            // Words, then the value in 4-byte pieces, then words: every piece of the value waits until the next one.
+            let v = values.first().cloned().unwrap_or_default();
+            let mut p = vec![text.clone()];
+            p.extend(
+                v.as_bytes()
+                    .chunks(4)
+                    .map(|c| String::from_utf8_lossy(c).into_owned()),
+            );
+            p
+        } else {
+            vec![text.clone()]
+        };
+        let n = 20_000usize;
+        let items: Vec<ChatItem> = (0..n)
+            .map(|i| ChatItem::Text(pieces[i % pieces.len()].clone()))
+            .collect();
+        let mut spent = Duration::ZERO;
+        for chunk in items.chunks(256) {
+            let start = Instant::now();
+            for item in chunk {
+                board.push_item(&agent, item, 1);
+            }
+            spent += start.elapsed();
+            while sub.recv_timeout(Duration::ZERO).is_ok() {}
+            let _ = board.take_unsaved();
+        }
+        Ok(spent.as_nanos() as f64 / n as f64)
+    };
+    let live_none_ns = live("live-none", Vec::new(), false)?;
+    let live_52_ns = live("live-52", vec!["s".repeat(52)], false)?;
+    let live_8k_ns = live("live-8k", vec!["k".repeat(8192)], false)?;
+    let live_64x8000_ns = live(
+        "live-64",
+        (0..64)
+            .map(|i| {
+                format!(
+                    "{i:02}{}",
+                    "abcdefghijklmnopqrstuvwxyz0123456789".repeat(222)
+                )
+            })
+            .collect(),
+        false,
+    )?;
+    let live_split_52_ns = live(
+        "live-split",
+        vec!["QWERTYUIOPASDFGHJKLZXCVBNM-0123456789-qwertyuiopasdf".into()],
+        true,
+    )?;
+
     // A full file to seed from: 32 MiB of entries.
     let full = AgentId::new("agent-full");
     while std::fs::metadata(store.path(full.as_str()).unwrap_or_default()).map_or(0, |m| m.len())
@@ -281,6 +368,11 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         take_8k_p50_us,
         write_8k_p50_ms,
         write_dense_8k_p50_ms,
+        live_none_ns,
+        live_52_ns,
+        live_8k_ns,
+        live_64x8000_ns,
+        live_split_52_ns,
         seed_file_bytes,
         seed_p50_ms: ms(percentile(&mut seed, 0.5)),
         seed_max_ms: ms(percentile(&mut seed, 1.0)),

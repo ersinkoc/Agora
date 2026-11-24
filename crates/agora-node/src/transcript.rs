@@ -84,6 +84,8 @@
 //! | take-up and resume (seeding) | this node does not have the earlier node's raw words | the earlier node's last words as written become the carry (up to 16 KiB): every boundary between them, their end and their `<redacted>` marks are edges. With no file at all (never written, purged, killed before the first batch), the next words start with an edge |
 //! | Start again | the earlier session's words flushed to its file, the new session starts | as a stop's flush; the new session's first word is an edge |
 //! | rotation | the newest whole lines kept | nothing split |
+//! | live (#1147): the agent's words sent to followers before the words after them | sent without what may follow | held while the stream they end ends in a part (4 bytes or more) of a value; any send without what follows (another entry of the agent, a turn's end, Start again, the 300 ms deadline, the ring's bound) makes their end an edge (b); the live carry (raw, in memory) joins what follows, across a Start again too |
+//! | live: a new follower's snapshot | the ring as followers were sent it | words as they were sent (kept beside the ring where they differ, never redacted again with another stream); other entries redacted as their line is; words still held left out |
 //!
 //! Every cut in the node's chat code, the transcript writer, the bridge and the cut helpers goes through those helpers or is listed
 //! with why it needs no record (`chat::every_cut`, which looks for truncations, drains and splits, range slices with or without brackets, and cut helpers named or passed), and
@@ -95,7 +97,16 @@
 //! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
 //! hold. The bridge cleans and redacts a tool's whole output before
 //! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
-//! the agent chose and is written as it is. What the window is sent live is not redacted (#1147). The matcher of fragments costs
+//! the agent chose and is written as it is.
+//!
+//! **Live** (#1147, ADR-0089 Amendment A). What the node sends followers (the live stream and a new follower's snapshot) is redacted
+//! by the same functions ([`redact_lines`], [`redact_entry`]) with the same values ([`Secrets`], shared with the writer), as
+//! `crate::chat` describes (**Live redaction**). The writer and the live path each keep their own stream of the agent's words (their
+//! carry, edges and hold), so the file and the window may differ where a part of a value stands at an edge only by chance. The live
+//! path reads the values last read ([`Store::current`]; the writer and the node's tick read them again, at most a second apart): a
+//! value added to the store is replaced live from then, text sent before stays as it was sent on streams already open, and a later
+//! snapshot redacts the words again with it ([`redact_words_again`]). The node's hub events that carry the agent's own words are
+//! redacted with the same values ([`redact_text`]; see `crate::daemon::EventSink`). The matcher of fragments costs
 //! about 27 bytes of memory per byte of the values held (13 MiB for 64 values of 8,000 bytes, built in about 70 ms when the values
 //! change), kept while the node runs; a value over 16 KiB (only one from the node's environment can be) gets none and is only
 //! replaced whole. The values are read again when the secrets folder or a file in it changes (name, size or time), and at every
@@ -285,9 +296,115 @@ pub struct Store {
     env_values: Vec<String>,
     /// The secret values last read, longest first, and what their folder looked like then.
     known: Mutex<(Option<Fingerprint>, Vec<String>)>,
-    /// What finding pieces of those values needs, made again only when they change.
-    pieces: Mutex<(Vec<String>, Arc<Vec<Needle>>)>,
+    /// #1147: those values with what finding their pieces needs, made again only when they change. The writer refreshes it
+    /// ([`Self::secrets`]); the chat path only reads it ([`Self::current`]), so no folder is read on an agent's path.
+    live: Mutex<Option<Arc<Secrets>>>,
+    /// When the values were last read for it.
+    read_at: Mutex<Option<std::time::Instant>>,
 }
+
+/// #1147: the secret values the node replaces, as one snapshot the writer and the live chat path share: each value raw and as JSON
+/// escapes it (longest first), a suffix automaton of each one up to [`agora_adapters::text::MAX_SECRET_SPAN`], the longest value, and
+/// the longest one that has no automaton (0: none).
+pub(crate) struct Secrets {
+    known: Vec<String>,
+    pieces: Vec<Needle>,
+    span: usize,
+    unpieced: usize,
+    /// Which set of values this is (a new one each time they change), so state kept against one is never used with another.
+    generation: u64,
+}
+
+/// #1147: where each value's automaton stands at the end of a stream (`Secrets::feed`), so the part of a value the stream ends in is
+/// known without reading the stream again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AtEnd {
+    generation: u64,
+    states: Vec<(u32, u32)>,
+}
+
+impl AtEnd {
+    /// Whether this was made against `sec` (else it is to be made again from the stream's end).
+    pub(crate) fn of(&self, sec: &Secrets) -> bool {
+        self.generation == sec.generation && self.states.len() == sec.pieces.len()
+    }
+
+    /// The length of the longest part of a value the stream ends in.
+    pub(crate) fn part(&self) -> usize {
+        self.states.iter().map(|s| s.1 as usize).max().unwrap_or(0)
+    }
+}
+
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl Secrets {
+    fn of(known: Vec<String>) -> Self {
+        let pieces = needles(&known);
+        let span = known.iter().map(String::len).max().unwrap_or(0);
+        let unpieced = known
+            .iter()
+            .map(String::len)
+            .filter(|&l| l > agora_adapters::text::MAX_SECRET_SPAN)
+            .max()
+            .unwrap_or(0);
+        Self {
+            known,
+            pieces,
+            span,
+            unpieced,
+            generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// No value is held: nothing is replaced and nothing waits.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.known.is_empty()
+    }
+
+    /// Which set of values this is.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The longest value (0: none).
+    pub(crate) fn span(&self) -> usize {
+        self.span
+    }
+
+    /// The longest value that has no automaton (only one from the node's environment can be): its parts cannot be found, so the
+    /// live path keeps that many bytes of words less one at the stream's end while it may still be cut (0: none).
+    pub(crate) fn unpieced(&self) -> usize {
+        self.unpieced
+    }
+
+    /// #1147: where each automaton stands at the end of `text` (only its last bytes, as many as the value is long, can matter: a
+    /// longer part cannot exist).
+    pub(crate) fn at_end(&self, text: &str) -> AtEnd {
+        let b = text.as_bytes();
+        let mut at = AtEnd {
+            generation: self.generation,
+            states: Vec::with_capacity(self.pieces.len()),
+        };
+        for n in &self.pieces {
+            let from = b.len().saturating_sub(n.len);
+            at.states
+                .push(n.sam.run((0, 0), b.get(from..).unwrap_or_default()));
+        }
+        at
+    }
+
+    /// #1147: `at` moved on over `text`, which the stream goes on with: one pass of each automaton over the new bytes only. Its
+    /// [`AtEnd::part`] is then the longest part of a value the stream ends in: what mechanism (b) would replace there were the end
+    /// an edge, once it is 4 bytes or more.
+    pub(crate) fn feed(&self, at: &mut AtEnd, text: &str) {
+        for (n, st) in self.pieces.iter().zip(at.states.iter_mut()) {
+            *st = n.sam.run(*st, text.as_bytes());
+        }
+    }
+}
+
+/// #1147: [`MIN_PIECE`] for the chat path: a part shorter than this at the stream's end is not held.
+pub(crate) const MIN_PART: usize = MIN_PIECE;
 
 /// What the secrets folder looks like: its own time, and each file's name, size and time.
 #[derive(Clone, PartialEq, Eq)]
@@ -590,10 +707,19 @@ pub const BRIDGE_MARK: &str = "[redacted]";
 fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
     // A needle longer than the text is skipped before the search is set up (its setup costs the needle's length).
     for k in known.iter().filter(|k| !k.is_empty() && k.len() <= s.len()) {
+        // #1147: the search is for the value's first bytes (at most 16, whole characters), each place checked for the rest: the same
+        // places, without setting up a search of the whole value each time (the live path searches once per piece it sends).
+        let mut lead = k.len().min(16);
+        while !k.is_char_boundary(lead) {
+            lead += 1;
+        }
+        let head = k.get(..lead).unwrap_or(k);
         let mut from = 0;
-        while let Some(i) = s[from..].find(k.as_str()) {
+        while let Some(i) = s[from..].find(head) {
             let at = from + i;
-            out.push(at..at + k.len());
+            if s.as_bytes().get(at..at + k.len()) == Some(k.as_bytes()) {
+                out.push(at..at + k.len());
+            }
             // The next search starts one character on, so an occurrence overlapping this one is found too.
             from = at + s[at..].chars().next().map_or(1, char::len_utf8);
             if from > s.len() - k.len() {
@@ -607,6 +733,8 @@ fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
 /// write).
 pub(crate) struct Needle {
     sam: Sam,
+    /// The value's length.
+    len: usize,
 }
 
 /// A value longer than [`MAX_SECRET_SPAN`] (a value the node keeps is at most 8 KiB, ADR-0084; one passed from its environment may be
@@ -617,6 +745,7 @@ fn needles(known: &[String]) -> Vec<Needle> {
         .filter(|v| v.len() <= agora_adapters::text::MAX_SECRET_SPAN)
         .map(|v| Needle {
             sam: Sam::of(v.as_bytes()),
+            len: v.len(),
         })
         .collect()
 }
@@ -741,6 +870,27 @@ impl Sam {
             }
             out[i + 1] = out[i + 1].max(l);
         }
+    }
+
+    /// From state `at` (a state and the length of the longest part of the value ending there), over `text`: where it ends (the last
+    /// of [`Self::ending`], kept so the stream can go on from there).
+    fn run(&self, at: (u32, u32), text: &[u8]) -> (u32, u32) {
+        let (mut v, mut l) = (at.0 as usize, at.1 as usize);
+        for &c in text {
+            while v != 0 && self.get(v, c).is_none() {
+                v = self.link[v] as usize;
+                l = self.len[v] as usize;
+            }
+            match self.get(v, c) {
+                Some(n) => {
+                    v = n;
+                    l += 1;
+                }
+                None => (v, l) = (0, 0),
+            }
+        }
+        // A state and a length are at most the value's length (at most 16 KiB): they fit.
+        (u32::try_from(v).unwrap_or(0), u32::try_from(l).unwrap_or(0))
     }
 }
 
@@ -875,9 +1025,14 @@ fn mask(s: &mut String, mut ranges: Vec<Range<usize>>) {
 
 /// What to replace in each line's text, from the batch's runs of the agent's words: every whole value in a run, and fragments at its
 /// edges, in the part of it each line holds.
-fn run_masks(batch: &Batch, known: &[String], pieces: &[Needle]) -> Vec<Vec<Range<usize>>> {
-    let mut masks = vec![Vec::new(); batch.lines.len()];
-    for run in &batch.runs {
+fn run_masks(
+    lines: usize,
+    runs: &[Run],
+    known: &[String],
+    pieces: &[Needle],
+) -> Vec<Vec<Range<usize>>> {
+    let mut masks = vec![Vec::new(); lines];
+    for run in runs {
         let mut found = Vec::new();
         whole(&run.text, known, &mut found);
         // The node's own marks in words written already (a carry from the file) are places a value was cut too.
@@ -976,6 +1131,83 @@ fn redacted(
     line
 }
 
+/// #1147: `lines` as the writer redacts them, with the runs of the agent's words they belong to: what the live chat path sends a
+/// follower of the words it releases. The same mechanisms and the same functions as [`Store::write`].
+pub(crate) fn redact_lines(lines: &[Line], runs: &[Run], sec: &Secrets) -> Vec<Line> {
+    if sec.is_empty() {
+        return lines.to_vec();
+    }
+    let masks = run_masks(lines.len(), runs, &sec.known, &sec.pieces);
+    lines
+        .iter()
+        .zip(masks)
+        .map(|(line, m)| redacted(line, &sec.known, &sec.pieces, m))
+        .collect()
+}
+
+/// #1147 (audit of #1157): a free text the agent chose that the node records as a hub event (an approval's action and detail, a mesh
+/// message's body, a task's title, an option's name): its whole values, and fragments at both its ends and beside a `…` the bridge put
+/// where it cut it (as a notice parameter's), and at the bridge's marks.
+pub(crate) fn redact_text(s: &str, sec: &Secrets) -> String {
+    if sec.is_empty() || s.is_empty() {
+        return s.to_string();
+    }
+    let mut edges = vec![0, s.len()];
+    if s.starts_with('…') {
+        edges.push('…'.len_utf8());
+    }
+    if s.ends_with('…') {
+        edges.push(s.len() - '…'.len_utf8());
+    }
+    let mut out = s.to_string();
+    redact_field(&mut out, &sec.known, &sec.pieces, edges, Vec::new());
+    out
+}
+
+/// #1147 (audit of #1157): the agent's words a new follower is shown, as they were sent (`views`, in order), redacted again as one
+/// stream with the values held now: a value added to the store after they were sent is replaced in them too (masks are only added).
+pub(crate) fn redact_words_again(views: &mut [ChatEntry], sec: &Secrets) {
+    if sec.is_empty() || views.is_empty() {
+        return;
+    }
+    let mut run = Run::default();
+    // The ring's first word may follow words that left it (a value's start among them): its start is an edge.
+    run.edges.push(0);
+    let mut lines = Vec::with_capacity(views.len());
+    for (i, v) in views.iter().enumerate() {
+        let at = run.text.len();
+        run.text.push_str(&v.text);
+        run.parts.push(RunPart {
+            line: Some(i),
+            start: at,
+            end: run.text.len(),
+        });
+        lines.push(Line::Entry(Box::new(v.clone()), Side::default()));
+    }
+    for (v, line) in views.iter_mut().zip(redact_lines(&lines, &[run], sec)) {
+        if let Line::Entry(e, _) = line {
+            *v = *e;
+        }
+    }
+}
+
+/// #1147: one entry that is not the agent's words (or words seeded from the file), redacted as the writer redacts its line: what a
+/// follower is sent of it.
+pub(crate) fn redact_entry(e: &ChatEntry, side: Side, sec: &Secrets) -> ChatEntry {
+    if sec.is_empty() {
+        return e.clone();
+    }
+    match redacted(
+        &Line::Entry(Box::new(e.clone()), side),
+        &sec.known,
+        &sec.pieces,
+        Vec::new(),
+    ) {
+        Line::Entry(e, _) => *e,
+        Line::Removed(_) => e.clone(),
+    }
+}
+
 impl Store {
     /// The store of a node whose data folder is `data_dir`; `secrets` are the values to keep out of the files.
     pub fn new(data_dir: &Path, limits: Limits, secrets: Option<SecretStore>) -> Self {
@@ -985,7 +1217,8 @@ impl Store {
             secrets,
             env_values: Vec::new(),
             known: Mutex::new((None, Vec::new())),
-            pieces: Mutex::new((Vec::new(), Arc::new(Vec::new()))),
+            live: Mutex::new(None),
+            read_at: Mutex::new(None),
         }
     }
 
@@ -998,6 +1231,7 @@ impl Store {
             .filter(|v| v.len() >= MIN_SECRET)
             .collect();
         self.known = Mutex::new((None, Vec::new()));
+        self.live = Mutex::new(None);
         self
     }
 
@@ -1064,12 +1298,49 @@ impl Store {
     }
 
     /// The longest value looked for (0: none), so the board gathers enough of a run around a piece and holds back enough of it.
+    /// Refreshes what the live chat path reads ([`Self::secrets`]).
     pub fn longest_secret(&self) -> usize {
-        self.known_secrets()
-            .iter()
-            .map(String::len)
-            .max()
-            .unwrap_or(0)
+        self.secrets().span
+    }
+
+    /// #1147: the values as they are now (read again as [`Self::known_secrets`] says), with their automata, made again only when the
+    /// values changed; what the chat path reads ([`Self::current`]) is replaced by it. Called by the writer (each batch it takes and
+    /// writes), never on an agent's path.
+    pub(crate) fn secrets(&self) -> Arc<Secrets> {
+        let known = self.known_secrets();
+        *self.read_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        if let Some(s) = &*self.live.lock().unwrap_or_else(|e| e.into_inner()) {
+            if s.known == known {
+                return Arc::clone(s);
+            }
+        }
+        // Built without the lock (up to about 70 ms for 64 values of 8,000 bytes), so the chat path never waits for it.
+        let s = Arc::new(Secrets::of(known));
+        *self.live.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&s));
+        s
+    }
+
+    /// #1147 (audit of #1157): [`Self::secrets`] when the values were last read `age` ago or more: the node's tick calls it (off every
+    /// agent's path), so the live path follows a change even when the writer thread is not running.
+    pub(crate) fn refresh_if_older(&self, age: Duration) {
+        let due = self
+            .read_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|t| t.elapsed() >= age);
+        if due {
+            self.secrets();
+        }
+    }
+
+    /// #1147: the values the writer last read, for the live chat path: no folder is read here, except once when nothing was read yet
+    /// (a board made before its writer's first tick). A value added to the store is replaced live from the writer's next tick (at most
+    /// a second later).
+    pub(crate) fn current(&self) -> Arc<Secrets> {
+        if let Some(s) = &*self.live.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Arc::clone(s);
+        }
+        self.secrets()
     }
 
     /// Appends a batch to its agent's file (made private, with its header, when new), then keeps the file within its bound.
@@ -1084,18 +1355,12 @@ impl Store {
             .path(batch.agent.as_str())
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         agora_platform::ensure_private_dir(&self.dir)?;
-        let known = self.known_secrets();
-        let pieces = {
-            let mut g = self.pieces.lock().unwrap_or_else(|e| e.into_inner());
-            if g.0 != known {
-                *g = (known.clone(), Arc::new(needles(&known)));
-            }
-            Arc::clone(&g.1)
-        };
-        let masks = run_masks(batch, &known, &pieces);
+        let sec = self.secrets();
+        let (known, pieces) = (&sec.known, &sec.pieces);
+        let masks = run_masks(batch.lines.len(), &batch.runs, known, pieces);
         let mut out = Vec::new();
         for (line, m) in batch.lines.iter().zip(masks) {
-            out.extend(encode_line(batch.high, &redacted(line, &known, &pieces, m)));
+            out.extend(encode_line(batch.high, &redacted(line, known, pieces, m)));
         }
         let mut f = agora_platform::open_append_private(&path)?;
         let len = f.metadata()?.len();

@@ -906,3 +906,37 @@ fn switching_one_setting_back_through_the_other_command_withdraws_its_card() {
         "a non-twin option keeps the mode card"
     );
 }
+
+/// #1147 (audit of #1157): a value the node holds that is the agent's own name for a mode never reaches the card (the queue, the hub's
+/// event, the window); the decision signs what the card showed and still applies the mode the agent named by its id.
+#[test]
+fn a_secret_in_the_agents_name_for_a_mode_never_reaches_the_card() {
+    if !local() {
+        return;
+    }
+    let e = env("secret-name", None);
+    // The fake agent calls its mode `bypassPermissions` "Bypass Permissions": a value this node holds.
+    agora_node::credentials::SecretStore::in_data(&e.dir.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new("Bypass Permissions").unwrap(),
+        )
+        .unwrap();
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let err = error(set_mode(&mut c, &id, "bypassPermissions"));
+    assert_eq!(err.code, "agent.approval_needed");
+    let card = skip_requests(&n).remove(0);
+    let d: serde_json::Value = serde_json::from_str(&card.detail).unwrap();
+    assert_eq!(d["value_name"], "<redacted>", "{}", card.detail);
+    assert!(!card.detail.contains("Bypass"), "{}", card.detail);
+    assert!(n
+        .approvals
+        .waiting()
+        .iter()
+        .all(|p| !p.detail.contains("Bypass")));
+    let r = ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    assert!(matches!(r.result, Some(Ok_::Empty(_))));
+    applied(&worktree, &["applied mode:bypassPermissions"]);
+}

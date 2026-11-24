@@ -482,6 +482,23 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+What the stream carries is redacted (ADR-0089 Amendment A, #1147): the node replaces the values of the secrets it holds (8 bytes or
+more: its secret store and the environment variables its policy passes to agents) by `<redacted>` in every entry and every version
+it sends and in the snapshot, by the same rule and code as the file below. A field is redacted before it is first sent; never an
+unredacted version first. What it does not cover is listed in the threat model (T61): a value's first 3 bytes or fewer can go before
+the next words show the value goes on, and text sent before a value was added to the store stays as it was sent on streams already
+open (a later snapshot replaces it). The agent's words (text and thinking)
+are one stream: a value split between two entries is found whole, and words whose end is a part of a value (4 bytes or more) wait
+until the next words show it is not one, until any other entry of the agent (so ids still increase on the stream), until its turn
+ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
+part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
+brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: on an approval
+card, before it is queued (so the card and the signature over it hold the same words), an adapter's action, detail and always-option
+label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a task's title, a
+handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids are kept; paths in
+other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted (T61).
+
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
 secret values of 8 bytes or more replaced: whole anywhere, also when an agent's streamed text splits one between pieces, and as a piece of 4 bytes or more at a place the node cut a text; ids are never changed; see the threat model, T61). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
@@ -496,8 +513,8 @@ node shows that replay only when it holds none of the conversation, so every tur
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
 changes neither. A node that stops cleanly writes everything first, the words it held back included, with a secret value's start at
 their end masked (ADR-0104 O2: `agora node` on `SIGTERM`, Unix). A node killed loses at most the last batch (up to a second), and while
-it holds a secret value the agent's newest words it held back in a turn: those entries were shown live and are not in the
-file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+it holds a secret value the agent's newest words it held back in a turn: those entries may have been shown live (redacted) and are
+not in the file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
 `chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
