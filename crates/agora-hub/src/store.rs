@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -377,6 +377,41 @@ impl SqliteStore {
         }
         if !script.is_empty() {
             conn.execute_batch(&format!("BEGIN;{script} COMMIT;"))?;
+        }
+        if version < 14 {
+            let mut script = String::new();
+            for (name, kind) in [
+                ("project_id", "TEXT NOT NULL DEFAULT ''"),
+                ("agent_id", "TEXT NOT NULL DEFAULT ''"),
+                ("requested_device_id", "TEXT NOT NULL DEFAULT ''"),
+                (
+                    "signer_verified",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(signer_verified IN (0, 1))",
+                ),
+            ] {
+                let has: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('audit') WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )?;
+                if has == 0 {
+                    script.push_str(&format!(" ALTER TABLE audit ADD COLUMN {name} {kind};"));
+                }
+            }
+            conn.execute_batch(&format!(
+                "BEGIN;{script}
+                 DROP TRIGGER audit_only_the_outcome;
+                 CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+                 WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                      OR NEW.action != OLD.action OR NEW.node != OLD.node OR NEW.session != OLD.session
+                      OR NEW.project_id != OLD.project_id OR NEW.agent_id != OLD.agent_id
+                      OR NEW.requested_device_id != OLD.requested_device_id
+                      OR (NEW.signer_verified != OLD.signer_verified AND
+                          (NEW.signer_verified != 1 OR NEW.outcome != 'ok' OR OLD.requested_device_id = ''))
+                 BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+                 PRAGMA user_version = 14;
+                 COMMIT;"
+            ))?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1128,6 +1163,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn audit_attribution_migration_preserves_earlier_rows() {
+        let d = tmpdir("audit-target-migration");
+        let path = d.join("hub.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE devices (first_seen_ms INTEGER, cert_pem TEXT, csr_key_hash BLOB);
+             CREATE TABLE audit (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, who TEXT NOT NULL,
+                 session TEXT NOT NULL, action TEXT NOT NULL, node TEXT NOT NULL, outcome TEXT NOT NULL);
+             CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+                 WHEN OLD.outcome != 'sent' BEGIN SELECT RAISE(ABORT, 'append-only'); END;
+             INSERT INTO audit VALUES (1, 10, 'owner', 'abc123', 'AgentStop', 'n1', 'ok');
+             PRAGMA user_version = 13;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteStore::open(&path).unwrap();
+        let audit = crate::audit::Audit::new(&store);
+        let rows = audit.list(0, None, 10).unwrap();
+        let row = crate::audit::json_value(&rows[0]);
+        assert_eq!(row["who"], "owner");
+        assert_eq!(row["node"], "n1");
+        assert_eq!(row["outcome"], "ok");
+        for field in [
+            "project_id",
+            "agent_id",
+            "requested_device_id",
+            "signer_device_id",
+        ] {
+            assert_eq!(row[field], "");
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// An unreleased build of schema 13 left databases at `user_version = 13` without the renewal columns. Opening one adds them (and
     /// keeps the rows), so a renewal on it does not fail with "no such column".
     #[test]
@@ -1140,7 +1211,8 @@ mod tests {
             conn.execute_batch(
                 "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES ('ab', 'n1', 7);
                  ALTER TABLE devices DROP COLUMN cert_pem;
-                 ALTER TABLE devices DROP COLUMN csr_key_hash;",
+                 ALTER TABLE devices DROP COLUMN csr_key_hash;
+                 PRAGMA user_version = 13;",
             )
             .unwrap();
             let v: i64 = conn

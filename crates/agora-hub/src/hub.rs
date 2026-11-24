@@ -360,6 +360,27 @@ impl Hub {
         self.lock().view.nodes.contains_key(node)
     }
 
+    /// Captures a command's shown target and whether the machine is known, under one projection lock.
+    pub(crate) fn audit_target<'a>(
+        &self,
+        req: &'a agora_protocol::v1::CommandRequest,
+    ) -> (crate::audit::Target<'a>, bool) {
+        let g = self.lock();
+        let target =
+            crate::audit::Target::for_command(&req.target_node, req.command.as_ref(), &g.view);
+        (target, g.view.nodes.contains_key(&req.target_node))
+    }
+
+    /// ADR-0108: the project of `node`'s agent `agent` (its own id), for the audit row of a forget passed on to it; empty when not known.
+    pub(crate) fn agent_project(&self, node: &str, agent: &str) -> String {
+        self.lock()
+            .view
+            .agents
+            .get(&crate::projection::qualified(node, agent))
+            .map(|a| a.project_id.clone())
+            .unwrap_or_default()
+    }
+
     /// The current view and the log position it reflects.
     pub fn view(&self) -> (View, u64) {
         let g = self.lock();
