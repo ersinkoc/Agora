@@ -474,6 +474,30 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
+`<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
+secret values of 8 bytes or more replaced: whole anywhere, also when an agent's streamed text splits one between pieces, and as a piece of 4 bytes or more at a place the node cut a text; ids are never changed; see the threat model, T61). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
+before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
+shows (a rotated file keeps that mark even when no whole entry fits): ids never start again at 1, unless the file was purged or
+removed by retention. A tool call or a plan from before the restart is changed in place under its id. A permission entry
+still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
+there is dropped with an `adapter.queue_dropped` notice (also one the old node sent in its last unwritten second: the file cannot tell).
+What the file holds is held to the shapes and bounds of live entries before it is shown. An agent that loads its session on resume
+replays its conversation (ACP `session/load`, passed on by `agora acp-bridge` as chat before it answers the session's start): the
+node shows that replay only when it holds none of the conversation, so every turn appears once. A fresh start ("Start again") that went through begins a new file (the earlier
+one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
+changes neither. A node killed loses at most the last batch (up to a second), and while it holds a secret value the agent's newest
+words it held back in a turn: those entries were shown live and are not in the
+file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
+memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
+`chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
+at most 30; 0: as soon as the agent ended) bound it: over its size a file keeps its newest half, and a file is removed that many
+days after its agent ended (as the node's session ledger says; after its last write for an agent the ledger no longer knows), never
+while the agent runs or is offered for Resume (2 GiB per node in all, the files of agents not kept first). A failed batch is not
+written later. `agora history purge` removes every transcript. Reading older entries in pages
+(`chat.history`) is ADR-0089's later schema step.
+
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared

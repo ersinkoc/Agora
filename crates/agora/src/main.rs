@@ -531,6 +531,7 @@ fn main() -> ExitCode {
         ["node", "trust"] => trustcli::node_trust(&say, &opts),
         ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
         ["node", "secret"] => secretcmd::secret(&say, &opts),
+        ["history", "purge"] => history_purge(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -549,6 +550,22 @@ fn main() -> ExitCode {
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// ADR-0089 decision 3: `agora history purge` removes every chat transcript this machine's node keeps (`<data>/transcripts`). Files only:
+/// a node that runs writes the turns that come after it again.
+fn history_purge(say: &Say, opts: &Opts) -> ExitCode {
+    let data = opts.data.clone().unwrap_or_else(|| home().join("data"));
+    match agora_node::transcript::purge_all(&data) {
+        Ok(()) => {
+            say.out(key!("cli-history-purged"), &[]);
+            ExitCode::SUCCESS
+        }
+        Err(_) => {
+            say.err(key!("cli-history-purge-failed"), &[]);
+            ExitCode::from(1)
         }
     }
 }

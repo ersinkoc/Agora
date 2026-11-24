@@ -42,6 +42,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
       agora node untrust DEVICE_ID [--data DIR]
       agora node secret set NAME | list | remove NAME [--data DIR]
+      agora history purge [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -513,6 +514,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = That is not a usable name: use letters, digits and underscores only, not starting with a digit, and not a name the system or Agora uses.
 cli-secret-bad-value = The value must be one line of at most 8192 bytes, with no control characters. Nothing was stored.
 cli-secret-failed = The secret could not be stored or read here. Check that the node's data folder is yours and can be written.
+cli-history-purged = Removed the chat history this machine kept for its agents.
+cli-history-purge-failed = The chat history could not be removed. Check that the node's data folder is yours and can be written.
 cli-secret-name-collides = A secret whose name differs only in capital letters is already stored. Use that exact name, or remove it first.
 
 # ADR-0065: `agora pair` on the hub and `agora join` on the new machine.

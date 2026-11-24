@@ -1613,6 +1613,10 @@ pub(crate) fn resume_agent(
                 .ok_or_else(folder_changed)
         })
         .transpose()?;
+    // ADR-0089 decision 5, ADR-0104 C1: a resume continues the conversation its file holds, and a fresh start begins a new file,
+    // numbering on after the earlier session's ids. Read here, outside the supervisor's lock; applied only once the resume went through
+    // (below), so a refused one leaves both as they were.
+    let seed = ctx.chat.read_seed(&id, new_session);
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),
@@ -1646,12 +1650,18 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume_in(&id, Instant::now(), checked) {
-            Ok(events) => (
-                events,
-                sup.list(),
-                sup.terminal(&id).is_some(),
-                sup.carried_on(&id),
-            ),
+            // Still under the supervisor's lock: the new adapter's first words are recorded by the supervision tick, which needs it,
+            // so the transcript is seeded before any of them.
+            Ok(events) => {
+                ctx.chat
+                    .resumed(&id, seed, new_session, crate::daemon::now_ms());
+                (
+                    events,
+                    sup.list(),
+                    sup.terminal(&id).is_some(),
+                    sup.carried_on(&id),
+                )
+            }
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));

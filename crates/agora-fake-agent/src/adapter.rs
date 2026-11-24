@@ -11,6 +11,11 @@
 //!   and writes `later.txt` in its folder once the request is out.
 //! - `later-flood`: answers the prompt, waits 1.5 s, then says 3000 chat items of 1000 bytes each and `flood-end` (output that fills
 //!   what a holder keeps while no node reads, ADR-0093), then writes `later.txt` in its folder.
+//! - `later-tool`: answers the prompt, starts a tool call (`callId` `t1`, tool `read`, arguments `{"path":"a.rs"}`, `in_progress`), then
+//!   waits until a file `go.txt` appears in its folder (a test makes it once the node it wants gone is gone), then finishes the call
+//!   with only its status and output (`completed`, `done`), says `tool-done`, goes idle and writes `later.txt` (ADR-0104 C1).
+//! - `hold:TEXT`: goes working, says TEXT, and stays working until a file `go.txt` appears in its folder; then goes idle and writes
+//!   `later.txt` (review of #1103, round 3).
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `mode:ID` (with `--modes`): switches itself to mode ID, as an agent may on its own (ACP `current_mode_update`), and reports its
 //!   options again with ID as the current mode.
@@ -236,6 +241,50 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         )?;
                         state(out, &session, "IDLE")?;
                         // A marker in the agent's folder, so a test waits for it instead of guessing how long 1.5 s took.
+                        std::fs::write("later.txt", "done")?;
+                    }
+                    held if held.starts_with("hold:") => {
+                        // Review of #1103, round 3: words said in a turn that stays open until the test makes `go.txt`.
+                        state(out, &session, "WORKING")?;
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "text": {"text": &held["hold:".len()..]}}),
+                        )?;
+                        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        while !std::path::Path::new("go.txt").exists()
+                            && std::time::Instant::now() < end
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        state(out, &session, "IDLE")?;
+                        std::fs::write("later.txt", "done")?;
+                    }
+                    "later-tool" => {
+                        state(out, &session, "WORKING")?;
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "toolCall": {"callId": "t1", "tool": "read",
+                                   "argumentsJson": "{\"path\":\"a.rs\"}", "kind": "read", "status": "in_progress"}}),
+                        )?;
+                        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        while !std::path::Path::new("go.txt").exists()
+                            && std::time::Instant::now() < end
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "toolCall": {"callId": "t1", "status": "completed", "output": "done"}}),
+                        )?;
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "text": {"text": "tool-done"}}),
+                        )?;
+                        state(out, &session, "IDLE")?;
                         std::fs::write("later.txt", "done")?;
                     }
                     "ask" | "ask-error" | "ask-reserved" | "later-ask" => {

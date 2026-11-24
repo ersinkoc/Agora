@@ -519,6 +519,7 @@ notice-adapter-gave_up-no_code = Ajan { $restarts } yeniden başlatmadan sonra y
 notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
 notice-approval-always_only_forbidden = Ajan “{ $action }” için izin istedi ve yalnızca hatırlayacağı bir yanıt sundu. Bu makine yalnızca tek seferlik yanıtlara izin veriyor, bu yüzden reddedildi.
 notice-adapter-permission_unanswerable = Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi.
+notice-chat-history_not_saved = Bu konuşma çalıştığı makinede kaydedilemedi (diski dolu olabilir). Ajan çalışmaya devam ediyor, ancak bundan sonraki adımlar Agora yeniden başladıktan sonra eksik olabilir.
 session-header = Ajan ayarları
 session-elapsed-hint = Ne kadar süredir çalışıyor
 session-mode = Mod

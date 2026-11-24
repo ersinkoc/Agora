@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         Some("run") => run(&args[1..]),
         Some("footprint") => footprint(&args[1..]),
         Some("history") => history(&args[1..]),
+        Some("transcript") => transcript(&args[1..]),
         Some("bestof") => bestof(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
@@ -224,6 +225,62 @@ fn cmp(args: &[String]) -> ExitCode {
 /// Measures the history replay a window may ask for (ADR-0100 decision 2): the lock hold for a full 2000-line, 200-column history,
 /// the bytes per attach, and the terminal snapshot after switching with a full history (budget 150 ms). With `--check`, exits 1 if
 /// the switch is over that budget.
+/// `agora-bench transcript [--runs N] [--commit SHA] [--out FILE]` (ADR-0089, ADR-0104 C1).
+fn transcript(args: &[String]) -> ExitCode {
+    let (mut runs, mut commit, mut out) = (20usize, "unknown".to_string(), None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--runs" => match parse_value::<usize>(&mut it, "--runs") {
+                Ok(v) => runs = v.max(1),
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
+            _ => {
+                eprintln!("usage: agora-bench transcript [--runs N] [--commit SHA] [--out FILE]");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let r = match agora_bench::transcript::run(&commit, runs) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("agora-bench: transcript: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!(
+        "push one entry: memory only {:.0} ns, saving {:.0} ns | a 16 KiB one evicting: memory only {:.0} ns, saving {:.0} ns | take a batch of {} under the lock: p50 {:.1} us, max {:.1} us | write it: p50 {:.2} ms, max {:.2} ms | seed from a {} byte file: p50 {:.2} ms, max {:.2} ms",
+        r.push_memory_ns, r.push_saving_ns, r.push_large_memory_ns, r.push_large_saving_ns, r.batch_entries, r.take_p50_us, r.take_max_us, r.write_p50_ms, r.write_max_ms,
+        r.seed_file_bytes, r.seed_p50_ms, r.seed_max_ms
+    );
+    println!(
+        "with a 52-byte secret: take {:.1} us, write {:.2} ms | with an 8 KiB secret: take {:.1} us, write {:.2} ms (p50, one stream, newest pieces held)",
+        r.take_52_p50_us, r.write_52_p50_ms, r.take_8k_p50_us, r.write_8k_p50_ms
+    );
+    println!(
+        "a 16 KiB output dense with edges, an 8 KiB value held: write {:.2} ms (p50)",
+        r.write_dense_8k_p50_ms
+    );
+    if let Some(path) = out {
+        match serde_json::to_string_pretty(&r) {
+            Ok(json) if std::fs::write(&path, &json).is_ok() => {}
+            _ => {
+                eprintln!("agora-bench: could not write {path}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn history(args: &[String]) -> ExitCode {
     let (mut runs, mut commit, mut out, mut check) = (20usize, "unknown".to_string(), None, false);
     let mut it = args.iter();

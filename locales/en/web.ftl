@@ -540,6 +540,7 @@ notice-adapter-gave_up-no_code = The agent stopped unexpectedly again after { $r
 notice-other = The agent reported something this window cannot show ({ $code }).
 notice-approval-always_only_forbidden = The agent asked for “{ $action }” and offered only an answer it would remember. This machine allows single answers only, so it was refused.
 notice-adapter-permission_unanswerable = The agent asked for “{ $action }” without offering a way to allow it, so it was refused.
+notice-chat-history_not_saved = This conversation could not be saved on its machine (its disk may be full). The agent keeps working, but turns from now on may be missing after Agora restarts.
 session-header = Agent settings
 session-elapsed-hint = How long it has been running
 session-mode = Mode
