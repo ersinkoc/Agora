@@ -98,6 +98,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is found{ $by ->
         [agora] , installed by Agora (version { $version })
@@ -106,6 +107,7 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
@@ -132,9 +134,19 @@ doctor-policy-problems = { $detail ->
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is there but this account may not run it. Make the file executable, or reinstall it.
 doctor-agent-unsafe = { $detail }: `{ $program }` was installed by Agora, but its folder or file is not safe (another user could change it), so it is not used: using the one on your PATH, if there is one. Reinstall it with `agora agent install`, or make the install folders yours alone.
+doctor-registry-kinds = { $detail ->
+        [one] 1 agent
+       *[other] { $detail } agents
+    } of the ACP registry are known here, untested in Agora; { $ready } of them find their program on this machine. Settings → Agents in the window lists them all.
+doctor-registry-off = The ACP registry's agents are switched off on this machine (policy line `agents.registry = off`): it neither offers nor starts them. Your own agent descriptions are not affected.
+doctor-registry-denied = { $detail ->
+        [one] 1 agent of the ACP registry is
+       *[other] { $detail } agents of the ACP registry are
+    } switched off on this machine by the policy line `agents.registry.deny`.
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
     [one] 1 agent now

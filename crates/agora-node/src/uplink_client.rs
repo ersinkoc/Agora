@@ -1124,6 +1124,24 @@ fn run_local_on(
                 .with("policy", "signature"),
         );
     }
+    // #1133 ("startable, but always signed"): a registry kind that starts through a package runner fetches and runs code, so the hub
+    // alone never starts one: an unsigned routed `AgentStart` of it is refused whatever `signed_commands` says and whatever grant is
+    // live (a grant is the hub acting for a while, not a person signing this start). A signed `AgentLaunch` names the kind in what was
+    // signed, and is checked below.
+    if let Some(command_request::Command::AgentStart(a)) = &req.command {
+        let needs = grants.map_or_else(
+            || a.kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+            |g| g.start_needs_signature(&a.kind),
+        );
+        if needs {
+            return fail(
+                Error::new(ErrorCode::NodePolicyDenied)
+                    .with("node_id", "")
+                    .with("rule", "registry_signed_start")
+                    .with("kind", a.kind.as_str()),
+            );
+        }
+    }
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
     if grants.is_none()
@@ -1893,6 +1911,90 @@ mod tests {
         let (r, took) = talk_frozen("answers", Hub::Answers, IDLE.deadline * 3, None, IDLE);
         assert!(r.is_ok(), "{r:?}");
         assert!(took >= IDLE.deadline * 3, "{took:?}");
+    }
+
+    /// #1133: a routed unsigned `AgentStart` of a registry kind that fetches its program is refused where the hub's commands enter
+    /// the node, with no `signed_commands` at all and under a live grant for `agent.start`; a hand-made kind passes this gate.
+    #[test]
+    fn a_routed_unsigned_start_of_a_fetching_registry_kind_is_refused_whatever_the_policy() {
+        struct Fake;
+        impl crate::approvals::Verifier for Fake {
+            fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+                device == "dev" && signature == message
+            }
+        }
+        let approvals = std::sync::Arc::new(crate::approvals::NodeApprovals::new(
+            "node-a",
+            Box::new(Fake),
+        ));
+        let open = crate::grants::Grants::new(
+            "node-a",
+            std::sync::Arc::clone(&approvals),
+            crate::grants::SignedCommands::default(),
+        );
+        open.set_signed_start_check(Box::new(|kind| kind == "registry-gemini"));
+        let granted = crate::grants::Grants::new(
+            "node-a",
+            approvals,
+            crate::grants::SignedCommands(vec!["agent.start".into()]),
+        );
+        granted.set_signed_start_check(Box::new(|kind| kind == "registry-gemini"));
+        let now = crate::grants::now_ms();
+        let commands = vec!["agent.start".to_string()];
+        let expires = now + 60_000;
+        let message = crate::grants::signed_message("node-a", "g", "node", &commands, expires);
+        granted
+            .create(
+                &agora_protocol::v1::GrantCreate {
+                    grant_id: "g".into(),
+                    scope: "node".into(),
+                    commands,
+                    expires_at_ms: expires,
+                    signer_device_id: "dev".into(),
+                    signature: message,
+                },
+                now,
+            )
+            .unwrap();
+        let start = |kind: &str| CommandRequest {
+            request_id: "r".into(),
+            command: Some(command_request::Command::AgentStart(
+                agora_protocol::v1::AgentStart {
+                    kind: kind.into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let rule = |resp: CommandResponse| {
+            let Some(command_response::Result::Err(e)) = resp.result else {
+                panic!("not refused: {resp:?}");
+            };
+            match e.params.get("rule").and_then(|p| p.value.clone()) {
+                Some(agora_protocol::v1::param_value::Value::Str(s)) => (e.code, s),
+                other => (e.code, format!("{other:?}")),
+            }
+        };
+        for g in [None, Some(&open), Some(&granted)] {
+            assert_eq!(
+                rule(run_local(None, start("registry-gemini"), g)),
+                (
+                    "node.policy_denied".to_string(),
+                    "registry_signed_start".to_string()
+                )
+            );
+        }
+        // A hand-made kind (and a registry kind that runs its own program) is not stopped here: it goes on to the node (no socket in
+        // this test, so the next refusal is another one).
+        for kind in ["codex", "registry-goose"] {
+            let (_, r) = rule(run_local(None, start(kind), Some(&open)));
+            assert_ne!(r, "registry_signed_start", "{kind}");
+        }
+        // Without the node's check, every registry kind is held to it: the stricter reading.
+        assert_eq!(
+            rule(run_local(None, start("registry-goose"), None)).1,
+            "registry_signed_start"
+        );
     }
 
     /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's

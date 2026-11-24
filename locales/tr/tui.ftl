@@ -98,6 +98,7 @@ tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına
 tui-start-pick-page = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; sonraki sayfa için n'ye basın ({ $page } / { $pages }); başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
+tui-start-signed-only = { $name } başlarken programını indirir; bu yüzden makine onu yalnızca bu cihaz başlatmayı imzaladığında başlatır: f tuşuna basın ve klasörünü seçin.
 tui-start-missing-item = { $name } (`{ $program }`)
 tui-start-missing = Bu makinede bulunamadı: { $names }. Makine bu programları PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
 tui-start-nowhere = Projesi olan çevrimiçi bir makine yok.

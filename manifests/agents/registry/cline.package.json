@@ -1,0 +1,28 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Cline",
+  "installers": [
+    {
+      "args": [
+        "--acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "cline",
+      "version": "3.0.75"
+    }
+  ],
+  "name": "registry-cline",
+  "skipped": [],
+  "source": {
+    "id": "cline",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/cline/cline/blob/main/LICENSE",
+    "repository": "https://github.com/cline/cline",
+    "version": "3.0.75",
+    "website": "https://cline.bot/cli"
+  },
+  "tested": false
+}

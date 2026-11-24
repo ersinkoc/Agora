@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id poolside, version 1.0.16. Untested in Agora until someone runs it.
+kind = "registry-poolside"
+display_name = "Poolside"
+version = "1.0.16"
+min_engine = 1
+
+[structured]
+acp = { argv = ["poolside", "acp"] }

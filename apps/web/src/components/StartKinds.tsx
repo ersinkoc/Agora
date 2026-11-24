@@ -1,15 +1,22 @@
 import { useId, useRef, type KeyboardEvent } from 'react';
 import { t } from '../i18n';
-import { runsAs } from '../net/agentKinds';
+import { isRegistryKind, runsAs } from '../net/agentKinds';
+import { registryInfo } from '../net/registryCatalog';
 import { AgentAvatar, Tag } from './kit';
 import type { KindChoice } from './StartAgent';
 
 // The colour of an agent is picked when it starts (from the id its machine gives it), so nothing here wears one: a neutral avatar.
 export const NO_COLOUR = 'var(--text-muted)';
 
-/** The kinds as the start window lists them: installed first, then not installed, each in the machine's own order. */
-export function kindOrder(kinds: readonly KindChoice[]): { installed: KindChoice[]; missing: KindChoice[] } {
-  return { installed: kinds.filter((k) => k.installed), missing: kinds.filter((k) => !k.installed) };
+/** The kinds as the start window lists them, each group in the machine's own order: the installed hand-made ones, then the installed
+ * ACP registry ones (ADR-0092, untested in Agora), then the hand-made ones that are not installed. A registry kind that is not installed is
+ * left out here: there are dozens, and Settings → Agents lists them under "Add an agent". */
+export function kindOrder(kinds: readonly KindChoice[]): { installed: KindChoice[]; untested: KindChoice[]; missing: KindChoice[] } {
+  return {
+    installed: kinds.filter((k) => k.installed && !isRegistryKind(k.kind)),
+    untested: kinds.filter((k) => k.installed && isRegistryKind(k.kind)),
+    missing: kinds.filter((k) => !k.installed && !isRegistryKind(k.kind)),
+  };
 }
 
 // "Agent" in the start window: one card per kind (its letter, its name, Terminal or Chat), a radio group with one tab stop. The arrow keys
@@ -21,8 +28,8 @@ export function KindCards({ kinds, value, onChange, disabled, label }: {
   kinds: readonly KindChoice[]; value: string; onChange: (kind: string) => void; disabled?: boolean; label: string;
 }) {
   const id = useId();
-  const { installed, missing } = kindOrder(kinds);
-  const all = [...installed, ...missing];
+  const { installed, untested, missing } = kindOrder(kinds);
+  const all = [...installed, ...untested, ...missing];
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const at = all.findIndex((k) => k.kind === value);
   const stop = at >= 0 ? at : 0;
@@ -50,10 +57,10 @@ export function KindCards({ kinds, value, onChange, disabled, label }: {
         aria-label={k.name} aria-describedby={`${id}-${i}`} disabled={disabled} data-kind={k.kind} data-selected={on ? '' : undefined}
         className={`kit-card kit-card--dense flex min-w-0 items-center gap-2.5 disabled:opacity-50 ${k.installed ? '' : 'border-dashed'}`}
         onClick={() => onChange(k.kind)}>
-        <AgentAvatar accent={NO_COLOUR} kind={k.name || k.kind} />
+        <AgentAvatar accent={NO_COLOUR} kind={k.name || k.kind} icon={registryInfo(k.kind)?.icon} />
         <span className="grid min-w-0 gap-0.5">
           <span className={`truncate font-medium ${k.installed ? 'text-ink' : 'text-muted'}`}>{k.name}</span>
-          <span id={`${id}-${i}`} className="flex flex-wrap gap-1"><Tag>{t(how)}</Tag>{!k.installed && <span className="sr-only">{t('start-not-installed')}</span>}</span>
+          <span id={`${id}-${i}`} className="flex flex-wrap gap-1"><Tag>{t(how)}</Tag>{isRegistryKind(k.kind) && <Tag>{t('agents-untested')}</Tag>}{!k.installed && <span className="sr-only">{t('start-not-installed')}</span>}</span>
         </span>
       </button>
     );
@@ -62,10 +69,12 @@ export function KindCards({ kinds, value, onChange, disabled, label }: {
   const group = 'm-0 text-caption font-medium text-muted';
   return (
     <div role="radiogroup" aria-label={label} className="grid gap-2" onKeyDown={onKey}>
-      {missing.length > 0 && installed.length > 0 && <p aria-hidden className={group}>{t('start-group-installed')}</p>}
+      {missing.length + untested.length > 0 && installed.length > 0 && <p aria-hidden className={group}>{t('start-group-installed')}</p>}
       {installed.length > 0 && <div className={grid}>{installed.map((k, i) => card(k, i))}</div>}
+      {untested.length > 0 && <p aria-hidden className={group}>{t('start-group-untested')}</p>}
+      {untested.length > 0 && <div className={grid}>{untested.map((k, i) => card(k, installed.length + i))}</div>}
       {missing.length > 0 && <p aria-hidden className={group}>{t('start-group-missing')}</p>}
-      {missing.length > 0 && <div className={grid}>{missing.map((k, i) => card(k, installed.length + i))}</div>}
+      {missing.length > 0 && <div className={grid}>{missing.map((k, i) => card(k, installed.length + untested.length + i))}</div>}
     </div>
   );
 }

@@ -1380,8 +1380,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             .map(|k| (k.kind, k.display_name))
             .collect()
     };
+    // ADR-0092: the ACP registry's converted agents are offered too, each under `registry-<id>`.
     let shipped: Vec<String> = agora_node::manifests::BUILT_IN
         .iter()
+        .chain(agora_node::manifests::REGISTRY)
         .map(|(_, text)| {
             agora_adapters::Manifest::parse(text)
                 .expect("shipped manifest")
@@ -1397,9 +1399,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             s.sort();
             s
         },
-        "every shipped kind and the built-in shell, nothing else"
+        "every shipped kind, the registry's and the built-in shell, nothing else"
     );
     assert_eq!(listed["shell"], "Shell");
+    assert!(listed.keys().filter(|k| k.starts_with("registry-")).count() >= 40);
     // With no file at all, the user's shell starts.
     let started = c.call(start_cmd("shell"));
     assert!(started.is_ok(), "{started:?}");
@@ -2377,4 +2380,82 @@ fn the_users_prompt_comes_before_the_agents_answer() {
             .unwrap()
     };
     assert!(id_of(v1::ChatRole::User, "first:hello") < id_of(v1::ChatRole::Agent, "hello"));
+}
+
+/// #1133 ("yes, add a policy line"): `agents.registry = off` in the node's own policy switches the ACP registry's kinds off on this
+/// machine: none is offered, a start of one is refused with `node.policy_denied` (rule `registry_off`), and the hand-made kinds are not
+/// affected. `agents.registry.deny` switches off the kinds it names only (rule `registry_denied`).
+#[test]
+fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_ones() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let rule_of = |r: std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>>| {
+        let e = r.expect("io").expect_err("expected a refusal");
+        let rule = match e.params.get("rule").and_then(|p| p.value.clone()) {
+            Some(v1::param_value::Value::Str(s)) => s,
+            other => format!("{other:?}"),
+        };
+        (e.code, rule)
+    };
+    let kinds = |c: &mut Client| -> Vec<String> {
+        match ok(c.call(Cmd::AgentKinds(v1::AgentKinds {}))).result {
+            Some(Ok_::AgentKinds(k)) => k.kinds.into_iter().map(|k| k.kind).collect(),
+            other => panic!("{other:?}"),
+        }
+    };
+    for (name, line, gone, kept) in [
+        (
+            "registry-off",
+            "agents.registry = off\n",
+            vec!["registry-gemini", "registry-goose"],
+            vec![],
+        ),
+        (
+            "registry-deny",
+            "agents.registry.deny = registry-gemini-mine, registry-gemini\n",
+            vec!["registry-gemini"],
+            vec!["registry-goose"],
+        ),
+    ] {
+        let e = env(name);
+        std::fs::create_dir_all(e.dir.join("data")).unwrap();
+        std::fs::write(e.dir.join("data").join("policy"), line).unwrap();
+        // Review F5: a hand-made description whose name looks like a registry kind's is the owner's own, never switched off.
+        std::fs::write(
+            e.dir.join("manifests").join("mine.toml"),
+            "kind = \"registry-gemini-mine\"\ndisplay_name = \"Mine\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+        )
+        .unwrap();
+        let n = node(&e, NodeLimits::default());
+        let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+        let listed = kinds(&mut c);
+        for k in ["codex", "claude-code", "shell"] {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays");
+        }
+        for k in &gone {
+            assert!(!listed.iter().any(|x| x == k), "{name}: {k} is not offered");
+            let want = if name == "registry-off" {
+                "registry_off"
+            } else {
+                "registry_denied"
+            };
+            assert_eq!(
+                rule_of(c.call(start_cmd(k))),
+                ("node.policy_denied".to_string(), want.to_string()),
+                "{name}: {k}"
+            );
+        }
+        for k in &kept {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays offered");
+        }
+        // Hand-made kinds still start, also one named like a registry kind.
+        assert!(listed.iter().any(|x| x == "registry-gemini-mine"), "{name}");
+        for k in ["shell", "registry-gemini-mine"] {
+            let s = started(ok(c.call(start_cmd(k))));
+            assert!(!s.agent_id.is_empty(), "{name}: {k}");
+        }
+        drop(n);
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
 }

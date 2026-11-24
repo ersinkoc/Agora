@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id kilo, version 7.8.32. Untested in Agora until someone runs it.
+kind = "registry-kilo"
+display_name = "Kilo"
+version = "7.8.32"
+min_engine = 1
+
+[structured]
+acp = { argv = ["npx", "--yes", "@kilocode/cli@7.8.32", "acp"] }

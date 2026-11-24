@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { t } from '../../i18n';
 import { AGENT_COLOUR_NAMES } from '../../themes/tokens';
 import { Icon } from '../Icon';
+import { registryInfo } from '../../net/registryCatalog';
 import { AgentAvatar, Button, Callout, Card, CopyChip, EmptyState, KeyValue, ListRow, Pill, SegmentedControl, SettingRow, StatTile, StatusMark, StatusPill, Tag, Toggle, Tooltip, type ButtonVariant } from '.';
 
 // The widget kit in every state, for the gallery (one per theme panel). Demo data only; nothing here is sent anywhere.
@@ -45,6 +46,7 @@ export function KitGallery() {
           {AGENT_COLOUR_NAMES.map((c, i) => <AgentAvatar key={c} accent={`var(--agent-${c})`} kind={KINDS[i] ?? c} />)}
           <AgentAvatar accent="var(--agent-amber)" kind="claude" size="s" />
           <AgentAvatar accent="var(--agent-teal)" kind="codex" size="l" needsYou label="codex · teal" />
+          <AgentAvatar accent="var(--agent-slate)" kind="goose" icon={registryInfo('registry-goose')?.icon} label="goose" />
         </Row>
       </Section>
       <Section title={t('kit-cards')}>

@@ -1,0 +1,71 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "goose",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "5b87260719bf565958f305b32a761cd8cd6d5f7ce9e7b5831a18c8b3f3cb01f8",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-aarch64-apple-darwin.tar.bz2"
+        },
+        "darwin-x86_64": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "b83fead3e3813b876247d3612352783ae727f7620bddfb8ef352e909cc6bf63b",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-x86_64-apple-darwin.tar.bz2"
+        },
+        "linux-aarch64": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "9d0fed3d301ce61b2b50cc19039795d3fa85270fe8857abe4a16ed35b21a1fbf",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-aarch64-unknown-linux-gnu.tar.bz2"
+        },
+        "linux-aarch64-musl": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "e5c73e19d9954dc72aae0c4581c97f9ed8339559dbd11b6b0c645e1875b845ee",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-aarch64-unknown-linux-musl.tar.bz2"
+        },
+        "linux-x86_64": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "83fef08e07c63c8cd41f9702e5e840487463f3b4e1290711a94ade5beab2d082",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-x86_64-unknown-linux-gnu.tar.bz2"
+        },
+        "linux-x86_64-musl": {
+          "cmd": "./goose",
+          "env_names_not_copied": [],
+          "sha256": "3ec76884cd41adb1dc14f9bb24123febd62ad19cc574e664f74fe8d1c75c9afb",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-x86_64-unknown-linux-musl.tar.bz2"
+        },
+        "windows-x86_64": {
+          "cmd": "./goose-package\\goose.exe",
+          "env_names_not_copied": [],
+          "sha256": "5b838ab498f7a6b121fab621b99d39a480458c373f16be7f7ce7869e9bc54888",
+          "url": "https://github.com/block/goose/releases/download/v1.60.2/goose-x86_64-pc-windows-msvc.zip"
+        }
+      },
+      "provides": [
+        "goose"
+      ]
+    }
+  ],
+  "name": "registry-goose",
+  "skipped": [],
+  "source": {
+    "id": "goose",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/block/goose/blob/main/LICENSE",
+    "repository": "https://github.com/block/goose",
+    "version": "1.60.2",
+    "website": "https://block.github.io/goose/"
+  },
+  "tested": false
+}
