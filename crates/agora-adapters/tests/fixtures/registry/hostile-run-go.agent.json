@@ -1,0 +1,1 @@
+{"id":"hostile-run-go","name":"Hostile Runner","version":"1.0.0","distribution":{"binary":{"linux-x86_64":{"archive":"https://example.com/h.tar.gz","cmd":"./go","args":["run","example.com/odd@v1.0.0"],"sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}}}

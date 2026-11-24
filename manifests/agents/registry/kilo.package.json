@@ -1,0 +1,82 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Kilo",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@kilocode/cli",
+      "version": "7.8.32"
+    },
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "aab60d9e3b9e0e6a67c55e0bc4d044eb4eb14a905991c59f76b64a0a11d44029",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-darwin-arm64.zip"
+        },
+        "darwin-x86_64": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "0bdd23fd01bf6063d58533d5b2605bfaf039bfb2b65afdfbf5bb9cfdb7737ef0",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-darwin-x64.zip"
+        },
+        "linux-aarch64": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "f24e3be855255aefd5c691100de6af35c7c5fae3fb16dfdb661ea1ff501c2cd9",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-linux-arm64.tar.gz"
+        },
+        "linux-aarch64-musl": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "0c4afe8c23f603938d9863be7cc5b41924dec3862243fd74b9be1e6328ed855d",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-linux-arm64-musl.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "88bd622110ec61ae92661b208d495e2d53f72b43c4c6bc9b6fa5380c8d3447a4",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-linux-x64.tar.gz"
+        },
+        "linux-x86_64-musl": {
+          "cmd": "./kilo",
+          "env_names_not_copied": [],
+          "sha256": "c956d6a3fabc4ff1e6511855aa8f2e55a3288cb127842eace3266c8b411f21eb",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-linux-x64-musl.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./kilo.exe",
+          "env_names_not_copied": [],
+          "sha256": "5efa1066b4667d43aeb6a6719ff9310ada03b793ad9bc20c6bcbdff6affebf72",
+          "url": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.32/kilo-windows-x64.zip"
+        }
+      },
+      "provides": [
+        "kilo"
+      ]
+    }
+  ],
+  "name": "registry-kilo",
+  "skipped": [],
+  "source": {
+    "id": "kilo",
+    "license": "MIT",
+    "license_url": "https://github.com/Kilo-Org/kilocode/blob/main/LICENSE",
+    "repository": "https://github.com/Kilo-Org/kilocode",
+    "version": "7.8.32",
+    "website": "https://kilo.ai/"
+  },
+  "tested": false
+}

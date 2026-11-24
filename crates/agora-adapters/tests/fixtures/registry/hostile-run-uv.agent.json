@@ -1,0 +1,1 @@
+{"id":"hostile-run-uv","name":"Hostile Runner","version":"1.0.0","distribution":{"binary":{"linux-x86_64":{"archive":"https://example.com/h.tar.gz","cmd":"./uv","args":["tool","run","odd-pkg"],"sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}}}

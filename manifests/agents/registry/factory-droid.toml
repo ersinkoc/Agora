@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id factory-droid, version 1.17.2. Untested in Agora until someone runs it.
+kind = "registry-factory-droid"
+display_name = "Factory Droid"
+version = "1.17.2"
+min_engine = 1
+
+[structured]
+acp = { argv = ["npx", "--yes", "droid@1.17.2", "exec", "--output-format", "acp-daemon"] }

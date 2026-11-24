@@ -1,0 +1,52 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Corust Agent",
+  "installers": [
+    {
+      "args": [],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./corust-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/Corust-ai/corust-agent-release/releases/download/v0.6.0/agent-darwin-arm64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./corust-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/Corust-ai/corust-agent-release/releases/download/v0.6.0/agent-darwin-x64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./corust-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/Corust-ai/corust-agent-release/releases/download/v0.6.0/agent-linux-x64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./corust-agent-acp.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/Corust-ai/corust-agent-release/releases/download/v0.6.0/agent-windows-x64.zip"
+        }
+      },
+      "provides": [
+        "corust-agent-acp"
+      ]
+    }
+  ],
+  "name": "registry-corust-agent",
+  "skipped": [],
+  "source": {
+    "id": "corust-agent",
+    "license": "GPL-3.0-or-later",
+    "license_url": "https://github.com/Corust-ai/corust-agent-release/blob/main/LICENSE",
+    "repository": "https://github.com/Corust-ai/corust-agent-release",
+    "version": "0.6.0",
+    "website": "https://corust.ai/"
+  },
+  "tested": false
+}

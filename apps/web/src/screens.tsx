@@ -123,6 +123,9 @@ const demoKinds: KindChoice[] = [
   { kind: 'claude', name: 'Claude Code', installed: true, level: 3 },
   { kind: 'shell', name: 'Shell', installed: true, level: 1 },
   { kind: 'gemini', name: 'Gemini CLI', installed: false, level: 2, program: 'gemini' },
+  // ADR-0092: an ACP registry agent the machine can start (grouped as untested) and one it cannot find (left to Settings → Agents).
+  { kind: 'registry-qwen-code', name: 'Qwen Code', installed: true, level: 3, program: 'npx' },
+  { kind: 'registry-goose', name: 'goose', installed: false, level: 3, program: 'goose' },
 ];
 function DemoStart({ onClose }: { onClose: () => void }) {
   return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}

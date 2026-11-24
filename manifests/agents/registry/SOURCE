@@ -1,0 +1,7 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+registry = https://github.com/agentclientprotocol/registry
+commit = 6f2077ceb4b890a3280a287cb6b6359d2ef7071c
+date = 2026-11-23T19:07:25Z
+entries = 46
+converted = 41
+skipped = 5

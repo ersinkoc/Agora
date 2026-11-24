@@ -22,7 +22,7 @@ const { PNG } = web('pngjs');
 const pixelmatch = (await import(web.resolve('pixelmatch'))).default;
 const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
 const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
 
 const server = createServer((req, res) => {
   const path = join(dist, !req.url || req.url === '/' ? 'index.html' : req.url.split('?')[0]);
