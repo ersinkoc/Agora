@@ -149,7 +149,9 @@ Engine details (`agora-adapters`):
   `bottom_non_empty_lines(n)` is the last `n` rows that contain text. Neither ever includes scrollback.
 - A `contains` phrase of more than one word also matches when the region wraps it: runs of whitespace, line breaks included, count as one
   space (so "Yes, I trust this folder" is found when a narrow terminal puts "folder" on the next row). Only whitespace is collapsed;
-  regexes still see the rows as they are.
+  regexes still see the rows as they are. Whitespace at either end of a phrase is kept as one space and asks for a boundary there
+  (`" build done "` is not found in "prebuild done"); a line break counts as one, and so do the start and end of the region, so a
+  padded phrase, one word included, is still found when it wraps or stands at the start or end of the region.
 - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
   and are size-limited.
 - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.
@@ -169,7 +171,9 @@ a first prompt typed for it (the prompt is left for the user). Every shipped ter
 that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
 `[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
 footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
-require (`contains` in the rule, `all` or `any`), and the top-level
+require (`contains` in the rule, `all` or `any`; compared ignoring case and with every run of whitespace as one space, see
+`mesh-tools.md`; a word the box breaks in its middle and a marker given only as a regex are not covered, so a kind's `[[typed]]` rules
+should also need the footer whole on one row by a regex, as the shipped ones do), and the top-level
 `input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that

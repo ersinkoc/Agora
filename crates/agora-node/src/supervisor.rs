@@ -324,14 +324,18 @@ impl AdapterCall {
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
                 given(self.caller.prompt(session, text, *from_mesh, WAIT))
-                    .map_err(|e| SupervisorError::Spawn(e.to_string()))
+                    .map_err(|e| SupervisorError::Prompt(e.to_string()))
             }
-            CallOp::Cancel => given(self.caller.cancel(session, WAIT)).map_err(adapter_error),
+            CallOp::Cancel => {
+                given(self.caller.cancel(session, WAIT)).map_err(call_error("cancel"))
+            }
             CallOp::SetConfig { id, value } => {
-                given(self.caller.set_config(session, id, value, WAIT)).map_err(adapter_error)
+                given(self.caller.set_config(session, id, value, WAIT))
+                    .map_err(call_error("set_config"))
             }
             CallOp::SetOption { kind, value } => {
-                given(self.caller.set_option(session, *kind, value, WAIT)).map_err(adapter_error)
+                given(self.caller.set_option(session, *kind, value, WAIT))
+                    .map_err(call_error("set_option"))
             }
             CallOp::Resolve {
                 approval,
@@ -341,7 +345,7 @@ impl AdapterCall {
                 self.caller
                     .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
             )
-            .map_err(|e| SupervisorError::Spawn(e.to_string())),
+            .map_err(|e| SupervisorError::Approval(e.to_string())),
         }
     }
 }
@@ -379,6 +383,16 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// #1150: an adapter was not given a prompt (it did not answer in time, it exited, or it answered with an error); the text is for
+    /// logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the reference
+    /// `agent.prompt` (no stable code says this yet).
+    Prompt(String),
+    /// #1150: an adapter was not given the answer to one of its approval requests (it did not answer in time, it exited, or it
+    /// answered with an error); the text is for logs only. The caller gets `internal` with the reference `approval.resolve`.
+    Approval(String),
+    /// #1150: a cancel or a switch (`call`: `cancel`, `set_config`, `set_option`) failed without one of the adapter's stable reasons;
+    /// the text is for logs only. The node's log names the call; the caller gets `internal`, as before.
+    AdapterCall(&'static str, String),
     /// RM-19 (#903): the start failed and this machine cannot find the kind's program: `(kind, program)`. Nothing was started.
     ProgramMissing(String, String),
     /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
@@ -459,6 +473,19 @@ impl SupervisorError {
                 // The client gets only the stable code; the cause (an OS error text, never a secret) goes to the node's stderr, which
                 // the supervisor's log keeps, so a start that failed is not silent. `{:?}` escapes control characters.
                 eprintln!("agent start failed: {text:?}");
+                Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
+            }
+            Self::Prompt(text) => {
+                // As for a failed start: only the reference goes to the caller, the cause to the node's log (`{:?}` escapes it).
+                eprintln!("agent prompt failed: {text:?}");
+                Error::new(ErrorCode::Internal).with("incident_id", "agent.prompt")
+            }
+            Self::Approval(text) => {
+                eprintln!("agent approval answer failed: {text:?}");
+                Error::new(ErrorCode::Internal).with("incident_id", "approval.resolve")
+            }
+            Self::AdapterCall(call, text) => {
+                eprintln!("agent {call} failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
             Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
@@ -1576,12 +1603,14 @@ impl Supervisor {
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
     /// write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). ADR-0084: the same for the folder of stored
     /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. #1114: and, where
-    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started.
+    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started. #1150: the paths checked are
+    /// handed to the platform (`Sandbox::closed`), which checks each grant again as it opens it for the kernel.
     fn refuse_reachable(
         &self,
         kind: &str,
-        profile: &agora_platform::Sandbox,
+        profile: &mut agora_platform::Sandbox,
     ) -> Result<(), SupervisorError> {
+        let mut closed = self.sandbox.closed_paths();
         if self.sandbox.token_reachable(profile) {
             return Err(SupervisorError::SandboxRefused(
                 kind.to_string(),
@@ -1590,12 +1619,17 @@ impl Supervisor {
             ));
         }
         if let Some(store) = self.credentials.store() {
-            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
-                return Err(SupervisorError::SandboxRefused(
-                    kind.to_string(),
-                    self.sandbox.level.name(),
-                    "secrets_reachable",
-                ));
+            if !store.list().is_empty() {
+                if self.sandbox.path_reachable(store.dir(), profile) {
+                    return Err(SupervisorError::SandboxRefused(
+                        kind.to_string(),
+                        self.sandbox.level.name(),
+                        "secrets_reachable",
+                    ));
+                }
+                if agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+                    closed.push(store.dir().to_path_buf());
+                }
             }
         }
         // #1114: the same for every path of the node's own (its data folder with the secrets, the ledger and the transcripts, its
@@ -1607,6 +1641,7 @@ impl Supervisor {
                 "protected_path_reachable",
             ));
         }
+        profile.closed = closed;
         Ok(())
     }
 
@@ -4552,7 +4587,13 @@ fn begin_send(
     let spawned = std::thread::Builder::new()
         .name("agora-queued-prompt".into())
         .spawn(move || {
-            let ok = call.run().is_ok();
+            let ok = match call.run() {
+                Ok(()) => true,
+                Err(e) => {
+                    log_call_failure("prompt", &agent, &e);
+                    false
+                }
+            };
             results
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -4560,6 +4601,20 @@ fn begin_send(
         });
     if spawned.is_err() {
         push(sent, false);
+    }
+}
+
+/// #1150: one line in the node's log for a call to `agent`'s adapter that failed where nobody is answered with the error (`what`:
+/// `prompt` for a queued prompt or a helper's first prompt, `approval refusal` for a request the node refuses on its own). Never the
+/// prompt's or the request's text, which may hold secrets: only the cause.
+pub(crate) fn log_call_failure(what: &str, agent: &AgentId, e: &SupervisorError) {
+    match e {
+        SupervisorError::Prompt(cause)
+        | SupervisorError::Approval(cause)
+        | SupervisorError::AdapterCall(_, cause) => {
+            eprintln!("agent {what} failed: {}: {cause:?}", agent.as_str())
+        }
+        other => eprintln!("agent {what} failed: {}: {other:?}", agent.as_str()),
     }
 }
 
@@ -4655,6 +4710,17 @@ fn bounded_commands(commands: Vec<AdapterCommand>) -> Vec<AdapterCommand> {
 /// An adapter's error answer as a supervisor error: one of the stable reasons the node passes on (ADR-0058), with only the
 /// parameters that code has, as strings, bounded; anything else is internal (the text goes to logs only).
 fn adapter_error(e: HostError) -> SupervisorError {
+    adapter_reason(e).unwrap_or_else(|e| SupervisorError::Spawn(e.to_string()))
+}
+
+/// #1150: [`adapter_error`] for a call made to a running agent (`call`: `cancel`, `set_config`, `set_option`): what has no stable
+/// reason is internal as before, but the node's log names the call instead of a failed start.
+fn call_error(call: &'static str) -> impl Fn(HostError) -> SupervisorError {
+    move |e| adapter_reason(e).unwrap_or_else(|e| SupervisorError::AdapterCall(call, e.to_string()))
+}
+
+/// One of the stable reasons the node passes on, or the error itself when it has none.
+fn adapter_reason(e: HostError) -> Result<SupervisorError, HostError> {
     if let Some((code, params)) = e.reason() {
         let known = [
             agora_protocol::ErrorCode::AdapterAgentExited,
@@ -4681,10 +4747,10 @@ fn adapter_error(e: HostError) -> SupervisorError {
                     (*k, v)
                 })
                 .collect();
-            return SupervisorError::Adapter { code, params };
+            return Ok(SupervisorError::Adapter { code, params });
         }
     }
-    SupervisorError::Spawn(e.to_string())
+    Err(e)
 }
 
 /// F1012: the folder a launch checked (`checkout`, as the check spelled it): the one the caller held, or held now when it gave none.
@@ -6430,6 +6496,36 @@ mod adapter_option_tests {
         );
     }
 
+    /// #1150: a cancel or a switch that fails without a stable reason is a failed call of that name, never a failed start (whose
+    /// label the start steps keep); the caller's answer is unchanged. A known reason is passed on as for a start.
+    #[test]
+    fn a_failed_call_to_a_running_adapter_is_named_and_a_failed_start_stays_a_start() {
+        assert!(matches!(
+            call_error("cancel")(HostError::Timeout),
+            SupervisorError::AdapterCall("cancel", _)
+        ));
+        let e = call_error("set_config")(HostError::Exited).to_protocol();
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert_eq!(
+            e.params.get("incident_id"),
+            Some(&agora_protocol::ParamValue::Str("unassigned".into()))
+        );
+        let refused = HostError::Rpc {
+            code: -32000,
+            data: Some(
+                serde_json::json!({"code": "adapter.option_refused", "params": {"id": "plan"}}),
+            ),
+        };
+        assert_eq!(
+            call_error("set_option")(refused).to_protocol().code,
+            ErrorCode::AdapterOptionRefused
+        );
+        assert!(matches!(
+            adapter_error(HostError::Timeout),
+            SupervisorError::Spawn(_)
+        ));
+    }
+
     /// #1033: a switch that skips permissions refused by the policy names the same option when it is asked (`skip_ask`) and when an
     /// approved card is applied after the policy changed (`prepare_skip_apply`): a mode's id (the value; never the word `mode`), and a
     /// config option's own id.
@@ -6474,5 +6570,57 @@ mod adapter_option_tests {
             option(sup.prepare_skip_apply(&approvals).map(Prepared::Call)),
             "approvals"
         );
+    }
+
+    /// #1150: the paths the start check keeps out of every grant (the control token, the node's own paths, its data folder and, once
+    /// it holds a secret, its folder of secrets) go to the platform with the profile, which checks each grant again as it opens it.
+    /// Only where a refusal is what keeps them closed (Linux); elsewhere nothing is added.
+    #[test]
+    fn the_paths_the_start_check_keeps_closed_go_to_the_platform() {
+        let base = std::env::temp_dir().join(format!("agora-1150-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, data) = (base.join("node"), base.join("node/data"));
+        std::fs::create_dir_all(&data).unwrap();
+        let token = home.join("control.token");
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.set_sandbox(crate::sandbox::SandboxPolicy {
+            level: crate::sandbox::Level::Worktree,
+            protect: vec![home.clone()],
+            data_dir: Some(data.clone()),
+            control_token: Some(token.clone()),
+            ..Default::default()
+        });
+        let store = crate::credentials::SecretStore::in_data(&data);
+        sup.set_credentials(crate::credentials::Credentials::new(
+            store.clone(),
+            BTreeMap::new(),
+        ));
+        let work = base.join("work");
+        let closed = |sup: &Supervisor| {
+            let mut profile = agora_platform::Sandbox::new(vec![], vec![work.clone()]);
+            sup.refuse_reachable("k", &mut profile).unwrap();
+            profile.closed
+        };
+        let checked = vec![token.clone(), home.clone(), data.clone()];
+        let want = |v: Vec<PathBuf>| {
+            if agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+                v
+            } else {
+                Vec::new()
+            }
+        };
+        assert_eq!(closed(&sup), want(checked.clone()));
+        store
+            .set("A_TOKEN", &crate::credentials::Secret::new("v").unwrap())
+            .unwrap();
+        let mut with_secrets = checked;
+        with_secrets.push(store.dir().to_path_buf());
+        assert_eq!(closed(&sup), want(with_secrets));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

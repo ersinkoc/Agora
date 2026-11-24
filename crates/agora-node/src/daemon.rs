@@ -2419,7 +2419,13 @@ impl Node {
                                                     approval_id,
                                                     false,
                                                 );
-                                            let _ = call.and_then(|c| c.run());
+                                            if let Err(e) = call.and_then(|c| c.run()) {
+                                                crate::supervisor::log_call_failure(
+                                                    "approval refusal",
+                                                    agent,
+                                                    &e,
+                                                );
+                                            }
                                             let code = if refused
                                                 == crate::approvals::Raise::AlwaysOnlyForbidden
                                             {
@@ -2455,7 +2461,13 @@ impl Node {
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner())
                                             .prepare_resolve_approval(agent, approval_id, false);
-                                        let _ = call.and_then(|c| c.run());
+                                        if let Err(e) = call.and_then(|c| c.run()) {
+                                            crate::supervisor::log_call_failure(
+                                                "approval refusal",
+                                                agent,
+                                                &e,
+                                            );
+                                        }
                                     }
                                 }
                                 SupervisorEvent::Restarting { .. }
@@ -2505,7 +2517,9 @@ impl Node {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .prepare_resolve_approval(&agent, &adapter_id, false);
-                            let _ = call.and_then(|c| c.run());
+                            if let Err(e) = call.and_then(|c| c.run()) {
+                                crate::supervisor::log_call_failure("approval refusal", &agent, &e);
+                            }
                             // ADR-0090: nobody decided in time.
                             chat.set_permission(
                                 &agent,
