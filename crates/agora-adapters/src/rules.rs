@@ -82,8 +82,26 @@ impl RegionText {
 
     fn collapsed(&self) -> &str {
         self.collapsed
-            .get_or_init(|| self.raw.split_whitespace().collect::<Vec<_>>().join(" "))
+            .get_or_init(|| collapse_whitespace(&self.raw, self.raw.split_whitespace()))
     }
+}
+
+// Keep one space for a run at either end as well. A manifest can use that space to require a
+// boundary around a phrase, even when the terminal wraps the phrase over several rows.
+fn collapse_whitespace<'a>(text: &str, words: impl IntoIterator<Item = &'a str>) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut space = text.starts_with(char::is_whitespace);
+    for word in words {
+        if space {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+        space = true;
+    }
+    if text.ends_with(char::is_whitespace) {
+        normalized.push(' ');
+    }
+    normalized
 }
 
 enum Matcher {
@@ -101,7 +119,7 @@ impl Matcher {
         match (contains, regex) {
             (Some(s), None) => {
                 let words: Vec<&str> = s.split_whitespace().collect();
-                let collapsed = (words.len() > 1).then(|| words.join(" "));
+                let collapsed = (words.len() > 1).then(|| collapse_whitespace(s, words));
                 Some(Self::Contains(s.to_string(), collapsed))
             }
             (None, Some(r)) => compile(r).ok().map(Self::Regex),
