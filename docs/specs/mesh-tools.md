@@ -85,6 +85,10 @@ for this node's agents are not made. Calls that go through the hub instead (a `#
 project, below) are not numbered here and work as usual, except that a copy for an agent of this node is refused like any message
 from another node. The node tries again every half second. Numbers are per node: the same number on two nodes names two messages.
 
+When the hub enables ADR-0109 for a cross-node task handoff, the recipient sees a durable `handoff` message. It shares the same
+cursor as ordinary messages and keeps its original number if that process is taken up from the holder. Ordinary message traffic
+does not evict it. A replacement process under the same agent id cannot see it. The `inbox` call still reads without removing.
+
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are

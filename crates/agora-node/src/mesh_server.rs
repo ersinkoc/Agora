@@ -539,6 +539,35 @@ struct AgentServer {
     path: PathBuf,
 }
 
+struct Handoffs {
+    store: crate::handoff_store::Store,
+    runs: HashMap<AgentId, (String, crate::handoff_store::Id)>,
+}
+
+fn handoff_message(record: &crate::handoff_store::Record) -> agora_mesh::broker::Message {
+    use agora_mesh::broker::{Message, Provenance};
+    let d = &record.delivery;
+    Message {
+        id: format!("m-{}", record.number),
+        provenance: Provenance {
+            from: AgentId::new(format!("{}/{}", d.sender_node, d.sender_agent_id)),
+            kind: String::new(),
+            node: d.sender_node.clone(),
+            project: d.project_id.clone(),
+        },
+        to: d.agent_id.clone(),
+        body: d.summary.clone(),
+        refs: d
+            .refs
+            .iter()
+            .map(|r| format!("{}:{r}", d.sender_node))
+            .collect(),
+        at_ms: record.accepted_at_ms,
+        reply_to: None,
+        kind: "handoff",
+    }
+}
+
 pub struct MeshServer {
     /// ADR-0057: answers `agent_start`, `agent_wait` and `agent_output`; without it those tools are not listed.
     helpers: Arc<HelpersSlot>,
@@ -548,6 +577,9 @@ pub struct MeshServer {
     shares: Arc<Shares>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
+    // When both locks are needed, take the broker before the handoff store. This orders
+    // a durable write and publication with MCP cursors and with the next run of an agent.
+    handoffs: Mutex<Option<Handoffs>>,
     agents: Mutex<HashMap<AgentId, AgentServer>>,
     /// #1093: agents whose endpoint is closing (an `unregister` between taking it out of `agents` and its broker `leave`), with how
     /// many closings are under way. Taken before `agents` wherever both are held. A registration of the agent waits until none is
@@ -655,6 +687,7 @@ impl MeshServer {
             shares: Arc::new(Shares::default()),
             mesh,
             dir: dir.to_path_buf(),
+            handoffs: Mutex::new(None),
             agents: Mutex::new(HashMap::new()),
             leaving: Mutex::new(HashMap::new()),
             left: Condvar::new(),
@@ -687,6 +720,171 @@ impl MeshServer {
         if !allowed {
             *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
+    }
+
+    /// Opens the node-local inbox before agents are taken up or the hub connects.
+    pub(crate) fn open_handoffs(&self, data_dir: &Path) -> io::Result<()> {
+        let store = crate::handoff_store::Store::open(&data_dir.join("handoffs"))?;
+        if let Some(last) = store.records().map(|record| record.number).max() {
+            // A restored record must never collide with a new message. The normal
+            // reservation, after startup, extends this floor on disk.
+            let next = last + 1;
+            self.mesh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reserve_ids(next, next);
+        }
+        *self.handoffs.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handoffs {
+            store,
+            runs: HashMap::new(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn has_handoffs(&self) -> bool {
+        self.handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    pub(crate) fn bind_handoff_run(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        run: Option<crate::handoff_store::Id>,
+    ) {
+        let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(handoffs) = handoffs.as_mut() else {
+            return;
+        };
+        if let Some(run) = run {
+            if handoffs
+                .runs
+                .get(agent)
+                .is_some_and(|(p, r)| p == project && *r == run)
+            {
+                return;
+            }
+            handoffs.runs.insert(agent.clone(), (project.into(), run));
+            let messages = handoffs
+                .store
+                .records()
+                .filter(|record| {
+                    let delivery = &record.delivery;
+                    delivery.agent_id == agent.as_str()
+                        && delivery.project_id == project
+                        && delivery.receiver_run_id.as_slice() == run
+                })
+                .map(|record| (record.number, handoff_message(record)));
+            mesh.restore_handoff_inbox(agent, messages);
+        } else if handoffs.runs.remove(agent).is_some() {
+            mesh.restore_handoff_inbox(agent, std::iter::empty());
+        }
+    }
+
+    /// Answers only after the addressed run owns the entry on disk and in its inbox.
+    pub(crate) fn deliver_handoff(
+        &self,
+        delivery: agora_protocol::v1::DeliverTaskHandoff,
+        now: u64,
+    ) -> Result<agora_protocol::v1::TaskHandoffReceipt, agora_protocol::Error> {
+        use crate::handoff_store::{Id, Record};
+        use agora_protocol::{v1::TaskHandoffReceipt, Error, ErrorCode};
+
+        let invalid =
+            |field: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field);
+        let unavailable = || Error::new(ErrorCode::MeshUnavailable);
+        let id: Id = delivery
+            .delivery_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid("delivery_id"))?;
+        let run: Id = delivery
+            .receiver_run_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid("receiver_run_id"))?;
+        let receipt = TaskHandoffReceipt {
+            delivery_id: id.to_vec(),
+            receiver_run_id: run.to_vec(),
+        };
+        let agent = AgentId::new(&delivery.agent_id);
+        let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+        let handoffs = handoffs.as_mut().ok_or_else(unavailable)?;
+        if let Some(stored) = handoffs.store.get(&id) {
+            return if stored.delivery == delivery {
+                Ok(receipt)
+            } else {
+                Err(invalid("delivery_id"))
+            };
+        }
+        if !self.remote_allowed.load(Ordering::Acquire) {
+            return Err(Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", "mesh.remote"));
+        }
+        if delivery.valid_until_ms <= now {
+            return Err(unavailable());
+        }
+        if delivery.sender_node.is_empty() || delivery.sender_node.contains('/') {
+            return Err(invalid("sender_node"));
+        }
+        if delivery.sender_agent_id.is_empty() || delivery.sender_agent_id.contains('/') {
+            return Err(invalid("sender_agent_id"));
+        }
+        if delivery.task_id.is_empty() {
+            return Err(invalid("task_id"));
+        }
+        let limits = mesh.limits();
+        limits
+            .check_content(&delivery.summary, &delivery.refs)
+            .map_err(|e| e.to_error(&limits))?;
+        let recipient_unknown =
+            || Error::new(ErrorCode::MeshRecipientUnknown).with("to", agent.as_str());
+        if !handoffs
+            .runs
+            .get(&agent)
+            .is_some_and(|(p, r)| p == &delivery.project_id && *r == run)
+            || !mesh
+                .agent_info(&agent)
+                .is_some_and(|info| info.project == delivery.project_id)
+        {
+            return Err(recipient_unknown());
+        }
+        let runs = &handoffs.runs;
+        handoffs.store.prune(now, |d| {
+            runs.get(&AgentId::new(&d.agent_id))
+                .is_some_and(|(p, r)| p == &d.project_id && d.receiver_run_id.as_slice() == *r)
+        });
+        let sender = AgentId::new(format!(
+            "{}/{}",
+            delivery.sender_node, delivery.sender_agent_id
+        ));
+        let number = mesh
+            .next_handoff_number(&sender, now)
+            .map_err(|e| e.to_error(&limits))?;
+        let record = Record {
+            number,
+            accepted_at_ms: now,
+            delivery,
+        };
+        let message = handoff_message(&record);
+        handoffs.store.insert(record).map_err(|e| match e {
+            crate::handoff_store::InsertError::Full { resource, limit } => {
+                Error::new(ErrorCode::NodeResourceLimit)
+                    .with("resource", resource)
+                    .with("limit", limit as i64)
+            }
+            crate::handoff_store::InsertError::Storage(error) => {
+                eprintln!("mesh: durable handoff could not be written: {error}");
+                unavailable()
+            }
+        })?;
+        mesh.publish_handoff(&agent, number, message);
+        Ok(receipt)
     }
 
     /// A message from an agent on another node, as the hub vouched for it (ADR-0031).
@@ -1118,10 +1316,18 @@ impl MeshServer {
             }
             let _ = std::fs::remove_file(&s.path);
         }
-        self.mesh
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .leave(agent, reason, now_ms());
+        {
+            let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+            mesh.leave(agent, reason, now_ms());
+            if let Some(handoffs) = self
+                .handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
+                handoffs.runs.remove(agent);
+            }
+        }
         let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
         match leaving.get_mut(agent) {
             Some(n) if *n > 1 => *n -= 1,
@@ -1871,6 +2077,120 @@ fn serve(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handoff_survives_reopen_only_in_its_original_run() {
+        let dir = std::env::temp_dir().join(format!("agora-handoff-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agent = AgentId::new("receiver");
+        let start = |run| {
+            let node = MeshServer::new(
+                &dir,
+                Limits {
+                    inbox_capacity: 1,
+                    ..Limits::default()
+                },
+            )
+            .unwrap();
+            node.open_handoffs(&dir).unwrap();
+            node.bind_handoff_run(&agent, "shared", Some(run));
+            node.mesh.lock().unwrap().register(AgentInfo {
+                id: agent.clone(),
+                kind: "fixture".into(),
+                node: "local".into(),
+                project: "shared".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            });
+            node
+        };
+        let delivery = agora_protocol::v1::DeliverTaskHandoff {
+            delivery_id: vec![1; 16],
+            receiver_run_id: vec![2; 16],
+            agent_id: agent.as_str().into(),
+            project_id: "shared".into(),
+            task_id: "t-1".into(),
+            summary: "durable".into(),
+            refs: vec!["src/lib.rs".into()],
+            valid_until_ms: 1000,
+            sender_node: "remote".into(),
+            sender_agent_id: "sender".into(),
+        };
+        let node = start([2; 16]);
+        let blocked = dir
+            .join("handoffs")
+            .join(format!("{}.handoff", "01".repeat(16)));
+        std::fs::create_dir(&blocked).unwrap();
+        assert_eq!(
+            node.deliver_handoff(delivery.clone(), 9).unwrap_err().code,
+            agora_protocol::ErrorCode::MeshUnavailable
+        );
+        assert!(node
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir(blocked).unwrap();
+        let receipt = std::thread::scope(|scope| {
+            let first = scope.spawn(|| node.deliver_handoff(delivery.clone(), 10).unwrap());
+            let second = node.deliver_handoff(delivery.clone(), 10).unwrap();
+            assert_eq!(first.join().unwrap(), second);
+            second
+        });
+        node.deliver_remote("remote", "sender", &agent, "first", &[])
+            .unwrap();
+        node.deliver_remote("remote", "sender", &agent, "second", &[])
+            .unwrap();
+        let durable = {
+            let mut mesh = node.mesh.lock().unwrap();
+            let page = mesh.inbox(&agent, None, 10).unwrap();
+            assert_eq!(
+                page.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+                ["durable", "second"]
+            );
+            assert_eq!(page[0].refs, ["remote:src/lib.rs"]);
+            assert_eq!(mesh.take_events().len(), 3);
+            page[0].clone()
+        };
+        assert_eq!(node.deliver_handoff(delivery.clone(), 11).unwrap(), receipt);
+        drop(node);
+
+        let node = start([2; 16]);
+        {
+            let mut mesh = node.mesh.lock().unwrap();
+            mesh.reserve_ids(100, 200);
+            assert_eq!(
+                mesh.inbox(&agent, None, 10).unwrap(),
+                std::slice::from_ref(&durable)
+            );
+            assert!(mesh
+                .inbox(&agent, Some(&durable.id), 10)
+                .unwrap()
+                .is_empty());
+            assert!(mesh.take_events().is_empty());
+        }
+        assert_eq!(node.deliver_handoff(delivery.clone(), 12).unwrap(), receipt);
+        node.bind_handoff_run(&agent, "shared", Some([3; 16]));
+        assert!(node
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap()
+            .is_empty());
+        let mut another = delivery.clone();
+        another.delivery_id = vec![4; 16];
+        assert_eq!(
+            node.deliver_handoff(another, 13).unwrap_err().code,
+            agora_protocol::ErrorCode::MeshRecipientUnknown
+        );
+        assert_eq!(node.deliver_handoff(delivery, 14).unwrap(), receipt);
+        drop(node);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn ask_fixture() -> (Arc<Mutex<Mesh>>, AgentId, AgentId) {
         let mut mesh = Mesh::new(Limits::default());

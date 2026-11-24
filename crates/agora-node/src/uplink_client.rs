@@ -644,7 +644,12 @@ where
     let mut jobs = mesh_out.map(MeshOut::connect);
     let _disconnect = Disconnect(mesh_out);
     let mut posts = Posts::default();
-    let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), CAPABILITIES);
+    let mut capabilities = CAPABILITIES.to_vec();
+    let has_handoffs = mesh.as_ref().is_some_and(|mesh| mesh.has_handoffs());
+    if has_handoffs {
+        capabilities.push(agora_protocol::handshake::TASK_HANDOFF_V1);
+    }
+    let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
         STREAM_CONTROL,
         kinds::HELLO,
@@ -659,6 +664,14 @@ where
     )
     .map_err(|_| LinkError::Transport("bad welcome".into()))?;
     up.on_welcome(&welcome)?;
+    let handoffs_negotiated = has_handoffs
+        && welcome
+            .capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::TASK_HANDOFF_V1);
+    // File writes are serialized. An in-flight write is enough; a later hub retry
+    // can return its receipt without queueing unbounded blocking work on this link.
+    let handoff_writer = Arc::new(tokio::sync::Semaphore::new(1));
     if let Some(c) = certs {
         c.welcomed(&welcome.capabilities);
     }
@@ -788,13 +801,34 @@ where
                         });
                         continue;
                     }
-                    // ADR-0109: this node does not take durable handoffs yet (it does not advertise the capability), so the hub's
-                    // delivery is refused here, before grants or the signed-command policy could ask for a grant on it.
-                    if matches!(
-                        req.command,
-                        Some(command_request::Command::DeliverTaskHandoff(_))
-                    ) {
-                        let _ = answers_tx.send(handoff_not_taken(&req.request_id));
+                    // ADR-0109: only the hub delivers here. Contents remain mesh data.
+                    if let Some(command_request::Command::DeliverTaskHandoff(delivery)) =
+                        &req.command
+                    {
+                        let Some(mesh) = mesh.as_ref().filter(|_| handoffs_negotiated) else {
+                            let _ = answers_tx.send(handoff_not_taken(&req.request_id));
+                            continue;
+                        };
+                        let Ok(permit) = Arc::clone(&handoff_writer).try_acquire_owned() else {
+                            let _ = answers_tx.send(handoff_answer(
+                                req.request_id,
+                                Err(agora_protocol::Error::new(
+                                    agora_protocol::ErrorCode::MeshUnavailable,
+                                )),
+                            ));
+                            continue;
+                        };
+                        let (mesh, tx, id, delivery) = (
+                            Arc::clone(mesh),
+                            answers_tx.clone(),
+                            req.request_id,
+                            delivery.clone(),
+                        );
+                        tokio::task::spawn_blocking(move || {
+                            let answer = mesh.deliver_handoff(delivery, crate::daemon::now_ms());
+                            drop(permit);
+                            let _ = tx.send(handoff_answer(id, answer));
+                        });
                         continue;
                     }
                     if let Some(command_request::Command::BoardJoin(j)) = &req.command {
@@ -1031,7 +1065,23 @@ fn misplaced(request_id: String) -> CommandResponse {
     }
 }
 
-/// The node's answer to the hub's `DeliverTaskHandoff` until it keeps a durable handoff inbox (ADR-0109).
+fn handoff_answer(
+    request_id: String,
+    result: Result<agora_protocol::v1::TaskHandoffReceipt, agora_protocol::Error>,
+) -> CommandResponse {
+    use agora_protocol::v1::{command_ok, CommandOk};
+    CommandResponse {
+        request_id,
+        result: Some(match result {
+            Ok(receipt) => command_response::Result::Ok(CommandOk {
+                result: Some(command_ok::Result::TaskHandoffReceipt(receipt)),
+            }),
+            Err(error) => command_response::Result::Err(error.to_info()),
+        }),
+    }
+}
+
+/// An older hub or a node whose durable store is unavailable has not negotiated delivery.
 fn handoff_not_taken(request_id: &str) -> CommandResponse {
     use agora_protocol::{Error, ErrorCode};
     CommandResponse {

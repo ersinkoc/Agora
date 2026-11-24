@@ -125,6 +125,7 @@ fn outcome(r: &CommandResponse) -> String {
 /// What the fake hub saw: each request's outcome by id, and the frame kinds that came on each dynamic stream.
 struct Seen {
     answers: HashMap<String, String>,
+    handoffs: HashMap<String, v1::TaskHandoffReceipt>,
     streams: HashMap<u32, Vec<u8>>,
     /// How long the node's uplink took to stop once the hub was done.
     stopped_in: Duration,
@@ -151,6 +152,16 @@ fn hub(
 }
 
 fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) -> bool) -> Seen {
+    hub_test(n, socket, script, false, done)
+}
+
+fn hub_test(
+    n: &Node,
+    socket: &Path,
+    script: Vec<Step>,
+    handoffs: bool,
+    done: impl Fn(&Seen) -> bool,
+) -> Seen {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -169,7 +180,7 @@ fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) ->
             key_pem: String::new(),
             commands: Some(socket.to_path_buf()),
             grants: Some(Arc::clone(&n.grants)),
-            mesh: None,
+            mesh: handoffs.then(|| Arc::clone(&n.mesh)),
             devices: None,
             state_dir: None,
             certs: None,
@@ -181,8 +192,17 @@ fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) ->
         let mut c = agora_protocol::ws::accept(s).await.unwrap();
         let hello = c.recv().await.unwrap().unwrap();
         assert_eq!(hello.kind, kinds::HELLO);
+        let caps = if handoffs {
+            let hello = v1::Hello::decode(hello.payload.as_slice()).unwrap();
+            let cap = agora_protocol::handshake::TASK_HANDOFF_V1;
+            assert!(hello.capabilities.iter().any(|c| c == cap));
+            vec![cap.to_string()]
+        } else {
+            Vec::new()
+        };
         let welcome = v1::Welcome {
             chosen_generation: 1,
+            capabilities: caps,
             ..Default::default()
         };
         c.send(&frame(
@@ -204,6 +224,7 @@ fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) ->
             .unwrap();
         let mut seen = Seen {
             answers: HashMap::new(),
+            handoffs: HashMap::new(),
             streams: HashMap::new(),
             stopped_in: Duration::ZERO,
         };
@@ -241,6 +262,12 @@ fn hub_steps(n: &Node, socket: &Path, script: Vec<Step>, done: impl Fn(&Seen) ->
                 Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) => {
                     let r = CommandResponse::decode(f.payload.as_slice()).unwrap();
                     seen.answers.insert(r.request_id.clone(), outcome(&r));
+                    if let Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(Ok_::TaskHandoffReceipt(receipt)),
+                    })) = r.result
+                    {
+                        seen.handoffs.insert(r.request_id, receipt);
+                    }
                     waiting = 0;
                 }
                 Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) => {
@@ -541,6 +568,74 @@ fn a_handoff_delivery_is_refused_before_the_signed_command_policy() {
         "{:?}",
         seen.answers
     );
+}
+
+#[test]
+fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("durable", "mesh.*");
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let shell = start_shell(&socket);
+    let started = n
+        .events
+        .events_after(0)
+        .into_iter()
+        .find_map(|e| match e.body {
+            Some(v1::event::Body::AgentStarted(a)) if a.agent_id == shell.agent_id => Some(a),
+            _ => None,
+        })
+        .expect("the shell's run was announced");
+    assert_eq!(started.run_id.len(), 16);
+    let delivery = v1::DeliverTaskHandoff {
+        delivery_id: vec![4; 16],
+        receiver_run_id: started.run_id.clone(),
+        agent_id: shell.agent_id.clone(),
+        project_id: started.project_id,
+        task_id: "t-1".into(),
+        summary: "test delivery".into(),
+        valid_until_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 86_400_000,
+        sender_node: "sender".into(),
+        sender_agent_id: "agent-2".into(),
+        ..Default::default()
+    };
+    let mut wrong = delivery.clone();
+    wrong.delivery_id = vec![5; 16];
+    wrong.receiver_run_id[0] ^= 1;
+    let send =
+        |id, delivery| Step::Ask(STREAM_COMMANDS, req(id, Cmd::DeliverTaskHandoff(delivery)));
+    let seen = hub_test(
+        &n,
+        &socket,
+        vec![
+            send("wrong", wrong),
+            send("first", delivery.clone()),
+            send("retry", delivery.clone()),
+        ],
+        true,
+        |_| true,
+    );
+    assert_eq!(seen.answers["wrong"], "mesh.recipient_unknown");
+    assert_eq!(seen.handoffs["first"].delivery_id, delivery.delivery_id);
+    assert_eq!(
+        seen.handoffs["first"].receiver_run_id,
+        delivery.receiver_run_id
+    );
+    assert_eq!(seen.handoffs["first"], seen.handoffs["retry"]);
+    let broker = n.mesh.mesh();
+    let inbox = broker
+        .lock()
+        .unwrap()
+        .inbox(&agora_core::AgentId::new(&shell.agent_id), None, 10)
+        .unwrap();
+    assert_eq!(inbox.iter().filter(|m| m.kind == "handoff").count(), 1);
+    stop(&socket, &shell.agent_id);
 }
 
 /// The control socket holds to the same rule for a local client: a command that is not a subscription on a dynamic stream is

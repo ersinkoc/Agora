@@ -601,7 +601,7 @@ impl EventSink {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
         record(Body::AgentStarted(v1::AgentStarted {
-            run_id: Vec::new(),
+            run_id: view.run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.into(),
             project_id: view.project.clone(),
             node_id: self.producer.clone(),
@@ -766,7 +766,7 @@ impl EventSink {
         parent: &str,
     ) {
         let none = crate::launch_options::LaunchChoice::default();
-        self.agent_started_with(agent, project, node, worktree, kind, parent, &none);
+        self.agent_started_with(agent, project, node, worktree, kind, parent, &none, None);
     }
 
     /// [`Self::agent_started_by`] with the launch options the agent was started with (ADR-0059).
@@ -780,9 +780,10 @@ impl EventSink {
         kind: &str,
         parent: &str,
         launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
-            run_id: Vec::new(),
+            run_id: run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
             node_id: node.to_string(),
@@ -1115,6 +1116,7 @@ impl EventSink {
             kind,
             has_terminal,
             &none,
+            None,
         );
     }
 
@@ -1131,6 +1133,7 @@ impl EventSink {
         kind: &str,
         has_terminal: bool,
         launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
     ) {
         let worktree_id = worktree.to_string_lossy().into_owned();
         self.record(Body::WorktreeCreated(v1::WorktreeCreated {
@@ -1139,7 +1142,7 @@ impl EventSink {
             path: worktree_id.clone(),
             branch: branch.to_string(),
         }));
-        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch);
+        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch, run_id);
         if !has_terminal {
             return; // an adapter agent has no terminal
         }
@@ -1159,7 +1162,7 @@ impl EventSink {
         terminal: bool,
     ) {
         let none = crate::launch_options::LaunchChoice::default();
-        self.helper_launched(agent, workspace, kind, terminal, "", &none);
+        self.helper_launched(agent, workspace, kind, terminal, "", &none, None);
     }
 
     /// [`Self::directory_agent_launched`] with the launch options the agent was started with (ADR-0059).
@@ -1170,11 +1173,13 @@ impl EventSink {
         kind: &str,
         terminal: bool,
         launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
     ) {
-        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch);
+        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch, run_id);
     }
 
     /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
+    #[allow(clippy::too_many_arguments)]
     pub fn helper_launched(
         &self,
         agent: &AgentId,
@@ -1183,12 +1188,14 @@ impl EventSink {
         terminal: bool,
         parent: &str,
         launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
     ) {
         // ADR-0059 decision 5: a helper has launch options only when the user's signed decision named them (never inherited); the
         // event carries them, so every client shows the "does not ask" badge on it.
-        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, launch);
+        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, launch, run_id);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn workspace_agent_launched(
         &self,
         agent: &AgentId,
@@ -1197,6 +1204,7 @@ impl EventSink {
         terminal: bool,
         parent: &str,
         launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
     ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
@@ -1211,6 +1219,7 @@ impl EventSink {
             kind,
             parent,
             launch,
+            run_id,
         );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
@@ -1817,6 +1826,9 @@ impl Node {
         mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
         // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
         // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
+        if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
+            eprintln!("mesh: durable handoffs unavailable: {e}");
+        }
         mesh.reserve_ids(&cfg.data_dir);
 
         let mut sup = Supervisor::new(SupervisorConfig {
@@ -1872,7 +1884,11 @@ impl Node {
         // agents are taken up: each joins the mesh again at the same path through this hook, so its running bridge reconnects (#906).
         {
             let for_abort = Arc::clone(&mesh);
+            let for_runs = Arc::clone(&mesh);
             let mesh = Arc::clone(&mesh);
+            sup.set_run_hook(Box::new(move |id, project, run| {
+                for_runs.bind_handoff_run(id, project, run)
+            }));
             sup.set_launch_hook(Box::new(move |l| {
                 let socket = mesh
                     .register_confined(
@@ -3551,6 +3567,7 @@ mod announce_tests {
             project: "p".into(),
             running,
             restarts: 0,
+            run_id: None,
             parent: None,
             launch_options: Vec::new(),
             skips_permissions: false,
@@ -4273,6 +4290,7 @@ mod process_record_tests {
             project: "p".into(),
             running,
             restarts: 0,
+            run_id: None,
             parent: None,
             launch_options: Vec::new(),
             skips_permissions: false,

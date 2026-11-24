@@ -1030,6 +1030,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                     &launch,
+                    view.run_id,
                 );
                 // ADR-0060: a session id the node chose at launch, recorded right after the start.
                 if let Some(session) = &session {
@@ -1115,6 +1116,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                     &launch,
+                    view.as_ref().and_then(|v| v.run_id),
                 );
                 if let Some(session) = &session {
                     ev.session_reported(&id, session);
@@ -1835,6 +1837,7 @@ pub(crate) fn resume_agent(
                         skips_permissions: v.skips_permissions,
                     })
                     .unwrap_or_default(),
+                views.iter().find(|v| v.id == id).and_then(|v| v.run_id),
             );
             // Its start is said above with its folder; the rest (its state, its session) as usual.
             let rest: Vec<SupervisorEvent> = events

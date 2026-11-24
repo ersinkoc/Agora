@@ -719,6 +719,7 @@ impl Spawner {
                     args: Vec::new(),
                     skips_permissions: view.as_ref().is_some_and(|v| v.skips_permissions),
                 },
+                view.as_ref().and_then(|v| v.run_id),
             );
             // ADR-0060: a session id the node chose at launch.
             if let Some(session) = &session {
