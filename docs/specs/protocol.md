@@ -650,8 +650,9 @@ All additions; nothing published changed.
   hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
   `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
   local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
-  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
-  command (action `AgentResume`).
+  anything by itself. The local owner-only socket needs no signature (`agora agent resume AGENT_ID` sends it there, and with
+  `--again` Start again, `new_session`; #1137). Viewers cannot send it, and the hub audits it like every routed command (action
+  `AgentResume`).
 - **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
   (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
   of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal

@@ -12,6 +12,7 @@ cli-usage =
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
+      agora agent resume AJAN_KİMLİĞİ [--again] [--socket YOL]
       agora agent list [--socket YOL]
       agora agent kinds [--socket YOL]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
@@ -53,6 +54,8 @@ cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ 
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-prompted = İstem { $agent_id } ajanına gönderildi
+cli-agent-resumed = { $agent_id } ajanı { $worktree } içinde devam ettirildi
+cli-agent-started-again = { $agent_id } ajanı { $worktree } içinde yeniden başlatıldı (yeni bir konuşma)
 cli-agent-list-empty = Bu düğümde ajan yok.
 cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
