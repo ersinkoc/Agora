@@ -269,6 +269,10 @@ fn transcript(args: &[String]) -> ExitCode {
         "a 16 KiB output dense with edges, an 8 KiB value held: write {:.2} ms (p50)",
         r.write_dense_8k_p50_ms
     );
+    println!(
+        "live (#1147), one 200-byte piece added and sent to a follower: no value {:.0} ns | 52 bytes {:.0} ns | 8 KiB {:.0} ns | 64 x 8,000 bytes {:.0} ns | the 52-byte value in 4-byte pieces {:.0} ns",
+        r.live_none_ns, r.live_52_ns, r.live_8k_ns, r.live_64x8000_ns, r.live_split_52_ns
+    );
     if let Some(path) = out {
         match serde_json::to_string_pretty(&r) {
             Ok(json) if std::fs::write(&path, &json).is_ok() => {}

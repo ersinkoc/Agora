@@ -513,7 +513,11 @@ fn switch(
 }
 
 /// Raises the approval for `ask` (or finds the one already waiting) and returns the error that tells the window to show it.
-fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
+fn raise_skip(ctx: &ControlContext, mut ask: SkipAsk) -> Error {
+    // #1147 (audit of #1157): the agent's names for the option and the value, as its card (and the signature over it) shows them,
+    // with the node's secret values replaced; the ids the decision applies are kept.
+    ask.option_name = ctx.chat.redact_text(&ask.option_name);
+    ask.value_name = ctx.chat.redact_text(&ask.value_name);
     let Some(approvals) = &ctx.approvals else {
         // A node without an approvals queue cannot ask anyone: the switch stays refused, as it was before the approval existed.
         let option = match ask.kind {
@@ -703,6 +707,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // ADR-0039 amendment B: only the hub asks for this, and the uplink answers it where the hub's commands enter; from the
         // local socket it would hand this node's board work to nobody.
         Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
+        // ADR-0109: only the hub delivers a durable handoff, and this node does not take them yet.
+        Cmd::DeliverTaskHandoff(_) => Err(capability_missing(
+            agora_protocol::handshake::TASK_HANDOFF_V1,
+        )),
         // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
         // (the person at this machine is not routed through the hub, ADR-0041).
         Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
@@ -1974,6 +1982,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
+        Cmd::DeliverTaskHandoff(_) => agora_protocol::handshake::TASK_HANDOFF_V1,
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",
