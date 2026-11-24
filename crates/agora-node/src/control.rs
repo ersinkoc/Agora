@@ -722,9 +722,25 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .as_ref()
                 .map(|l| l.ended(crate::daemon::now_ms()))
                 .unwrap_or_default();
+            // ADR-0107: the agents it found interrupted and still offers (oldest id first), read before the lock as well.
+            let found = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.interrupted())
+                .unwrap_or_default();
             // One lock for the whole answer (the mutex is not reentrant).
             let sup = ctx.sup();
             let views = sup.list();
+            // An id the supervisor holds (one being resumed or started again) is listed from the supervisor only. Whether Resume is
+            // offered is decided here, under the lock, as the node's announcement decides it.
+            let interrupted: Vec<(crate::ledger::Entry, bool)> = found
+                .into_iter()
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| {
+                    let resumable = sup.offers_resume(&e);
+                    (e, resumable)
+                })
+                .collect();
             let earlier: Vec<v1::AgentSummary> = kept
                 .into_iter()
                 .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
@@ -770,8 +786,18 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     a.agent_id.clone(),
                 )
             });
+            drop(sup);
+            // Each row is the `AgentInterrupted` the node announces for it (the same builder), built after the lock is released: whether
+            // its process still runs is a look at the system.
+            let interrupted = interrupted
+                .iter()
+                .map(|(e, resumable)| e.interrupted_event(*resumable))
+                .collect();
             Ok(v1::CommandOk {
-                result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+                result: Some(Ok_::AgentList(v1::AgentListResult {
+                    agents,
+                    interrupted,
+                })),
             })
         }
         Cmd::WorkspaceQuery(q) => {
@@ -1493,7 +1519,7 @@ fn stop_survivor(
     }
     ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
-        let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
+        let resumable = ctx.sup().offers_resume(&e);
         ev.agent_interrupted(&e, resumable);
     }
     Ok(())
@@ -1587,6 +1613,10 @@ pub(crate) fn resume_agent(
                 .ok_or_else(folder_changed)
         })
         .transpose()?;
+    // ADR-0089 decision 5, ADR-0104 C1: a resume continues the conversation its file holds, and a fresh start begins a new file,
+    // numbering on after the earlier session's ids. Read here, outside the supervisor's lock; applied only once the resume went through
+    // (below), so a refused one leaves both as they were.
+    let seed = ctx.chat.read_seed(&id, new_session);
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),
@@ -1620,12 +1650,18 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume_in(&id, Instant::now(), checked) {
-            Ok(events) => (
-                events,
-                sup.list(),
-                sup.terminal(&id).is_some(),
-                sup.carried_on(&id),
-            ),
+            // Still under the supervisor's lock: the new adapter's first words are recorded by the supervision tick, which needs it,
+            // so the transcript is seeded before any of them.
+            Ok(events) => {
+                ctx.chat
+                    .resumed(&id, seed, new_session, crate::daemon::now_ms());
+                (
+                    events,
+                    sup.list(),
+                    sup.terminal(&id).is_some(),
+                    sup.carried_on(&id),
+                )
+            }
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));
@@ -2007,6 +2043,15 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
+/// Whether `cmd` may arrive on a dynamic stream (3+): the commands that open one (protocol.md, "Terminal relay", "Chat transcript
+/// stream", `PreviewConnect`). Every other command belongs on stream 1, where the hub's commands pass the node's routed checks.
+pub(crate) fn opens_stream(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_) | Cmd::PreviewConnect(_)
+    )
+}
+
 fn handle_request(
     frame: &Frame,
     ctx: &Arc<ControlContext>,
@@ -2040,6 +2085,19 @@ fn handle_request(
             &req.request_id,
             Err(Error::new(ErrorCode::AuthUnauthenticated)),
         );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
+    // relay). Before the idempotency claim, so a refused request stores nothing.
+    let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+    let misplaced = match &req.command {
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
+        None => dynamic,
+    };
+    if misplaced {
+        let resp = response(&req.request_id, Err(invalid("stream_id")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }

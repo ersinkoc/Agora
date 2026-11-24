@@ -42,6 +42,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
       agora node untrust CİHAZ_ID [--data DİZİN]
       agora node secret set AD | list | remove AD [--data DİZİN]
+      agora history purge [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -81,6 +82,7 @@ doctor-git = Git kullanılabilir ({ $detail }).
 doctor-git-missing = Git bulunamadı. Agora, her ajana ayrı bir çalışma alanı vermek için buna ihtiyaç duyar.
 doctor-git-identity-missing = Buradaki ajanların git kimliği yok, bu yüzden commit yapamazlar. "git config --global" ile "user.name" ve "user.email" değerlerini ayarlayın.
 doctor-control-token-reachable = Buradaki ajanlar düğümün denetim belirtecini ({ $detail }) okuyabilir, çünkü düğümün klasörü ajanların okuyabildiği veya yazabildiği bir klasörün içinde (örneğin /tmp altında). Ajanlar başlamayacak. Düğümün klasörünü (--data) ilkedeki klasörlerin dışına taşıyın.
+doctor-protected-path-reachable = Buradaki ajanlar bu düğümün kendi dosyalarını ({ $detail }) okuyabilir, çünkü bunlar ajanların okuyabildiği veya yazabildiği bir klasörün içinde (/tmp, /var, /opt, /etc ya da /run altında veya ilkedeki bir klasörde) ve bu sistem onları orada kapalı tutamıyor. Ajanlar başlamayacak. Düğümün veri klasörünü (--data) ya da ajan türleri klasörünü (--manifests) bu klasörlerin dışına, örneğin ev klasörünüzün altına taşıyın.
 doctor-sockets-profile = Bu makinedeki korumalı alan profili, ajanlara verilmemiş unix soketlerini (ssh-agent, oturum veri yolu, docker, tmux) reddedecek şekilde ayarlıdır. Bir macOS geliştiricisi bunu 17.11.2026'da gerçek bir Mac'te ölçtü: ajanın kendi soketi çalışır, başka bir soket reddedilir ve ad çözücü çalışır. Diğer sistem soketleri (her araçta DNS, https üzerinden git, cargo, npm, Claude Code, Codex) gerçek ajanlarla henüz ölçülmedi; listede adı geçmeyen bir sokete ihtiyaç duyan araç çalışmayabilir, onu `sandbox.sockets` ile ekleyin.
 doctor-sockets-abstract = Bu çekirdek dosya olan unix soketlerini kısıtlayamaz: bir ajan hâlâ ssh-agent, oturum veri yolu, docker veya tmux soketine ulaşabilir (yalnızca soyut soketler kapalıdır). Diğer tek katman ortam değişkeni temizliğidir ve soketi arayan bir ajan onu bulabilir.
 doctor-sockets-none = Bu makine ({ $detail }) unix soketlerini kısıtlayamaz: tek katman ortam değişkeni temizliğidir ve ssh-agent, oturum veri yolu, docker veya tmux soketini arayan bir ajan onu bulabilir.
@@ -488,6 +490,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi kullanın, rakamla başlamasın ve sistemin ya da Agora'nın kullandığı bir ad olmasın.
 cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
 cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
+cli-history-purged = Bu makinenin ajanları için tuttuğu sohbet geçmişi silindi.
+cli-history-purge-failed = Sohbet geçmişi silinemedi. Düğümün veri klasörünün size ait ve yazılabilir olduğunu kontrol edin.
 cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.
 
 # ADR-0065: hub'da `agora pair`, yeni makinede `agora join`.

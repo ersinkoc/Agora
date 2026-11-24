@@ -12,13 +12,15 @@ Never reuse or renumber a field; add new fields and messages instead.
 ## Breaking changes
 
 CI runs `agora-schema-check` against the target branch. Renaming, retyping, or removing a field, message,
-enum, or enum value fails the build; adding new ones is fine. Run locally:
+enum, or enum value fails the build, as does changing a published field's oneof membership. Additions
+are allowed. Run the descriptor check locally:
 `cargo run -p agora-schema-check -- <base schema dir> schema`.
 
 ## Golden fixtures
 
 `schema/fixtures/v1/` holds a binary (`.bin`) and proto3-JSON (`.json`) fixture for every message. A fixture is
-never edited, only added. `cargo test -p agora-protocol --test golden` checks them; for new messages run it with
+never edited, only added. CI rejects modifications and removals against the target branch.
+`cargo test -p agora-protocol --test golden` checks their binary and JSON round trip. For new messages run it with
 `AGORA_WRITE_FIXTURES=1` (existing files are never overwritten).
 
 ## Adapter conformance

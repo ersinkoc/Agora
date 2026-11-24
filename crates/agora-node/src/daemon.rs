@@ -945,18 +945,7 @@ impl EventSink {
     /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
     /// id and its kind can continue one.
     pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
-        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
-            agent_id: e.agent_id.clone(),
-            kind: e.kind.clone(),
-            project_id: e.project_id.clone(),
-            folder: e.folder.clone(),
-            parent_agent_id: e.parent_agent_id.clone(),
-            resumable,
-            started_at_ms: e.started_at_ms,
-            interrupted_at_ms: e.interrupted_at_ms,
-            last_state: crate::ledger::proto_state(&e.last_state) as i32,
-            still_running: e.still_running(),
-        }));
+        self.record(Body::AgentInterrupted(e.interrupted_event(resumable)));
     }
 
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
@@ -1336,6 +1325,9 @@ pub struct Policy {
     pub credentials: std::collections::BTreeMap<String, Vec<String>>,
     /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
     pub credentials_malformed: Vec<String>,
+    /// ADR-0089 decision 2: how much of each structured agent's chat history the node keeps on its disk (`chat.history_max_bytes`,
+    /// at most the default 32 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
+    pub history: crate::transcript::Limits,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1395,6 +1387,7 @@ impl Default for Policy {
             credentials: std::collections::BTreeMap::new(),
             credentials_malformed: Vec::new(),
             problems: Vec::new(),
+            history: crate::transcript::Limits::default(),
         }
     }
 }
@@ -1476,6 +1469,15 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
+                // ADR-0089: a value that is not a number keeps the default and is a line the node did not understand.
+                "chat.history_max_bytes" => match crate::transcript::Limits::parse_max_bytes(v) {
+                    Some(b) => p.history.max_bytes = b,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
+                "chat.history_days" => match crate::transcript::Limits::parse_days(v) {
+                    Some(d) => p.history.days = d,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
                 "signed_commands" => {
                     p.signed_commands = crate::grants::SignedCommands(
                         v.split(',')
@@ -1631,6 +1633,8 @@ pub struct Node {
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
     pub devices: Arc<crate::device_trust::DeviceTrust>,
     devices_watch: Option<JoinHandle<()>>,
+    /// ADR-0089: writes the chat history of structured agents (`crate::transcript`).
+    transcript_writer: Option<JoinHandle<()>>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1821,7 +1825,7 @@ impl Node {
         }
         // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
         for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+            events.agent_interrupted(&e, sup.offers_resume(&e));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1911,7 +1915,7 @@ impl Node {
                     found
                         .into_iter()
                         .map(|e| {
-                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            let resumable = s.offers_resume(&e);
                             (e, resumable)
                         })
                         .collect()
@@ -1928,7 +1932,20 @@ impl Node {
                 }
             }));
         }
-        let chat = Arc::new(crate::chat::ChatBoard::new());
+        // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
+        // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
+        let policy = read_policy(&cfg.data_dir.join(POLICY_FILE));
+        let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::new(
+            crate::transcript::Store::new(
+                &cfg.data_dir,
+                policy.history,
+                Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
+            )
+            .with_env_secrets(policy.credentials.values().flatten().map(String::as_str)),
+        )));
+        for (id, _) in &taken_up {
+            chat.seed_from_disk(id, now_ms());
+        }
         let git_wake = Arc::new(AtomicBool::new(false));
         // ADR-0057: agents may ask to start helpers; every start needs a decision a trusted device signed.
         let spawner = Arc::new(
@@ -2340,12 +2357,32 @@ impl Node {
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
                                 }
+                                // Review of #1103 (B1): a resumed session's replay of its conversation is shown only when this node holds
+                                // none of it (its file was purged, never written, or the agent never spoke here).
+                                SupervisorEvent::ReplayedChat { agent, items } => {
+                                    chat.replayed(agent, items, now);
+                                }
+                                // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in
+                                // a turn; leaving one (or ending) closes them.
+                                SupervisorEvent::StateChanged { agent, state } => {
+                                    chat.set_working(
+                                        agent,
+                                        *state == agora_core::AgentState::Working,
+                                    );
+                                }
+                                SupervisorEvent::Exited { agent, .. } => {
+                                    chat.set_working(agent, false);
+                                }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
+                                    if let SupervisorEvent::GaveUp { agent, .. } = e {
+                                        chat.set_working(agent, false);
+                                    }
                                     restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    chat.set_working(agent, false);
                                     // The spawner first: a start the agent waited for is withdrawn and its slot released, before
                                     // the queue drops the request.
                                     spawner.agent_ended(agent);
@@ -2361,6 +2398,14 @@ impl Node {
                                 }
                                 _ => {}
                             }
+                        }
+                        // Review of #1103, round 3: the state each agent is in, as a backstop for a change no event carried (the
+                        // transcript writer holds an agent's newest words only while it works).
+                        for v in &views {
+                            chat.set_working_if_known(
+                                &v.id,
+                                v.running && v.state == agora_core::AgentState::Working,
+                            );
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
                             // ADR-0090 Amendment A: nobody decided a switch in time: nothing is applied, and no adapter asked.
@@ -2443,6 +2488,48 @@ impl Node {
                     }
                 })?
         };
+        // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
+        let transcript_writer = {
+            let (sup, ledger) = (Arc::clone(&supervisor), Arc::clone(&ledger));
+            crate::transcript::spawn_writer(
+                Arc::clone(&chat),
+                // ADR-0089 decision 2 (review of #1103, N6): a running agent's file and one offered for Resume are kept; an ended one
+                // ages from when it ended (the ledger's last write for it), one the ledger no longer knows from its file.
+                Box::new(move |names: &[String]| {
+                    use crate::transcript::Kept;
+                    let running: std::collections::HashSet<String> = sup
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .list()
+                        .into_iter()
+                        .filter(|v| v.running)
+                        .map(|v| v.id.as_str().to_string())
+                        .collect();
+                    names
+                        .iter()
+                        .filter_map(|n| {
+                            if running.contains(n) {
+                                return Some((n.clone(), Kept::Keep));
+                            }
+                            let e = ledger.get(n)?;
+                            let kept = if e.ended {
+                                Kept::EndedAt(e.updated_at_ms)
+                            } else {
+                                // Interrupted (offered for Resume), or still running as far as the ledger knows.
+                                Kept::Keep
+                            };
+                            Some((n.clone(), kept))
+                        })
+                        .collect()
+                }),
+                Arc::clone(&stop),
+            )
+            .unwrap_or_else(|e| {
+                // Operational log, not UI text.
+                eprintln!("transcripts: the writer did not start: {e}");
+                None
+            })
+        };
         // Started last, after every step that can fail: a node that did not start leaves nothing resuming behind it.
         let resume_wait = if waiting.is_empty() {
             None
@@ -2481,6 +2568,7 @@ impl Node {
             chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),
+            transcript_writer,
             node_id: cfg.node_id.clone(),
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
@@ -2643,6 +2731,12 @@ impl Drop for Node {
             let _ = t.join();
         }
         if let Some(t) = self.devices_watch.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
             let _ = t.join();
         }
         if self.crashed {
@@ -3531,6 +3625,86 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0089 decision 7: the transcripts folder is among the paths the node protects for every confined agent (a confined agent
+    /// that tries to read one is in `tests/sandboxed_agent.rs`).
+    #[test]
+    fn the_transcripts_folder_is_among_the_paths_confinement_protects() {
+        // Built from the (absolute) temporary folder, so the same on every OS: a data folder in the node's own home, and one elsewhere.
+        let tmp = std::env::temp_dir().join(format!("agora-test-private-{}", std::process::id()));
+        let home = tmp.join("agora-home");
+        for data in [home.join("data"), tmp.join("elsewhere").join("data")] {
+            let cfg = NodeConfig {
+                resume_all: false,
+                node_id: "n".into(),
+                socket: home.join("run").join("n.sock"),
+                data_dir: data.clone(),
+                worktree_root: home.join("worktrees"),
+                manifests_dir: home.join("manifests"),
+                projects: vec![],
+                limits: crate::supervisor::NodeLimits::default(),
+            };
+            // `node_private_paths` makes every path absolute, so compare the same way.
+            let transcripts =
+                std::path::absolute(data.join(crate::transcript::TRANSCRIPTS_DIR)).unwrap();
+            assert!(
+                node_private_paths(&cfg)
+                    .iter()
+                    .any(|p| transcripts.starts_with(p)),
+                "{}",
+                data.display()
+            );
+        }
+    }
+
+    /// ADR-0089 decision 2: the history bounds come from the policy, never past their caps; a value that is not a number keeps the
+    /// default and is a line the node did not understand.
+    #[test]
+    fn read_policy_bounds_the_chat_history() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-test-history-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        assert_eq!(
+            read_policy(&file).history,
+            crate::transcript::Limits::default()
+        );
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 1048576
+chat.history_days = 7
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!((p.history.max_bytes, p.history.days), (1 << 20, 7));
+        assert!(p.problems.is_empty());
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 99999999999
+chat.history_days = 365
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.history.max_bytes, p.history.days),
+            (
+                crate::transcript::DEFAULT_MAX_BYTES,
+                crate::transcript::DEFAULT_DAYS
+            )
+        );
+        std::fs::write(
+            &file,
+            "chat.history_days = a week
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(p.history.days, crate::transcript::DEFAULT_DAYS);
+        assert_eq!(p.problems.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -42,6 +42,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
       agora node untrust DEVICE_ID [--data DIR]
       agora node secret set NAME | list | remove NAME [--data DIR]
+      agora history purge [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -81,6 +82,7 @@ doctor-git = Git is available ({ $detail }).
 doctor-git-missing = Git was not found. Agora needs it to give each agent its own workspace.
 doctor-git-identity-missing = Agents here have no git identity, so they cannot commit. Set "user.name" and "user.email" with "git config --global".
 doctor-control-token-reachable = Agents here could read the node's control token ({ $detail }), because the node's folder lies inside a folder agents may read or write (a node folder under /tmp). Agents will not start. Move the node's folder (--data) outside the folders in the policy.
+doctor-protected-path-reachable = Agents here could read this node's own files ({ $detail }), because they lie inside a folder agents may read or write (under /tmp, /var, /opt, /etc or /run, or a folder in the policy), and this system cannot keep them closed there. Agents will not start. Move the node's data folder (--data) or its agent types folder (--manifests) outside those folders, for example under your home folder.
 doctor-sockets-profile = The sandbox profile on this machine refuses unix sockets agents were not given (the ssh-agent, the session bus, docker, tmux). A macOS developer measured this on a real Mac on 2026-11-17: the agent's own socket works, another socket is refused, and the name resolver works. Other system sockets (DNS in every tool, git over https, cargo, npm, Claude Code, Codex) have not been measured with real agents yet, so one that needs a socket the list does not name may fail; add it with `sandbox.sockets`.
 doctor-sockets-abstract = This kernel cannot restrict unix sockets that are files: an agent can still reach an ssh-agent, a session bus, docker or tmux socket (only abstract sockets are closed). The environment scrub is the only other layer, and an agent that looks for the socket can find it.
 doctor-sockets-none = This machine ({ $detail }) cannot restrict unix sockets: the environment scrub is the only layer, and an agent that looks for an ssh-agent, session bus, docker or tmux socket can find it.
@@ -500,6 +502,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = That is not a usable name: use letters, digits and underscores only, not starting with a digit, and not a name the system or Agora uses.
 cli-secret-bad-value = The value must be one line of at most 8192 bytes, with no control characters. Nothing was stored.
 cli-secret-failed = The secret could not be stored or read here. Check that the node's data folder is yours and can be written.
+cli-history-purged = Removed the chat history this machine kept for its agents.
+cli-history-purge-failed = The chat history could not be removed. Check that the node's data folder is yours and can be written.
 cli-secret-name-collides = A secret whose name differs only in capital letters is already stored. Use that exact name, or remove it first.
 
 # ADR-0065: `agora pair` on the hub and `agora join` on the new machine.

@@ -150,6 +150,12 @@ pub enum SupervisorEvent {
     Started {
         agent: AgentId,
     },
+    /// Review of #1103 (B1): the chat items a resumed session replayed before it answered its start (ACP `session/load`), in order.
+    /// The node keeps them only for an agent whose transcript is empty (it holds the conversation already otherwise).
+    ReplayedChat {
+        agent: AgentId,
+        items: Vec<agora_adapters::host::ChatItem>,
+    },
     /// Native session retained across a resumed/restarted process; copied only on a lifecycle transition.
     SessionReported {
         agent: AgentId,
@@ -923,6 +929,9 @@ struct AdapterEntry {
     git_config: Option<crate::gitconfig::LaunchFile>,
     /// ADR-0101: how the adapter process that runs now (or ran last) was launched; set by every launch path.
     confinement: Confinement,
+    /// Review of #1103 (B1): what a resumed session said before it answered its start (see `open_session`), read by the next tick
+    /// before anything newer.
+    replayed: Vec<AdapterEvent>,
 }
 
 struct Entry {
@@ -1513,7 +1522,8 @@ impl Supervisor {
 
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
     /// write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). ADR-0084: the same for the folder of stored
-    /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. Refused, never started.
+    /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. #1114: and, where
+    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started.
     fn refuse_reachable(
         &self,
         kind: &str,
@@ -1534,6 +1544,15 @@ impl Supervisor {
                     "secrets_reachable",
                 ));
             }
+        }
+        // #1114: the same for every path of the node's own (its data folder with the secrets, the ledger and the transcripts, its
+        // manifests, its socket folder) where only a refusal keeps them closed (Linux). Checked last, so the two above keep their reason.
+        if self.sandbox.protected_reachable(profile).is_some() {
+            return Err(SupervisorError::SandboxRefused(
+                kind.to_string(),
+                self.sandbox.level.name(),
+                "protected_path_reachable",
+            ));
         }
         Ok(())
     }
@@ -1911,7 +1930,7 @@ impl Supervisor {
                     )
                 })
                 .map_err(|e| self.program_missing(&req.kind, e));
-            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
+            let (adapter, session_id, capabilities, git_config, confinement, _) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -1950,6 +1969,7 @@ impl Supervisor {
                     folder: folder.map(|f| f.path().to_path_buf()),
                     git_config,
                     confinement,
+                    replayed: Vec::new(),
                 },
             );
         } else {
@@ -2173,7 +2193,7 @@ impl Supervisor {
                 )
             })
             .map_err(|e| self.program_missing(&req.kind, e));
-        let (adapter, session_id, capabilities, git_config, confinement) = match result {
+        let (adapter, session_id, capabilities, git_config, confinement, _) = match result {
             Ok(started) => started,
             Err(error) => {
                 self.abandon(&id, created);
@@ -2210,6 +2230,7 @@ impl Supervisor {
                 folder: None,
                 git_config,
                 confinement,
+                replayed: Vec::new(),
             },
         );
         Ok(id)
@@ -2269,7 +2290,26 @@ impl Supervisor {
                 e.git_config = None;
             }
             let polled = match &e.adapter {
-                Some(adapter) if e.running => adapter.poll(),
+                Some(adapter) if e.running => {
+                    // A resumed session's replay first: its chat as one event, the rest as if it had just arrived.
+                    let early = std::mem::take(&mut e.replayed);
+                    let mut items = Vec::new();
+                    let mut rest = Vec::new();
+                    for ev in early {
+                        match ev {
+                            AdapterEvent::Chat { item, .. } => items.push(item),
+                            other => rest.push(other),
+                        }
+                    }
+                    if !items.is_empty() {
+                        events.push(SupervisorEvent::ReplayedChat {
+                            agent: id.clone(),
+                            items,
+                        });
+                    }
+                    rest.extend(adapter.poll());
+                    rest
+                }
                 _ => continue,
             };
             // ADR-0093: the holder kept only the newest of what the adapter wrote while no node read it: the person is told.
@@ -2441,8 +2481,10 @@ impl Supervisor {
             )
         });
         match launched {
-            Ok((adapter, session_id, capabilities, git_config, confinement)) => {
+            Ok((adapter, session_id, capabilities, git_config, confinement, replayed)) => {
                 e.adapter = Some(adapter);
+                // Review of #1103 (B1): what a resumed session replayed before it answered, read before anything newer.
+                e.replayed = replayed;
                 e.confinement = confinement;
                 e.git_config = git_config;
                 e.session_id = session_id;
@@ -3579,6 +3621,12 @@ impl Supervisor {
         })
     }
 
+    /// ADR-0060: whether Resume is offered for an agent the ledger holds as interrupted: the node has the agent's own session id and
+    /// its kind can continue one. What `AgentInterrupted.resumable` says, wherever the node says it (ADR-0107: also `agent.list`).
+    pub fn offers_resume(&self, e: &crate::ledger::Entry) -> bool {
+        !e.session_id.is_empty() && self.resumable(&e.kind)
+    }
+
     /// ADR-0060: puts an agent the node's session ledger holds as interrupted back as a stopped agent, so [`resume`](Self::resume)
     /// starts it under the same id, in the same folder and project. Nothing runs yet. `session` is the agent's own session id to
     /// continue, `None` for a new session.
@@ -3626,6 +3674,7 @@ impl Supervisor {
                     git_config: None,
                     // ADR-0101: no process yet; the launch (or the take-up) that follows records how it runs.
                     confinement: Confinement::Unknown,
+                    replayed: Vec::new(),
                 },
             );
             return Ok(());
@@ -3782,20 +3831,22 @@ impl Supervisor {
                 self.sandbox.enforceable(),
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
-            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
-                Ok(l) => l,
-                Err(e) => {
-                    if let Some(hook) = &self.abort_hook {
-                        hook(id);
+            let (adapter, session_id, capabilities, git_config, confinement, replayed) =
+                match launched {
+                    Ok(l) => l,
+                    Err(e) => {
+                        if let Some(hook) = &self.abort_hook {
+                            hook(id);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
-            };
+                };
             let entry = self
                 .adapters
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
             entry.adapter = Some(adapter);
+            entry.replayed = replayed;
             entry.confinement = confinement;
             entry.git_config = git_config;
             entry.session_id = session_id;
@@ -4551,6 +4602,7 @@ type Launched = (
     Vec<String>,
     Option<crate::gitconfig::LaunchFile>,
     Confinement,
+    Vec<AdapterEvent>,
 );
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
@@ -4634,9 +4686,14 @@ fn launch_adapter(
             discard_adapter(adapter, git_config);
             Err(SupervisorError::FolderMoved)
         }
-        Ok((session_id, capabilities)) => {
-            Ok((adapter, session_id, capabilities, git_config, confinement))
-        }
+        Ok((session_id, capabilities, replayed)) => Ok((
+            adapter,
+            session_id,
+            capabilities,
+            git_config,
+            confinement,
+            replayed,
+        )),
         Err(e) => {
             discard_adapter(adapter, git_config);
             Err(e)
@@ -4748,14 +4805,18 @@ fn discard_adapter(adapter: Adapter, git_config: Option<crate::gitconfig::Launch
         });
 }
 
-/// The adapter's `initialize` and its session's start (or resume): the session id and the capabilities it declared.
+/// The adapter's `initialize` and its session's start (or resume): the session id, the capabilities it declared and, for a resume,
+/// everything the adapter said before it answered the session's start. Review of #1103 (B1): an agent that loads its session replays
+/// the conversation then (ACP `session/load`, passed on by the bridge as chat), and the adapter's reader hands every line on in order,
+/// so all of that is waiting in its events when the answer is in. The tick reads them first and reports their chat items as one
+/// [`SupervisorEvent::ReplayedChat`], for the node to keep only when its transcript does not already hold the conversation.
 fn open_session(
     adapter: &Adapter,
     checkout_root: &Path,
     worktree: &Path,
     resume: Option<&str>,
     mesh: Option<&agora_adapters::inject::Endpoint>,
-) -> Result<(String, Vec<String>), SupervisorError> {
+) -> Result<(String, Vec<String>, Vec<AdapterEvent>), SupervisorError> {
     // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
     // the old 10 s ended such a start as a bare `internal` error.
     const INIT: Duration = Duration::from_secs(30);
@@ -4786,7 +4847,12 @@ fn open_session(
             SESSION,
         )
         .map_err(adapter_error)?;
-    Ok((session_id, init.capabilities))
+    let replayed = if resume.is_some() {
+        adapter.poll()
+    } else {
+        Vec::new()
+    };
+    Ok((session_id, init.capabilities, replayed))
 }
 
 /// The agent's own mesh socket joins the unix sockets a confined agent may reach (#475, ADR-0083): it lies in a folder of the node's,

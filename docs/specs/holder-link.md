@@ -71,7 +71,7 @@ next frame's.
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
   most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
   has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
-  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
+  refused (tested, also when the receive that completes the frame returns after the deadline: the read's clock is given, #1089); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - **Agent ids** are at most `MAX_AGENT_ID` (256 bytes; the node's own are `agent-<n>`, at most 26), refused on `Start` and `StartPipe`
   (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
   larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and
@@ -94,7 +94,7 @@ next frame's.
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
 - A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
   is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
-  waits only once). `write_frame` sets the stream's write timeout to `WRITE_SLICE` itself, so the bound holds whatever the caller set (none, or a longer one; tested). In the frame's last two `WRITE_SLICE`s a send is first waited for with `LocalStream::wait_writable` (`poll(2)` on Unix, rounded up to a millisecond, at most a slice and what is left), so the frame ends at `FRAME_TIMEOUT` and not when a late socket timer fires after it (a 1 s send timeout fired 24-27 ms late on Linux; the late-timer case is reasoned, not reproduced by a test); earlier sends are not polled, since `poll` reports room only once three quarters of the buffer are free and that halves a large frame's rate. On Windows the pipe is not polled (the call returns at once) and its writes have no time limit yet: the holder link runs on Unix only until ADR-0079 W2. A receive on a stream whose peer has already shut the connection (macOS refuses a new read timeout with `EINVAL`) goes on without the timeout, decided in `LocalStream::set_read_timeout_or_closed`, which takes `EINVAL` for that case only when `poll(2)` shows the stream hung up; every other failure of that call, and `EINVAL` on a stream still open, fails the read. The holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
+  waits only once). `write_frame` sets the stream's write timeout to `WRITE_SLICE` itself, so the bound holds whatever the caller set (none, or a longer one; tested). In the frame's last two `WRITE_SLICE`s a send is first waited for with `LocalStream::wait_writable` (`poll(2)` on Unix, rounded up to a millisecond, at most a slice and what is left), so the frame ends at `FRAME_TIMEOUT` and not when a late socket timer fires after it (a 1 s send timeout fired 24-27 ms late on Linux; the late-timer case is reasoned, not reproduced by a test); earlier sends are not polled, since `poll` reports room only once three quarters of the buffer are free and that halves a large frame's rate. On Windows the pipe is not polled (the call returns at once); the write timeout bounds each send instead: a pending pipe write is cancelled at it, and while a timeout is set a send writes at most 16 KiB, because only a write no larger than the pipe's buffer is sure to have sent nothing when cancelled (measured, #1089; a larger one can be partly taken and still report 0). The holder link runs on Unix only until ADR-0079 W2. A receive on a stream whose peer has already shut the connection (macOS refuses a new read timeout with `EINVAL`) goes on without the timeout, decided in `LocalStream::set_read_timeout_or_closed`, which takes `EINVAL` for that case only when `poll(2)` shows the stream hung up; every other failure of that call, and `EINVAL` on a stream still open, fails the read. The holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
@@ -292,7 +292,16 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
   (`skips_permissions_now`) until the agent reports new ones. Its `AgentStarted` says `same_process` (ADR-0104 decision 2), so the hub and the
   window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering when it stopped (up to 5 s) is lost.
-  Not built: its earlier conversation is not shown (the chat history is in memory, ADR-0089; #931).
+  Its earlier conversation is shown again (ADR-0104 C1, #931): before the node reads anything new from the holder, it fills the agent's chat
+  ring from the end of the transcript the old node wrote (`<data>/transcripts/<id>.jsonl`, ADR-0089), numbers on after the file's highest
+  id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
+  asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
+  its last unwritten second is said dropped too). The transcript is
+  written in batches at most a second apart (while the node holds a secret value, the agent's newest words in a turn wait for what
+  follows or the turn's end), so a
+  kill loses at most those: they were shown live, are not in the file,
+  and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines the old node read
+  from the holder (the holder counts them given) and had not yet recorded are lost too, as before.
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
   reports above; `pending_approvals` is its requests), which keeps an `approval/request` unless a later

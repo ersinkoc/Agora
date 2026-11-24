@@ -9,10 +9,10 @@ use agora_i18n::key;
 use std::time::Duration;
 
 use crate::device::{approval_message, grant_message, new_grant_id, Device};
-use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
+use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
-    ErrorInfo, Snapshot,
+    ErrorInfo, PersonRole, Snapshot,
 };
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
@@ -151,6 +151,22 @@ pub struct Session {
     seen: Seen,
     /// History (kind 4, ADR-0100) per terminal stream, held for the screen it comes before: [`Session::terminal_history`].
     history: HeldHistory,
+    /// ADR-0106: the role of the person this connection signed in as, from the hub's first frame; unspecified from an older hub.
+    person_role: PersonRole,
+}
+
+/// How long [`Session::connect`] waits for the hub's first frame: the `Welcome` naming the person's role (ADR-0106), or an older hub's
+/// snapshot. Both come at once; a hub that sends neither in time leaves the role unspecified, and its frames are read as they come.
+const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(5);
+
+/// ADR-0106: the role a `Welcome` names, when `f` is one.
+fn welcome_role(f: &Frame) -> Option<PersonRole> {
+    if (f.stream_id, f.kind) != (STREAM_CONTROL, kinds::WELCOME) {
+        return None;
+    }
+    agora_protocol::v1::Welcome::decode(f.payload.as_slice())
+        .ok()
+        .map(|w| w.person_role())
 }
 
 /// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
@@ -391,9 +407,16 @@ impl Session {
             })
             .await
             .map_err(|_| ClientError::Unreachable)?;
-            Ok::<_, ClientError>(conn)
+            // ADR-0106: a hub that tells the role sends its `Welcome` before anything else; an older hub sends the snapshot first
+            // (this subscription asks for one), which is kept for `next`. A closed connection is found by `next`, as before.
+            let first = match tokio::time::timeout(FIRST_FRAME_WITHIN, conn.recv()).await {
+                Ok(Ok(Some(f))) => Some(f),
+                _ => None,
+            };
+            Ok::<_, ClientError>((conn, first))
         })?;
-        Ok(Session {
+        let (conn, first) = conn;
+        let mut session = Session {
             rt,
             conn,
             requests: 0,
@@ -405,7 +428,28 @@ impl Session {
             typing: Typing::default(),
             seen: Seen::default(),
             history: HeldHistory::default(),
-        })
+            person_role: PersonRole::Unspecified,
+        };
+        if let Some(f) = first {
+            match welcome_role(&f) {
+                Some(role) => session.person_role = role,
+                None => set_aside(
+                    f,
+                    &mut session.changed,
+                    &mut session.asked,
+                    &mut session.snapshot,
+                    &mut session.term_frames,
+                    &mut session.seen,
+                ),
+            }
+        }
+        Ok(session)
+    }
+
+    /// ADR-0106: the role of the person this connection signed in as, as the hub said when it opened (the hub ends a connection whose
+    /// role or grants changed). `Unspecified` from a hub that predates it: the caller learns the role as it did before.
+    pub fn person_role(&self) -> PersonRole {
+        self.person_role
     }
 
     /// Waits up to `wait` for the hub to say something.
@@ -423,9 +467,17 @@ impl Session {
         let asked = &mut self.asked;
         let typing = &mut self.typing;
         let seen = &mut self.seen;
+        let person_role = &mut self.person_role;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // ADR-0106: a `Welcome` that came after `connect` stopped waiting for it.
+                Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME) => {
+                    if let Some(role) = welcome_role(&f) {
+                        *person_role = role;
+                    }
+                    Update::Quiet
+                }
                 // The answer to something typed without waiting: only a missing grant matters.
                 Ok(Ok(Some(f))) if typing.answer(&f) => Update::Quiet,
                 // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
@@ -887,8 +939,15 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
-    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
+    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033). The hub
+    /// answers it to the owner only, so a member's or viewer's session (ADR-0106) does not ask: `auth.forbidden` without a request,
+    /// where the hub would refuse it and write the refusal down. An older hub's session asks as before.
     pub fn usage_total(&mut self) -> Result<u64, String> {
+        if matches!(self.person_role, PersonRole::Member | PersonRole::Viewer) {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
         let ok = self.command_ok(
             "",
             command_request::Command::UsageReport(agora_protocol::v1::UsageReport {}),
@@ -1301,8 +1360,12 @@ impl Session {
         .map(|_| ())
     }
 
-    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
+    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget. Never sent
+    /// for a viewer (ADR-0106): their window watches, and the hub would refuse and write down every key.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1314,8 +1377,11 @@ impl Session {
     }
 
     /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
-    /// a machine's refusal of it asks for no grant.
+    /// a machine's refusal of it asks for no grant. Never sent for a viewer, as typing is not.
     pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1347,7 +1413,12 @@ impl Session {
         self.typing.sent.len()
     }
 
+    /// Asks for the terminal's size (the hub keeps the smallest its watchers asked for). Never sent for a viewer (ADR-0106): the hub
+    /// refuses it, writes the refusal down, and a viewer's window does not size the agent's terminal.
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         self.send_nowait(
             node,
             command_request::Command::TerminalResize(agora_protocol::v1::TerminalResize {
@@ -2135,6 +2206,40 @@ mod typing_tests {
 #[cfg(test)]
 mod set_aside_tests {
     use super::*;
+
+    #[test]
+    fn only_a_welcome_on_the_control_stream_names_a_role() {
+        let frame = |stream_id, kind, payload: Vec<u8>| Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        };
+        let mut w = agora_protocol::v1::Welcome::default();
+        w.set_person_role(PersonRole::Viewer);
+        assert_eq!(
+            welcome_role(&frame(STREAM_CONTROL, kinds::WELCOME, w.encode_to_vec())),
+            Some(PersonRole::Viewer)
+        );
+        // An older hub's first frame: the snapshot, which is no Welcome.
+        assert_eq!(
+            welcome_role(&frame(
+                STREAM_EVENTS,
+                kinds::SNAPSHOT,
+                Snapshot::default().encode_to_vec()
+            )),
+            None
+        );
+        // A published Welcome (a node's) reads as unspecified.
+        assert_eq!(
+            welcome_role(&frame(
+                STREAM_CONTROL,
+                kinds::WELCOME,
+                agora_protocol::v1::Welcome::default().encode_to_vec()
+            )),
+            Some(PersonRole::Unspecified)
+        );
+    }
 
     #[test]
     fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
