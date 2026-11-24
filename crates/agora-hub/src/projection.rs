@@ -1308,6 +1308,7 @@ mod tests {
 
     fn started(id: &str) -> Body {
         Body::AgentStarted(AgentStarted {
+            run_id: Vec::new(),
             agent_id: id.into(),
             project_id: "p".into(),
             node_id: "n1".into(),

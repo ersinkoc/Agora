@@ -57,10 +57,20 @@ struct Env {
 
 impl Env {
     fn new(name: &str) -> Self {
+        Self::with_secret(name, None)
+    }
+
+    /// [`Self::new`] on a node that holds `secret` in its store (#1147).
+    fn with_secret(name: &str, secret: Option<&str>) -> Self {
         let root = std::env::temp_dir().join(format!("spawn-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("manifests")).unwrap();
         std::fs::create_dir_all(root.join("data")).unwrap();
+        if let Some(v) = secret {
+            agora_node::credentials::SecretStore::in_data(&root.join("data"))
+                .set("TOKEN", &agora_node::credentials::Secret::new(v).unwrap())
+                .unwrap();
+        }
         let folder = root.join("work");
         std::fs::create_dir_all(folder.join("sub")).unwrap();
         // `probe` stays up reading its input; `screen` shows a line and holds it.
@@ -1426,4 +1436,44 @@ fn a_helper_acts_without_asking_only_when_the_signed_decision_names_it() {
     assert_ne!(p2.id, p.id, "asked again: no grant covers an option");
     e.stop(&parent, true);
     let _ = call;
+}
+
+/// #1147 (audit of #1157): a value the node holds, in the caller's prompt or its folder's name, never reaches the helper-start card
+/// (the queue, the hub's event, the window): the detail the start signature binds holds it replaced, so a decision over what the card
+/// showed still starts the helper.
+#[test]
+fn a_secret_in_a_helper_starts_prompt_never_reaches_its_card() {
+    if !supported() {
+        return;
+    }
+    let value = "SK-HELPER-0123456789-ABCDEFGHIJ";
+    let e = Env::with_secret("secret", Some(value));
+    let folder = e.folder.join(format!("dir-{value}"));
+    std::fs::create_dir_all(&folder).unwrap();
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "screen", "prompt": format!("use {value} to log in"), "folder": folder}),
+    );
+    let p = e.request_of(&parent);
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaks = |t: &str| pieces.iter().filter(|x| t.contains(**x)).count();
+    assert_eq!(leaks(&p.detail), 0, "{}", p.detail);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(detail["prompt"], "use <redacted> to log in");
+    let events = e.node().events.events_after(0);
+    let shown: Vec<String> = events
+        .iter()
+        .filter_map(|ev| match &ev.body {
+            Some(Body::ApprovalRequested(a)) => Some(a.detail.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|d| leaks(d) == 0), "{shown:?}");
+    // The decision signs what the card showed; the helper starts.
+    e.decide(&p, true, 0, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
 }

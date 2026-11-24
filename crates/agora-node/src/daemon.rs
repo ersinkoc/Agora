@@ -131,6 +131,8 @@ pub struct EventSink {
     ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
     /// Usage reports gathered before they are logged ([`crate::usage_merge`]). Never held with `log`.
     usage: Mutex<crate::usage_merge::UsageMerge>,
+    /// #1147 (audit of #1157): the node's secret values, replaced in the agent's own words an event carries (see `redact_body`).
+    secrets: std::sync::OnceLock<Arc<crate::transcript::Store>>,
 }
 
 impl Drop for EventSink {
@@ -385,7 +387,61 @@ impl EventSink {
             set_aside,
             ledger: std::sync::OnceLock::new(),
             usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
+            secrets: std::sync::OnceLock::new(),
         })
+    }
+
+    /// #1147 (audit of #1157): the store whose secret values are replaced in the agent's words an event carries. Set once.
+    pub fn set_secrets(&self, store: Arc<crate::transcript::Store>) {
+        let _ = self.secrets.set(store);
+    }
+
+    /// #1147 (audit of #1157): the text an agent chose in `body`, with the node's secret values replaced (whole, and pieces of 4 bytes
+    /// or more at the text's ends), so the hub never records them: a mesh message's body, a task's title, a handoff's summary, and the
+    /// names, descriptions and hints of the agent's modes, options and commands. Ids are kept (they are answered back). An approval's
+    /// action and detail are replaced before the request is queued (the always signature binds what the card shows), not here.
+    fn redact_body(&self, body: Body) -> Body {
+        let Some(store) = self.secrets.get() else {
+            return body;
+        };
+        let sec = store.current();
+        if sec.is_empty() {
+            return body;
+        }
+        let r = |s: &mut String| *s = crate::transcript::redact_text(s, &sec);
+        let mut body = body;
+        match &mut body {
+            Body::MessagePosted(m) => r(&mut m.body),
+            Body::TaskChanged(t) => r(&mut t.title),
+            Body::HandoffCreated(h) => {
+                r(&mut h.summary);
+                h.refs.iter_mut().for_each(r);
+            }
+            Body::AgentSessionOptions(o) => {
+                for x in o.modes.iter_mut().chain(o.models.iter_mut()) {
+                    r(&mut x.name);
+                    r(&mut x.description);
+                }
+            }
+            Body::AgentSessionConfig(c) => {
+                for o in &mut c.options {
+                    r(&mut o.name);
+                    r(&mut o.description);
+                    for x in &mut o.choices {
+                        r(&mut x.name);
+                        r(&mut x.description);
+                    }
+                }
+            }
+            Body::AgentCommands(c) => {
+                for x in &mut c.commands {
+                    r(&mut x.description);
+                    r(&mut x.input_hint);
+                }
+            }
+            _ => {}
+        }
+        body
     }
 
     /// ADR-0060: the session ledger that learns from what this sink records. Set once; a second call is ignored.
@@ -545,6 +601,7 @@ impl EventSink {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
         record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.into(),
             project_id: view.project.clone(),
             node_id: self.producer.clone(),
@@ -602,6 +659,7 @@ impl EventSink {
     }
 
     fn record_as(&self, body: Body, learn: bool) {
+        let body = self.redact_body(body);
         let ended = match &body {
             // Gathered for a few seconds and logged as one (see `crate::usage_merge`).
             Body::AgentUsageReported(u) => {
@@ -724,6 +782,7 @@ impl EventSink {
         launch: &crate::launch_options::LaunchChoice,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
             node_id: node.to_string(),
@@ -1732,6 +1791,18 @@ impl Node {
         // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
         let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
         events.set_ledger(Arc::clone(&ledger));
+        // ADR-0089, #1147: the store of chat transcripts, and the node's secret values it reads, which every event that carries the
+        // agent's own words has replaced (from the first event recorded, the agents taken up included).
+        let policy = read_policy(&cfg.data_dir.join(POLICY_FILE));
+        let transcripts = Arc::new(
+            crate::transcript::Store::new(
+                &cfg.data_dir,
+                policy.history,
+                Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
+            )
+            .with_env_secrets(policy.credentials.values().flatten().map(String::as_str)),
+        );
+        events.set_secrets(Arc::clone(&transcripts));
 
         // Short path on purpose: Unix socket paths are limited to about 100 bytes.
         let mesh_dir = cfg
@@ -1992,15 +2063,7 @@ impl Node {
         }
         // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
         // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
-        let policy = read_policy(&cfg.data_dir.join(POLICY_FILE));
-        let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::new(
-            crate::transcript::Store::new(
-                &cfg.data_dir,
-                policy.history,
-                Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
-            )
-            .with_env_secrets(policy.credentials.values().flatten().map(String::as_str)),
-        )));
+        let chat = Arc::new(crate::chat::ChatBoard::saving(transcripts));
         for (id, _) in &taken_up {
             chat.seed_from_disk(id, now_ms());
         }
@@ -2323,10 +2386,12 @@ impl Node {
                                         .unwrap_or_else(|e| e.into_inner())
                                         .approval_raise_terms(agent);
                                     let (strict, permitted) = terms.unwrap_or((false, false));
+                                    // #1147 (audit of #1157): the agent's name for its "always" option, as the card (and the always
+                                    // signature over it) shows it, with the node's secret values replaced; its id is kept.
                                     let raise = crate::approvals::raise_for(
                                         strict,
                                         scopes,
-                                        always_label,
+                                        &chat.redact_text(always_label),
                                         always_option_id,
                                         permitted,
                                     );
@@ -2338,8 +2403,8 @@ impl Node {
                                             if let Some(p) = approvals.request(
                                                 agent,
                                                 approval_id,
-                                                action,
-                                                detail,
+                                                &chat.redact_text(action),
+                                                &chat.redact_text(detail),
                                                 now,
                                             ) {
                                                 ev.approval_requested(&p);
@@ -2369,11 +2434,13 @@ impl Node {
                                     let Some(offer) = offer else {
                                         continue;
                                     };
+                                    // #1147 (audit of #1157): the card (the queue, its event, the window) shows the agent's action and
+                                    // detail with the node's secret values replaced; the always signature binds those words.
                                     if let Some(p) = approvals.request_offered(
                                         agent,
                                         approval_id,
-                                        action,
-                                        detail,
+                                        &chat.redact_text(action),
+                                        &chat.redact_text(detail),
                                         now,
                                         offer,
                                     ) {
@@ -4274,5 +4341,98 @@ mod process_record_tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// #1147 (audit of #1157): the agent's own words an event carries reach the hub with the node's secret values replaced.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod event_redaction_tests {
+    use super::EventSink;
+    use agora_protocol::v1::{self, event::Body};
+    use std::sync::Arc;
+
+    #[test]
+    fn the_agents_words_in_an_event_hold_no_piece_of_a_secret() {
+        let value = "SK-EVENT-0123456789-ABCDEFGHIJ";
+        let dir = std::env::temp_dir().join(format!("agora-ev-redact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::credentials::SecretStore::in_data(&dir)
+            .set("T", &crate::credentials::Secret::new(value).unwrap())
+            .unwrap();
+        let store = Arc::new(crate::transcript::Store::new(
+            &dir,
+            crate::transcript::Limits::default(),
+            Some(crate::credentials::SecretStore::in_data(&dir)),
+        ));
+        let sink = EventSink::open(&dir.join("events"), "n1").unwrap();
+        sink.set_secrets(store);
+        let opt = |s: &str| v1::SessionOption {
+            id: "plan".into(),
+            name: format!("name {s}"),
+            description: format!("{s} more"),
+            skips_permissions: false,
+        };
+        // Whole, and cut at a text's end (the first 12 bytes of the value only).
+        for s in [value, &value[..12]] {
+            sink.record_bodies(vec![
+                Body::MessagePosted(v1::MessagePosted {
+                    message_id: "m1".into(),
+                    from_agent_id: "a".into(),
+                    to: "b".into(),
+                    body: format!("use {s}"),
+                }),
+                Body::TaskChanged(v1::TaskChanged {
+                    task_id: "t1".into(),
+                    title: format!("{s} title"),
+                    ..Default::default()
+                }),
+                Body::HandoffCreated(v1::HandoffCreated {
+                    summary: format!("x {s}"),
+                    refs: vec![format!("src/{s}")],
+                    ..Default::default()
+                }),
+                Body::AgentSessionOptions(v1::AgentSessionOptions {
+                    agent_id: "a".into(),
+                    modes: vec![opt(s)],
+                    models: vec![opt(s)],
+                    current_mode: "plan".into(),
+                    current_model: "plan".into(),
+                }),
+                Body::AgentSessionConfig(v1::AgentSessionConfig {
+                    agent_id: "a".into(),
+                    options: vec![v1::SessionConfigOption {
+                        id: "o".into(),
+                        name: format!("name {s}"),
+                        description: format!("{s} d"),
+                        choices: vec![opt(s)],
+                        ..Default::default()
+                    }],
+                }),
+                Body::AgentCommands(v1::AgentCommands {
+                    agent_id: "a".into(),
+                    commands: vec![v1::AgentCommand {
+                        name: "c".into(),
+                        description: format!("does {s}"),
+                        input_hint: format!("{s} hint"),
+                    }],
+                }),
+            ]);
+        }
+        let events = sink.events_after(0);
+        assert!(events.len() >= 12);
+        let text = format!("{events:?}");
+        for i in 0..=value.len() - 4 {
+            assert!(
+                !text.contains(&value[i..i + 4]),
+                "{:?} in {text}",
+                &value[i..i + 4]
+            );
+        }
+        // Ids are answered back: kept as they are.
+        assert!(text.contains("\"plan\""));
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

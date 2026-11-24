@@ -1,0 +1,10 @@
+{
+  "agentId": "agent-1",
+  "projectId": "p1",
+  "nodeId": "n1",
+  "worktreeId": "w1",
+  "kind": "example",
+  "level": "INTEGRATION_LEVEL_L0_GENERIC",
+  "sameProcess": true,
+  "runId": "EBESExQVFhcYGRobHB0eHw=="
+}
