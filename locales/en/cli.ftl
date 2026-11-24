@@ -12,6 +12,7 @@ cli-usage =
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
       agora agent prompt AGENT_ID TEXT... [--socket PATH]
+      agora agent resume AGENT_ID [--again] [--socket PATH]
       agora agent list [--socket PATH]
       agora agent kinds [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
@@ -53,6 +54,8 @@ cli-node-events-set-aside = Events recorded before this machine was linked as { 
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
 cli-agent-prompted = Sent the prompt to agent { $agent_id }
+cli-agent-resumed = Resumed agent { $agent_id } in { $worktree }
+cli-agent-started-again = Started agent { $agent_id } again in { $worktree } (a new conversation)
 cli-agent-list-empty = This node has no agents.
 cli-agent-kinds-empty = This node has no agent descriptions.
 cli-terminal-detached = Detached from { $agent_id }.

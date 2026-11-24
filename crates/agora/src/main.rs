@@ -328,6 +328,8 @@ pub(crate) struct Opts {
     resume: Option<String>,
     /// ADR-0066: `agora agent start KIND --setting id=value` (repeatable).
     settings: Vec<String>,
+    /// ADR-0060, #1137: `agora agent resume AGENT_ID --again`, Start again (a new session in the same folder) instead of Resume.
+    again: bool,
     save: bool,
     positional: Vec<String>,
 }
@@ -342,6 +344,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--data" => o.data = Some(it.next()?.into()),
             "--cwd" => o.cwd = Some(it.next()?.clone()),
             "--worktree" => o.separate_worktree = true,
+            "--again" => o.again = true,
             "--accept-project-id-change" => o.accept_identity_change = true,
             "--worktrees" => o.worktrees = Some(it.next()?.into()),
             "--project" => {
@@ -489,6 +492,7 @@ fn main() -> ExitCode {
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
         ["agent", "prompt"] => agent_prompt(&say, &opts),
+        ["agent", "resume"] => agent_resume(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["agent", "install"] => agentcmd::install(&say, &opts),
@@ -1223,6 +1227,43 @@ fn agent_stop(say: &Say, o: &Opts) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Err(code) => code,
+    }
+}
+
+/// `agora agent resume AGENT_ID [--again]` (#1137): brings back an agent `agora agent list` shows as interrupted, under the same id in
+/// the same folder: with its own session (Resume, `resume` in the list), or with `--again` a new one (Start again, `start-again`). The
+/// same `AgentResume` the window and the terminal client send (ADR-0060); unsigned, as `agora agent start` is, since the local socket is
+/// this machine's own user (ADR-0082). The node answers why it cannot (`agent.not_interrupted`, `agent.session_missing`, ...).
+fn agent_resume(say: &Say, o: &Opts) -> ExitCode {
+    let Some(id) = o.positional.first() else {
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let cmd = Cmd::AgentResume(v1::AgentResume {
+        agent_id: id.clone(),
+        new_session: o.again,
+        authorization: None,
+    });
+    match call(say, &mut c, cmd) {
+        Ok(v1::CommandOk {
+            result: Some(Ok_::AgentLaunch(r)),
+        }) => {
+            say.out(
+                if o.again {
+                    key!("cli-agent-started-again")
+                } else {
+                    key!("cli-agent-resumed")
+                },
+                &[("agent_id", r.agent_id.into()), ("worktree", r.path.into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::from(1),
         Err(code) => code,
     }
 }
