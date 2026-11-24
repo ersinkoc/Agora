@@ -576,14 +576,16 @@ impl Spawner {
             "agent": r.caller.as_str(),
             "agent_kind": caller_kind,
             "kind": r.kind,
-            "folder": r.folder,
+            // #1147 (audit of #1157): the caller's own words (its prompt) and its folder, with the node's secret values replaced: the
+            // card, the hub's event and the start signature hold these words; the start itself uses the node's own request.
+            "folder": self.chat.redact_text(&r.folder),
             "inside": r.inside,
             "worktree": r.worktree,
             "depth": r.depth,
             // A scoped grant covers starts as they were approved here, and a later start never carries settings under a grant
             // (it is always asked), so a request with settings offers none: what the user approves is exactly this start.
             "grant_allowed": Self::grantable_start(r),
-            "prompt": r.prompt,
+            "prompt": self.chat.redact_text(&r.prompt),
         });
         // ADR-0066: shown on the card (`label` is the manifest's Fluent id, the window's own text names it) and signed with the request
         // (`agora-approval-start-v2`). Only present when there are some, so a request without settings is byte for byte what it was.

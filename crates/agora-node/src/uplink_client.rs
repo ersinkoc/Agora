@@ -788,6 +788,15 @@ where
                         });
                         continue;
                     }
+                    // ADR-0109: this node does not take durable handoffs yet (it does not advertise the capability), so the hub's
+                    // delivery is refused here, before grants or the signed-command policy could ask for a grant on it.
+                    if matches!(
+                        req.command,
+                        Some(command_request::Command::DeliverTaskHandoff(_))
+                    ) {
+                        let _ = answers_tx.send(handoff_not_taken(&req.request_id));
+                        continue;
+                    }
                     if let Some(command_request::Command::BoardJoin(j)) = &req.command {
                         let mesh = mesh.clone();
                         let tx = answers_tx.clone();
@@ -1017,6 +1026,19 @@ fn misplaced(request_id: String) -> CommandResponse {
         result: Some(command_response::Result::Err(
             agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
                 .with("field", "stream_id")
+                .to_info(),
+        )),
+    }
+}
+
+/// The node's answer to the hub's `DeliverTaskHandoff` until it keeps a durable handoff inbox (ADR-0109).
+fn handoff_not_taken(request_id: &str) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    CommandResponse {
+        request_id: request_id.to_string(),
+        result: Some(command_response::Result::Err(
+            Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", agora_protocol::handshake::TASK_HANDOFF_V1)
                 .to_info(),
         )),
     }
@@ -1596,6 +1618,22 @@ pub fn enroll(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hub_handoff_delivery_is_refused_until_the_node_keeps_an_inbox() {
+        let answer = handoff_not_taken("r-1");
+        assert_eq!(answer.request_id, "r-1");
+        let Some(command_response::Result::Err(info)) = answer.result else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(info.code, "protocol.capability_missing");
+        assert_eq!(
+            info.params["capability"].value,
+            Some(agora_protocol::v1::param_value::Value::Str(
+                agora_protocol::handshake::TASK_HANDOFF_V1.into()
+            ))
+        );
+    }
 
     #[test]
     fn urls_split_into_scheme_host_and_address() {

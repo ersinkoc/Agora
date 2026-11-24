@@ -51,7 +51,9 @@ pub fn command_name(req: &CommandRequest) -> String {
 pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route {
     // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let may = req.command.as_ref().is_some_and(|c| {
-        (who.role != Role::Viewer || viewer_may(c))
+        // ADR-0109: only the hub can issue a durable handoff delivery.
+        !matches!(c, C::DeliverTaskHandoff(_))
+            && (who.role != Role::Viewer || viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
     });
     if !may {
@@ -200,6 +202,17 @@ mod tests {
         for c in [usage, forget_node(false), forget_agent] {
             assert_eq!(route(&owner, None, &req("n1", c)), Route::TargetNotAllowed);
         }
+    }
+
+    #[test]
+    fn a_window_cannot_send_a_hub_handoff_delivery() {
+        let delivery = C::DeliverTaskHandoff(v1::DeliverTaskHandoff::default());
+        assert_eq!(
+            route(&who(Role::Owner), None, &req("n1", delivery)),
+            Route::Forbidden {
+                action: "DeliverTaskHandoff".into()
+            }
+        );
     }
 
     #[test]
