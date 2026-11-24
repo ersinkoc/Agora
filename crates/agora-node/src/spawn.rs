@@ -448,11 +448,7 @@ impl Spawner {
         };
         // The texts the kind's screen must show around typed text (its footer): a prompt that contains one could stand in for it when
         // a menu replaced the real one, so it is refused.
-        let lower = a.prompt.to_lowercase();
-        if markers
-            .iter()
-            .any(|m| !m.is_empty() && lower.contains(&m.to_lowercase()))
-        {
+        if carries_marker(&a.prompt, &markers) {
             return Err(invalid("prompt"));
         }
         let me = views
@@ -1194,10 +1190,50 @@ impl Helpers for Spawner {
     }
 }
 
+/// Whether `prompt` holds one of a kind's `[[typed]]` marker texts, ignoring case and whitespace as the screen rules do: they find a
+/// phrase with its runs of whitespace (line breaks included) as one space, so a prompt that only spaces a marker differently could
+/// still stand in for it once typed (ADR-0057).
+fn carries_marker(prompt: &str, markers: &[String]) -> bool {
+    let words = |s: &str| {
+        s.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let prompt = words(prompt);
+    markers.iter().any(|m| {
+        let m = words(m);
+        !m.is_empty() && prompt.contains(&m)
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0057: a prompt that spaces a marker differently (two spaces, a line break, a tab) is refused as the marker itself is, since
+    /// the screen rules find it either way; case does not matter, and a marker of only whitespace refuses nothing.
+    #[test]
+    fn a_marker_spaced_differently_is_still_found_in_a_prompt() {
+        let markers = vec!["Enter send".to_string(), "? for shortcuts".to_string()];
+        for prompt in [
+            "then press Enter send",
+            "then press enter  send",
+            "then press Enter\nsend",
+            "then press ENTER\t send now",
+            "type ?   for\r\nshortcuts",
+        ] {
+            assert!(carries_marker(prompt, &markers), "{prompt:?}");
+        }
+        for prompt in ["Enter, then send", "entersend", "? for short cuts"] {
+            assert!(!carries_marker(prompt, &markers), "{prompt:?}");
+        }
+        assert!(!carries_marker(
+            "any prompt",
+            &[" \n ".to_string(), String::new()]
+        ));
+    }
 
     #[test]
     fn output_is_cut_from_the_top_at_a_line() {
