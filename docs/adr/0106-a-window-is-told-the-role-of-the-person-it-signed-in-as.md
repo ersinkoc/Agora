@@ -131,5 +131,12 @@ message Welcome {
   - The web hides start, new terminal, close, resume, remove, prompts, options, Give, removing a device, approving another device and
     revoking a helper's grant. Forgetting a machine is offered to the owner only (the hub refuses `node.forget` to anyone else). A
     viewer's empty Home says what they will see instead of asking them to start an agent.
-- **Not built:** a viewer's answer buttons on requests in the web, and a chat tab's prompt line in the terminal client (#1140). The hub
-  refuses and audits both, as before.
+  - A viewer's requests are read-only (#1140). The web shows each request whole with no Allow, Deny or "Allow always" (the pane, the
+    side panel, Home, the attention dialog, the phone's list and bar, and Review, which keeps its Close and has no grant to choose),
+    with "You can watch here" where the answers would be in the attention dialog and the phone's bar. A chat agent's composer has no
+    box to type in and no Send; its Mode and Model menus show what the agent runs with, their choices off. The terminal client's chat
+    (a console tab and the plain list's) has no line to type on: its hint says the window watches, and a key typed says why and sends
+    nothing. Its requests (the list, the details panel, a chat tab, the reader of a start request) show without the keys that answer
+    them. The session itself refuses to send a viewer's `AgentPrompt`,
+    `AgentSetMode` or `AgentSetModel`. The terminal client never offers cancelling a turn. An older hub (role unspecified) keeps the
+    answers and the prompt line.
