@@ -1721,6 +1721,7 @@ impl Supervisor {
     pub fn clear_hooks(&mut self) {
         self.hook = None;
         self.abort_hook = None;
+        self.run_hook = None;
     }
 
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
