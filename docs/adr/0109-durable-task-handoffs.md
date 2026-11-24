@@ -1,6 +1,8 @@
 # 0109. Recover a cross-node task handoff after a hub restart
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
+
+Accepted: 2026-11-24 (the maintainer, in the merger chat: "Accept and build").
 
 ## Context
 
