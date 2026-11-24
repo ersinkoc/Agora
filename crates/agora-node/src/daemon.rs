@@ -1841,6 +1841,9 @@ impl Node {
             None
         };
         sup.set_sandbox(sandbox);
+        // #1150: registry kinds that start through a package runner (`npx`, `uvx`) start it in an empty folder of their own here, not
+        // in the project, whose package-manager configuration it would otherwise read.
+        sup.set_runner_root(cfg.data_dir.join("runner"));
         // ADR-0084: the secrets this node holds, and which kind may receive which (the node's own policy; the hub cannot set it).
         sup.set_credentials(crate::credentials::Credentials::new(
             crate::credentials::SecretStore::in_data(&cfg.data_dir),

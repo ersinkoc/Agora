@@ -142,6 +142,10 @@ doctor-registry-kinds = ACP kayıt defterinden { $detail ->
         [one] 1 ajan
        *[other] { $detail } ajan
     } biliniyor, Agora'da denenmedi; bunlardan { $ready } tanesi programını bu makinede buluyor. Penceredeki Ayarlar → Ajanlar hepsini listeler.
+doctor-runner-folders-left = ACP kayıt defteri ajanlarının başladığı { $detail ->
+        [one] 1 klasör
+       *[other] { $detail } klasör
+    } tamamen silinemedi (düğümün sildiğinden daha derin ya da büyük, ya da kullanmadığı adlar içeriyor); veri klasöründeki `runner` klasöründe `….left` adıyla duruyor ve elle silinebilir.
 doctor-registry-off = ACP kayıt defterinin ajanları bu makinede kapalı (politika satırı `agents.registry = off`): makine onları ne sunar ne başlatır. Kendi ajan tanımlarınız etkilenmez.
 doctor-registry-denied = ACP kayıt defterinden { $detail ->
         [one] 1 ajan
