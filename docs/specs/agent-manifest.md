@@ -176,12 +176,19 @@ that they match the captured idle and answered screens and nothing else (includi
 `[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
 footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
 require (`contains` in the rule, `all` or `any`; compared ignoring case and with every run of whitespace as one space, see
-`mesh-tools.md`; a word the box breaks in its middle and a marker given only as a regex are not covered, so a kind's `[[typed]]` rules
-should also need the footer whole on one row by a regex, as the shipped ones do), and the top-level
+`mesh-tools.md`; a marker given only as a regex is not checked against the prompt), and the top-level
 `input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
 `[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
+
+Every `[[typed]]` rule must need a regex to match (#1150): its own `regex`, or a `regex` in `all`, not empty. A regex only in `any`
+does not count (a phrase beside it can match instead), nor one only in `not` (it only excludes); a rule without one is refused as
+`typed[i].regex`, and a manifest file with such a rule is not loaded. Why: phrases are found with whitespace collapsed, so a prompt that
+holds a footer word the box breaks in its middle (`Entersend`, wrapped after `Enter`) reads as the footer `Enter send` once typed,
+and the prompt check above does not see it (`Entersend` is not `Enter send`). Regexes see the rows as they are. Validation can only
+check that the regex is there: write it so it needs the footer whole on one row, at its place right under the box, as the shipped
+manifests do.
 
 ## Launch settings (ADR-0066)
 

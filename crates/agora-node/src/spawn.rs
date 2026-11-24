@@ -1201,9 +1201,9 @@ impl Helpers for Spawner {
 
 /// Whether `prompt` holds one of a kind's `[[typed]]` marker texts, ignoring case and whitespace as the screen rules do: they find a
 /// phrase with its runs of whitespace (line breaks included) as one space, so a prompt that only spaces a marker differently could
-/// still stand in for it once typed (ADR-0057). Not covered: a word the input box breaks in its middle reads as two words to the rules
-/// (`Entersend` wrapped after `Enter`), and a marker given only as a regex; the shipped kinds' `[[typed]]` rules also need their footer
-/// whole on one row by a regex.
+/// still stand in for it once typed (ADR-0057). Not covered here: a word the input box breaks in its middle reads as two words to the
+/// rules (`Entersend` wrapped after `Enter`), and a marker given only as a regex. For the first, manifest validation makes every
+/// `[[typed]]` rule need a regex (#1150), which sees the rows as they are; the shipped ones need their footer whole on one row.
 fn carries_marker(prompt: &str, markers: &[String]) -> bool {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     // Both with case as written and lowercased: lowercasing is not the same letter by letter everywhere (a final sigma), so the
