@@ -1764,10 +1764,10 @@ mod tests {
         let times = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
         let (folder_t, file_t) = (times(secrets.dir()), times(&file));
         set("other-value-0002");
-        std::fs::File::open(secrets.dir())
-            .unwrap()
-            .set_modified(folder_t)
-            .unwrap();
+        // A folder can't be opened this way on Windows; there its time stays newer, which only makes the store read again sooner.
+        if let Ok(f) = std::fs::File::open(secrets.dir()) {
+            let _ = f.set_modified(folder_t);
+        }
         std::fs::File::options()
             .write(true)
             .open(&file)
