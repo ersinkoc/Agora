@@ -115,8 +115,16 @@ async function windowAs(role: agora.v1.PersonRole, hash = '#/') {
     if (role !== UNSPECIFIED) s.deliver(STREAM_CONTROL, CONTROL_KIND.WELCOME, v1.Welcome.encode({ chosenGeneration: 1, personRole: role }).finish());
     s.deliver(STREAM_EVENTS, EVENT_KIND.SNAPSHOT, v1.Snapshot.encode(fleet()).finish());
   });
-  // The device key, the device list, the lazy parts and every dwell.
-  for (let i = 0; i < 8; i++) await act(async () => { await new Promise((r) => setTimeout(r, 100)); });
+  await tick(3);
+}
+
+const tick = async (n: number) => { for (let i = 0; i < n; i++) await act(async () => { await new Promise((r) => setTimeout(r, 100)); }); };
+/** Waits (up to 5 s, in steps the window can draw in) until `check` holds: the device key, the device list and the lazy parts come late. */
+async function until(check: () => void) {
+  for (let i = 0; i < 50; i++) {
+    try { check(); return; } catch { await tick(1); }
+  }
+  check();
 }
 
 /** Another window, as if opened afresh (what the last one kept in this browser, its open tabs, is gone). */
@@ -136,61 +144,63 @@ const answers = (within: ParentNode | null) => buttons(within).filter((b) => b =
 const click = async (el: Element | null) => {
   if (!el) throw new Error('nothing to click');
   await act(async () => { (el as HTMLElement).click(); });
-  for (let i = 0; i < 4; i++) await act(async () => { await new Promise((r) => setTimeout(r, 100)); });
+  await tick(2);
 };
 
 describe('a viewer\'s window shows each request with no answers (ADR-0106, #1140)', () => {
   it('Home\'s list of what needs you', async () => {
     await windowAs(MEMBER);
-    expect(answers(document.querySelector('.fleet-ask'))).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.querySelector('.fleet-ask'))).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER);
-    const row = document.querySelector('.fleet-ask');
-    expect(row?.textContent).toContain('src/auth.rs');
+    await until(() => expect(document.querySelector('.fleet-ask')?.textContent).toContain('src/auth.rs'));
     expect(answers(document.body)).toEqual([]);
   });
 
   it('the attention dialog', async () => {
     focused = true;
     await windowAs(MEMBER);
-    expect(answers(document.querySelector('.attention-card'))).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.querySelector('.attention-card'))).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER);
+    await until(() => expect(document.querySelector('.attention-card')?.textContent).toContain('src/auth.rs'));
     const card = document.querySelector('.attention-card');
-    expect(card?.textContent).toContain('src/auth.rs');
     expect(answers(card)).toEqual([]);
     expect(card?.querySelector('[data-watching]')?.textContent).toBe(t('approval-watching'));
   });
 
-  it('the agent\'s pane in the window and its side panel', async () => {
+  it('the agent\'s pane in the window and the side panel', async () => {
+    const pane = () => document.querySelector('[data-pane][data-agent="n1/a1"]');
+    const panel = () => document.querySelector('.inspector__panel');
     await windowAs(MEMBER);
     await click(document.querySelector('[data-agent-row="n1/a1"]'));
-    expect(document.querySelector('[data-agent-row="n1/a1"][aria-pressed="true"]')).not.toBeNull();
-    expect(answers(document.body).length).toBeGreaterThan(0);
+    await until(() => expect(answers(pane())).toEqual([t('approval-deny'), t('approval-allow')]));
+    expect(answers(panel())).toEqual([t('approval-deny'), t('approval-allow')]);
     again();
     await windowAs(VIEWER);
     await click(document.querySelector('[data-agent-row="n1/a1"]'));
-    expect(document.body.textContent).toContain('src/auth.rs');
+    await until(() => expect(pane()?.textContent).toContain('src/auth.rs'));
+    expect(panel()?.textContent).toContain('src/auth.rs');
     expect(answers(document.body)).toEqual([]);
   });
 
   it('the agent on its own screen', async () => {
     await windowAs(MEMBER, '#/agent/n1%2Fa1');
-    expect(answers(document.body)).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.body)).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER, '#/agent/n1%2Fa1');
-    expect(document.body.textContent).toContain('src/auth.rs');
+    await until(() => expect(document.body.textContent).toContain('src/auth.rs'));
     expect(answers(document.body)).toEqual([]);
   });
 
   it('the phone\'s list and its bar', async () => {
     phone = true;
     await windowAs(MEMBER);
-    expect(answers(document.querySelector('.phone-dock'))).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.querySelector('.phone-dock'))).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER);
+    await until(() => expect(document.querySelector('.phone-dock')?.textContent).toContain('src/auth.rs'));
     const dock = document.querySelector('.phone-dock');
-    expect(dock?.textContent).toContain('src/auth.rs');
     expect(answers(document.body)).toEqual([]);
     expect(dock?.querySelector('[data-watching]')?.textContent).toBe(t('approval-watching'));
   });
@@ -198,16 +208,16 @@ describe('a viewer\'s window shows each request with no answers (ADR-0106, #1140
   it('the agent on the phone', async () => {
     phone = true;
     await windowAs(MEMBER, '#/agent/n1%2Fa1');
-    expect(answers(document.querySelector('.phone-dock'))).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.querySelector('.phone-dock'))).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER, '#/agent/n1%2Fa1');
-    expect(document.querySelector('.phone-req')?.textContent).toContain('src/auth.rs');
+    await until(() => expect(document.querySelector('.phone-req')?.textContent).toContain('src/auth.rs'));
     expect(answers(document.body)).toEqual([]);
   });
 
   it('an older hub (no role named) keeps the answers', async () => {
     await windowAs(UNSPECIFIED);
-    expect(answers(document.querySelector('.fleet-ask'))).toEqual([t('approval-deny'), t('approval-allow')]);
+    await until(() => expect(answers(document.querySelector('.fleet-ask'))).toEqual([t('approval-deny'), t('approval-allow')]));
   });
 });
 
@@ -228,7 +238,7 @@ describe('a viewer\'s window has nothing to type to a chat agent, and its settin
       phone = onPhone;
       await windowAs(MEMBER, hash);
       if (open) await click(document.querySelector('[data-agent-row="n1/c1"]'));
-      expect(box()).not.toBeNull();
+      await until(() => expect(box()).not.toBeNull());
       expect(buttons(document.body)).toContain(t('prompt-send'));
       expect(await modeOff()).toBe(false);
       again();
@@ -246,7 +256,7 @@ describe('a viewer\'s window offers no other change the hub would refuse (ADR-01
   it('a helper\'s grants are not listed to be revoked', async () => {
     await windowAs(MEMBER);
     await click(document.querySelector('[data-agent-row="n1/a1"]'));
-    expect(asked()).toContain('grantList');
+    await until(() => expect(asked()).toContain('grantList'));
     again();
     await windowAs(VIEWER);
     await click(document.querySelector('[data-agent-row="n1/a1"]'));
@@ -256,10 +266,10 @@ describe('a viewer\'s window offers no other change the hub would refuse (ADR-01
 
   it('another device is not offered for removal', async () => {
     await windowAs(MEMBER, '#/settings/devices');
-    expect(buttons(document.body)).toContain(t('device-remove'));
+    await until(() => expect(buttons(document.body)).toContain(t('device-remove')));
     again();
     await windowAs(VIEWER, '#/settings/devices');
-    expect(document.body.textContent).toContain('Phone');
+    await until(() => expect(document.body.textContent).toContain('Phone'));
     expect(buttons(document.body)).not.toContain(t('device-remove'));
   });
 
@@ -267,7 +277,7 @@ describe('a viewer\'s window offers no other change the hub would refuse (ADR-01
     const forget = () => buttons(document.body).filter((b) => b.includes(t('forget-machine-action')));
     for (const [role, offered] of [[OWNER, true], [UNSPECIFIED, true], [MEMBER, false], [VIEWER, false]] as const) {
       await windowAs(role, '#/machines');
-      expect(document.body.textContent).toContain('Gone');
+      await until(() => expect(document.body.textContent).toContain('Gone'));
       expect(forget().length > 0).toBe(offered);
       again();
     }

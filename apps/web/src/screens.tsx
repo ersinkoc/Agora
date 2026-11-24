@@ -178,6 +178,16 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
         <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
       </div>
+      {/* ADR-0106 (#1140): the same requests in a viewer's window, read-only: a plain request and a start's card with no answers, and
+          the whole start and switch as Review shows them, with no answers and no grant to choose. */}
+      <div data-viewer-requests className="grid max-w-3xl grid-cols-1 gap-3">
+        <div className="approvals">
+          <ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onOpen={() => {}} />
+        </div>
+        <div data-start-full-readonly className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" /></div>
+        <div data-skip-full-readonly className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" /></div>
+      </div>
       <HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />

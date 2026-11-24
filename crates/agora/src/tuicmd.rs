@@ -21,7 +21,9 @@ use agora_tui::pane::ColorMode;
 use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
 use agora_tui::split::{app_details, app_rows};
-use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
+use agora_tui::split::{
+    frame, reader_frame, start_card_fit, start_card_lines_for, tree_order, View,
+};
 
 use crate::hubcli::{hub_dir, new_login_code, own_hub_addr, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
@@ -560,12 +562,16 @@ fn read_start(
     a: &agora_protocol::v1::ApprovalSnapshot,
     ask: &mut dyn Asker,
     text: agora_tui::render::Text<'_>,
+    viewer: bool,
 ) -> bool {
     let mut top = 0usize;
     let mut seen_end = false;
     loop {
         let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
-        let Some(lines) = start_card_lines(a, usize::from(cols).saturating_sub(3), text) else {
+        // ADR-0106: a viewer reads the whole request, without how to answer it.
+        let Some(lines) =
+            start_card_lines_for(a, usize::from(cols).saturating_sub(3), text, viewer)
+        else {
             return false;
         };
         let room = usize::from(rows.max(3)) - 1;
@@ -932,7 +938,6 @@ fn chat(
     let (node, local) = agent.split_once('/').unwrap_or(("", agent));
     let stream = session.chat_open(node, local)?;
     let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
-    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let mut entries: Vec<ChatEntry> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
     let mut note = String::new();
@@ -1055,24 +1060,16 @@ fn chat(
             dirty = false;
             let size = agora_platform::terminal_size()
                 .map_or((80, 24), |(c, r)| (usize::from(c), usize::from(r)));
-            let mut lines = render_chat(
+            let lines = plain_chat_lines(
+                say,
                 &entries,
                 local,
-                &String::from_utf8_lossy(&typed),
-                size,
-                color,
-                &text,
+                &typed,
+                &note,
+                snapshot.as_ref(),
+                (size, color),
                 watching,
             );
-            if !note.is_empty() {
-                // Above the line being typed; a viewer's has none.
-                let at = lines.len().saturating_sub(usize::from(!watching));
-                lines.insert(at, plain(&note));
-            }
-            // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
-            if let Some(s) = snapshot.as_ref().and_then(|a| session_line(a, &text)) {
-                lines.insert(0, plain(&s));
-            }
             let mut out = std::io::stdout();
             let _ = write!(out, "\x1b[H\x1b[2J{}", lines.join("\r\n"));
             let _ = out.flush();
@@ -1080,6 +1077,41 @@ fn chat(
     }
     session.terminal_close(stream);
     Ok(lost)
+}
+
+/// The plain list's full-screen chat as drawn at `size`: what the agent runs with, its conversation, the note and the line being typed.
+/// A viewer's (`watching`, ADR-0106) has no line to type on, and the note goes last.
+#[allow(clippy::too_many_arguments)]
+fn plain_chat_lines(
+    say: &Say,
+    entries: &[ChatEntry],
+    local: &str,
+    typed: &[u8],
+    note: &str,
+    snapshot: Option<&agora_protocol::v1::AgentSnapshot>,
+    (size, color): ((usize, usize), bool),
+    watching: bool,
+) -> Vec<String> {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut lines = render_chat(
+        entries,
+        local,
+        &String::from_utf8_lossy(typed),
+        size,
+        color,
+        &text,
+        watching,
+    );
+    if !note.is_empty() {
+        // Above the line being typed; a viewer's has none.
+        let at = lines.len().saturating_sub(usize::from(!watching));
+        lines.insert(at, plain(note));
+    }
+    // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
+    if let Some(s) = snapshot.and_then(|a| session_line(a, &text)) {
+        lines.insert(0, plain(&s));
+    }
+    lines
 }
 
 /// What a key typed in the plain list's full-screen chat does.
@@ -2343,7 +2375,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 agora_platform::terminal_size().unwrap_or((100, 30)),
                             )
                         }) {
-                            if read_start(&a, &mut Plain::new(&rx), &text) {
+                            if read_start(&a, &mut Plain::new(&rx), &text, viewer) {
                                 read_whole.insert(a.approval_id.clone());
                             }
                         }
@@ -4174,7 +4206,17 @@ fn inspector_details(
     text: agora_tui::render::Text<'_>,
 ) -> agora_tui::split::Details {
     let inspector = c.app.areas(area).inspector;
-    if c.app.focus == agora_tui::app::Focus::Terminal {
+    // ADR-0106: a viewer's inspector shows the request without the keys that answer it.
+    if c.app.viewer {
+        agora_tui::split::viewer_details(
+            s,
+            &c.selected,
+            inspector.width,
+            inspector.height,
+            text,
+            c.app.focus == agora_tui::app::Focus::Terminal,
+        )
+    } else if c.app.focus == agora_tui::app::Focus::Terminal {
         agora_tui::split::app_details_in_tab(
             s,
             &c.selected,
@@ -4291,7 +4333,7 @@ fn answer_command(
         }
         if reply == Answer::Allow && !c.read_whole.contains(&id) {
             let read = over_console(say, c, session, None, rx, |_, ask| {
-                read_start(&a, ask, &text)
+                read_start(&a, ask, &text, false)
             });
             if read {
                 c.read_whole.insert(id);
@@ -5995,6 +6037,7 @@ mod adr0069_tests {
 mod skipping_start_tests {
     use super::*;
     use agora_i18n::Catalog;
+    use agora_tui::split::start_card_lines;
 
     /// Answers each question with the next key, and keeps what it was shown.
     struct Script {
@@ -6128,6 +6171,7 @@ mod forget_tests {
     use super::*;
     use agora_i18n::Catalog;
     use agora_protocol::error::{Error, ErrorCode};
+    use agora_tui::split::start_card_lines;
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -7537,6 +7581,32 @@ mod folder_role_tests {
         }
     }
 
+    /// ADR-0106 (#1140): the plain list's reader of a start request (Enter) shows a viewer the whole request without how to answer it.
+    #[test]
+    fn a_viewers_reader_of_a_start_request_does_not_say_how_to_answer() {
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let a = agora_protocol::v1::ApprovalSnapshot {
+            approval_id: "n1/a9".into(),
+            agent_id: "n1/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"n1","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests."}"#.into(),
+            ..Default::default()
+        };
+        let answer = say.text(key!("tui-split-answer"), &[]);
+        let mut member = keys(b"");
+        read_start(&a, &mut member, &text, false);
+        assert!(member.frames[0].contains(&answer), "{:?}", member.frames);
+        let mut viewer = keys(b"");
+        read_start(&a, &mut viewer, &text, true);
+        assert!(!viewer.frames[0].contains(&answer), "{:?}", viewer.frames);
+        assert!(
+            viewer.frames[0].contains("Fix the tests."),
+            "{:?}",
+            viewer.frames
+        );
+    }
+
     /// Machines `n1` and `n2`, online, with project folders at the paths given.
     fn snapshot(n1: &[&str], n2: &[&str]) -> Snapshot {
         let node = |id: &str| NodeSnapshot {
@@ -7957,6 +8027,34 @@ mod viewer_console_tests {
         );
     }
 
+    /// #1140: a viewer's inspector (beside the list, or in the agent's tab) shows the request without the keys that answer it.
+    #[test]
+    fn a_viewers_inspector_does_not_say_how_to_answer() {
+        let say = Say(agora_i18n::Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let mut c = console();
+        let area = Area::new(0, 0, 120, 30);
+        let s = c.snapshot.clone().unwrap();
+        let keys = [
+            say.text(key!("tui-split-answer"), &[]),
+            say.text(key!("tui-tab-answer"), &[]),
+        ];
+        let says_keys = |lines: &[String]| lines.iter().any(|l| keys.contains(l));
+        for focus in [agora_tui::app::Focus::Tree, agora_tui::app::Focus::Terminal] {
+            c.app.focus = focus;
+            c.app.viewer = false;
+            let member = inspector_details(&c, &s, area, &text).lines;
+            assert!(says_keys(&member), "{focus:?} {member:#?}");
+            c.app.viewer = true;
+            let viewer = inspector_details(&c, &s, area, &text).lines;
+            assert!(!says_keys(&viewer), "{focus:?} {viewer:#?}");
+            assert!(
+                viewer.iter().any(|l| l.contains("Edit")),
+                "{focus:?} {viewer:#?}"
+            );
+        }
+    }
+
     /// The chat pane of the console's agent, as [`follow_chat`] opens it.
     fn chat_pane(c: &Console) -> ChatPane {
         ChatPane {
@@ -8005,6 +8103,8 @@ mod viewer_console_tests {
         let tui = &src[t0..t0 + src[t0..].find("\n}\n").unwrap()];
         assert!(tui.contains("let viewer = person == agora_protocol::v1::PersonRole::Viewer;"));
         assert!(tui.contains("match plain_key(viewer, keys, k) {"));
+        // Enter's reader of a start request is the viewer's too (the whole request, without how to answer it).
+        assert!(tui.contains("read_start(&a, &mut Plain::new(&rx), &text, viewer)"));
         let changes = |p: PlainKey| {
             matches!(
                 p,
@@ -8064,6 +8164,7 @@ mod viewer_console_tests {
             "let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;"
         ));
         assert!(chat.contains("match chat_key(watching, k) {"));
+        assert!(chat.contains("(size, color),\n                watching,\n            );"));
         assert_eq!(chat_key(true, DETACH), ChatKey::Leave);
         for k in 0..=u8::MAX {
             if k != DETACH {
@@ -8075,6 +8176,37 @@ mod viewer_console_tests {
         assert_eq!(chat_key(false, b'h'), ChatKey::Type(b'h'));
         assert_eq!(chat_key(false, 0x7f), ChatKey::Back);
         assert_eq!(chat_key(false, 0x01), ChatKey::Nothing);
+    }
+
+    /// #1140: the plain list's full-screen chat is drawn for a viewer with no line to type on, the hint saying it watches and the note
+    /// last; a member's keeps the line, the note above it.
+    #[test]
+    fn the_plain_chat_is_drawn_with_no_line_to_type_on_for_a_viewer() {
+        let say = Say(agora_i18n::Catalog::english());
+        let input = say.text(key!("tui-chat-input"), &[]);
+        let note = say.text(key!("tui-viewer-watching"), &[]);
+        let draw = |watching| {
+            plain_chat_lines(
+                &say,
+                &[],
+                "agent-1",
+                b"hi",
+                &note,
+                None,
+                ((100, 12), false),
+                watching,
+            )
+        };
+        let member = draw(false);
+        assert_eq!(member.last(), Some(&format!("{input} hi")), "{member:#?}");
+        assert_eq!(member[member.len() - 2], note, "{member:#?}");
+        let viewer = draw(true);
+        assert!(viewer.iter().all(|l| !l.starts_with(&input)), "{viewer:#?}");
+        assert_eq!(viewer.last(), Some(&note), "{viewer:#?}");
+        assert!(
+            viewer.iter().any(|l| l.starts_with("You can watch here.")),
+            "{viewer:#?}"
+        );
     }
 
     #[test]

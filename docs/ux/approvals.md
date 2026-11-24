@@ -124,7 +124,8 @@ A viewer watches: the hub refuses their answer and writes the refusal down in th
 keeps **Review**, which shows all of it with only **Close** (no grant to choose); Home's row keeps its way to the agent or Review. The
 attention dialog keeps **Later**, and it and the phone's bar say "You can watch here. A member or the owner answers requests." where the
 answers would be. An older hub, which names no role, keeps the answers. The terminal client does the same: a viewer's `y`/`n` and
-Alt+Y/Alt+N say why and send nothing, and a chat tab shows a request without the keys that answer it.
+Alt+Y/Alt+N say why and send nothing, and its requests (the list, the details panel, a chat tab, the reader of a start request) show
+without the keys that answer them.
 
 ## Allow always (ADR-0101)
 
