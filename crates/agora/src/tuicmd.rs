@@ -5127,7 +5127,8 @@ fn clean_up_old(
 
 /// Asks which of a machine's installed `kinds` to start (`s`, `f`), nine to a page numbered 1 to 9: one key picks, `n` turns to the
 /// next page (after the last, the first again) when there is more than one, and the question says so; any other key, or none in
-/// `wait`, cancels. `under_title` goes below the question (the folder `f` starts in). The index into `kinds`, or `None`.
+/// `wait`, cancels, so no kind is ever chosen for the person (#1134). `under_title` goes below the question (the folder `f` starts
+/// in). The index into `kinds`, or `None`.
 fn pick_kind(
     say: &Say,
     ask: &mut dyn Asker,
@@ -5137,53 +5138,78 @@ fn pick_kind(
     missing: Option<&str>,
     wait: Duration,
 ) -> Option<usize> {
-    const PAGE: usize = 9;
-    let pages = kinds.len().div_ceil(PAGE);
+    let pages = kinds.len().div_ceil(KIND_PAGE);
     let mut page = 0;
     loop {
-        let machine = ("machine", Arg::Str(machine.to_string()));
-        let title = if pages > 1 {
-            say.text(
-                key!("tui-start-pick-page"),
-                &[
-                    machine,
-                    ("page", Arg::Num(page as i64 + 1)),
-                    ("pages", Arg::Num(pages as i64)),
-                ],
-            )
-        } else {
-            say.text(key!("tui-start-pick"), &[machine])
-        };
-        let shown = &kinds[(page * PAGE).min(kinds.len())..((page + 1) * PAGE).min(kinds.len())];
-        let mut menu = vec![title];
-        menu.extend_from_slice(under_title);
-        menu.push(String::new());
-        for (i, (_, name)) in shown.iter().enumerate() {
-            menu.push(say.text(
-                key!("tui-start-item"),
-                &[
-                    ("n", Arg::Num(i as i64 + 1)),
-                    ("name", Arg::Str(plain(name))),
-                ],
-            ));
-        }
-        if let Some(m) = missing {
-            menu.push(String::new());
-            menu.push(m.to_string());
-        }
+        let (menu, shown) = kind_menu(say, machine, under_title, kinds, missing, page);
         match ask.key(&menu, wait)? {
             b'n' if pages > 1 => page = (page + 1) % pages,
             k @ b'1'..=b'9' => {
                 let i = usize::from(k - b'1');
-                return (i < shown.len()).then_some(page * PAGE + i);
+                return (i < shown).then_some(page * KIND_PAGE + i);
             }
             _ => return None,
         }
     }
 }
 
-/// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
-/// find their program in its `PATH`. Each is named with the program the machine looked for (ADR-0069), when the machine says it.
+/// How many kinds one page of [`pick_kind`] numbers.
+const KIND_PAGE: usize = 9;
+
+/// The lines of one page of [`pick_kind`], and how many kinds it numbers. `kinds` come as [`split_kinds`] orders them: the ACP
+/// registry's (untested in Agora, ADR-0092) after the hand-made ones, so an "Untested" heading stands before the first of them on a
+/// page; it takes no number. Pure: it reads nothing and draws nothing.
+fn kind_menu(
+    say: &Say,
+    machine: &str,
+    under_title: &[String],
+    kinds: &[(String, String)],
+    missing: Option<&str>,
+    page: usize,
+) -> (Vec<String>, usize) {
+    let pages = kinds.len().div_ceil(KIND_PAGE);
+    let machine = ("machine", Arg::Str(machine.to_string()));
+    let title = if pages > 1 {
+        say.text(
+            key!("tui-start-pick-page"),
+            &[
+                machine,
+                ("page", Arg::Num(page as i64 + 1)),
+                ("pages", Arg::Num(pages as i64)),
+            ],
+        )
+    } else {
+        say.text(key!("tui-start-pick"), &[machine])
+    };
+    let from = (page * KIND_PAGE).min(kinds.len());
+    let shown = &kinds[from..((page + 1) * KIND_PAGE).min(kinds.len())];
+    let mut menu = vec![title];
+    menu.extend_from_slice(under_title);
+    menu.push(String::new());
+    let mut marked = false;
+    for (i, (kind, name)) in shown.iter().enumerate() {
+        if !marked && agora_tui::client::is_registry_kind(kind) {
+            marked = true;
+            if i > 0 {
+                menu.push(String::new());
+            }
+            menu.push(say.text(key!("tui-start-group-untested"), &[]));
+        }
+        menu.push(say.text(
+            key!("tui-start-item"),
+            &[
+                ("n", Arg::Num(i as i64 + 1)),
+                ("name", Arg::Str(plain(name))),
+            ],
+        ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m.to_string());
+    }
+    (menu, shown.len())
+}
+
 /// #1133: whether the machine starts `kind` only on a signed start: an ACP registry kind (`registry-*`) whose program is a package
 /// runner (the node's own rule, `agora_node::manifests::needs_signed_start`, seen from what the machine reports).
 fn needs_signed_start(kind: &str, program: &str) -> bool {
@@ -5192,19 +5218,28 @@ fn needs_signed_start(kind: &str, program: &str) -> bool {
         .trim_end_matches(".exe")
         .trim_end_matches(".cmd")
         .to_string();
-    kind.starts_with("registry-") && ["npx", "uvx", "pnpx", "bunx", "pipx"].contains(&stem.as_str())
+    agora_tui::client::is_registry_kind(kind)
+        && ["npx", "uvx", "pnpx", "bunx", "pipx"].contains(&stem.as_str())
 }
 
+/// A machine's agents split into the ones it can start (numbered in the menu: the hand-made ones, then the ACP registry's, untested
+/// in Agora, each in the machine's order, #1134) and one line naming the hand-made ones whose program the machine cannot find in its
+/// `PATH`, each with the program it looked for (ADR-0069) when the machine says it. A registry kind that is not installed is left out
+/// (the window's Settings → Agents lists them under "Add an agent").
 fn split_kinds(
     say: &Say,
     all: Vec<agora_tui::client::Kind>,
 ) -> (Vec<(String, String)>, Option<String>) {
-    let mut installed = Vec::new();
+    let groups = agora_tui::client::start_kinds(all);
+    let installed = groups
+        .installed
+        .into_iter()
+        .chain(groups.untested)
+        .map(|k| (k.kind, k.name))
+        .collect();
     let mut missing = Vec::new();
-    for k in all {
-        if k.installed {
-            installed.push((k.kind, k.name));
-        } else if k.program.is_empty() {
+    for k in groups.missing {
+        if k.program.is_empty() {
             missing.push(plain(&k.name));
         } else {
             missing.push(say.text(
@@ -8215,5 +8250,179 @@ mod viewer_console_tests {
         assert!(watching_notice(&say, true, 'x').is_some());
         assert!(watching_notice(&say, true, 'r').is_none());
         assert!(watching_notice(&say, false, 'x').is_none());
+    }
+}
+
+/// #1134 (ADR-0092): the start pickers (`s`, `f`) list a machine's installed ACP registry kinds after the hand-made ones, under an
+/// "Untested" heading, leave out the registry kinds it cannot find, and never choose one for the person, as the window's Start does.
+#[cfg(test)]
+mod registry_picker_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    fn kind(kind: &str, name: &str, installed: bool, program: &str) -> agora_tui::client::Kind {
+        agora_tui::client::Kind {
+            kind: kind.into(),
+            name: name.into(),
+            installed,
+            program: program.into(),
+        }
+    }
+
+    struct Script {
+        rx: mpsc::Receiver<u8>,
+        shown: Vec<Vec<String>>,
+    }
+    impl Asker for Script {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.push(lines.to_vec());
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn pick(keys: &[u8], kinds: &[(String, String)]) -> (Option<usize>, Vec<Vec<String>>) {
+        let say = Say(Catalog::english());
+        let (tx, rx) = mpsc::channel();
+        for k in keys {
+            tx.send(*k).unwrap_or_else(|_| panic!("send"));
+        }
+        let mut ask = Script {
+            rx,
+            shown: Vec::new(),
+        };
+        let got = pick_kind(
+            &say,
+            &mut ask,
+            "blackview",
+            &[],
+            kinds,
+            None,
+            Duration::from_millis(50),
+        );
+        (got, ask.shown)
+    }
+
+    const UNTESTED: &str = "Untested (from the ACP registry, not yet tried in Agora)";
+
+    #[test]
+    fn installed_registry_kinds_come_after_the_hand_made_ones_and_missing_ones_are_left_out() {
+        let say = Say(Catalog::english());
+        let (ok, line) = split_kinds(
+            &say,
+            vec![
+                kind("registry-gemini", "Gemini CLI", true, "npx"),
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+                kind("codex", "Codex", false, "codex"),
+                kind("registry-qwen-code", "Qwen Code", true, "npx"),
+                kind("shell", "Shell", true, "bash"),
+            ],
+        );
+        let ids: Vec<_> = ok.iter().map(|(k, _)| k.as_str()).collect();
+        // Each group keeps the machine's own order.
+        assert_eq!(
+            ids,
+            ["claude", "shell", "registry-gemini", "registry-qwen-code"]
+        );
+        let line = line.unwrap_or_default();
+        assert!(
+            line.contains("Not found on this machine: Codex (`codex`)."),
+            "{line}"
+        );
+        assert!(!line.contains("goose"), "{line}");
+        // Only registry kinds missing: no line at all (Settings → Agents lists them under "Add an agent").
+        let (ok, line) = split_kinds(
+            &say,
+            vec![
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+            ],
+        );
+        assert_eq!(ok.len(), 1);
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn the_untested_heading_stands_before_the_first_registry_kind_on_every_page() {
+        let mut kinds: Vec<(String, String)> = (1..=3)
+            .map(|i| (format!("made{i}"), format!("Made {i}")))
+            .collect();
+        kinds.extend((1..=8).map(|i| (format!("registry-r{i}"), format!("Reg {i}"))));
+        let (got, shown) = pick(b"n2", &kinds);
+        assert_eq!(got, Some(10), "{shown:#?}");
+        assert_eq!(kinds[10].1, "Reg 8");
+        let title = |p: u8| {
+            format!("Start which agent on blackview? Press its number, n for the next page ({p} of 2), any other key cancels.")
+        };
+        let mut first = vec![title(1), String::new()];
+        first.extend(["1  Made 1", "2  Made 2", "3  Made 3", "", UNTESTED].map(String::from));
+        first.extend((1..=6).map(|i| format!("{}  Reg {i}", i + 3)));
+        assert_eq!(shown[0], first);
+        // The second page holds only untested kinds: the heading opens it, so they are still marked.
+        let second = vec![
+            title(2),
+            String::new(),
+            UNTESTED.to_string(),
+            "1  Reg 7".to_string(),
+            "2  Reg 8".to_string(),
+        ];
+        assert_eq!(shown[1], second);
+        // A list with no registry kind has no heading.
+        let (_, shown) = pick(b"x", &kinds[..3]);
+        assert!(!shown[0].iter().any(|l| l == UNTESTED), "{shown:#?}");
+    }
+
+    /// The page `f` draws: its folder under the question, the hand-made kinds, the heading and the untested ones, then the line
+    /// naming the hand-made kinds the machine cannot find.
+    #[test]
+    fn the_folder_start_page_reads_top_to_bottom() {
+        let say = Say(Catalog::english());
+        let (ok, missing) = split_kinds(
+            &say,
+            vec![
+                kind("registry-gemini", "Gemini CLI", true, "npx"),
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+                kind("codex", "Codex", false, "codex"),
+            ],
+        );
+        let (menu, count) = kind_menu(
+            &say,
+            "blackview",
+            &["/home/r/src".to_string()],
+            &ok,
+            missing.as_deref(),
+            0,
+        );
+        assert_eq!(count, 2);
+        let want = [
+            "Start which agent on blackview? Press its number, any other key cancels.",
+            "/home/r/src",
+            "",
+            "1  Claude Code",
+            "",
+            UNTESTED,
+            "2  Gemini CLI",
+            "",
+            "Not found on this machine: Codex (`codex`). The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.",
+        ];
+        assert_eq!(menu, want.map(String::from));
+    }
+
+    #[test]
+    fn no_kind_is_chosen_for_the_person_not_even_when_only_untested_ones_are_installed() {
+        let kinds = vec![("registry-gemini".to_string(), "Gemini CLI".to_string())];
+        let (got, shown) = pick(b"\r", &kinds);
+        assert_eq!(got, None);
+        assert_eq!(
+            shown[0][2..],
+            [UNTESTED.to_string(), "1  Gemini CLI".to_string()]
+        );
+        assert_eq!(pick(b"", &kinds).0, None);
+        assert_eq!(pick(b" ", &kinds).0, None);
+        assert_eq!(pick(b"1", &kinds).0, Some(0));
     }
 }
