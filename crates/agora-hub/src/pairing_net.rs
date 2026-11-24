@@ -865,21 +865,23 @@ mod tests {
         m
     }
 
-    /// The code of the next answer that is not a pong; the machine pings every 200 ms while it waits (at most `within`).
+    /// The code of the next answer that is not a pong; the machine pings again after each pong, or after 200 ms without an answer,
+    /// while it waits (at most `within`). A ping that cannot be sent (the hub already answered and closed) is not the end: the answer
+    /// waiting to be read is.
     async fn answer_while_pinging(
         m: &mut Conn<tokio::io::DuplexStream>,
         within: Duration,
     ) -> Option<ErrorCode> {
         let until = tokio::time::Instant::now() + within;
         while tokio::time::Instant::now() < until {
-            m.send(&Frame {
-                stream_id: STREAM_CONTROL,
-                kind: kinds::PING,
-                seq: None,
-                payload: Vec::new(),
-            })
-            .await
-            .ok()?;
+            let _ = m
+                .send(&Frame {
+                    stream_id: STREAM_CONTROL,
+                    kind: kinds::PING,
+                    seq: None,
+                    payload: Vec::new(),
+                })
+                .await;
             let Ok(got) = tokio::time::timeout(Duration::from_millis(200), m.recv()).await else {
                 continue;
             };

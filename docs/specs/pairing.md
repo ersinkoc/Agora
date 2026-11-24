@@ -254,9 +254,10 @@ What this document did not say, and what the code does:
   approval nobody collected. The window's later `PairStatus` says closed; discovery stops within half a second as for any closing.
 - **Results.** A deny is `PairResult { approved: false }` with empty fields (the schema says so); an expiry is `pair.expired`; the switch closing
   is `pair.closed`. `pair.denied` is not sent by the hub core (the browser path may use it).
-- **Errors for the wrong order.** A second request on a connection is `pair.state` naming the state (`awaiting_reveal` while the connection waits for its reveal,
-  `requested` where the hub core refuses it); a second reveal, a reveal after the
-  session ended, or any other message while waiting is `pair.state` naming the state. A first message that is a reveal (a connection naming a
+- **Errors for the wrong order.** A second request on a connection is `pair.state` naming the session's state (`awaiting_reveal` before
+  the reveal, `pending` while the owner decides); a second reveal or any other message while waiting is `pair.state` naming the state.
+  A reveal after the session ended is answered with how it ended (`pair.expired` or `pair.closed`); another message that arrives just as
+  the session ends can instead get `pair.state` naming `expired` or `closed`. A first message that is a reveal (a connection naming a
   session it cannot own) is `pair.unknown`, and a repeated commitment, exporter or nonce is `pair.mismatch`; each ends the session and counts as a failure.
 - **Approving a taken name.** If the node id belongs to an enrolled machine and `replace` is false, Approve is refused with `pair.state`
   (`state = name_in_use`) and the request stays pending, so the owner can approve again with `replace`. The same check runs again inside the
