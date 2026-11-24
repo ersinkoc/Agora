@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- In the terminal client, the start pickers (`s`, and `f` for a folder) now put fewer agents on a page when the window is too short or too narrow for nine, so every agent and the line naming the ones the machine cannot find stay visible; before, the bottom of a tall page was cut off (#1150).
 - On Windows, two agent installs started at the same moment on one machine no longer make one of them fail with an I/O error: the one that finds the other already installing now says an install is in progress, as on Linux and macOS. The same applies to Agora's other lock and log files there, which two programs can open at once. An install that does fail with an error the system gives no kind for now names the system's error number in its detail.
 - A machine joining with `agora join` that has its challenge but has not yet sent its reveal when the hub stops accepting machines (the owner closed it, approved another machine, or the switch ran out) is now told at once that the hub is closed for pairing, instead of being told 30 seconds later that its request ran out; a machine whose request has already ended can no longer keep its connection to the hub open by pinging it (audit F1460, F1461)
 - `agora join` (and Join in the front door) no longer waits forever when the address answers the secure connection but then stays silent: it gives up after the usual wait for the hub's answer and says the hub did not answer in time (#1150).
