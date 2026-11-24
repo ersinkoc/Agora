@@ -2489,6 +2489,192 @@ async fn run_with(
 }
 
 #[cfg(test)]
+mod snapshot_budget_tests {
+    use super::*;
+    use crate::scope::Scope;
+    use v1::event::Body;
+
+    const SNAPSHOT_POS: u64 = 500;
+
+    fn record(view: &mut View, pos: u64, node: &str, body: Body) -> v1::PositionedEvent {
+        let event = v1::Event {
+            producer_id: node.into(),
+            body: Some(body),
+            ..Default::default()
+        };
+        view.apply_at(pos, &event);
+        v1::PositionedEvent {
+            pos,
+            event: Some(event),
+        }
+    }
+
+    fn fixture(binary: &str) -> View {
+        let mut view = View::default();
+        record(
+            &mut view,
+            1,
+            "n1",
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                binary: binary.into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            2,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "sender".into(),
+                project_id: "p".into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            3,
+            "n1",
+            Body::ApprovalRequested(v1::ApprovalRequested {
+                approval_id: "pad".into(),
+                agent_id: "sender".into(),
+                // Keep the padding in the same protobuf length-varint range through the 1 MiB boundary.
+                detail: "x".repeat(512 * 1024),
+                ..Default::default()
+            }),
+        );
+        view
+    }
+
+    fn say(view: &mut View, pos: u64, node: &str, from: &str, body: &str) -> v1::PositionedEvent {
+        record(
+            view,
+            pos,
+            node,
+            Body::MessagePosted(v1::MessagePosted {
+                message_id: format!("m-{pos}"),
+                from_agent_id: from.into(),
+                to: "sender".into(),
+                body: body.into(),
+            }),
+        )
+    }
+
+    fn wire_size(message: &v1::PositionedEvent) -> usize {
+        v1::Snapshot {
+            recent_messages: vec![message.clone()],
+            ..Default::default()
+        }
+        .encoded_len()
+    }
+
+    fn padding(view: &mut View) -> &mut String {
+        let Some(approval) = view.approvals.get_mut("n1/pad") else {
+            panic!("fixture approval is missing");
+        };
+        &mut approval.detail
+    }
+
+    fn leave_space(view: &mut View, bytes: usize, snapshot: impl Fn(&View) -> v1::Snapshot) {
+        let mut base = View {
+            messages: Arc::default(),
+            ..view.clone()
+        };
+        let additional = DEFAULT_MAX_PAYLOAD - bytes - snapshot(&base).encoded_len();
+        let detail = "x".repeat(additional);
+        padding(view).push_str(&detail);
+        padding(&mut base).push_str(&detail);
+        assert_eq!(snapshot(&base).encoded_len(), DEFAULT_MAX_PAYLOAD - bytes);
+    }
+
+    #[test]
+    fn snapshot_history_counts_the_complete_protobuf_element_at_the_boundary() {
+        let mut view = fixture("");
+        let message = say(&mut view, 128, "n1", "sender", &"a".repeat(256));
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&message), snapshot);
+
+        let exact = snapshot(&view);
+        assert_eq!(exact.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(exact.recent_messages, [message]);
+
+        padding(&mut view).push('x');
+        let short = snapshot(&view);
+        assert!(short.recent_messages.is_empty());
+        assert!(short.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn snapshot_history_stops_at_the_first_message_that_does_not_fit() {
+        let mut view = fixture("");
+        let old = say(&mut view, 128, "n1", "sender", "older");
+        say(&mut view, 129, "n1", "sender", &"x".repeat(16 * 1024));
+        let newest = say(&mut view, 130, "n1", "sender", "newest");
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&old) + wire_size(&newest), snapshot);
+
+        let result = snapshot(&view);
+        assert!(result.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [newest]);
+    }
+
+    #[test]
+    fn a_member_budgets_only_its_project_and_sender_copies() {
+        let mut view = fixture("/opt/releases/agora");
+        record(
+            &mut view,
+            4,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "other".into(),
+                project_id: "private".into(),
+                ..Default::default()
+            }),
+        );
+        let visible = say(
+            &mut view,
+            128,
+            "n1",
+            "sender",
+            &"shared project ".repeat(10),
+        );
+        say(&mut view, 129, "n1", "other", &"p".repeat(1024));
+        say(&mut view, 130, "n1", "n2/remote", &"r".repeat(1024));
+        let member = |view: &View| {
+            let scope = Scope::from_view(["n1/p".into()].into(), view);
+            snapshot_of(&scope.filter_view(view), SNAPSHOT_POS)
+        };
+        leave_space(&mut view, wire_size(&visible), member);
+        assert!(snapshot_of(&view, SNAPSHOT_POS).recent_messages.is_empty());
+
+        let result = member(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [visible]);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.agents.len(), 1);
+        assert_eq!(result.agents[0].agent_id, "n1/sender");
+    }
+
+    #[test]
+    fn the_shortened_binary_path_frees_budget_for_a_non_owner() {
+        let mut view = fixture("/opt/a-machine-specific-installation-directory/agora");
+        let message = say(&mut view, 128, "n1", "sender", &"hello ".repeat(40));
+        let non_owner = |view: &View| snapshot_for_client(view, SNAPSHOT_POS, false);
+        leave_space(&mut view, wire_size(&message), non_owner);
+
+        let result = non_owner(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.recent_messages, [message]);
+        let owner = snapshot_of(&view, SNAPSHOT_POS);
+        assert!(owner.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert!(owner.recent_messages.is_empty());
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod event_writer_tests {
     use super::*;
