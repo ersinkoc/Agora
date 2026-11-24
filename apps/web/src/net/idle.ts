@@ -39,7 +39,7 @@ export function watchIdle(minutes: number, onIdle: () => void, target: Pick<Even
   // Restarting the timer on every pointer move would be wasteful: at most once a second.
   const active = () => {
     const now = Date.now();
-    if (timer === undefined || now - last < 1_000) return;
+    if (timer === undefined || (now >= last && now - last < 1_000)) return;
     last = now;
     clearTimeout(timer);
     arm();
