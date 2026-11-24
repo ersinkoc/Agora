@@ -19,6 +19,9 @@
 //! - `rich`: ADR-0090: thinks (two chunks), runs a tool call `t3` (pending with a path, in progress, completed with text output), plans
 //!   with step status, says `done` and finishes. `rich-secret`: a tool call whose output holds a fake key and a very long text.
 //! - `burst`: updates one tool call and the plan several times back to back, then says `burst-done` and stops.
+//! - `cut-secret` (ADR-0111): a tool call `t-cut` whose line fits the bridge's 4 MiB input limit but whose line to the node would not
+//!   (its title fills the line and its arguments, written again as text, grow), so the bridge halves every long string of it; its
+//!   output (1000 bytes) holds [`CUT_SECRET`] across the place where that halving cuts it. Then says `cut-done` and finishes.
 //! - `slow`: starts a tool call `t4` (in progress) and then waits, reading its input, for `session/cancel`; it ends the turn with the
 //!   stop reason `cancelled` (or after 20 s). `hold`: finishes after 1.5 s. Both let a test queue prompts behind a running turn.
 //! - anything else: echoes the text as a message and finishes.
@@ -191,6 +194,31 @@ fn initial_config() -> Value {
         {"id": "auto_approve", "name": "Auto approve", "category": "_custom", "type": "boolean", "currentValue": false},
         {"id": "extended", "name": "Extended thinking", "category": "_custom", "type": "boolean", "currentValue": false}
     ])
+}
+
+/// ADR-0111: the value the `cut-secret` tool output holds (words only, so the bridge's own shape check leaves it as it is).
+pub const CUT_SECRET: &str = "violet otter juniper maple quartz";
+
+/// The bridge's input line limit (`agora_adapters::host::MAX_LINE`, which this crate does not depend on).
+const BRIDGE_LINE_MAX: usize = 4 * 1024 * 1024;
+
+/// ADR-0111: the `cut-secret` update. The output is 1000 bytes with [`CUT_SECRET`] at 234..267; halving it keeps 250 bytes of head
+/// and 250 of tail, so the cut at 250 leaves the value's first 16 bytes. The title is control characters (six bytes each when
+/// written), as many as keep the agent's line 1000 bytes under the limit; the arguments are 60000 quotes, which the bridge sends as
+/// text of 64 KiB (two bytes each when written), so its line passes the limit by about 10 KB.
+fn cut_secret_update() -> Value {
+    let output = format!("{}{CUT_SECRET}{} ", "a ".repeat(117), " z".repeat(366));
+    let mut u = json!({"sessionUpdate": "tool_call", "toolCallId": "t-cut", "title": "",
+                       "rawInput": {"a": "\"".repeat(60_000)},
+                       "content": [{"type": "content", "content": {"type": "text", "text": output}}]});
+    let line = |u: &Value| {
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "acp-s1", "update": u}})
+            .to_string()
+            .len()
+    };
+    let room = BRIDGE_LINE_MAX.saturating_sub(line(&u) + 1000);
+    u["title"] = json!("\u{1}".repeat(room / 6));
+    u
 }
 
 fn send<W: Write>(out: &mut W, v: &Value) -> io::Result<()> {
@@ -590,6 +618,14 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         }
                     }
                     "hold" => std::thread::sleep(Duration::from_millis(1500)),
+                    "cut-secret" => {
+                        update(out, &session, cut_secret_update())?;
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "cut-done"}}),
+                        )?;
+                    }
                     "plan" => {
                         update(
                             out,

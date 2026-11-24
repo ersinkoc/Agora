@@ -1,0 +1,1 @@
+- Agents that run through the ACP bridge now tell the node every place the bridge shortened their text (a very long message, tool output, arguments, plan step or file path, and the error lines kept when an agent stops), so the node also hides the parts of your saved secrets left on either side of each cut, live and in the saved conversation. (ADR-0111)

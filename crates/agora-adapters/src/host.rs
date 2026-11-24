@@ -834,7 +834,7 @@ fn cut_field(p: &Value, item: &ChatItem, pointer: &str) -> Option<CutField> {
 
 /// Notification → event. `None` for methods this host does not know: adapters must be free to send more than the
 /// node understands (forward compatibility), so that is not an error.
-fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
+pub(crate) fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
     Some(match method {
         "state/update" => AdapterEvent::State {
             session_id: s(p, "sessionId"),
