@@ -259,6 +259,7 @@ start-not-installed-why = Bu makine bu ajanın programını PATH içinde bulamı
 start-not-installed-program = Bu makine { $program } programını PATH içinde bulamıyor. Onu oraya kurun ya da Agora'yı o makinede { $program } programının çalıştığı bir terminalden başlatın.
 start-group-installed = Kurulu
 start-group-missing = Kurulu değil
+start-group-untested = Denenmedi
 start-runs-terminal = Terminal
 start-runs-chat = Sohbet
 # Yeni ajanın Ana sayfada ve sekmelerde alacağı ad: türü, sonra başlarken seçilen bir renk ($name "codex · …" biçimindedir).
@@ -1510,6 +1511,18 @@ agents-setting-any = ajanın kabul ettiği herhangi bir değer
 agents-setting-default = varsayılan { $value }
 agents-options = Seçenekler
 agents-option-skips = izin sorularını atlar
+agents-group-here = Bu makinede
+agents-group-add = Ajan ekle
+agents-group-add-desc = Bu makinede kurulu değil. Programı oraya kurun, sonra başlatılabilir; burada hiçbir şey çalışmaz ya da indirilmez.
+agents-untested = Denenmedi
+agents-untested-desc = ACP kayıt defterinden. Henüz kimse Agora'da denemedi: başlamayabilir ya da bazı özellikleri eksik olabilir.
+agents-runs-fetch = Başlatmak { $program } çalıştırır; o da bu sürümü ilk seferde indirir.
+agents-version = Sürüm
+agents-license = Lisans
+agents-repository = Depo
+agents-website = Web sitesi
+agents-source = Listeleyen
+agents-source-registry = ACP kayıt defteri
 
 # Bileşen galerisindeki bileşen takımı (visual-language.md §3). Yalnızca galeri için örnek metin.
 kit-title = Bileşen takımı

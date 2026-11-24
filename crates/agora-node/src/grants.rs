@@ -155,7 +155,12 @@ pub struct Grants {
     limits: Arc<crate::limits::DeviceLimits>,
     /// Which project a directory action lands in, for limited devices. Unset: a limited device can take no directory action.
     places: Mutex<Option<PlaceResolver>>,
+    /// #1133: whether a start of a kind must be signed (the node's loaded manifests say). Unset: every `registry-*` kind.
+    signed_starts: Mutex<Option<KindCheck>>,
 }
+
+/// Whether something holds for an agent kind, by the node's own manifests.
+pub type KindCheck = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// What a command is about, as far as a grant's scope can tell.
 #[derive(Default)]
@@ -219,11 +224,27 @@ impl Grants {
             project_of: Mutex::new(None),
             limits: Arc::new(crate::limits::DeviceLimits::default()),
             places: Mutex::new(None),
+            signed_starts: Mutex::new(None),
         }
     }
 
     /// Tells grants which project a folder or an agent belongs to, so a device limited to some projects can take directory actions
     /// inside them.
+    /// #1133: how to tell a kind whose start must be signed (`crate::manifests::needs_signed_start` over the node's kinds).
+    pub fn set_signed_start_check(&self, f: KindCheck) {
+        *self.signed_starts.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// #1133 ("startable, but always signed"): whether a start of `kind` that reaches the node through the hub must carry a person's
+    /// device signature (a routed `AgentLaunch`), so that an unsigned `AgentStart` of it is refused whatever `signed_commands` says.
+    /// Without a check set, every registry kind (`registry-*`) does: the stricter reading.
+    pub fn start_needs_signature(&self, kind: &str) -> bool {
+        match &*self.signed_starts.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(f) => f(kind),
+            None => kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+        }
+    }
+
     pub fn set_place_resolver(&self, f: PlaceResolver) {
         *self.places.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }

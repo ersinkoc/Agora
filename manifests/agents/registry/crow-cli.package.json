@@ -1,0 +1,59 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "crow-cli",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./crow-cli",
+          "env_names_not_copied": [],
+          "sha256": "e57bec141681d0843990ab2d536467a42cf33b4fe10a3374c152b83eb200cccd",
+          "url": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.49/crow-cli-darwin-aarch64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./crow-cli",
+          "env_names_not_copied": [],
+          "sha256": "62941f0f3d35c9e722d92bee3a4a9a5f8c4c92c2bcf408f7a7268eb0f8d52a1f",
+          "url": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.49/crow-cli-darwin-x86_64.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./crow-cli",
+          "env_names_not_copied": [],
+          "sha256": "7e4160ae3ffc0078a73fe78cab49cfe00bf854538991c47dbb25282d6a092685",
+          "url": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.49/crow-cli-linux-aarch64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./crow-cli",
+          "env_names_not_copied": [],
+          "sha256": "0001d5019ec35e8a080844daa96d3ba91afd38ec44a89e5102291ebd36a1083c",
+          "url": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.49/crow-cli-linux-x86_64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./crow-cli.exe",
+          "env_names_not_copied": [],
+          "sha256": "bcee58f1af378436d93b3386b62ce9a90dc3ed9614861ad28581c86577c4323a",
+          "url": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.49/crow-cli-windows-x86_64.zip"
+        }
+      },
+      "provides": [
+        "crow-cli"
+      ]
+    }
+  ],
+  "name": "registry-crow-cli",
+  "skipped": [],
+  "source": {
+    "id": "crow-cli",
+    "license": "MIT",
+    "license_url": "https://github.com/crow-cli/crow-cli/blob/main/LICENSE.md",
+    "repository": "https://github.com/crow-cli/crow-cli",
+    "version": "0.1.49",
+    "website": "https://crow-ai.dev"
+  },
+  "tested": false
+}

@@ -1,0 +1,7 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry entries left out, with the reason code.
+agoragentic-acp registry.quarantined
+antigravity-acp registry.inconsistent_command
+deepagents registry.quarantined
+minion-code registry.quarantined
+vtcode registry.quarantined

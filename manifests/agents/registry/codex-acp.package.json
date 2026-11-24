@@ -1,0 +1,25 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Codex",
+  "installers": [
+    {
+      "args": [],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@agentclientprotocol/codex-acp",
+      "version": "2.10.0"
+    }
+  ],
+  "name": "registry-codex-acp",
+  "skipped": [],
+  "source": {
+    "id": "codex-acp",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/agentclientprotocol/codex-acp/blob/main/LICENSE",
+    "repository": "https://github.com/agentclientprotocol/codex-acp",
+    "version": "2.10.0"
+  },
+  "tested": false
+}

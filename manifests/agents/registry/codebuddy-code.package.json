@@ -1,0 +1,27 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Codebuddy Code",
+  "installers": [
+    {
+      "args": [
+        "--acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@tencent-ai/codebuddy-code",
+      "version": "2.185.0"
+    }
+  ],
+  "name": "registry-codebuddy-code",
+  "skipped": [],
+  "source": {
+    "id": "codebuddy-code",
+    "license": "Proprietary",
+    "license_url": "https://www.codebuddy.cn/agreement/",
+    "version": "2.185.0",
+    "website": "https://www.codebuddy.cn/cli/"
+  },
+  "tested": false
+}

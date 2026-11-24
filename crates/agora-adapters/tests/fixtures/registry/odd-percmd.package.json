@@ -1,0 +1,26 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Odd Per Command",
+  "installers": [
+    {
+      "args": ["acp"],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {"cmd": "./percmd-darwin-arm64", "env_names_not_copied": [], "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "url": "https://example.com/odd/percmd-darwin-arm64.tar.gz"},
+        "linux-x86_64": {"cmd": "./percmd-linux-amd64", "env_names_not_copied": [], "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "url": "https://example.com/odd/percmd-linux-amd64.tar.gz"},
+        "windows-x86_64": {"cmd": "./percmd-windows-amd64.exe", "env_names_not_copied": [], "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "url": "https://example.com/odd/percmd-windows-amd64.zip"}
+      },
+      "provides": ["odd-percmd"]
+    }
+  ],
+  "name": "registry-odd-percmd",
+  "skipped": [],
+  "source": {
+    "id": "odd-percmd",
+    "license": "Apache-2.0",
+    "repository": "https://example.com/odd/percmd",
+    "version": "0.4.0"
+  },
+  "tested": false
+}

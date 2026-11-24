@@ -1,0 +1,28 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Grok Build",
+  "installers": [
+    {
+      "args": [
+        "agent",
+        "stdio"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@xai-official/grok",
+      "version": "1.0.93"
+    }
+  ],
+  "name": "registry-grok-build",
+  "skipped": [],
+  "source": {
+    "id": "grok-build",
+    "license": "proprietary",
+    "license_url": "https://x.ai/legal/terms-of-service",
+    "version": "1.0.93",
+    "website": "https://x.ai/cli"
+  },
+  "tested": false
+}

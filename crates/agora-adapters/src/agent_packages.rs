@@ -409,7 +409,7 @@ fn display(s: &str) -> R<String> {
 /// all digits nor `0x` and hex digits, so no IPv4 or IPv6 literal, and not `localhost`, `.local`, `.internal`), no userinfo, an optional
 /// port 1 to 65535, and nothing a shell, a header or a log could misread. This is syntax only: rung 3, which downloads, MUST still refuse
 /// private and loopback addresses a name resolves to, validate the port again, and refuse redirects to a non-https scheme or another host.
-fn https_url(s: &str) -> R<String> {
+pub(crate) fn https_url(s: &str) -> R<String> {
     let rest = s.strip_prefix("https://").ok_or(Reason::BadUrl)?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let (host, port) = match authority.split_once(':') {

@@ -98,6 +98,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` bulundu{ $by ->
         [agora] , Agora kurdu (sürüm { $version })
@@ -106,10 +107,12 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` orada ama bu hesap onu çalıştıramıyor. Dosyayı çalıştırılabilir yapın ya da yeniden kurun.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.
@@ -132,6 +135,15 @@ doctor-skip-permissions = { $detail ->
 doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır anlaşılamadı; bunlar düzelene kadar hiçbir ajan izin sorularını atlayamaz.
 doctor-show-secret = Dosya tarayıcısı ve inceleme ekranı, bir projeye bakabilen herkese gizli dosyaları (.env dosyaları, özel anahtarlar, ...) olduğu gibi gösteriyor (politika: files.show_secret = true).
 doctor-agent-unsafe = { $detail }: `{ $program }` Agora tarafından kurulmuş, ancak klasörü ya da dosyası güvenli değil (başka bir kullanıcı değiştirebilir); bu yüzden kullanılmıyor: varsa PATH üzerindeki kullanılır. `agora agent install` ile yeniden kurun ya da kurulum klasörlerini yalnızca size ait yapın.
+doctor-registry-kinds = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } biliniyor, Agora'da denenmedi; bunlardan { $ready } tanesi programını bu makinede buluyor. Penceredeki Ayarlar → Ajanlar hepsini listeler.
+doctor-registry-off = ACP kayıt defterinin ajanları bu makinede kapalı (politika satırı `agents.registry = off`): makine onları ne sunar ne başlatır. Kendi ajan tanımlarınız etkilenmez.
+doctor-registry-denied = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } bu makinede `agents.registry.deny` politika satırıyla kapalı.
 doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-cert-node = Bu makinenin hub sertifikası { $detail ->

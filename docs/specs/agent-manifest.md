@@ -23,6 +23,19 @@ shell) or, when the manifest names a path, exists there. On Windows, a bare name
 levels, looked up where the standard library looks and never in the agent's project folder; it is installed when that file
 exists. A found file without the owner's execute bit is "broken" (`agent-broken`, ADR-0087 rung 1): there, but starting it would fail. Doctor runs nothing and reads nothing from the program, and shows no agent version because no manifest has a version command yet. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
 
+**The ACP registry's kinds (ADR-0092).** Under the built-in kinds the binary also carries the converted agents of the ACP registry,
+`manifests/agents/registry/*.toml` (`agora-node::manifests::REGISTRY`), each of kind `registry-<registry id>`. They load first, so a
+built-in or folder file of the same `kind` replaces one, and a registry kind whose id is the name of a hand-made kind (built in or
+from the folder) is not offered at all (`antigravity-acp` covers `registry-antigravity-acp`). They are untested in Agora: the window
+marks them "Untested" (a kind named `registry-*`; no manifest field and no protocol change), lists the ones a machine cannot find
+under Settings → Agents, "Add an agent", with the version, licence and repository from the catalog built into the window, and leaves
+those out of the Start window. Their program is the ACP `argv[0]`: `npx` or `uvx` for a package (which fetches the pinned version
+when the agent first starts), else the registry's own program name. `agora doctor` counts them in one line (`registry-kinds`: how
+many, and how many find their program) instead of one line per kind. No registry kind has a launch option, so none can skip
+permission questions (ADR-0092 decision 5). A registry kind (by origin, not by name) whose program is a package runner (`npx`, `uvx`) is
+started from the hub only by a signed start, and the node's policy can switch registry kinds off (`agents.registry = off`, `agents.registry.deny`): both in
+`docs/specs/protocol.md`, "ACP registry kinds".
+
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated

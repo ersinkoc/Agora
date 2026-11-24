@@ -4,8 +4,11 @@
 //! every name and argument must be a plain token, `env` values are never copied, and a distribution this does not understand
 //! is skipped with a reason code, never guessed.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Map, Value};
 
+use crate::agent_packages::https_url;
 use crate::package::valid_name;
 use crate::perm::says_it_skips;
 
@@ -25,6 +28,12 @@ pub enum Reason {
     InsecureUrl,
     InconsistentCommand,
     ForbiddenExecutable,
+    /// A `repository`, `website` or `license_url` that is not an `https://` address a vendor could serve from.
+    BadUrl,
+    /// The registry itself holds the entry back (its `quarantine.json`).
+    Quarantined,
+    /// The icon is not a plain drawing (see [`check_icon`]).
+    BadIcon,
 }
 
 impl Reason {
@@ -40,6 +49,9 @@ impl Reason {
             Reason::InsecureUrl => "registry.insecure_url",
             Reason::InconsistentCommand => "registry.inconsistent_command",
             Reason::ForbiddenExecutable => "registry.forbidden_executable",
+            Reason::BadUrl => "registry.bad_url",
+            Reason::Quarantined => "registry.quarantined",
+            Reason::BadIcon => "registry.bad_icon",
         }
     }
 }
@@ -216,7 +228,11 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
     if !plain_token(pkg) || pkg.starts_with('-') {
         return Err(Reason::BadToken);
     }
-    let (name, version) = pkg.split_once("==").ok_or(Reason::UnpinnedVersion)?;
+    // `name==version`, or uvx's own `name@version` (the same exact pin); the manifest always says `==`.
+    let (name, version) = pkg
+        .split_once("==")
+        .or_else(|| pkg.split_once('@'))
+        .ok_or(Reason::UnpinnedVersion)?;
     if !pypi_name(name) {
         return Err(Reason::BadToken);
     }
@@ -236,8 +252,79 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
     })
 }
 
-/// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable.
+/// Package runners, package managers and fetchers: given a package, image or module name they download it and run it (`npx`,
+/// `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`, `go run x@v`, `docker run`). The converter writes `npx`/`uvx` launches itself
+/// (ADR-0092 decision 1, exact version); a `binary` entry may never name one, and the node starts a registry kind whose program is
+/// one only on a signed start (`agora_node::manifests::needs_signed_start`). One list for both.
+pub const PACKAGE_RUNNERS: &[&str] = &[
+    "npx",
+    "npm",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "yarnpkg",
+    "bun",
+    "bunx",
+    "corepack",
+    "uv",
+    "uvx",
+    "pip",
+    "pip3",
+    "pipx",
+    "poetry",
+    "pdm",
+    "hatch",
+    "conda",
+    "mamba",
+    "micromamba",
+    "go",
+    "cargo",
+    "rustup",
+    "gem",
+    "bundle",
+    "bundler",
+    "composer",
+    "dotnet",
+    "java",
+    "jbang",
+    "mvn",
+    "gradle",
+    "docker",
+    "podman",
+    "nerdctl",
+    "kubectl",
+    "nix",
+    "nix-shell",
+    "brew",
+    "curl",
+    "wget",
+    "git",
+];
+
+/// An executable's name without its folder and the extensions a platform runs it by (`npm.cmd`, `C:\\x\\node.exe`), lower-case.
+pub fn bare_executable(exe: &str) -> String {
+    let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    let mut e = file.to_ascii_lowercase();
+    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]
+        .iter()
+        .find_map(|x| e.strip_suffix(x))
+    {
+        e = bare.to_string();
+    }
+    e
+}
+
+/// Whether `exe` (any path, any extension) is one of [`PACKAGE_RUNNERS`].
+pub fn is_package_runner(exe: &str) -> bool {
+    PACKAGE_RUNNERS.contains(&bare_executable(exe).as_str())
+}
+
+/// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable; nor a
+/// package runner ([`PACKAGE_RUNNERS`]), which would fetch whatever its arguments name, unpinned and unreviewed.
 pub(crate) fn forbidden_executable(exe: &str) -> bool {
+    if is_package_runner(exe) {
+        return true;
+    }
     // Whatever extension a platform runs it by is the same program: `node.exe`, `bash.exe`, `powershell.exe -c` are a shell too.
     let mut e = exe.to_ascii_lowercase();
     while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]
@@ -277,10 +364,14 @@ pub(crate) fn forbidden_executable(exe: &str) -> bool {
         || e.starts_with("pypy")
 }
 
-fn convert_binary(d: &Value) -> Result<Dist, Reason> {
+/// A `binary` distribution. Every platform must give the same arguments. When every platform's program has the same name (an
+/// extension and a folder aside), the manifest runs that name; when they differ (`tool-linux-amd64`, `tool-windows-arm64.exe`), it runs
+/// the registry id, the one name the installer leaves on the path for each of them (`provides`).
+fn convert_binary(d: &Value, id: &str) -> Result<Dist, Reason> {
     let platforms = d.as_object().ok_or(Reason::BadField)?;
     let mut out = Map::new();
-    let mut command: Option<(String, Vec<String>)> = None;
+    let mut names: Vec<String> = Vec::new();
+    let mut command: Option<Vec<String>> = None;
     let mut all_hashed = !platforms.is_empty();
     for (platform, p) in platforms {
         if !plain_token(platform) {
@@ -318,9 +409,12 @@ fn convert_binary(d: &Value) -> Result<Dist, Reason> {
         }
         let a = args(p)?;
         match &command {
-            None => command = Some((exe, a.clone())),
-            Some((e, ea)) if *e == exe && *ea == a => {}
+            None => command = Some(a.clone()),
+            Some(ea) if *ea == a => {}
             Some(_) => return Err(Reason::InconsistentCommand),
+        }
+        if !names.contains(&exe) {
+            names.push(exe);
         }
         // A hash that is there but is not 64 hex digits is a malformed entry, not a missing hash.
         let sha = match text(p, "sha256") {
@@ -337,7 +431,14 @@ fn convert_binary(d: &Value) -> Result<Dist, Reason> {
             json!({ "url": url, "cmd": cmd, "sha256": sha, "env_names_not_copied": env_names(p) }),
         );
     }
-    let (exe, a) = command.ok_or(Reason::BadField)?;
+    let a = command.ok_or(Reason::BadField)?;
+    let exe = match names.as_slice() {
+        [one] => one.clone(),
+        _ => id.to_string(),
+    };
+    if forbidden_executable(&exe) {
+        return Err(Reason::ForbiddenExecutable);
+    }
     let mut argv = vec![exe.clone()];
     argv.extend(a.iter().cloned());
     let mut installer = json!({
@@ -380,7 +481,7 @@ pub fn convert(src: &str) -> Result<Converted, Reason> {
         let r = match kind_name {
             "npx" => convert_npx(d, version),
             "uvx" => convert_uvx(d),
-            _ => convert_binary(d),
+            _ => convert_binary(d, id),
         };
         match r {
             Ok(c) => {
@@ -421,8 +522,12 @@ pub fn convert(src: &str) -> Result<Converted, Reason> {
         "license_url",
     ] {
         if let Some(s) = text(&v, k) {
-            if !clean_text(s) {
+            if !clean_text(s) || (k == "license" && (s.is_empty() || s.chars().count() > 64)) {
                 return Err(Reason::BadField);
+            }
+            // The window turns these into links: an `https://` address only, never `javascript:`, a plain-HTTP or a local one.
+            if ["repository", "website", "license_url"].contains(&k) && https_url(s).is_err() {
+                return Err(Reason::BadUrl);
             }
             source.insert(k.to_string(), json!(s));
         }
@@ -442,4 +547,310 @@ pub fn convert(src: &str) -> Result<Converted, Reason> {
         package,
         notes,
     })
+}
+
+/// The registry's `quarantine.json`: an object from agent id to the registry's own short reason. The conversion skips those ids
+/// (`registry.quarantined`): the registry itself does not offer them. Anything but an object of valid ids to text is refused whole.
+pub fn quarantine_list(src: &str) -> Result<BTreeMap<String, String>, Reason> {
+    let v: Value = serde_json::from_str(src).map_err(|_| Reason::NotJson)?;
+    let obj = v.as_object().ok_or(Reason::BadField)?;
+    let mut out = BTreeMap::new();
+    for (id, why) in obj {
+        let why = why.as_str().ok_or(Reason::BadField)?;
+        if !valid_name(id) {
+            return Err(Reason::BadId);
+        }
+        out.insert(
+            id.clone(),
+            why.chars().filter(|c| !c.is_control()).collect(),
+        );
+    }
+    Ok(out)
+}
+
+/// What the window's list needs of one converted entry (`manifests/agents/registry/catalog.json`), joined to a machine's kinds by
+/// `kind`. `runs` is how the manifest starts it (`npx`, `uvx` or `binary`); `icon` says whether `icons/<id>.svg` was vendored.
+pub fn catalog_entry(c: &Converted, icon: bool) -> Value {
+    let src = &c.package["source"];
+    let runs = c.package["installers"]
+        .as_array()
+        .and_then(|i| i.first())
+        .and_then(|i| i["kind"].as_str())
+        .map_or(
+            "binary",
+            |k| if k == "binary-download" { "binary" } else { k },
+        );
+    let mut line = json!({
+        "kind": c.kind, "id": src["id"], "name": c.package["display"], "version": src["version"],
+        "runs": runs, "icon": icon, "tested": false,
+    });
+    for k in ["license", "license_url", "repository", "website"] {
+        if let Some(s) = src[k].as_str() {
+            line[k] = json!(s);
+        }
+    }
+    line
+}
+
+/// Largest icon accepted, in bytes.
+pub const MAX_ICON_BYTES: usize = 16 * 1024;
+
+/// SVG elements an icon may use: shapes, groups, gradients, clipping and text. No script, style, image, link, foreign object or
+/// animation.
+const ICON_ELEMENTS: &[&str] = &[
+    "svg",
+    "g",
+    "path",
+    "circle",
+    "ellipse",
+    "line",
+    "rect",
+    "polygon",
+    "polyline",
+    "title",
+    "desc",
+    "text",
+    "tspan",
+    "defs",
+    "linearGradient",
+    "radialGradient",
+    "stop",
+    "clipPath",
+    "mask",
+];
+
+/// Attributes an icon may use: geometry and paint. No event handler, no `style` and no `href` (and no `<use>`): an icon refers to
+/// nothing but its own gradients and clips, through `url(#id)`.
+const ICON_ATTRIBUTES: &[&str] = &[
+    "xmlns",
+    "xmlns:xlink",
+    "version",
+    "viewBox",
+    "width",
+    "height",
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "fx",
+    "fy",
+    "d",
+    "points",
+    "fill",
+    "fill-rule",
+    "fill-opacity",
+    "clip-rule",
+    "clip-path",
+    "mask",
+    "stroke",
+    "stroke-width",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-opacity",
+    "stroke-miterlimit",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "opacity",
+    "transform",
+    "id",
+    "class",
+    "preserveAspectRatio",
+    "overflow",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "font-style",
+    "text-anchor",
+    "dominant-baseline",
+    "letter-spacing",
+    "offset",
+    "stop-color",
+    "stop-opacity",
+    "gradientUnits",
+    "gradientTransform",
+    "maskUnits",
+    "clipPathUnits",
+    "xml:space",
+    "data-name",
+    "p-id",
+    "t",
+];
+
+/// The entities XML itself defines; any other reference (named or numeric) is refused, so no value can spell a word in hiding.
+fn entities_ok(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        rest = &rest[i..];
+        let Some(end) = rest.find(';') else {
+            return false;
+        };
+        if !["&amp;", "&lt;", "&gt;", "&quot;", "&apos;"].contains(&&rest[..=end]) {
+            return false;
+        }
+        rest = &rest[end + 1..];
+    }
+    true
+}
+
+/// An attribute value: no markup, only the five XML entities, `url(...)` only to a local `#id`, no script scheme.
+fn icon_value_ok(name: &str, value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let urls_local = lower
+        .match_indices("url(")
+        .all(|(i, _)| lower[i + 4..].trim_start().starts_with('#'));
+    let plain = !value.contains('<') && entities_ok(value) && urls_local;
+    let scheme_free = !lower.contains("javascript:") && !lower.contains("data:");
+    match name {
+        "xmlns" => value == "http://www.w3.org/2000/svg",
+        "xmlns:xlink" => value == "http://www.w3.org/1999/xlink",
+        _ => {
+            plain
+                && scheme_free
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() && c != '\t' && c != '\n' && c != '\r')
+        }
+    }
+}
+
+/// Drops a leading `<?xml ...?>` declaration, a `<!DOCTYPE svg ...>` without an internal subset and comments; whatever else starts
+/// with `<!` or `<?` is refused.
+fn strip_prolog(s: &str) -> Result<String, Reason> {
+    let mut rest = s.trim_start_matches('\u{feff}').trim_start();
+    if rest.starts_with("<?xml") {
+        let end = rest.find("?>").ok_or(Reason::BadIcon)?;
+        if rest[1..end].contains(['<', '>']) {
+            return Err(Reason::BadIcon);
+        }
+        rest = rest[end + 2..].trim_start();
+    }
+    let mut out = String::with_capacity(rest.len());
+    let mut doctype_seen = false;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let end = after.find("-->").ok_or(Reason::BadIcon)?;
+            rest = &after[end + 3..];
+        } else if rest.starts_with("<!DOCTYPE") && !doctype_seen && out.trim().is_empty() {
+            let end = rest.find('>').ok_or(Reason::BadIcon)?;
+            // An internal subset (`[ ... ]`) is where entities are declared: refused.
+            if rest[1..end].contains(['[', ']', '<'])
+                || !rest[9..end].trim_start().starts_with("svg")
+            {
+                return Err(Reason::BadIcon);
+            }
+            doctype_seen = true;
+            rest = &rest[end + 1..];
+        } else if rest.starts_with("<!") || rest.starts_with("<?") {
+            return Err(Reason::BadIcon);
+        } else {
+            out.push('<');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out.trim().to_string())
+}
+
+/// ADR-0092 open question 2: an agent's icon is vendored at conversion time only when it is a plain drawing. At most
+/// [`MAX_ICON_BYTES`], UTF-8, one `<svg>` root in the SVG namespace, only the elements and attributes above, every attribute
+/// quoted, no `href`, `url(...)` only to a local `#id`, only the five XML entities, no CDATA, processing instruction or internal
+/// doctype subset. Returns the drawing without its prolog and comments. The window shows it through an `<img>` (which never runs a
+/// script nor loads anything an SVG names), so this check is a second wall, not the only one.
+pub fn check_icon(bytes: &[u8]) -> Result<String, Reason> {
+    if bytes.is_empty() || bytes.len() > MAX_ICON_BYTES {
+        return Err(Reason::BadIcon);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| Reason::BadIcon)?;
+    let svg = strip_prolog(text)?;
+    let mut stack: Vec<&str> = Vec::new();
+    let mut roots = 0;
+    let mut rest = svg.as_str();
+    loop {
+        let (before, tag_start) = match rest.find('<') {
+            Some(i) => (&rest[..i], Some(i)),
+            None => (rest, None),
+        };
+        if !entities_ok(before) || before.contains('>') {
+            return Err(Reason::BadIcon);
+        }
+        if !before.trim().is_empty() && stack.is_empty() {
+            return Err(Reason::BadIcon);
+        }
+        let Some(i) = tag_start else { break };
+        rest = &rest[i + 1..];
+        let end = rest.find('>').ok_or(Reason::BadIcon)?;
+        let tag = &rest[..end];
+        rest = &rest[end + 1..];
+        if let Some(name) = tag.strip_prefix('/') {
+            if stack.pop() != Some(name.trim_end()) {
+                return Err(Reason::BadIcon);
+            }
+            continue;
+        }
+        let (body, closed) = match tag.strip_suffix('/') {
+            Some(b) => (b, true),
+            None => (tag, false),
+        };
+        let name_end = body
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(body.len());
+        let name = &body[..name_end];
+        if !ICON_ELEMENTS.contains(&name) {
+            return Err(Reason::BadIcon);
+        }
+        if stack.is_empty() {
+            roots += 1;
+            if name != "svg" || roots > 1 {
+                return Err(Reason::BadIcon);
+            }
+        }
+        let mut attrs = &body[name_end..];
+        let mut has_ns = false;
+        loop {
+            attrs = attrs.trim_start();
+            if attrs.is_empty() {
+                break;
+            }
+            let eq = attrs.find('=').ok_or(Reason::BadIcon)?;
+            let an = attrs[..eq].trim_end();
+            if !ICON_ATTRIBUTES.contains(&an) {
+                return Err(Reason::BadIcon);
+            }
+            let v = attrs[eq + 1..].trim_start();
+            let quote = v
+                .chars()
+                .next()
+                .filter(|q| *q == '"' || *q == '\'')
+                .ok_or(Reason::BadIcon)?;
+            let close = v[1..].find(quote).ok_or(Reason::BadIcon)?;
+            let value = &v[1..=close];
+            if !icon_value_ok(an, value) {
+                return Err(Reason::BadIcon);
+            }
+            has_ns |= an == "xmlns";
+            attrs = &v[close + 2..];
+            if !attrs.is_empty() && !attrs.starts_with(|c: char| c.is_ascii_whitespace()) {
+                return Err(Reason::BadIcon);
+            }
+        }
+        if name == "svg" && stack.is_empty() && !has_ns {
+            return Err(Reason::BadIcon);
+        }
+        if !closed {
+            stack.push(name);
+        }
+    }
+    if !stack.is_empty() || roots != 1 {
+        return Err(Reason::BadIcon);
+    }
+    Ok(svg)
 }

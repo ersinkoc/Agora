@@ -21,7 +21,7 @@ or a local response timeout has a localized retry message.
 | `node.unknown` | `node_id` | The hub has never seen this node, or the request named none (ADR-0029) |
 | `node.online` | `node_id` | ADR-0073: the machine is connected, so it cannot be forgotten; only an offline machine can |
 | `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
-| `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
+| `node.policy_denied` | `node_id`, `rule`, (`kind`) | Node local policy rejected the action. ADR-0092 (#1133) adds three rules for an ACP registry kind, with `kind`: `registry_signed_start` (a routed unsigned `AgentStart` of a registry kind that starts through a package runner such as `npx` or `uvx`: only a signed `AgentLaunch`, a helper start the person approved, or the machine's own control socket may start one, whatever `signed_commands` says), `registry_off` (the policy line `agents.registry = off`) and `registry_denied` (`agents.registry.deny` names it). Nothing was started |
 | `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk, requests waiting for a node) |
 | `project.not_found` | `project_id` | |
 | `worktree.dirty` | `path` | Uncommitted changes block the operation |

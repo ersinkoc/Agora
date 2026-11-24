@@ -6,6 +6,7 @@ import { sharesName } from '../model';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { ROLE_REFUSAL, refusalCode } from '../net/startRefusal';
+import { isRegistryKind } from '../net/agentKinds';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, Callout, SegmentedControl } from './kit';
 import { KindCards, NO_COLOUR } from './StartKinds';
@@ -139,7 +140,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
     if (!node) return;
     let current = true;
     setKinds('loading'); setKind(''); setInfo(undefined); setError(undefined);
-    loadKinds(node).then(all => { if (current) { const k = forTask ? all.filter(x => x.kind !== 'shell') : all; setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed)?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
+    loadKinds(node).then(all => { if (current) { const k = forTask ? all.filter(x => x.kind !== 'shell') : all; setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed && !isRegistryKind(x.kind))?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
     return () => { current = false; };
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
