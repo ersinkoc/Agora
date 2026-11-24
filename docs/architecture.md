@@ -186,8 +186,9 @@ Main window layout: see `ux/main-window.md`.
   Team changes use `owner` and an empty session. For `user.add` and `user.role`, `node` holds the affected
   user ID and `outcome` holds the role. Removal records the affected user ID, and project grant and revoke
   rows record the user and project scope in `node`.
-  The event log carries coordination events separately. Device, project and agent attribution in the audit export
-  is tracked in [#1127](https://github.com/ersinkoc/Agora/issues/1127).
+  Routed commands also record the project and agent they act on when the command or the hub's view names them, the
+  requested signing device of a signed command, and the device a node verified (`docs/specs/protocol.md`, team audit).
+  The event log carries coordination events separately.
 - Optional end-to-end encryption of terminal streams between node and client (required for cloud mode).
 
 ## 7. Internationalization
