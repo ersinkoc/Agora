@@ -44,6 +44,16 @@ enum Resource<'a> {
 }
 
 impl<'a> Target<'a> {
+    /// ADR-0108: one agent of `node` (its own id) and its project, for a row the hub writes about that agent itself.
+    pub(crate) fn of_agent(node: &'a str, agent_id: &str, project_id: &str) -> Self {
+        Self {
+            node,
+            agent_id: bounded_id(agent_id),
+            project_id: bounded_id(project_id),
+            ..Self::default()
+        }
+    }
+
     /// Uses only identifiers documented by the command and the hub's current node-qualified projection.
     pub(crate) fn for_command(node: &'a str, command: Option<&'a C>, view: &View) -> Self {
         use Resource::*;

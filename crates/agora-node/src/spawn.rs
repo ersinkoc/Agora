@@ -208,6 +208,8 @@ pub struct Spawner {
     events: Option<Arc<EventSink>>,
     chat: Arc<crate::chat::ChatBoard>,
     git_wake: Option<Arc<AtomicBool>>,
+    /// #1119 item 3: the node's stop flag; once it is set no helper is started (`node.offline`).
+    stopping: Option<Arc<AtomicBool>>,
     names: AtomicU64,
     state: Mutex<State>,
 }
@@ -337,6 +339,7 @@ impl Spawner {
             events,
             chat,
             git_wake: None,
+            stopping: None,
             names: AtomicU64::new(0),
             state: Mutex::new(State::default()),
         }
@@ -347,6 +350,25 @@ impl Spawner {
     pub fn with_git_wake(mut self, wake: Arc<AtomicBool>) -> Self {
         self.git_wake = Some(wake);
         self
+    }
+
+    /// #1119 item 3: the node's stop flag (see [`Self::stopping`]).
+    #[must_use]
+    pub fn with_stopping(mut self, stopping: Arc<AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
+        self
+    }
+
+    /// `node.offline` once the node is stopping (ADR-0104 O2): it starts nothing more, as its commands do not.
+    fn stopping(&self) -> Result<(), Error> {
+        if self
+            .stopping
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Acquire))
+        {
+            return Err(Error::new(ErrorCode::NodeOffline).with("node_id", self.node_id.as_str()));
+        }
+        Ok(())
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -614,6 +636,8 @@ impl Spawner {
             base: None,
         };
         let mut sup = self.sup();
+        // Read under the lock the stop takes before it lets the agents go: a start either comes before it or not at all.
+        self.stopping()?;
         // ADR-0066: the settings the user approved, exactly, and ADR-0059 decision 5: the launch options the user's signed decision
         // named (that decision is the confirmation of each; a helper never inherits its parent's). Checked again against the manifest
         // and the owner's policy as they are now.
@@ -1015,6 +1039,8 @@ impl Helpers for Spawner {
     fn start(&self, caller: &AgentId, a: &StartArgs) -> Result<u64, Error> {
         let folder_shown = a.folder.clone().unwrap_or_default();
         let refuse = |e: Error| self.refused(caller, &a.kind, &folder_shown, e);
+        // Recorded as every refusal is (`agent_start_refused`).
+        self.stopping().map_err(refuse)?;
         if a.node
             .as_deref()
             .is_some_and(|n| !n.is_empty() && n != self.node_id)

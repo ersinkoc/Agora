@@ -228,9 +228,10 @@ pub enum HostError {
     Timeout,
     /// The adapter exited (or its output ended) before answering.
     Exited,
-    /// ADR-0104 O2: the node let the adapter go (it is stopping; the holder keeps the process) while this call waited. Its line had
-    /// been handed to the writer, which still writes it; the answer is not read here. Callers count the request as given, never as
-    /// failed (no prompt taken back, no queued one dropped, no decision recorded as not delivered).
+    /// ADR-0104 O2: the node let the adapter go (it is stopping; the holder keeps the process) while this call waited, after its line
+    /// was written (#1119 item 1: a line never written is answered [`Self::Exited`], and is not written after). The answer is not read
+    /// here. Callers count the request as given, never as failed (no prompt taken back, no queued one dropped, no decision recorded as
+    /// not delivered).
     Detached,
     /// The adapter answered with a JSON-RPC error; `data` is its `{code, params}` if it sent one.
     Rpc {
@@ -293,11 +294,37 @@ pub struct Initialized {
 /// Calls waiting for an answer. `closed` stops admitting new calls after output ends or a write fails.
 #[derive(Default)]
 struct PendingState {
-    map: HashMap<u64, Sender<Result<Value, HostError>>>,
+    map: HashMap<u64, Waiter>,
     closed: bool,
     /// ADR-0104 O2: set by [`Adapter::let_go`] before the reader is stopped, so the end of output that follows is the node's own
-    /// stop: the waiting calls are answered [`HostError::Detached`], and the lines already queued are still written.
+    /// stop. No call is admitted from then on. When the reader ends, a waiting call whose line was written is answered
+    /// [`HostError::Detached`]; one whose line is still queued is answered [`HostError::Exited`] and its line is never written; one whose
+    /// line is being written is answered by the writer when that write returns (#1119 item 1).
     detached: bool,
+}
+
+/// A call waiting for its answer, and how far its line got.
+struct Waiter {
+    answer: Sender<Result<Value, HostError>>,
+    line: LineState,
+}
+
+/// ADR-0104 O2 (#1119 item 1): how far a waiting call's line got to the adapter's input (for a process the holder runs: to the holder,
+/// which passes it on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineState {
+    Queued,
+    Writing,
+    Written,
+}
+
+impl From<Sender<Result<Value, HostError>>> for Waiter {
+    fn from(answer: Sender<Result<Value, HostError>>) -> Self {
+        Self {
+            answer,
+            line: LineState::Queued,
+        }
+    }
 }
 
 type Pending = Arc<Mutex<PendingState>>;
@@ -384,12 +411,13 @@ impl Caller {
             // Check admission and enqueue under one lock so the writer cannot miss a send
             // while it closes and drains the queue. The send is nonblocking.
             let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed) else {
+            // ADR-0104 O2: nothing new is sent to an adapter the node is letting go.
+            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed && !p.detached) else {
                 return Err(HostError::Exited);
             };
             match writer.try_send((id, line)) {
                 Ok(()) => {
-                    p.map.insert(id, tx);
+                    p.map.insert(id, tx.into());
                 }
                 Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
                 Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
@@ -1283,7 +1311,10 @@ impl Adapter {
     }
 
     /// Everything the adapter said since the last call, oldest first. Never blocks. After [`Self::detach`] or [`Self::let_go`], the end
-    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder.
+    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder. A real end read just before
+    /// the let-go is dropped too (a stopping node would only schedule a restart it never makes): the holder still has the ended process,
+    /// so the next node does not take it up, the holder lets it go, and the agent is offered for Resume (#1119 item 5, tested in
+    /// `hold_node_pipes`).
     pub fn poll(&self) -> Vec<AdapterEvent> {
         let detached = matches!(self.proc, Proc::Held { detached: true, .. });
         std::iter::from_fn(|| self.events.try_recv().ok())
@@ -1451,15 +1482,24 @@ fn read_loop<R: Read>(
             }
         }
     }
-    // Output ended: fail everyone still waiting, then say so. When the node let the adapter go, the calls were given and only their
-    // answers will not be read (ADR-0104 O2).
+    // Output ended: fail everyone still waiting, then say so. When the node let the adapter go (ADR-0104 O2), a call whose line was
+    // written was given and only its answer will not be read; one whose line was not is not delivered, and the writer now skips it; one
+    // whose line is being written is the writer's to answer (#1119 item 1).
     {
         let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
         p.closed = true;
         if p.detached {
-            for (_, waiter) in p.map.drain() {
-                let _ = waiter.send(Err(HostError::Detached));
-            }
+            p.map.retain(|_, w| match w.line {
+                LineState::Writing => true,
+                LineState::Written => {
+                    let _ = w.answer.send(Err(HostError::Detached));
+                    false
+                }
+                LineState::Queued => {
+                    let _ = w.answer.send(Err(HostError::Exited));
+                    false
+                }
+            });
         } else {
             p.map.clear();
         }
@@ -1471,19 +1511,33 @@ fn read_loop<R: Read>(
 /// it fail at once (as the old in-line write did) instead of waiting for their timeouts.
 fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: &Pending) {
     while let Ok((id, line)) = lines.recv() {
-        // A caller can time out while its line is still queued. Never hold this lock during I/O. A line queued before the node let
-        // the adapter go was given (ADR-0104 O2): it is written although nobody waits for its answer any more.
+        // A caller can time out while its line is still queued, and a line still queued when the reader of an adapter the node let go
+        // ended was answered as not delivered (ADR-0104 O2, #1119 item 1): neither is written. Never hold this lock during I/O.
         let active = {
-            let p = pending.lock().unwrap_or_else(|e| e.into_inner());
-            p.detached || p.map.contains_key(&id)
+            let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.map
+                .get_mut(&id)
+                .map(|w| w.line = LineState::Writing)
+                .is_some()
         };
         if !active {
             continue;
         }
-        if let Err(e) = stdin
+        let wrote = stdin
             .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-        {
+            .and_then(|()| stdin.flush());
+        if wrote.is_ok() {
+            let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            if p.closed && p.detached {
+                // The reader of an adapter the node let go ended while this line was written: given, its answer is not read.
+                if let Some(w) = p.map.remove(&id) {
+                    let _ = w.answer.send(Err(HostError::Detached));
+                }
+            } else if let Some(w) = p.map.get_mut(&id) {
+                w.line = LineState::Written;
+            }
+        }
+        if let Err(e) = wrote {
             pending.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
             let err = if e.kind() == io::ErrorKind::BrokenPipe {
                 HostError::Exited
@@ -1500,25 +1554,25 @@ fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: 
 }
 
 fn fail(pending: &Pending, id: u64, e: HostError) {
-    let tx = pending
+    let w = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .map
         .remove(&id);
-    if let Some(tx) = tx {
-        let _ = tx.send(Err(e));
+    if let Some(w) = w {
+        let _ = w.answer.send(Err(e));
     }
 }
 
 fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
     let Some(id) = id.as_u64() else { return };
-    let tx = pending
+    let w = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .map
         .remove(&id);
-    if let Some(tx) = tx {
-        let _ = tx.send(r);
+    if let Some(w) = w {
+        let _ = w.answer.send(r);
     }
 }
 
@@ -1750,6 +1804,106 @@ mod tests {
         ));
     }
 
+    /// The input of a held adapter whose first write waits until the test says how it ends (`true`: written, `false`: the link broke).
+    #[derive(Clone)]
+    struct Gated {
+        written: Arc<Mutex<Vec<u8>>>,
+        entered: Arc<Mutex<Option<Sender<()>>>>,
+        outcome: Arc<Mutex<Receiver<bool>>>,
+    }
+
+    impl Write for Gated {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+                if !self.outcome.lock().unwrap().recv().unwrap_or(false) {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            self.written.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A held adapter on a [`Gated`] input: a prompt whose write waits, and a cancel queued behind it. Then the node lets it go and its
+    /// reader ends. The adapter, the input's bytes, how to end the waiting write, and the two calls' answers.
+    #[allow(clippy::type_complexity)]
+    fn let_go_while_writing() -> (
+        Adapter,
+        Arc<Mutex<Vec<u8>>>,
+        Sender<bool>,
+        std::thread::JoinHandle<Result<Value, HostError>>,
+        std::thread::JoinHandle<Result<Value, HostError>>,
+    ) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (entered, is_writing) = channel();
+        let (end_write, outcome) = channel();
+        let input = Gated {
+            written: Arc::default(),
+            entered: Arc::new(Mutex::new(Some(entered))),
+            outcome: Arc::new(Mutex::new(outcome)),
+        };
+        let mut a = Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(input.clone()),
+                output: Box::new(Lines(Cursor::new(Vec::new()), Arc::clone(&stop))),
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let call = |method: &'static str| {
+            let caller = a.caller();
+            std::thread::spawn(move || caller.call(method, json!({}), Duration::from_secs(10)))
+        };
+        let prompt = call("session/prompt");
+        is_writing.recv_timeout(Duration::from_secs(10)).unwrap();
+        let cancel = call("session/cancel");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while a.pending.lock().unwrap().map.len() < 2 {
+            assert!(std::time::Instant::now() < end, "the cancel was not queued");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(a.let_go());
+        assert!(a.reader_ended_by(std::time::Instant::now() + DETACH_WAIT));
+        (a, input.written, end_write, prompt, cancel)
+    }
+
+    /// #1119 item 1: when the reader of an adapter the node let go ends, a call whose line is still queued is answered `Exited` (not
+    /// delivered) at once and its line is never written; one whose line is being written is answered when that write returns:
+    /// `Detached` (given) once written.
+    #[test]
+    fn a_line_still_queued_at_the_let_go_is_not_delivered_and_never_written() {
+        let (_a, written, end_write, prompt, cancel) = let_go_while_writing();
+        assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
+        end_write.send(true).unwrap();
+        assert!(matches!(prompt.join().unwrap(), Err(HostError::Detached)));
+        // The writer goes on to the queued cancel, and skips it.
+        std::thread::sleep(Duration::from_millis(100));
+        let text = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert!(text.contains("session/prompt"), "{text}");
+        assert!(!text.contains("session/cancel"), "{text}");
+    }
+
+    /// #1119 item 1: a call whose line was being written when the reader of an adapter the node let go ended, and whose write then
+    /// failed, was not delivered: `Exited`, never `Detached` (which callers record as sent).
+    #[test]
+    fn a_line_whose_write_fails_after_the_let_go_is_not_delivered() {
+        let (_a, written, end_write, prompt, cancel) = let_go_while_writing();
+        assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
+        end_write.send(false).unwrap();
+        assert!(matches!(prompt.join().unwrap(), Err(HostError::Exited)));
+        assert!(written.lock().unwrap().is_empty());
+    }
+
     /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a
     /// node's stop, waiting longer than [`DETACH_WAIT`].
     #[test]
@@ -1973,7 +2127,7 @@ mod tests {
         let mut responses = Vec::new();
         for (id, line) in [(1, "first\n"), (2, "expired\n"), (3, "last\n")] {
             let (reply, response) = channel();
-            pending.lock().unwrap().map.insert(id, reply);
+            pending.lock().unwrap().map.insert(id, reply.into());
             responses.push(response);
             requests.send((id, line.into())).unwrap();
         }
@@ -2022,7 +2176,7 @@ mod tests {
         let (resume, release) = channel();
         let responses = [1, 2, 3].map(|id| {
             let (reply, response) = channel();
-            pending.lock().unwrap().map.insert(id, reply);
+            pending.lock().unwrap().map.insert(id, reply.into());
             if id > 1 {
                 requests.try_send((id, format!("{id}\n"))).unwrap();
             }
@@ -2078,7 +2232,7 @@ mod tests {
 
         let pending: Pending = Arc::default();
         let (reply, response) = channel();
-        pending.lock().unwrap().map.insert(1, reply);
+        pending.lock().unwrap().map.insert(1, reply.into());
         let (events, output) = channel();
         let head = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":";
         let tail = b"\"done\"}";
@@ -2111,7 +2265,7 @@ mod tests {
     fn invalid_utf8_is_ignored_without_settling_a_request_or_ending_the_stream() {
         let pending: Pending = Arc::default();
         let (answer, response) = channel();
-        pending.lock().unwrap().map.insert(1, answer);
+        pending.lock().unwrap().map.insert(1, answer.into());
         let ignored = AtomicUsize::new(0);
         let (events, output) = channel();
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"\xff\"}}\n\

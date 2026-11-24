@@ -74,8 +74,10 @@ a confined agent cannot read it; paging returns exactly the entries before an id
   the agent ended, `agora history purge`, the node's secret values replaced, continuous ids, and a resume or a take-up that shows the
   earlier turns once (an agent's own replay of a loaded session is not shown again). See ADR-0104 "Build status".
 - Not built: the schema step and paging (decision 4's `chat.history`), the window's scroll-back and its "resumed" and "earlier session"
-  markers (decision 5; a fresh start already keeps the earlier session as `<id>.earlier.jsonl`), search (decision 6). A forget at the hub
-  (ADR-0053) never reaches the node, so decision 3's "forgetting an agent forgets its history" holds only through retention.
+  markers (decision 5; a fresh start already keeps the earlier session as `<id>.earlier.jsonl`), search (decision 6).
+- Decision 3's "forgetting an agent forgets its history" is built by ADR-0108 (#1104): a forget at the hub reaches a node that offers
+  `agent.forget.local` (at once, or when it next connects), which removes the agent's file and its earlier session's and no longer
+  offers it for Resume. An older node still leaves the file to retention.
 
 ## Amendment A (2026-11-24, #1147): the node's own secret values are replaced in what it sends live too
 Status: Accepted (2026-11-24, the maintainer's explicit message in the merger chat: "Yes, redact live too").

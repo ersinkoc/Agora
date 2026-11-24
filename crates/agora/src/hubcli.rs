@@ -51,6 +51,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "task.dispatch",
     // ADR-0060
     "agent.resume",
+    // ADR-0108: the hub passes a person's forget of a closed agent on to its node (a node offers it), and keeps it owed meanwhile.
+    "agent.forget.local",
     // ADR-0059
     "agent.launch_options",
     // ADR-0066
