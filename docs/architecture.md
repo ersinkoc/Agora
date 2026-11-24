@@ -41,7 +41,7 @@ Owns everything that touches the machine:
 - **Terminal emulation:** `agora-vt` exposes a trait; the backend is replaceable (see open questions).
 - **Process inspection:** foreground process, process tree, cwd.
 - **Files:** lazy directory listing and read through the protocol. The node's file module has watch and lease-checked
-  write helpers for node-mediated access.
+  write helpers that are not yet wired to any command or tool.
 - **Git:** checkouts, worktree create/remove, status, diff, branch info.
 - **Agent supervision:** start, stop, resume, restart policy.
 
