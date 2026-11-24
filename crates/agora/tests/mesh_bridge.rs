@@ -48,7 +48,19 @@ struct FakeNode {
 
 impl FakeNode {
     fn start(path: &Path, mode: Mode) -> Self {
-        let listener = agora_platform::local_listen(path).unwrap();
+        // #1150: a bridge another test thread is starting holds a copy of every open descriptor from its fork until it runs its
+        // program, the stopped node's `<path>.lock` too, and the system counts that copy as holding the lock: a node started again at
+        // once can be refused for that moment. The node's mesh server waits it out the same way (`RELISTEN_WAIT`, #1093); a lock
+        // still held after the wait is a real holder and fails the test.
+        let until = Instant::now() + Duration::from_secs(5);
+        let listener = loop {
+            match agora_platform::local_listen(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => break other.unwrap(),
+            }
+        };
         listener.set_nonblocking(true).unwrap();
         let (stop, streams, seen) = (
             Arc::new(AtomicBool::new(false)),

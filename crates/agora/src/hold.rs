@@ -1020,7 +1020,18 @@ mod tests {
         // This process stands for the supervisor. Its node is an `agora` process (here `sleep` under that name); a stranger it started
         // is not named so, and what the node started is the node's child, never the lock holder's.
         let node_exe = dir.join("agora-admit-node");
-        std::fs::write(&node_exe, "#!/bin/sh\nsleep 5\n").unwrap();
+        // #1150: written by a shell, not by this process. A program another test thread starts holds a copy of every descriptor of
+        // this process from its fork until it runs its program, and while any copy of a descriptor open for writing is left, starting
+        // the script fails with "Text file busy" (Linux). The shell's own descriptor is closed when its `printf` ends.
+        let wrote = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf \"$1\" > \"$2\"")
+            .arg("sh")
+            .arg("#!/bin/sh\\nsleep 5\\n")
+            .arg(&node_exe)
+            .status()
+            .unwrap();
+        assert!(wrote.success());
         std::fs::set_permissions(
             &node_exe,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),

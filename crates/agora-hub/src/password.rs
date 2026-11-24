@@ -636,15 +636,23 @@ mod tests {
     fn verifying_takes_the_same_time_for_a_near_miss_and_a_far_miss() {
         // ring compares the derived keys with a constant-time compare; this checks only that a miss at the first byte does not return
         // much sooner than one at the last (a loose bound: the derivation dominates either way).
+        // #1150: timed one verification at a time, the two kinds taking turns, and each kind judged by its fastest run. A stall of the
+        // machine (another test, a busy runner) only ever adds time, and it lands on one run, not on one kind as a whole: when each
+        // kind was timed once, as one block after the other, a single stall in one block put it past the bound.
         let stored = hash_with("abcdefgh", 20_000).unwrap();
-        let time = |c: &str| {
+        let once = |c: &str| {
             let t = std::time::Instant::now();
-            for _ in 0..5 {
-                assert!(!verify(&stored, c));
-            }
+            assert!(!verify(&stored, c));
             t.elapsed().as_secs_f64()
         };
-        let (near, far) = (time("abcdefgX"), time("Xbcdefgh"));
+        // Warmed up first, so neither kind pays for the first run's cold caches.
+        once("abcdefgX");
+        once("Xbcdefgh");
+        let (mut near, mut far) = (f64::INFINITY, f64::INFINITY);
+        for _ in 0..9 {
+            near = near.min(once("abcdefgX"));
+            far = far.min(once("Xbcdefgh"));
+        }
         assert!(far > near * 0.5 && near > far * 0.5, "{near} vs {far}");
     }
 
