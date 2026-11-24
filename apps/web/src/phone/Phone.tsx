@@ -100,10 +100,10 @@ function PhoneRequest({ ask, guard, onResolve, onOpen }: { ask: PhoneAsk; guard:
   const send = (go: () => unknown) => guard.answer(x.id, go);
   const stale = guard.stale;
   const staleWhy = stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>;
-  if (x.start) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><StartApproval approval={x} start={x.start} busy={!onResolve || !guard.canAnswer(x.id)} onResolve={(ok, choice) => send(() => onResolve?.(x, ok, choice))} />{staleWhy}</div>;
+  if (x.start) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><StartApproval approval={x} start={x.start} busy={!guard.canAnswer(x.id)} onResolve={onResolve ? (ok, choice) => send(() => onResolve(x, ok, choice)) : undefined} />{onResolve && staleWhy}</div>;
   // ADR-0090 Amendment A: a switch to a mode that skips permissions is read in the node's own rendering, never as raw text. Its answer
   // returns how it went, so the window's holds free it again when it failed.
-  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{staleWhy}</div>;
+  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{onResolve && staleWhy}</div>;
   const name = agent?.name || approvalName(x);
   const why = `phone-why-${x.id}`;
   const sent = guard.status(x.id) === 'sent';
@@ -207,11 +207,14 @@ function NeedsDock({ dock, count, machines, stale, onResolve, onOpen }: { dock: 
       {dock.kind === 'answer' && <ApprovalRequest density="row" stacked className="phone-dock__req" icon={ASK_ICON[askKind(dock.approval)]}
         avatar={<AgentAvatar accent={dock.agent?.accent || 'var(--agent-slate)'} kind={kindOf({ kind: dock.agent?.kind, name: who })} size="s" />}
         title={askTitle(dock.approval, visible(who))} where={where ? <bdi>{visible(where)}</bdi> : undefined}
-        actions={<AnswerButtons approval={dock.approval} off={off} onDeny={() => answer(false)} onAllow={() => answer(true)} />}
-        foot={stale || sent ? <>
-          {stale && <p id={why} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
-          {sent && <p className="phone-card__why m-0">{t('approval-sent')}</p>}
-        </> : undefined}>
+        actions={onResolve && <AnswerButtons approval={dock.approval} off={off} onDeny={() => answer(false)} onAllow={() => answer(true)} />}
+        foot={!onResolve
+          // ADR-0106: a viewer's bar shows the request with no answers (the hub would refuse them), and says why.
+          ? <p className="phone-card__why m-0" data-watching>{t('approval-watching')}</p>
+          : stale || sent ? <>
+            {stale && <p id={why} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
+            {sent && <p className="phone-card__why m-0">{t('approval-sent')}</p>}
+          </> : undefined}>
         <p className="approval-req__what"><span className="approval-req__cmd" dir="auto">{visible(line)}</span></p>
       </ApprovalRequest>}
       {dock.kind === 'review' && <Button className="phone-dock__btn" onClick={() => (dock.agent ? onOpen(dock.agent.id) : bring(`phone-ask-${dock.approval.id}`))}>{t('fleet-review')}</Button>}
@@ -243,7 +246,8 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
 export interface PhoneCommon {
   approvals: readonly ApprovalModel[];
   machines: readonly MachineModel[];
-  onResolve: Resolve;
+  // Left out in a viewer's window (ADR-0106): every request is shown read-only, with no answers.
+  onResolve?: Resolve;
   // ADR-0061: whether a machine is known not to trust this browser's key yet (it reported whom it trusts, and not this one). Unknown
   // is not said: the machine decides either way.
   untrusted?: (node: string) => boolean;

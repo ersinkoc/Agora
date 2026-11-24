@@ -39,6 +39,8 @@ export const STOP_GRACE_MS = 1000;
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
 // `approvals`: what this agent waits on, pinned above the composer (the caller draws them). `onReview`: the way into the review screen.
+// Without `send` (a viewer's window, ADR-0106: the hub would refuse a request) the composer is read-only: the conversation and the agent's
+// settings (their menus off without `choose`), and a line that says why there is nothing to type in.
 export function PromptBox({ agent, send, source, choose, approvals, onReview }: { agent: AgentTileModel; send?: PromptSend; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<ActionResult>; approvals?: ReactNode; onReview?: () => void }) {
   const actions = useContext(ChatActionsContext);
   const canClose = !!useContext(CloseAgentContext);
@@ -315,7 +317,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
             ))}
           </ul>
         )}
-        <textarea ref={field} value={text} onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setSlashOff(false); setSlashAt(0); }}
+        {!send && !agent.closed && <p className="m-0 p-1 text-sm text-muted" data-watching>{t('prompt-watching')}</p>}
+        {send && <textarea ref={field} value={text} onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setSlashOff(false); setSlashAt(0); }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           aria-label={t('prompt-label')} placeholder={t(commands.length > 0 ? 'prompt-placeholder-commands' : 'prompt-label')} rows={rowCount}
           {...(commands.length > 0 ? { role: 'combobox' as const, 'aria-autocomplete': 'list' as const, 'aria-haspopup': 'listbox' as const, 'aria-expanded': menuOpen, 'aria-controls': menuOpen ? 'slash-menu' : undefined, 'aria-activedescendant': menuOpen ? `slash-opt-${at}` : undefined } : {})}
@@ -333,7 +336,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
             // Enter sends, Shift+Enter starts a new line; a key that only confirms an input method's candidate is not a send (Safari too).
             if (e.key === 'Enter' && !e.shiftKey) e.preventDefault();
             if (sendsOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, Date.now() - composedAt.current)) void go();
-          }} />
+          }} />}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} approvals={actions.approvals} launchedFree={agent.skipsPermissions} />}
           {/* With a session the bar draws the sign beside Mode (`launchedFree`); without one it leads the row. */}
@@ -342,12 +345,12 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           <span className="flex-1" />
           {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-danger'}`}>{sentText}</span>}
           {stopFailed && <span role="status" className="text-xs text-danger">{t(stopFailed)}</span>}
-          <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>
+          {(send || agent.closed) && <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>}
           {/* Ends this turn only: the agent stays and can be asked again. Not the same as stopping the agent. */}
           {canStop && <button type="button" className="button gap-1.5 px-3 text-removed" disabled={stopping === 'busy'} title={t('turn-stop-hint')} aria-label={`${t('turn-stop')}. ${t('turn-stop-hint')}`} onClick={() => void stopTurn(false)}>
             <svg aria-hidden viewBox="0 0 16 16" className="size-3.5 fill-current"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" /></svg>{t('turn-stop')}
           </button>}
-          <button type="submit" className="button button--primary" disabled={busy || !text.trim() || !send || agent.closed}>{t('prompt-send')}</button>
+          {send && <button type="submit" className="button button--primary" disabled={busy || !text.trim() || agent.closed}>{t('prompt-send')}</button>}
         </div>
       </form>
       </div>

@@ -1210,6 +1210,7 @@ notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
 attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
 # A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
 approval-sent = Yanıt gönderildi.
+approval-watching = Burada izleyebilirsiniz. İstekleri bir üye ya da sahibi yanıtlar.
 attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.
 
 # Usage (no money: tokens, context and time)
@@ -1249,6 +1250,7 @@ chat-files-more = Ve { $count } tane daha
 chat-plan-label = Plan
 chat-error-label = Bir şey ters gitti
 prompt-hint = Enter gönderir, Shift+Enter yeni satır açar.
+prompt-watching = Burada izleyebilirsiniz. Bu ajanla bir üye ya da sahibi konuşur.
 session-started-with = { $name }: { $value }
 session-started-hint = Bu ajan başlatılırken seçildi. Ajan bunu bildirmez, bu yüzden sonradan değişmiş olabilir.
 empty-changes-title = Her şey temiz

@@ -144,7 +144,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <PanelGallery messages={demoMessages} fleet={demoAgents} />
-      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
+      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       <ChatActionsContext.Provider value={{ setConfig: async (_a, _c, v) => (v === 'yolo' ? { approvalNeeded: 'demo/9' } : true), cancelTurn: async () => true, approvals: new Set(['demo/9']) }}>
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       </ChatActionsContext.Provider>

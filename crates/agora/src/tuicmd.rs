@@ -920,7 +920,7 @@ fn attach(
 }
 
 /// The conversation of an agent that has no terminal, with a line to type the next request on. Ctrl-] leaves it. Same results as
-/// [`attach`].
+/// [`attach`]. A viewer's (ADR-0106) has no line to type on: what they type is not taken, and the line says why.
 fn chat(
     say: &Say,
     session: &mut Session,
@@ -931,6 +931,7 @@ fn chat(
 ) -> Result<bool, String> {
     let (node, local) = agent.split_once('/').unwrap_or(("", agent));
     let stream = session.chat_open(node, local)?;
+    let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let mut entries: Vec<ChatEntry> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
@@ -961,9 +962,14 @@ fn chat(
             break;
         }
         while let Ok(k) = rx.try_recv() {
-            match k {
-                DETACH => break 'watch,
-                b'\r' | b'\n' => {
+            match chat_key(watching, k) {
+                ChatKey::Leave => break 'watch,
+                // ADR-0106: a viewer's keys send nothing (the hub would refuse a request or a switch, and write it down).
+                ChatKey::Watching => {
+                    note = say.text(key!("tui-viewer-watching"), &[]);
+                    dirty = true;
+                }
+                ChatKey::Send => {
                     let line = String::from_utf8_lossy(&typed).trim().to_string();
                     typed.clear();
                     let asked = chat_command(&line, snapshot.as_ref(), confirming.as_deref());
@@ -1033,16 +1039,16 @@ fn chat(
                     }
                     dirty = true;
                 }
-                0x7f | 0x08 => {
+                ChatKey::Back => {
                     // Backspace removes one character, not one byte.
                     while typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
                     dirty = true;
                 }
-                b if b >= 0x20 => {
+                ChatKey::Type(b) => {
                     typed.push(b);
                     dirty = true;
                 }
-                _ => {}
+                ChatKey::Nothing => {}
             }
         }
         if dirty {
@@ -1056,9 +1062,12 @@ fn chat(
                 size,
                 color,
                 &text,
+                watching,
             );
             if !note.is_empty() {
-                lines.insert(lines.len().saturating_sub(1), plain(&note));
+                // Above the line being typed; a viewer's has none.
+                let at = lines.len().saturating_sub(usize::from(!watching));
+                lines.insert(at, plain(&note));
             }
             // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
             if let Some(s) = snapshot.as_ref().and_then(|a| session_line(a, &text)) {
@@ -1071,6 +1080,35 @@ fn chat(
     }
     session.terminal_close(stream);
     Ok(lost)
+}
+
+/// What a key typed in the plain list's full-screen chat does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatKey {
+    /// Ctrl-]: back to the list.
+    Leave,
+    /// ADR-0106: any other key of a viewer's: it only says why nothing is typed or sent.
+    Watching,
+    /// Enter: sends the line (or switches the mode or model it names).
+    Send,
+    /// Backspace.
+    Back,
+    /// A byte of the line being typed.
+    Type(u8),
+    Nothing,
+}
+
+/// The full-screen chat's keys, decided before anything is done: a viewer's (ADR-0106) chat has no line to type on, so only leaving
+/// stays theirs; the hub would refuse their request or switch and write the refusal down.
+fn chat_key(watching: bool, k: u8) -> ChatKey {
+    match k {
+        DETACH => ChatKey::Leave,
+        _ if watching => ChatKey::Watching,
+        b'\r' | b'\n' => ChatKey::Send,
+        0x7f | 0x08 => ChatKey::Back,
+        b if b >= 0x20 => ChatKey::Type(b),
+        _ => ChatKey::Nothing,
+    }
 }
 
 /// `s`: asks which agent to start on the machine the pointer is on (or the first online one with a project), then starts it in that
@@ -2090,8 +2128,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 } else {
                     k
                 };
-                match k {
-                    b'\t' | b'j' | b'k' | b'K' if keys => {
+                match plain_key(viewer, keys, k) {
+                    PlainKey::Move => {
                         if let Some(s) = &snapshot {
                             let order = tree_order(s);
                             let at = order.iter().position(|a| *a == selected);
@@ -2107,13 +2145,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             last_draw = Instant::now();
                         }
                     }
-                    3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
+                    PlainKey::Quit => return ExitCode::SUCCESS,
                     // ADR-0106: a viewer's list watches; nothing that changes something is sent (the hub would refuse it, written down).
-                    _ if watching_notice(say, viewer, char::from(k)).is_some() => {
-                        notice = watching_notice(say, viewer, char::from(k)).unwrap_or_default();
+                    PlainKey::Watching => {
+                        notice = say.text(key!("tui-viewer-watching"), &[]);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b'y' | b'n' => {
+                    PlainKey::Answer => {
                         if let Some(s) = &snapshot {
                             // A start request is allowed only once all of it was in view: in the panel, or in the reader.
                             if k == b'y'
@@ -2154,7 +2192,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'f' => {
+                    PlainKey::Folder => {
                         if let Some(sn) = &snapshot {
                             // The picker reads keys itself; the panel's terminal is let go meanwhile.
                             if let Some(p) = preview.take() {
@@ -2173,11 +2211,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'a' => {
+                    PlainKey::Ask => {
                         notice = ask_approval(say, &mut session);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b'v' => {
+                    PlainKey::Devices => {
                         if let Some(p) = preview.take() {
                             p.close(&mut session);
                         }
@@ -2190,7 +2228,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         dirty_since.get_or_insert_with(Instant::now);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b's' => {
+                    PlainKey::Start => {
                         if let Some(sn) = &snapshot {
                             notice = start(say, &mut session, sn, &selected, &mut Plain::new(&rx));
                             dirty_since.get_or_insert_with(Instant::now);
@@ -2198,7 +2236,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         }
                     }
                     // ADR-0060: an agent that stopped with its machine comes back (u) or starts again in its folder (U).
-                    b'u' | b'U' => {
+                    PlainKey::Resume => {
                         if let Some(sn) = &snapshot {
                             let local = selected
                                 .split_once('/')
@@ -2227,7 +2265,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'd' => {
+                    PlainKey::Forget => {
                         // A closed agent leaves every client's list; a running one is stopped first (x).
                         let running = snapshot.as_ref().is_some_and(|s| {
                             s.agents.iter().any(|a| a.agent_id == selected && a.running)
@@ -2242,7 +2280,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'x' => {
+                    PlainKey::Stop => {
                         if !selected.is_empty() {
                             let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
                             let scope = format!("agent:{local}");
@@ -2279,7 +2317,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'\r' | b'\n'
+                    PlainKey::Open
                         if snapshot
                             .as_ref()
                             .and_then(|s| {
@@ -2312,7 +2350,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         notice = String::new();
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b'\r' | b'\n' => {
+                    PlainKey::Open => {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
                             // The full-screen view reads the same terminal: stop watching it here first.
                             if let Some(p) = preview.take() {
@@ -2343,7 +2381,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    _ => {}
+                    PlainKey::Nothing => {}
                 }
             }
             if link_lost {
@@ -2411,6 +2449,56 @@ fn connected_role(session: &mut Session, c: &mut Console) {
         c.role = role;
     }
     c.app.viewer = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
+}
+
+/// What a key typed in the plain list (no console) does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlainKey {
+    /// Tab, j, k, arrows: the next or previous agent (only with a keyboard).
+    Move,
+    /// q or Ctrl-C (a plain byte in raw mode).
+    Quit,
+    /// ADR-0106: a key that changes something, in a viewer's list: it only says why not.
+    Watching,
+    /// y / n: answers the selected agent's request.
+    Answer,
+    /// f: starts an agent in a folder.
+    Folder,
+    /// a: asks another device to approve this one.
+    Ask,
+    /// v: approves another device.
+    Devices,
+    /// s: starts an agent.
+    Start,
+    /// u / U: resumes, or starts again.
+    Resume,
+    /// d: removes a closed agent.
+    Forget,
+    /// x: stops the agent.
+    Stop,
+    /// Enter: reads a start request whole, or opens the agent.
+    Open,
+    Nothing,
+}
+
+/// The plain list's keys, decided before anything is done: a viewer's (ADR-0106) that would change something (the hub would refuse
+/// it and write the refusal down) only says why not; moving, quitting and opening stay theirs.
+fn plain_key(viewer: bool, keys: bool, k: u8) -> PlainKey {
+    match k {
+        b'\t' | b'j' | b'k' | b'K' if keys => PlainKey::Move,
+        3 | b'q' => PlainKey::Quit,
+        _ if viewer && agora_tui::role::changes(char::from(k)) => PlainKey::Watching,
+        b'y' | b'n' => PlainKey::Answer,
+        b'f' => PlainKey::Folder,
+        b'a' => PlainKey::Ask,
+        b'v' => PlainKey::Devices,
+        b's' => PlainKey::Start,
+        b'u' | b'U' => PlainKey::Resume,
+        b'd' => PlainKey::Forget,
+        b'x' => PlainKey::Stop,
+        b'\r' | b'\n' => PlainKey::Open,
+        _ => PlainKey::Nothing,
+    }
 }
 
 /// ADR-0106: the line a viewer's window shows for a key that changes something (it sends nothing: the hub would refuse it and write the
@@ -3343,6 +3431,62 @@ fn read_keys(
     true
 }
 
+/// A chat agent's conversation as it fits its pane (`pane`): what it runs with first, then its lines, a note, a request that waits and
+/// the line being typed. A viewer's (ADR-0106) has no line to type on, and its request shows without the keys that answer it.
+fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<String> {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
+    let head = p
+        .snapshot
+        .as_ref()
+        .and_then(|a| session_line(a, &text))
+        .map(|l| plain(&l));
+    let room = usize::from(pane.height)
+        .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
+    // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
+    let watching = c.app.viewer;
+    let waiting: Vec<String> = c
+        .snapshot
+        .as_ref()
+        .and_then(|s| waiting_for(s, &p.agent))
+        .map(|a| chat_request_block(say, a, usize::from(pane.width), watching).0)
+        .unwrap_or_default();
+    let room = room.saturating_sub(waiting.len());
+    // The agent speaks under its name (as in the tree), not its id.
+    let speaker = p.snapshot.as_ref().map_or_else(
+        || local.to_string(),
+        |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
+    );
+    let mut lines = render_chat(
+        &p.entries,
+        &speaker,
+        &String::from_utf8_lossy(&p.typed),
+        (usize::from(pane.width), room.max(2)),
+        false,
+        &text,
+        watching,
+    );
+    // What goes above the line being typed; a viewer's chat has none (ADR-0106).
+    let input = usize::from(!watching);
+    if !p.note.is_empty() {
+        let at = lines.len().saturating_sub(input);
+        let width = usize::from(pane.width).max(12);
+        lines.splice(
+            at..at,
+            agora_tui::render::wrap_row(&plain(&p.note), width, width),
+        );
+    }
+    // The request goes above the line being typed, which stays in view (the draft is kept while it waits).
+    if !waiting.is_empty() {
+        let at = lines.len().saturating_sub(input);
+        lines.splice(at..at, waiting);
+    }
+    if let Some(h) = head {
+        lines.insert(0, h);
+    }
+    lines
+}
+
 fn draw_console(
     say: &Say,
     c: &mut Console,
@@ -3396,54 +3540,7 @@ fn draw_console(
     let pane = c.app.areas(area).terminal;
     let conversation = chat
         .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
-        .map(|p| {
-            let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
-            let head = p
-                .snapshot
-                .as_ref()
-                .and_then(|a| session_line(a, &text))
-                .map(|l| plain(&l));
-            let room = usize::from(pane.height)
-                .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
-            // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
-            let waiting: Vec<String> = c
-                .snapshot
-                .as_ref()
-                .and_then(|s| waiting_for(s, &p.agent))
-                .map(|a| chat_request_block(say, a, usize::from(pane.width)).0)
-                .unwrap_or_default();
-            let room = room.saturating_sub(waiting.len());
-            // The agent speaks under its name (as in the tree), not its id.
-            let speaker = p.snapshot.as_ref().map_or_else(
-                || local.to_string(),
-                |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
-            );
-            let mut lines = render_chat(
-                &p.entries,
-                &speaker,
-                &String::from_utf8_lossy(&p.typed),
-                (usize::from(pane.width), room.max(2)),
-                false,
-                &text,
-            );
-            if !p.note.is_empty() {
-                let at = lines.len().saturating_sub(1);
-                let width = usize::from(pane.width).max(12);
-                lines.splice(
-                    at..at,
-                    agora_tui::render::wrap_row(&plain(&p.note), width, width),
-                );
-            }
-            // The request goes above the line being typed, which stays in view (the draft is kept while it waits).
-            if !waiting.is_empty() {
-                let at = lines.len().saturating_sub(1);
-                lines.splice(at..at, waiting);
-            }
-            if let Some(h) = head {
-                lines.insert(0, h);
-            }
-            lines
-        });
+        .map(|p| conversation_lines(say, c, p, pane));
     // A notice too long for the footer, whole in a box while it is new.
     let note: Option<Vec<String>> =
         (c.note.open && notice.chars().count() > usize::from(area.width) * 2 / 3).then(|| {
@@ -3520,10 +3617,12 @@ fn waiting_for<'a>(
 
 /// The block a chat agent's request takes in place of its input line: what it asks (at most four rows), ADR-0101's always lines (the
 /// agent's own words and what "always" means) and the keys that answer. The flag says whether the request's own text is there whole.
+/// `watching` (a viewer's window, ADR-0106): the request without the keys that answer it (the hub would refuse the answer).
 fn chat_request_block(
     say: &Say,
     a: &agora_protocol::v1::ApprovalSnapshot,
     width: usize,
+    watching: bool,
 ) -> (Vec<String>, bool) {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let width = width.max(12);
@@ -3534,6 +3633,9 @@ fn chat_request_block(
     block.extend(rows.into_iter().take(CHAT_REQUEST_ROWS));
     for l in agora_tui::render::always_lines(a, &text) {
         block.extend(agora_tui::render::wrap_row(&l, width, width));
+    }
+    if watching {
+        return (block, whole);
     }
     block.extend(agora_tui::render::wrap_row(
         &say.text(
@@ -3565,7 +3667,7 @@ fn chat_shows_request(
     head: bool,
     note_rows: usize,
 ) -> bool {
-    let (block, whole) = chat_request_block(say, a, usize::from(width));
+    let (block, whole) = chat_request_block(say, a, usize::from(width), false);
     whole && usize::from(head) + note_rows + block.len() + 2 <= usize::from(height)
 }
 
@@ -3645,6 +3747,12 @@ fn chat_input(
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x1b) {
+        return;
+    }
+    // ADR-0106: a viewer's chat tab has no line to type on; nothing typed is kept or sent (the hub would refuse a request, a mode or a
+    // model switch, and write the refusal down). The footer says why, as for the list's keys.
+    if c.app.viewer {
+        c.notice = say.text(key!("tui-viewer-watching"), &[]);
         return;
     }
     // A paste is one chunk of several bytes: its line breaks are spaces, it is sent with Enter like typed text.
@@ -7218,13 +7326,30 @@ mod tab_answer_tests {
         );
     }
 
+    /// ADR-0106 (#1140): a viewer's chat tab shows what the agent asks, without the keys that answer it (the hub would refuse them).
+    #[test]
+    fn a_viewers_chat_shows_a_request_without_the_keys_that_answer_it() {
+        let say = Say(Catalog::english());
+        let a = ask(2);
+        let (member, _) = chat_request_block(&say, &a, 200, false);
+        let (viewer, whole) = chat_request_block(&say, &a, 200, true);
+        assert!(whole);
+        assert!(member.iter().any(|l| l.contains("Alt+N")), "{member:?}");
+        assert!(viewer.iter().all(|l| !l.contains("Alt+")), "{viewer:?}");
+        assert_eq!(
+            viewer[..],
+            member[..viewer.len()],
+            "the same request, keys left out"
+        );
+    }
+
     /// Codex's re-review: Alt+A in a chat tab counts the request as read only when all of its block, the duration warning included,
     /// fits the pane as drawn; otherwise the box opens (and nothing is signed without a key there).
     #[test]
     fn a_chat_shows_an_always_request_only_when_all_of_it_fits() {
         let say = Say(Catalog::english());
         let a = ask(2);
-        let (block, whole) = chat_request_block(&say, &a, 40);
+        let (block, whole) = chat_request_block(&say, &a, 40, false);
         assert!(whole);
         assert!(block.iter().any(|l| l.contains("possibly")), "{block:#?}");
         let need = block.len() + 2;
@@ -7263,7 +7388,7 @@ mod tab_answer_tests {
         // A request longer than its four rows is cut in the pane: never in view there, whatever the height.
         let mut long = ask(2);
         long.detail = "x".repeat(400);
-        assert!(!chat_request_block(&say, &long, 40).1);
+        assert!(!chat_request_block(&say, &long, 40, false).1);
         assert!(!chat_shows_request(&say, &long, (40, 200), false, 0));
     }
 
@@ -7744,6 +7869,107 @@ mod viewer_console_tests {
         assert_eq!(rows(&h), Vec::<(String, String)>::new());
     }
 
+    /// #1140: a viewer's chat tab has no line to type on: neither a request nor a mode or model switch is sent, nothing typed is kept,
+    /// and the footer says why. The session sends neither either. The owner's Activity gets no row.
+    #[test]
+    fn a_viewers_chat_tab_takes_no_typing_and_sends_no_request_or_switch() {
+        let h = hub(PersonRoleOnHub::Viewer);
+        let say = Say(agora_i18n::Catalog::english());
+        let watching = say.text(key!("tui-viewer-watching"), &[]);
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(c.app.viewer);
+        // Nothing waits: Enter would send at once (a waiting request holds the draft whatever the role).
+        if let Some(s) = c.snapshot.as_mut() {
+            s.approvals.clear();
+        }
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let mut pane = chat_pane(&c);
+        for typed in [
+            &b"hello\r"[..],
+            b"/mode plan\r",
+            b"/model big\r",
+            b"h",
+            b"i",
+        ] {
+            c.notice.clear();
+            chat_input(&say, &mut session, &rx, &mut c, &mut pane, typed);
+            assert_eq!(c.notice, watching, "{typed:?}");
+            assert!(pane.typed.is_empty(), "{typed:?}");
+        }
+        let forbidden = Err(agora_protocol::ErrorCode::AuthForbidden
+            .as_str()
+            .to_string());
+        assert_eq!(session.prompt("n1", "agent-1", "hello"), forbidden);
+        assert_eq!(
+            session.set_option("n1", "agent-1", false, "plan"),
+            forbidden
+        );
+        assert_eq!(session.set_option("n1", "agent-1", true, "big"), forbidden);
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let _ = session.next(Duration::from_millis(50));
+        }
+        assert_eq!(rows(&h), Vec::<(String, String)>::new());
+    }
+
+    /// The same chat tab in a member's console takes what is typed (the viewer's above is not one that never does).
+    #[test]
+    fn a_members_chat_tab_takes_typing() {
+        let h = hub(PersonRoleOnHub::Member);
+        let say = Say(agora_i18n::Catalog::english());
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let mut pane = chat_pane(&c);
+        c.notice.clear();
+        chat_input(&say, &mut session, &rx, &mut c, &mut pane, b"hi");
+        assert_eq!(pane.typed, b"hi");
+        assert!(c.notice.is_empty());
+    }
+
+    /// #1140: a viewer's chat tab is drawn with no line to type on, its hint saying it watches, and the request that waits without the
+    /// keys that answer it; a member's has both.
+    #[test]
+    fn a_viewers_chat_tab_is_drawn_with_no_line_to_type_on() {
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console();
+        let p = chat_pane(&c);
+        let pane = Area::new(0, 0, 100, 24);
+        let input = say.text(key!("tui-chat-input"), &[]);
+        let member = conversation_lines(&say, &c, &p, pane);
+        assert!(
+            member.last().is_some_and(|l| l.starts_with(&input)),
+            "{member:?}"
+        );
+        assert!(member.iter().any(|l| l.contains("Alt+Y")), "{member:?}");
+        assert!(member.iter().any(|l| l.contains("Edit")), "{member:?}");
+        c.app.viewer = true;
+        let viewer = conversation_lines(&say, &c, &p, pane);
+        assert!(viewer.iter().all(|l| !l.starts_with(&input)), "{viewer:?}");
+        assert!(viewer.iter().all(|l| !l.contains("Alt+")), "{viewer:?}");
+        assert!(viewer.iter().any(|l| l.contains("Edit")), "{viewer:?}");
+        assert!(
+            viewer.iter().any(|l| l.starts_with("You can watch here.")),
+            "{viewer:?}"
+        );
+    }
+
+    /// The chat pane of the console's agent, as [`follow_chat`] opens it.
+    fn chat_pane(c: &Console) -> ChatPane {
+        ChatPane {
+            agent: "n1/agent-1".into(),
+            stream: 0,
+            entries: Vec::new(),
+            typed: Vec::new(),
+            note: String::new(),
+            confirming: None,
+            snapshot: c.snapshot.as_ref().and_then(|s| s.agents.first().cloned()),
+        }
+    }
+
     #[test]
     fn a_members_console_is_not_held_back_and_asks_nothing_on_connecting() {
         let h = hub(PersonRoleOnHub::Member);
@@ -7769,30 +7995,86 @@ mod viewer_console_tests {
         assert!(rows(&h).iter().all(|(action, _)| action != "pair.status"));
     }
 
-    /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal; its viewer gate is
-    /// pinned here by its shape: the role comes from the session, and the gate is the first arm that takes a key that changes something,
-    /// with [`watching_notice`] (tested above) deciding.
+    /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal. The loop matches on
+    /// [`plain_key`], which decides each key first (#1140): a viewer's key that would change something only says why not, for every byte;
+    /// a member's (and an older hub's) does what it did; moving, quitting, asking and opening stay a viewer's.
     #[test]
-    fn the_plain_lists_keys_pass_the_viewer_gate_first() {
+    fn the_plain_lists_keys_change_nothing_for_a_viewer() {
         let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let t0 = src.find("\npub fn tui(").unwrap();
         let tui = &src[t0..t0 + src[t0..].find("\n}\n").unwrap()];
         assert!(tui.contains("let viewer = person == agora_protocol::v1::PersonRole::Viewer;"));
-        let gate = tui
-            .find("_ if watching_notice(say, viewer, char::from(k)).is_some() => {")
-            .expect("the plain list's viewer gate");
-        for arm in [
-            "b'y' | b'n' =>",
-            "b'f' =>",
-            "b's' =>",
-            "b'u' | b'U' =>",
-            "b'd' =>",
-            "b'x' =>",
-            "b'v' =>",
-        ] {
-            let at = tui.find(arm).unwrap_or_else(|| panic!("{arm}"));
-            assert!(gate < at, "{arm} comes before the viewer gate");
+        assert!(tui.contains("match plain_key(viewer, keys, k) {"));
+        let changes = |p: PlainKey| {
+            matches!(
+                p,
+                PlainKey::Answer
+                    | PlainKey::Folder
+                    | PlainKey::Devices
+                    | PlainKey::Start
+                    | PlainKey::Resume
+                    | PlainKey::Forget
+                    | PlainKey::Stop
+            )
+        };
+        for k in 0..=u8::MAX {
+            for keys in [true, false] {
+                assert!(!changes(plain_key(true, keys, k)), "{k}");
+            }
         }
+        for (k, what) in [
+            (b'y', PlainKey::Answer),
+            (b'n', PlainKey::Answer),
+            (b'f', PlainKey::Folder),
+            (b'v', PlainKey::Devices),
+            (b's', PlainKey::Start),
+            (b'u', PlainKey::Resume),
+            (b'U', PlainKey::Resume),
+            (b'd', PlainKey::Forget),
+            (b'x', PlainKey::Stop),
+        ] {
+            assert_eq!(plain_key(true, true, k), PlainKey::Watching, "{k}");
+            assert_eq!(plain_key(false, true, k), what, "{k}");
+        }
+        for (k, what) in [
+            (b'q', PlainKey::Quit),
+            (3, PlainKey::Quit),
+            (b'j', PlainKey::Move),
+            (b'\t', PlainKey::Move),
+            (b'a', PlainKey::Ask),
+            (b'\r', PlainKey::Open),
+            (b'\n', PlainKey::Open),
+            (b'r', PlainKey::Nothing),
+        ] {
+            assert_eq!(plain_key(true, true, k), what, "{k}");
+            assert_eq!(plain_key(false, true, k), what, "{k}");
+        }
+        // Piped (no keyboard): nothing moves.
+        assert_eq!(plain_key(false, false, b'j'), PlainKey::Nothing);
+    }
+
+    /// The plain list's full-screen chat (the plain list's Enter on a chat agent) matches on [`chat_key`] (#1140): a viewer's has no
+    /// line to type on, for every byte, and can only leave; a member's types, sends and leaves as before.
+    #[test]
+    fn the_plain_chat_takes_no_typing_from_a_viewer() {
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let c0 = src.find("\nfn chat(").unwrap();
+        let chat = &src[c0..c0 + src[c0..].find("\n}\n").unwrap()];
+        assert!(chat.contains(
+            "let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;"
+        ));
+        assert!(chat.contains("match chat_key(watching, k) {"));
+        assert_eq!(chat_key(true, DETACH), ChatKey::Leave);
+        for k in 0..=u8::MAX {
+            if k != DETACH {
+                assert_eq!(chat_key(true, k), ChatKey::Watching, "{k}");
+            }
+        }
+        assert_eq!(chat_key(false, DETACH), ChatKey::Leave);
+        assert_eq!(chat_key(false, b'\r'), ChatKey::Send);
+        assert_eq!(chat_key(false, b'h'), ChatKey::Type(b'h'));
+        assert_eq!(chat_key(false, 0x7f), ChatKey::Back);
+        assert_eq!(chat_key(false, 0x01), ChatKey::Nothing);
     }
 
     #[test]

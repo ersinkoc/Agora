@@ -106,13 +106,14 @@ export function useOwnGuard(x: ApprovalModel, agent?: RequestAgent): AnswerGuard
 }
 
 // The side panel's card for one request. `onOpen` opens the agent that asks (the panel lists no separate row for it). `guard` is the side
-// panel's (one dwell for its whole list); a card drawn alone has its own. Every answer but a switch's goes through it.
+// panel's (one dwell for its whole list); a card drawn alone has its own. Every answer but a switch's goes through it. Without `onResolve`
+// (a viewer's window, ADR-0106: the hub would refuse the answer) the card is read-only: the whole ask, and no answers.
 export function ApprovalCard({ approval, busy, agent, guard, onResolve, onOpen }: {
   approval: ApprovalModel;
   busy?: boolean;
   agent?: RequestAgent;
   guard?: AnswerGuard;
-  onResolve: (approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  onResolve?: (approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   onOpen?: () => void;
 }) {
   const own = useOwnGuard(approval, agent);
@@ -122,5 +123,5 @@ export function ApprovalCard({ approval, busy, agent, guard, onResolve, onOpen }
   // guards (its Allow dwell and one-click lock, and Deny always available: main-window.md), not this list's.
   if (approval.start || approval.skip || approval.skipUnknown) return <ReviewableRequest approval={approval} agent={agent} guard={g} busy={busy} onOpen={onOpen} onResolve={onResolve} />;
   return <PlainRequest approval={approval} density="card" surface="card" agent={agent} busy={busy} guard={g} onOpen={onOpen}
-    onAnswer={(ok, always) => g.answer(approval.id, () => (always ? onResolve(true, undefined, true) : onResolve(ok)))} />;
+    onAnswer={onResolve ? (ok, always) => g.answer(approval.id, () => (always ? onResolve(true, undefined, true) : onResolve(ok))) : undefined} />;
 }
