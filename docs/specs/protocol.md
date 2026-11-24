@@ -1192,7 +1192,7 @@ forwards either to a node that did not offer it.
   fresh snapshot instead of keeping a transcript with a hole in it. Direction marks: the override and embedding controls (U+202A to
   U+202E) are always removed; in prose (thinking, output, plan steps) LRM, RLM, ALM and balanced isolates stay, as Arabic and Hebrew
   text needs them; in names, paths, labels and arguments every direction control goes. A lone carriage return is a line break (a space
-  in a one-line field); an escape sequence that is never closed swallows at most to the next line break or 4096 characters.
+  in a one-line field); an escape sequence that is never closed (CSI, OSC, DCS, ...) swallows at most to the next line break, which stays, or 4096 characters.
 - **Coalescing.** At most one version of an entry is sent per 150 ms, repeats of a final status included (the first `completed` goes at once); a version held back is stored (a new subscriber sees it) and sent by
   the node's tick once 150 ms have passed; a final tool status is never held back. A client therefore may see fewer versions than the
   agent sent, never a stale last one.
