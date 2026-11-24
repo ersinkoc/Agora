@@ -7961,6 +7961,43 @@ mod registry_picker_tests {
         assert!(!shown[0].iter().any(|l| l == UNTESTED), "{shown:#?}");
     }
 
+    /// The page `f` draws: its folder under the question, the hand-made kinds, the heading and the untested ones, then the line
+    /// naming the hand-made kinds the machine cannot find.
+    #[test]
+    fn the_folder_start_page_reads_top_to_bottom() {
+        let say = Say(Catalog::english());
+        let (ok, missing) = split_kinds(
+            &say,
+            vec![
+                kind("registry-gemini", "Gemini CLI", true, "npx"),
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+                kind("codex", "Codex", false, "codex"),
+            ],
+        );
+        let (menu, count) = kind_menu(
+            &say,
+            "blackview",
+            &["/home/r/src".to_string()],
+            &ok,
+            missing.as_deref(),
+            0,
+        );
+        assert_eq!(count, 2);
+        let want = [
+            "Start which agent on blackview? Press its number, any other key cancels.",
+            "/home/r/src",
+            "",
+            "1  Claude Code",
+            "",
+            UNTESTED,
+            "2  Gemini CLI",
+            "",
+            "Not found on this machine: Codex (`codex`). The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.",
+        ];
+        assert_eq!(menu, want.map(String::from));
+    }
+
     #[test]
     fn no_kind_is_chosen_for_the_person_not_even_when_only_untested_ones_are_installed() {
         let kinds = vec![("registry-gemini".to_string(), "Gemini CLI".to_string())];
