@@ -280,7 +280,7 @@ export function FilesView({ files, load, changed, compact = false }: {
           </button>}
           <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('files-refresh')} title={t('files-refresh')}><Icon name="restore" /></button>
         </div>
-        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{changed !== undefined && changed > status.size ? t('files-truncated-count', { count: status.size, total: changed }) : t('files-truncated')}</p>}
+        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-tint-accent px-3 py-1.5 text-xs text-ink">{changed !== undefined && changed > status.size ? t('files-truncated-count', { count: status.size, total: changed }) : t('files-truncated')}</p>}
         <div ref={treeRef} className="min-h-0 flex-1 overflow-auto py-1" role="tree" aria-label={t('files-tree')} onKeyDown={onTreeKey}
           onFocus={(e) => { const p = (e.target as HTMLElement).dataset.path; if (p !== undefined) setCursor(p); }}>
           {flat ? (
@@ -393,7 +393,7 @@ export function TreeLevel({ dir, depth, listings, open, list, toggle, pick, acti
   useEffect(() => { if (l === undefined) list(dir); }, [dir, l, list]);
   const pad = { paddingInlineStart: 8 + depth * 14 };
   if (l === undefined || l === 'loading') return <p className="muted m-0 px-2 py-1 text-xs" style={pad}>…</p>;
-  if (l === 'failed') return <p role="alert" className="m-0 flex items-center gap-2 px-2 py-1 text-xs text-needs-you" style={pad}>{t('files-failed')}<button type="button" className="button" onClick={() => list(dir)}>{t('changes-retry')}</button></p>;
+  if (l === 'failed') return <p role="alert" className="m-0 flex items-center gap-2 px-2 py-1 text-xs text-danger" style={pad}>{t('files-failed')}<button type="button" className="button" onClick={() => list(dir)}>{t('changes-retry')}</button></p>;
   if (l.length === 0 && depth === 0) return <p className="muted m-0 px-3 py-2">{t('files-empty')}</p>;
   return (
     <div role="group">
@@ -428,7 +428,7 @@ export function keepLetters(e: KeyboardEvent<HTMLElement>): void {
   if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation();
 }
 
-const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-needs-you' };
+const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-danger' };
 
 // A file's lines with numbers and change marks, drawn a screenful at a time. Lines do not wrap; the view scrolls sideways.
 export function CodeView({ label, lines, html, marks, matches, current }: { label: string; lines: string[]; html?: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {

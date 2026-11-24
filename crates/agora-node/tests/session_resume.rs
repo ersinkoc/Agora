@@ -11,6 +11,7 @@ use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Comma
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -48,11 +49,229 @@ fn supported() -> bool {
     agora_platform::PTY_SUPPORTED && agora_platform::LOCAL_SOCKETS_SUPPORTED
 }
 
+/// How long one environment may live before its test is called hung (#1011). The suite takes under a minute; a hang used to run until
+/// the CI step's 25-minute limit, with the scratch agents still alive, because a call to the node (or a node's own stop) can block
+/// where no wait below is checking the time.
+const HUNG_AFTER: Duration = Duration::from_secs(300);
+
+/// Watches one environment from another thread: if it is still there after [`HUNG_AFTER`], it says what the test was doing and what
+/// the folder holds, ends this process's scratch agents (none of it needs a lock a stuck thread may hold), and ends the test run with
+/// a failure. Disarmed when dropped.
+struct Watchdog {
+    done: Arc<(Mutex<bool>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn arm(root: PathBuf, doing: Arc<Mutex<String>>) -> Self {
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let seen = Arc::clone(&done);
+        let thread = std::thread::spawn(move || {
+            let end = Instant::now() + HUNG_AFTER;
+            let (lock, wake) = &*seen;
+            let mut finished = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*finished {
+                let Some(left) = end.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                finished = wake
+                    .wait_timeout(finished, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            if *finished {
+                return;
+            }
+            let doing = doing.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let said = format!(
+                "{} hung for {HUNG_AFTER:?} while {doing}\n{}ended the scratch agents: {:?}\n",
+                root.display(),
+                folder_state(&root),
+                end_scratch_agents(None)
+            );
+            // Straight to the standard error: the test harness holds back what `eprintln!` says until a test ends, and this one will not.
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), said.as_bytes());
+            std::process::exit(101);
+        });
+        Self {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        wake.notify_all();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Ends the fake agents this test process started (`only`: just these pids), without asking any node: a node whose thread is stuck may
+/// hold the lock that knows them. Each process is identified first; only an identity that names a fake agent and is still this
+/// process's child is ended, and only while it is still that process (a pid can be given again). One that cannot be identified is
+/// left alone and said so (on Windows its node's job ends it with the node). Says which pids it ended.
+fn end_scratch_agents(only: Option<&[u32]>) -> Vec<u32> {
+    let mut ended = Vec::new();
+    let is_child = |pid: u32| {
+        agora_platform::process_children(std::process::id()).is_ok_and(|c| c.contains(&pid))
+    };
+    for pid in agora_platform::process_children(std::process::id()).unwrap_or_default() {
+        if only.is_some_and(|o| !o.contains(&pid)) {
+            continue;
+        }
+        match end_if_ours(
+            pid,
+            agora_platform::process_identity,
+            is_child,
+            agora_platform::kill_process_if_same,
+        ) {
+            Ending::Ended => ended.push(pid),
+            Ending::NotOurs | Ending::Gone => {}
+            // Straight to the standard error: this may run on the watchdog's thread just before the process exits.
+            Ending::Skipped(why) => {
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!("left child {pid} alone: it cannot be identified ({why})\n").as_bytes(),
+                );
+            }
+        }
+    }
+    ended
+}
+
+/// What [`end_if_ours`] did with one pid.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    Ended,
+    /// The identity read names no fake agent, or that pid is no longer this process's child: nothing was signalled.
+    NotOurs,
+    /// It was no longer the process that was identified (or had ended): nothing was signalled.
+    Gone,
+    /// It could not be identified, so nothing was signalled.
+    Skipped(String),
+}
+
+/// Ends `pid` only through the identity read first (`identify`): that identity must name a fake agent, the pid must still be this
+/// process's child after it was read (`is_child`), and `kill_if_same` signals only the process that identity names. A pid that cannot
+/// be identified is never signalled by its bare number, which may by now name another process (Codex review of #1030).
+fn end_if_ours(
+    pid: u32,
+    identify: impl Fn(u32) -> std::io::Result<agora_platform::ProcessIdentity>,
+    is_child: impl Fn(u32) -> bool,
+    kill_if_same: impl Fn(&agora_platform::ProcessIdentity) -> std::io::Result<bool>,
+) -> Ending {
+    let id = match identify(pid) {
+        Ok(id) => id,
+        Err(e) => return Ending::Skipped(e.to_string()),
+    };
+    if !id.name.contains("agora-fake") || !is_child(id.pid) {
+        return Ending::NotOurs;
+    }
+    match kill_if_same(&id) {
+        Ok(true) => Ending::Ended,
+        Ok(false) => Ending::Gone,
+        Err(e) => Ending::Skipped(e.to_string()),
+    }
+}
+
+#[test]
+fn the_watchdog_never_signals_a_pid_it_cannot_identify_or_that_is_not_its_fake_agent() {
+    let signalled = std::cell::Cell::new(false);
+    let kill = |_: &agora_platform::ProcessIdentity| {
+        signalled.set(true);
+        Ok(true)
+    };
+    let child = |_: u32| true;
+    // Unsupported (Windows) or a passing error (Unix): nothing is signalled, and the reason is kept to be said.
+    for err in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let ending = end_if_ours(4242, |_| Err(std::io::Error::from(err)), child, kill);
+        assert!(matches!(ending, Ending::Skipped(_)), "{err:?}: {ending:?}");
+        assert!(
+            !signalled.get(),
+            "{err:?}: a pid that could not be identified was signalled"
+        );
+    }
+    let fake = agora_platform::ProcessIdentity {
+        pid: 4242,
+        group: 4242,
+        started: 1,
+        boot: String::new(),
+        name: "agora-fake-agen".into(),
+    };
+    // The identity read names another program (the pid was given to a replacement before it was read): not signalled.
+    let other = agora_platform::ProcessIdentity {
+        name: "sshd".into(),
+        ..fake.clone()
+    };
+    assert_eq!(
+        end_if_ours(4242, |_| Ok(other.clone()), child, kill),
+        Ending::NotOurs
+    );
+    // A fake agent that is no longer this process's child once identified: not signalled.
+    assert_eq!(
+        end_if_ours(4242, |_| Ok(fake.clone()), |_| false, kill),
+        Ending::NotOurs
+    );
+    assert!(!signalled.get());
+    // A child fake agent goes through the identity-checked kill only.
+    assert_eq!(
+        end_if_ours(4242, |_| Ok(fake.clone()), child, kill),
+        Ending::Ended
+    );
+    assert!(signalled.get());
+}
+
+/// What the folder of an environment says, read without the node: the ledger file, the files, and each probe report's arguments.
+fn folder_state(root: &Path) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let ledger_file = root
+        .join("data")
+        .join("sessions")
+        .join(agora_node::ledger::LEDGER_FILE);
+    let _ = writeln!(
+        out,
+        "ledger file {}: {:?}",
+        ledger_file.display(),
+        std::fs::read_to_string(&ledger_file)
+    );
+    let mut files: Vec<String> = std::fs::read_dir(root)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    let _ = writeln!(out, "files in {}: {files:?}", root.display());
+    // A report is named by the pid that wrote it: one name for two starts (a pid given again) or a start that never wrote one shows here.
+    for f in files.iter().filter(|f| f.ends_with(".json")) {
+        let _ = writeln!(
+            out,
+            "  {f}: {:?}",
+            std::fs::read_to_string(root.join(f)).unwrap_or_default()
+        );
+    }
+    out
+}
+
 struct Env {
     root: PathBuf,
     node: Option<Node>,
     /// `agora node run --resume auto` (ADR-0062 item 4).
     resume_all: bool,
+    /// What the test is doing now, for [`Watchdog`].
+    doing: Arc<Mutex<String>>,
+    watchdog: Option<Watchdog>,
 }
 
 impl Env {
@@ -128,17 +347,28 @@ impl Env {
             ),
         )
         .unwrap();
+        let doing = Arc::new(Mutex::new(String::from("setting up")));
+        let watchdog = Some(Watchdog::arm(root.clone(), Arc::clone(&doing)));
         let mut e = Self {
             root,
             node: None,
             resume_all: false,
+            doing,
+            watchdog,
         };
         e.start();
         e
     }
 
+    /// Says what the test does next, for [`Watchdog`].
+    fn doing(&self, what: impl Into<String>) {
+        *self.doing.lock().unwrap_or_else(|e| e.into_inner()) = what.into();
+    }
+
     fn start(&mut self) {
+        self.doing("stopping the node");
         self.node = None;
+        self.doing("starting the node");
         self.node = Some(
             Node::start(&NodeConfig {
                 resume_all: self.resume_all,
@@ -171,6 +401,7 @@ impl Env {
     }
 
     fn launch_with(&self, kind: &str, options: &[&str]) -> String {
+        self.doing(format!("launching {kind}"));
         let mut c = self.client();
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -203,6 +434,7 @@ impl Env {
     }
 
     fn resume(&self, id: &str, new_session: bool) -> Result<v1::AgentLaunchResult, String> {
+        self.doing(format!("resuming {id} (new session: {new_session})"));
         match self
             .client()
             .call(Cmd::AgentResume(v1::AgentResume {
@@ -284,6 +516,7 @@ impl Env {
     }
 
     fn wait(&self, what: &str, ok: impl Fn(&Self) -> bool) {
+        self.doing(format!("waiting for {what}"));
         let end = Instant::now() + Duration::from_secs(60);
         while !ok(self) {
             assert!(
@@ -330,27 +563,31 @@ impl Env {
         for v in &views {
             let _ = writeln!(out, "ledger entry: {:?}", node.ledger.get(v.id.as_str()));
         }
-        let ledger_file = self
-            .root
-            .join("data")
-            .join("sessions")
-            .join(agora_node::ledger::LEDGER_FILE);
-        let _ = writeln!(
-            out,
-            "ledger file {}: {:?}",
-            ledger_file.display(),
-            std::fs::read_to_string(&ledger_file)
-        );
-        let mut files: Vec<String> = std::fs::read_dir(&self.root)
-            .map(|d| {
-                d.flatten()
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        files.sort();
-        let _ = writeln!(out, "files in {}: {files:?}", self.root.display());
+        out.push_str(&folder_state(&self.root));
         out
+    }
+
+    /// The arguments of the start report that passed `session` as the new session id, once one is written. Found by what it says,
+    /// never by how many reports there are: a report is named by its pid, and a later process can get an earlier one's (Windows).
+    /// Waits for the start that passed `session` and returns its arguments as read that time: reading again can miss a report
+    /// a moment later (on Windows a file being read by another check, or rewritten, is skipped), so the found value is kept.
+    fn wait_start(&self, what: &str, session: &str) -> Vec<String> {
+        let found = std::cell::RefCell::new(None);
+        self.wait(what, |e| match e.start_with_session(session) {
+            Some(a) => {
+                *found.borrow_mut() = Some(a);
+                true
+            }
+            None => false,
+        });
+        found.into_inner().unwrap_or_default()
+    }
+
+    fn start_with_session(&self, session: &str) -> Option<Vec<String>> {
+        self.reports("start-").iter().map(args).find(|a| {
+            a.windows(2)
+                .any(|w| w[0] == "--session-id" && w[1] == session)
+        })
     }
 
     /// The probe reports (`<prefix>-<pid>.json`) written so far.
@@ -378,8 +615,23 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        // A failed test ends its own agents first, without the node, so a node stuck in a call cannot keep them (or its own stop)
+        // waiting. Its `Watchdog` stays armed until the end: a stop that hangs anyway still ends the run.
+        if std::thread::panicking() {
+            let pids: Vec<u32> = self
+                .node
+                .as_ref()
+                .and_then(|n| n.supervisor.try_lock().ok().map(|s| s.agent_pids()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, pid)| pid)
+                .collect();
+            let _ = end_scratch_agents(Some(&pids));
+        }
+        self.doing("stopping the node at the end");
         self.node = None;
         let _ = std::fs::remove_dir_all(&self.root);
+        drop(self.watchdog.take());
     }
 }
 
@@ -574,7 +826,14 @@ fn start_again_gives_a_kind_that_chooses_its_ids_a_new_one_it_can_resume_later()
     }
     let mut e = Env::new("again");
     let probe = e.launch("probe");
+    // The ledger may learn the chosen session on a later tick (#696).
+    e.wait("the first session", |e| !e.session(&probe).is_empty());
     let first = e.session(&probe);
+    // #1011: started for real before the node stops. On Windows a node that stopped at once ended the probe before it wrote its
+    // report, and a wait for two reports then waited for one that never came.
+    e.wait("the first start", |e| {
+        e.start_with_session(&first).is_some()
+    });
     e.start();
     let r = e.resume(&probe, true).unwrap();
     assert_eq!(r.agent_id, probe);
@@ -585,12 +844,9 @@ fn start_again_gives_a_kind_that_chooses_its_ids_a_new_one_it_can_resume_later()
     });
     let fresh = e.session(&probe);
     assert_eq!(fresh.len(), 36);
-    e.wait("the second start", |e| e.reports("start-").len() >= 2);
-    assert!(e.reports("start-").iter().any(|r| {
-        args(r)
-            .windows(2)
-            .any(|w| w[0] == "--session-id" && w[1] == fresh)
-    }));
+    e.wait("the second start", |e| {
+        e.start_with_session(&fresh).is_some()
+    });
     // So after the next restart it can be resumed with it.
     e.start();
     assert!(e
@@ -658,6 +914,7 @@ fn a_session_id_that_could_be_an_option_never_reaches_a_command_line() {
 }
 
 fn stop(e: &Env, id: &str, helpers: bool) -> Result<(), String> {
+    e.doing(format!("stopping {id}"));
     e.client()
         .call(Cmd::AgentStop(v1::AgentStop {
             agent_id: id.into(),
@@ -793,8 +1050,13 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
     }
     let mut e = Env::new("options");
     let probe = e.launch_with("probe", &["skip"]);
-    e.wait("the probe's start", |e| !e.reports("start-").is_empty());
-    assert!(args(&e.reports("start-")[0]).iter().any(|a| a == "--yolo"));
+    // The ledger may learn the chosen session on a later tick (#696).
+    e.wait("the first session", |e| !e.session(&probe).is_empty());
+    let first = e.session(&probe);
+    assert!(e
+        .wait_start("the probe's start", &first)
+        .iter()
+        .any(|a| a == "--yolo"));
     e.wait("the options in the ledger", |e| {
         e.node()
             .ledger
@@ -805,16 +1067,18 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
     e.resume(&probe, false).unwrap();
     e.wait("the resume", |e| !e.reports("resume-").is_empty());
     assert!(!args(&e.reports("resume-")[0]).iter().any(|a| a == "--yolo"));
-    // Start again does not bring it back either.
+    // Start again does not bring it back either. The second start is found by its new session, not by counting reports (#1011).
     e.start();
     e.resume(&probe, true).unwrap();
-    e.wait("the second start", |e| e.reports("start-").len() >= 2);
-    let yolo = e
-        .reports("start-")
+    e.wait("the new session", |e| {
+        let s = e.session(&probe);
+        !s.is_empty() && s != first
+    });
+    let fresh = e.session(&probe);
+    assert!(!e
+        .wait_start("the second start", &fresh)
         .iter()
-        .filter(|r| args(r).iter().any(|a| a == "--yolo"))
-        .count();
-    assert_eq!(yolo, 1);
+        .any(|a| a == "--yolo"));
 }
 
 #[test]

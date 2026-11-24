@@ -9,10 +9,10 @@ use agora_i18n::key;
 use std::time::Duration;
 
 use crate::device::{approval_message, grant_message, new_grant_id, Device};
-use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
+use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
-    ErrorInfo, Snapshot,
+    ErrorInfo, PersonRole, Snapshot,
 };
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
@@ -47,6 +47,22 @@ fn runtime() -> Result<tokio::runtime::Runtime, ClientError> {
         .enable_all()
         .build()
         .map_err(|_| ClientError::Unreachable)
+}
+
+/// Runs `fut` on `rt` and hands the runtime back with the answer, for a session to keep. On a failure the runtime is shut down
+/// without waiting for its blocking pool: a dial given up after its wait while the host name was still being looked up (`lookup_host`
+/// runs there and cannot be stopped) would otherwise keep the caller until the resolver gave up (#1150). That lookup ends on its own.
+fn run_on<T>(
+    rt: tokio::runtime::Runtime,
+    fut: impl std::future::Future<Output = Result<T, ClientError>>,
+) -> Result<(tokio::runtime::Runtime, T), ClientError> {
+    match rt.block_on(fut) {
+        Ok(v) => Ok((rt, v)),
+        Err(e) => {
+            rt.shutdown_background();
+            Err(e)
+        }
+    }
 }
 
 /// The names the hub's certificate may carry for this address: the host itself, and for an IP number also `localhost` (a hub
@@ -101,7 +117,7 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
 
 /// Trades a one-time sign-in code (`agora hub login`) for a session token.
 pub fn sign_in(hub: &Hub, code: &str) -> Result<String, ClientError> {
-    runtime()?.block_on(async {
+    run_on(runtime()?, async {
         let mut s = tls(hub).await?;
         let body = serde_json::json!({ "code": code }).to_string();
         let host = hub.addr.clone();
@@ -128,6 +144,7 @@ pub fn sign_in(hub: &Hub, code: &str) -> Result<String, ClientError> {
             _ => Err(ClientError::Unreachable),
         }
     })
+    .map(|(_, token)| token)
 }
 
 /// A live connection: one snapshot, then the positions of the events that follow.
@@ -151,6 +168,22 @@ pub struct Session {
     seen: Seen,
     /// History (kind 4, ADR-0100) per terminal stream, held for the screen it comes before: [`Session::terminal_history`].
     history: HeldHistory,
+    /// ADR-0106: the role of the person this connection signed in as, from the hub's first frame; unspecified from an older hub.
+    person_role: PersonRole,
+}
+
+/// How long [`Session::connect`] waits for the hub's first frame: the `Welcome` naming the person's role (ADR-0106), or an older hub's
+/// snapshot. Both come at once; a hub that sends neither in time leaves the role unspecified, and its frames are read as they come.
+const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(5);
+
+/// ADR-0106: the role a `Welcome` names, when `f` is one.
+fn welcome_role(f: &Frame) -> Option<PersonRole> {
+    if (f.stream_id, f.kind) != (STREAM_CONTROL, kinds::WELCOME) {
+        return None;
+    }
+    agora_protocol::v1::Welcome::decode(f.payload.as_slice())
+        .ok()
+        .map(|w| w.person_role())
 }
 
 /// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
@@ -350,6 +383,41 @@ pub struct Kind {
     pub program: String,
 }
 
+/// ADR-0092: the prefix of every kind a machine converted from the ACP registry (`agora_adapters::registry_convert`); such a kind is
+/// untested in Agora. A hand-made kind of the same name or id has already replaced it on the machine.
+pub const REGISTRY_PREFIX: &str = "registry-";
+
+/// Whether `kind` is one of the ACP registry's (ADR-0092), by its name as the window tells it (`registry-<id>`).
+pub fn is_registry_kind(kind: &str) -> bool {
+    kind.starts_with(REGISTRY_PREFIX)
+}
+
+/// A machine's kinds as the start pickers list them (#1134), each group in the machine's own order, as the window's Start does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartKinds {
+    /// The installed hand-made kinds: listed first.
+    pub installed: Vec<Kind>,
+    /// The installed ACP registry kinds: listed after them, under "Untested".
+    pub untested: Vec<Kind>,
+    /// The hand-made kinds whose program the machine cannot find. A registry kind that is not installed is left out: there are
+    /// dozens, and the window's Settings → Agents lists them under "Add an agent".
+    pub missing: Vec<Kind>,
+}
+
+/// Sorts `all` into [`StartKinds`]; nothing is chosen for the person.
+pub fn start_kinds(all: Vec<Kind>) -> StartKinds {
+    let mut out = StartKinds::default();
+    for k in all {
+        match (k.installed, is_registry_kind(&k.kind)) {
+            (true, false) => out.installed.push(k),
+            (true, true) => out.untested.push(k),
+            (false, false) => out.missing.push(k),
+            (false, true) => {}
+        }
+    }
+    out
+}
+
 /// ADR-0065: what the hub tells an owner's window about pairing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PairNote {
@@ -372,8 +440,7 @@ pub enum Update {
 impl Session {
     /// Connects and subscribes; the first update is the snapshot.
     pub fn connect(hub: &Hub, token: &str) -> Result<Session, ClientError> {
-        let rt = runtime()?;
-        let conn = rt.block_on(async {
+        let (rt, conn) = run_on(runtime()?, async {
             let stream = tls(hub).await?;
             let host = hub
                 .addr
@@ -391,9 +458,16 @@ impl Session {
             })
             .await
             .map_err(|_| ClientError::Unreachable)?;
-            Ok::<_, ClientError>(conn)
+            // ADR-0106: a hub that tells the role sends its `Welcome` before anything else; an older hub sends the snapshot first
+            // (this subscription asks for one), which is kept for `next`. A closed connection is found by `next`, as before.
+            let first = match tokio::time::timeout(FIRST_FRAME_WITHIN, conn.recv()).await {
+                Ok(Ok(Some(f))) => Some(f),
+                _ => None,
+            };
+            Ok::<_, ClientError>((conn, first))
         })?;
-        Ok(Session {
+        let (conn, first) = conn;
+        let mut session = Session {
             rt,
             conn,
             requests: 0,
@@ -405,7 +479,28 @@ impl Session {
             typing: Typing::default(),
             seen: Seen::default(),
             history: HeldHistory::default(),
-        })
+            person_role: PersonRole::Unspecified,
+        };
+        if let Some(f) = first {
+            match welcome_role(&f) {
+                Some(role) => session.person_role = role,
+                None => set_aside(
+                    f,
+                    &mut session.changed,
+                    &mut session.asked,
+                    &mut session.snapshot,
+                    &mut session.term_frames,
+                    &mut session.seen,
+                ),
+            }
+        }
+        Ok(session)
+    }
+
+    /// ADR-0106: the role of the person this connection signed in as, as the hub said when it opened (the hub ends a connection whose
+    /// role or grants changed). `Unspecified` from a hub that predates it: the caller learns the role as it did before.
+    pub fn person_role(&self) -> PersonRole {
+        self.person_role
     }
 
     /// Waits up to `wait` for the hub to say something.
@@ -423,9 +518,17 @@ impl Session {
         let asked = &mut self.asked;
         let typing = &mut self.typing;
         let seen = &mut self.seen;
+        let person_role = &mut self.person_role;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // ADR-0106: a `Welcome` that came after `connect` stopped waiting for it.
+                Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME) => {
+                    if let Some(role) = welcome_role(&f) {
+                        *person_role = role;
+                    }
+                    Update::Quiet
+                }
                 // The answer to something typed without waiting: only a missing grant matters.
                 Ok(Ok(Some(f))) if typing.answer(&f) => Update::Quiet,
                 // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
@@ -853,8 +956,10 @@ impl Session {
         })
     }
 
-    /// Sends a request to an agent (a routed `agent.prompt`) and waits for the machine to take it.
+    /// Sends a request to an agent (a routed `agent.prompt`) and waits for the machine to take it. A viewer's session (ADR-0106) does not
+    /// send it: `auth.forbidden` without a request, where the hub would refuse it and write the refusal down.
     pub fn prompt(&mut self, node: &str, agent_id: &str, text: &str) -> Result<(), String> {
+        self.viewer_refused()?;
         self.command(
             node,
             command_request::Command::AgentPrompt(agora_protocol::v1::AgentPrompt {
@@ -865,7 +970,8 @@ impl Session {
         )
     }
 
-    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered.
+    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered. Not sent for a viewer, as
+    /// [`Session::prompt`] is not.
     pub fn set_option(
         &mut self,
         node: &str,
@@ -873,6 +979,7 @@ impl Session {
         model: bool,
         id: &str,
     ) -> Result<(), String> {
+        self.viewer_refused()?;
         let command = if model {
             command_request::Command::AgentSetModel(agora_protocol::v1::AgentSetModel {
                 agent_id: agent_id.to_string(),
@@ -887,8 +994,25 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
-    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
+    /// ADR-0106: `auth.forbidden` for a viewer's session, whose window only watches; nothing is sent.
+    fn viewer_refused(&self) -> Result<(), String> {
+        if self.person_role == PersonRole::Viewer {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
+        Ok(())
+    }
+
+    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033). The hub
+    /// answers it to the owner only, so a member's or viewer's session (ADR-0106) does not ask: `auth.forbidden` without a request,
+    /// where the hub would refuse it and write the refusal down. An older hub's session asks as before.
     pub fn usage_total(&mut self) -> Result<u64, String> {
+        if matches!(self.person_role, PersonRole::Member | PersonRole::Viewer) {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
         let ok = self.command_ok(
             "",
             command_request::Command::UsageReport(agora_protocol::v1::UsageReport {}),
@@ -902,14 +1026,14 @@ impl Session {
 
     /// The agents a machine can start: `(kind, display name)` of the installed ones.
     /// The folders inside `path` on `node` (ADR-0053 `directory.list`; empty `path` is the home folder there), with this device's
-    /// signature for exactly that folder.
+    /// signature for exactly that folder. Errors keep their parameters (#1044).
     pub fn list_folder(
         &mut self,
         node: &str,
         path: &str,
         authorization: agora_protocol::v1::DirectoryAuthorization,
-    ) -> Result<agora_protocol::v1::DirectoryEntries, String> {
-        let ok = self.command_ok(
+    ) -> Result<agora_protocol::v1::DirectoryEntries, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::DirectoryList(agora_protocol::v1::DirectoryList {
                 path: path.to_string(),
@@ -919,7 +1043,10 @@ impl Session {
         )?;
         match ok.result {
             Some(command_ok::Result::DirectoryEntries(e)) => Ok(e),
-            _ => Err("protocol.invalid_message".into()),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -1005,14 +1132,15 @@ impl Session {
         }
     }
 
-    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
+    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project. Errors
+    /// keep their parameters (#1044).
     pub fn inspect_folder(
         &mut self,
         node: &str,
         path: &str,
         authorization: agora_protocol::v1::DirectoryAuthorization,
-    ) -> Result<agora_protocol::v1::DirectoryInfo, String> {
-        let ok = self.command_ok(
+    ) -> Result<agora_protocol::v1::DirectoryInfo, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::DirectoryInspect(agora_protocol::v1::DirectoryInspect {
                 path: path.to_string(),
@@ -1023,7 +1151,10 @@ impl Session {
         )?;
         match ok.result {
             Some(command_ok::Result::DirectoryInfo(i)) => Ok(i),
-            _ => Err("protocol.invalid_message".into()),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -1125,14 +1256,15 @@ impl Session {
         ))
     }
 
-    /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
+    /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id. Errors keep their parameters,
+    /// so a refusal for the person's role can be told from one for this device (#1044).
     pub fn start_agent(
         &mut self,
         node: &str,
         project_id: &str,
         kind: &str,
-    ) -> Result<String, String> {
-        let ok = self.command_ok(
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
             node,
             command_request::Command::AgentStart(agora_protocol::v1::AgentStart {
                 project_id: project_id.to_string(),
@@ -1293,8 +1425,12 @@ impl Session {
         .map(|_| ())
     }
 
-    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
+    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget. Never sent
+    /// for a viewer (ADR-0106): their window watches, and the hub would refuse and write down every key.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1306,8 +1442,11 @@ impl Session {
     }
 
     /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
-    /// a machine's refusal of it asks for no grant.
+    /// a machine's refusal of it asks for no grant. Never sent for a viewer, as typing is not.
     pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
@@ -1339,7 +1478,12 @@ impl Session {
         self.typing.sent.len()
     }
 
+    /// Asks for the terminal's size (the hub keeps the smallest its watchers asked for). Never sent for a viewer (ADR-0106): the hub
+    /// refuses it, writes the refusal down, and a viewer's window does not size the agent's terminal.
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
+        if self.person_role == PersonRole::Viewer {
+            return;
+        }
         self.send_nowait(
             node,
             command_request::Command::TerminalResize(agora_protocol::v1::TerminalResize {
@@ -2129,6 +2273,40 @@ mod set_aside_tests {
     use super::*;
 
     #[test]
+    fn only_a_welcome_on_the_control_stream_names_a_role() {
+        let frame = |stream_id, kind, payload: Vec<u8>| Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        };
+        let mut w = agora_protocol::v1::Welcome::default();
+        w.set_person_role(PersonRole::Viewer);
+        assert_eq!(
+            welcome_role(&frame(STREAM_CONTROL, kinds::WELCOME, w.encode_to_vec())),
+            Some(PersonRole::Viewer)
+        );
+        // An older hub's first frame: the snapshot, which is no Welcome.
+        assert_eq!(
+            welcome_role(&frame(
+                STREAM_EVENTS,
+                kinds::SNAPSHOT,
+                Snapshot::default().encode_to_vec()
+            )),
+            None
+        );
+        // A published Welcome (a node's) reads as unspecified.
+        assert_eq!(
+            welcome_role(&frame(
+                STREAM_CONTROL,
+                kinds::WELCOME,
+                agora_protocol::v1::Welcome::default().encode_to_vec()
+            )),
+            Some(PersonRole::Unspecified)
+        );
+    }
+
+    #[test]
     fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
         let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
         let mut asked = false;
@@ -2737,5 +2915,130 @@ mod history_tests {
         h.route(&frame(3, 4, b"ok"));
         h.route(&frame(3, 1, b"s"));
         assert_eq!(h.take(3), b"ok");
+    }
+}
+
+#[cfg(test)]
+mod same_process_tests {
+    use super::*;
+    use agora_protocol::v1::{
+        event::Body, AgentSessionConfig, AgentStarted, Event, PositionedEvent,
+    };
+
+    fn at(pos: u64, body: Body) -> Frame {
+        Frame {
+            stream_id: STREAM_EVENTS,
+            kind: kinds::POSITIONED_EVENT,
+            seq: None,
+            payload: PositionedEvent {
+                pos,
+                event: Some(Event {
+                    producer_id: "mac".into(),
+                    body: Some(body),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec(),
+        }
+    }
+
+    /// ADR-0104 (#930): the terminal client sums no usage of its own; it draws the hub's snapshot, which keeps a kept agent's counters.
+    /// So the `AgentStarted` (`same_process`) of an agent its restarted node took up asks for a fresh snapshot, and leaves the options
+    /// it holds for that agent as they are (the node re-states them right after, and each report replaces the last).
+    #[test]
+    fn a_taken_up_agent_asks_for_the_hubs_snapshot_and_keeps_its_held_options() {
+        let mut seen = Seen {
+            snapshot_pos: Some(7),
+            ..Seen::default()
+        };
+        let option = agora_protocol::v1::SessionConfigOption {
+            id: "effort".into(),
+            current: "high".into(),
+            ..Default::default()
+        };
+        seen.note(&at(
+            7,
+            Body::AgentSessionConfig(AgentSessionConfig {
+                agent_id: "agent-1".into(),
+                options: vec![option.clone()],
+            }),
+        ));
+        seen.configs_changed = false;
+        let taken_up = Body::AgentStarted(AgentStarted {
+            agent_id: "agent-1".into(),
+            node_id: "mac".into(),
+            same_process: true,
+            ..Default::default()
+        });
+        assert!(seen.note(&at(8, taken_up)), "a fresh snapshot is wanted");
+        assert_eq!(seen.configs.options.get("mac/agent-1"), Some(&vec![option]));
+        assert!(!seen.configs_changed);
+    }
+}
+
+#[cfg(test)]
+mod start_kinds_tests {
+    use super::{is_registry_kind, start_kinds, Kind};
+
+    fn k(kind: &str, installed: bool) -> Kind {
+        Kind {
+            kind: kind.into(),
+            name: kind.into(),
+            installed,
+            program: String::new(),
+        }
+    }
+
+    /// #1134: installed hand-made kinds, then installed registry ones, each in the machine's order; missing registry ones are left out.
+    #[test]
+    fn registry_kinds_follow_the_hand_made_ones_and_missing_ones_are_left_out() {
+        let got = start_kinds(vec![
+            k("registry-gemini", true),
+            k("claude", true),
+            k("registry-goose", false),
+            k("codex", false),
+            k("registry-qwen-code", true),
+            k("shell", true),
+        ]);
+        let ids = |v: &[Kind]| v.iter().map(|k| k.kind.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&got.installed), ["claude", "shell"]);
+        assert_eq!(
+            ids(&got.untested),
+            ["registry-gemini", "registry-qwen-code"]
+        );
+        assert_eq!(ids(&got.missing), ["codex"]);
+        assert_eq!(start_kinds(Vec::new()), super::StartKinds::default());
+    }
+
+    #[test]
+    fn a_registry_kind_is_told_by_its_prefix_only() {
+        assert!(is_registry_kind("registry-gemini"));
+        assert!(!is_registry_kind("gemini"));
+        assert!(!is_registry_kind("my-registry-gemini"));
+        assert!(!is_registry_kind("registry"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod runtime_tests {
+    use super::*;
+
+    /// #1150: a sign-in or a connection whose wait ran out while a blocking task (a host name lookup) was still running fails when
+    /// the wait does; the runtime used to wait for the task on its way out, so the terminal client outlasted its 10 s dial wait by
+    /// the resolver's own timeout.
+    #[test]
+    fn a_failure_does_not_wait_for_a_lookup_still_running() {
+        let start = std::time::Instant::now();
+        let got = run_on(runtime().unwrap(), async {
+            let slow = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+            tokio::time::timeout(Duration::from_millis(200), slow)
+                .await
+                .map_err(|_| ClientError::Unreachable)?
+                .map_err(|_| ClientError::Unreachable)
+        });
+        assert!(matches!(got, Err(ClientError::Unreachable)));
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "took {took:?}");
     }
 }

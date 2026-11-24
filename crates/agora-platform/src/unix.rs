@@ -307,6 +307,25 @@ pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
     Ok(SecretMode(saved))
 }
 
+/// The bytes of the keys that arrive on the terminal on stdin within `wait` (`crate::read_confirmation_until`): `None` when none came
+/// or a signal interrupted the wait, empty at the end of input. Read from fd 0 directly, never through `std::io::stdin`'s buffer.
+pub(crate) fn terminal_key(wait: std::time::Duration) -> io::Result<Option<Vec<u8>>> {
+    if !wait_readable(&io::stdin(), wait)? {
+        return Ok(None);
+    }
+    let mut buf = [0u8; 64];
+    // SAFETY: fd 0 is stdin; `buf` is valid for writes of its length.
+    let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        let e = io::Error::last_os_error();
+        return match e.kind() {
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => Ok(None),
+            _ => Err(e),
+        };
+    }
+    Ok(Some(buf[..n.unsigned_abs()].to_vec()))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -349,6 +368,17 @@ pub(crate) fn cloexec_from(first: libc::c_int) {
         // SAFETY: plain fcntl; a descriptor that is not open is `EBADF`, which is ignored.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+}
+
+/// See [`crate::keep_only_standard_streams`].
+pub(crate) fn keep_only_standard_streams(cmd: &mut Command) {
+    // SAFETY: runs between fork and exec and only makes system calls (getrlimit, fcntl, close_range), which are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            cloexec_from(3);
+            Ok(())
+        })
+    };
 }
 
 /// Closes every descriptor from `first` up, for good. Only where nothing else of this process uses them (its own start).
@@ -502,19 +532,20 @@ pub(crate) fn start_child(
     if let Some(file) = git_config {
         cmd.envs(crate::git_config_env(file));
     }
-    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
+    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, fcntl, getrlimit, setsid, ioctl,
     // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
     unsafe {
         cmd.pre_exec(move || {
             if let Some(fd) = held {
                 cvt(libc::fchdir(fd))?;
             }
-            if clear_env {
-                // Whatever this process was handed at its start (a pipe of its starter, a log) must not reach the agent: it keeps
-                // the terminal (0, 1, 2) and nothing else. Marked here, not closed, so std's own pipe that reports a failed `exec`
-                // to the parent still works; it all closes at `exec`.
-                cloexec_from(3);
-            }
+            // The agent keeps the terminal (0, 1, 2) and nothing else: not what this process was handed at its start (a pipe of
+            // its starter, a log), and not a descriptor another thread of this process has open without close-on-exec at this
+            // moment. Where a pipe is not made close-on-exec in one step (macOS: std makes it, then marks it), a pipe another thread
+            // was making (a `git` whose output the node reads, another start's `exec` report) stayed open in the agent for its whole
+            // life, and whoever waited for that pipe's end waited as long (#1011). Marked here, not closed, so std's own pipe that
+            // reports a failed `exec` to the parent still works; it all closes at `exec`.
+            cloexec_from(3);
             #[cfg(target_os = "linux")]
             if die_with_parent {
                 cvt(libc::prctl(
@@ -795,10 +826,50 @@ pub(crate) fn detach(cmd: &mut Command) {
 /// The child a caught stop request is passed on to (0: none), and whether one was caught: see [`crate::catch_stop_requests`].
 static STOP_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static STOP_CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The first stop request's signal (0: none yet), for [`end_as_stopped`].
+static STOP_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// See [`catch_stop_requests_once`]: a second request ends the process at once.
+static STOP_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the first stop request came (the monotonic clock, in ms), for [`STOP_ECHO_MS`].
+static STOP_AT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
-extern "C" fn on_stop_request(_: libc::c_int) {
+/// #1119 item 4: with [`catch_stop_requests_once`], a request less than this long after the first is the same stop reaching the process
+/// again, not a second one: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor (one process group), and
+/// the supervisor passes its own on; a service manager may signal the whole group as well as the supervisor. A deliberate second request
+/// comes later than this.
+const STOP_ECHO_MS: i64 = 1000;
+
+/// The monotonic clock in ms (`clock_gettime` is async-signal-safe).
+// `time_t` and `c_long` are 32 bits wide on some Unix targets: the conversions are not useless there.
+#[allow(clippy::useless_conversion)]
+fn monotonic_ms() -> i64 {
+    // SAFETY: an all-zero timespec is valid to be written into.
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid pointer to a timespec; `CLOCK_MONOTONIC` exists on every Unix this builds for.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    i64::from(ts.tv_sec)
+        .saturating_mul(1000)
+        .saturating_add(i64::from(ts.tv_nsec) / 1_000_000)
+}
+
+extern "C" fn on_stop_request(sig: libc::c_int) {
     use std::sync::atomic::Ordering::SeqCst;
-    // Only lock-free atomics and `kill`, all async-signal-safe.
+    // Only lock-free atomics, `clock_gettime`, `kill`, `signal` and `raise`, all async-signal-safe.
+    if STOP_ONCE.load(SeqCst) && STOP_CAUGHT.load(SeqCst) {
+        if monotonic_ms().saturating_sub(STOP_AT_MS.load(SeqCst)) < STOP_ECHO_MS {
+            // The first request again (see STOP_ECHO_MS): the clean stop goes on.
+            return;
+        }
+        // SAFETY: async-signal-safe calls on this process: the default action of `sig`, then `sig` itself, which ends it.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+        return;
+    }
+    let _ = STOP_SIGNAL.compare_exchange(0, sig, SeqCst, SeqCst);
+    // Before the request is said caught, so a handler that sees it caught also sees when.
+    let _ = STOP_AT_MS.compare_exchange(0, monotonic_ms(), SeqCst, SeqCst);
     STOP_CAUGHT.store(true, SeqCst);
     let pid = STOP_TARGET.load(SeqCst);
     if pid > 0 {
@@ -807,18 +878,40 @@ extern "C" fn on_stop_request(_: libc::c_int) {
     }
 }
 
+/// See [`crate::catch_stop_requests_once`].
+pub(crate) fn catch_stop_requests_once() -> io::Result<()> {
+    STOP_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // A signal ignored on entry (`nohup`, a background job of a shell without job control) stays ignored, as it was before.
+        // SAFETY: an all-zero sigaction is valid to be written into.
+        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: a null new action only reads the current one into `old`, a valid pointer.
+        cvt(unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) })?;
+        if old.sa_sigaction == libc::SIG_IGN {
+            continue;
+        }
+        catch_one(sig)?;
+    }
+    Ok(())
+}
+
 /// See [`crate::catch_stop_requests`]. A child started after this gets the default actions back at `exec` (caught signals are reset).
 pub(crate) fn catch_stop_requests() -> io::Result<()> {
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-        // SAFETY: an all-zero sigaction is valid; the handler only touches atomics and calls `kill`.
-        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = on_stop_request as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        action.sa_flags = libc::SA_RESTART;
-        // SAFETY: valid pointers to a filled action; the old action is not wanted.
-        unsafe { libc::sigemptyset(&mut action.sa_mask) };
-        // SAFETY: as above.
-        cvt(unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) })?;
+        catch_one(sig)?;
     }
+    Ok(())
+}
+
+fn catch_one(sig: libc::c_int) -> io::Result<()> {
+    // SAFETY: an all-zero sigaction is valid; the handler only calls async-signal-safe functions.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = on_stop_request as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    // SAFETY: valid pointers to a filled action; the old action is not wanted.
+    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    // SAFETY: as above.
+    cvt(unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) })?;
     Ok(())
 }
 
@@ -852,19 +945,8 @@ pub(crate) fn open_private(
     append: bool,
 ) -> io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let link_error = |e: io::Error| match e.raw_os_error() {
-        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
-        _ => e,
-    };
     let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let cname = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if name.as_bytes().contains(&b'/') {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
     // SAFETY: a NUL-terminated path; the descriptor is owned below.
     let dfd = cvt(unsafe {
         libc::open(
@@ -872,9 +954,36 @@ pub(crate) fn open_private(
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     })
-    .map_err(link_error)?;
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+            io::Error::new(io::ErrorKind::InvalidInput, "a link")
+        }
+        _ => e,
+    })?;
     // SAFETY: a descriptor this call just opened and nothing else owns.
     let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
+    open_private_at(&dir_fd, name, append)
+}
+
+/// [`open_private`] relative to a folder already held open (`dir`, a directory descriptor): the same checks on `name`, no path looked
+/// up (#1000, [`crate::ConfinedDir::open_lock`]).
+pub(crate) fn open_private_at(
+    dir_fd: &impl AsRawFd,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let link_error = |e: io::Error| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    };
+    let cname = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     let access = if append {
         libc::O_WRONLY | libc::O_APPEND
     } else {
@@ -991,6 +1100,28 @@ pub(crate) fn forward_stop_to(pid: Option<u32>) {
 
 pub(crate) fn stop_requested() -> bool {
     STOP_CAUGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// See [`crate::end_as_stopped`]: the caught signal (or `SIGTERM`) with its default action again, raised at this process.
+pub(crate) fn end_as_stopped() -> ! {
+    let sig = match STOP_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => libc::SIGTERM,
+        s => s,
+    };
+    // SAFETY: an all-zero sigaction with `SIG_DFL` is valid; plain system calls on this process.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(sig, &action, std::ptr::null_mut());
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
+    }
+    // Not reached: the default action of each caught signal ends the process. The shell's code for an end by that signal otherwise.
+    std::process::exit(128 + sig)
 }
 
 /// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
@@ -1618,6 +1749,55 @@ zz10db8000000000000000000000005 02 40 00 01 eth0
                 _ => {}
             }
         }
+    }
+
+    /// A descriptor of this process left without close-on-exec, as std's pipes are on macOS between making them and marking them
+    /// (#1011): a number high enough that the shell below opens nothing there itself. Closed when the result is dropped.
+    fn left_open() -> (File, OwnedFd) {
+        let file = File::open("/dev/null").expect("open");
+        // SAFETY: plain fcntl on a descriptor we own; F_DUPFD makes a copy without close-on-exec.
+        let fd = cvt(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 100) }).expect("dup");
+        // SAFETY: fcntl just returned this fresh descriptor, which nothing else owns.
+        (file, unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// A shell command that says whether descriptor `fd` reached it.
+    fn says_whether_it_got(fd: &OwnedFd) -> Vec<String> {
+        let n = fd.as_raw_fd();
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("if [ -e /dev/fd/{n} ]; then echo GOT-IT; else echo NOT-GOT; fi"),
+        ]
+    }
+
+    #[test]
+    fn a_terminal_agent_never_gets_a_descriptor_another_thread_left_open() {
+        // #1011: the agent kept such a pipe for its whole life, so whoever waited for the pipe's end (another start's `exec` report,
+        // a `git` whose output was read) waited as long.
+        let (_file, fd) = left_open();
+        let p = spawn(&PtyConfig::new(says_whether_it_got(&fd))).expect("spawn");
+        let out = read_until(&*p, "GOT");
+        assert!(out.contains("NOT-GOT"), "output: {out:?}");
+    }
+
+    #[test]
+    fn a_child_kept_to_its_standard_streams_never_gets_a_descriptor_another_thread_left_open() {
+        // #1011: an adapter agent, started with std's `Command`, kept one the same way.
+        let (_file, fd) = left_open();
+        let argv = says_whether_it_got(&fd);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let out = crate::keep_only_standard_streams(&mut cmd)
+            .output()
+            .expect("run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "NOT-GOT");
+        // Without it the same command does get it, so the check above proves something.
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "GOT-IT");
     }
 
     #[test]

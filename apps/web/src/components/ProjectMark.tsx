@@ -19,5 +19,5 @@ export function ProjectChip({ spread, compact }: { spread: ProjectSpread; compac
 // A gentle hint: agents on more than one machine have changes in the same project right now. It does not say they conflict.
 export function ProjectHint({ spread }: { spread: ProjectSpread }) {
   if (spread.changing < 2) return null;
-  return <p role="note" className="m-0 flex items-center gap-1.5 text-xs text-needs-you"><Icon name="warn" className="size-3.5" />{t('fleet-project-changing', { count: spread.changing })}</p>;
+  return <p role="note" className="m-0 flex items-center gap-1.5 text-xs text-muted"><Icon name="warn" className="size-3.5" />{t('fleet-project-changing', { count: spread.changing })}</p>;
 }

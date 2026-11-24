@@ -141,6 +141,10 @@ message Snapshot {
   // ADR-0052: distinct from the legacy worktree tables.
   repeated WorkspaceRegistered workspaces = 10;
   repeated AgentWorkspaceBound agent_workspaces = 11;
+  // ADR-0103: the newest mesh messages this window may see, oldest first, each as the hub stored it (its log position, producer, time
+  // and `MessagePosted` body). Positions are at or before `pos`. A client folds them in as it would the live events, and ignores any
+  // other body.
+  repeated PositionedEvent recent_messages = 12;
 }
 
 // hub -> client for every live or replayed event.

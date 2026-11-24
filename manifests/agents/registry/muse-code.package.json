@@ -1,0 +1,76 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Muse Code",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./muse",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "51224e835fccf2ba8c1abe9c2957b187252050a0b7315e0b1ee4cdcd2f090494",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-aarch64-macos"
+        },
+        "darwin-x86_64": {
+          "cmd": "./muse",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "dc65624b7e061e7f11f251acf4b11d77c4a1bb9eca945d58cd6787f84da8521a",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-x86-macos"
+        },
+        "linux-aarch64": {
+          "cmd": "./muse",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "31d4c1fdf382e6711b1c8854d976a6095fe4743eb17b2a8f9a5bb43aef5bad63",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-aarch64-linux"
+        },
+        "linux-x86_64": {
+          "cmd": "./muse",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "d752c45dce079ee29e118804b091d81ac2b1b89b67f317b4a162fa1af1206465",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-x86-linux"
+        },
+        "windows-aarch64": {
+          "cmd": "./muse.exe",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "5ff8bc7d867739bc7ff17d298f20d1581620fe10f12e9eaf3dd23849b3b7594a",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-aarch64-windows.exe"
+        },
+        "windows-x86_64": {
+          "cmd": "./muse.exe",
+          "env_names_not_copied": [
+            "MUSE_EXPERIMENTAL_ACP"
+          ],
+          "sha256": "9c948338ba8b0a463ca81a1826660b3d3a59fb96feef8669f51cdfb5c2a3cb93",
+          "url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.24-R9131.1&file=muse-x86-windows.exe"
+        }
+      },
+      "provides": [
+        "muse"
+      ]
+    }
+  ],
+  "name": "registry-muse-code",
+  "skipped": [],
+  "source": {
+    "id": "muse-code",
+    "license": "proprietary",
+    "license_url": "https://dev.meta.ai/legal/terms-of-service",
+    "version": "1.4.24",
+    "website": "https://dev.meta.ai/docs/muse-code"
+  },
+  "tested": false
+}

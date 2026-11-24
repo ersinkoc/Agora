@@ -23,6 +23,23 @@ shell) or, when the manifest names a path, exists there. On Windows, a bare name
 levels, looked up where the standard library looks and never in the agent's project folder; it is installed when that file
 exists. A found file without the owner's execute bit is "broken" (`agent-broken`, ADR-0087 rung 1): there, but starting it would fail. Doctor runs nothing and reads nothing from the program, and shows no agent version because no manifest has a version command yet. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
 
+**The ACP registry's kinds (ADR-0092).** Under the built-in kinds the binary also carries the converted agents of the ACP registry,
+`manifests/agents/registry/*.toml` (`agora-node::manifests::REGISTRY`), each of kind `registry-<registry id>`. They load first, so a
+built-in or folder file of the same `kind` replaces one, and a registry kind whose id is the name of a hand-made kind (built in or
+from the folder) is not offered at all (`antigravity-acp` covers `registry-antigravity-acp`). They are untested in Agora: the window
+marks them "Untested" (a kind named `registry-*`; no manifest field and no protocol change), lists the ones a machine cannot find
+under Settings → Agents, "Add an agent", with the version, licence and repository from the catalog built into the window, and leaves
+those out of the Start window. Their program is the ACP `argv[0]`: `npx` or `uvx` for a package (which fetches the pinned version
+when the agent first starts), else the registry's own program name. `agora doctor` counts them in one line (`registry-kinds`: how
+many, and how many find their program) instead of one line per kind. No registry kind has a launch option, so none can skip
+permission questions (ADR-0092 decision 5). A registry kind (by origin, not by name) whose program is a package runner (`npx`, `uvx`) is
+started from the hub only by a signed start, and the node's policy can switch registry kinds off (`agents.registry = off`, `agents.registry.deny`): both in
+`docs/specs/protocol.md`, "ACP registry kinds". Such a kind's package runner never starts in the project (#1150): the bridge starts it
+in a new, empty folder for each start, `<data>/runner/<agent id>.<random>` (a confined agent gets a write grant to that folder, as to its worktree; its earlier folders are removed in the background, bounded; one it cannot finish stays as `….left`, counted by `agora doctor`), so a project's `.npmrc`, `package.json`,
+`node_modules`, `uv.toml`, `pyproject.toml` or `.python-version` cannot change what the pinned version resolves to, while the owner's
+user and global npm and uv configuration still apply; the agent gets the project as ACP's session `cwd`. What is and is not covered:
+`docs/security/threat-model.md`, T52.
+
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
@@ -136,7 +153,9 @@ Engine details (`agora-adapters`):
   `bottom_non_empty_lines(n)` is the last `n` rows that contain text. Neither ever includes scrollback.
 - A `contains` phrase of more than one word also matches when the region wraps it: runs of whitespace, line breaks included, count as one
   space (so "Yes, I trust this folder" is found when a narrow terminal puts "folder" on the next row). Only whitespace is collapsed;
-  regexes still see the rows as they are.
+  regexes still see the rows as they are. Whitespace at either end of a phrase is kept as one space and asks for a boundary there
+  (`" build done "` is not found in "prebuild done"); a line break counts as one, and so do the start and end of the region, so a
+  padded phrase, one word included, is still found when it wraps or stands at the start or end of the region.
 - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
   and are size-limited.
 - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.
@@ -156,11 +175,20 @@ a first prompt typed for it (the prompt is left for the user). Every shipped ter
 that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
 `[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
 footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
-require (`contains` in the rule, `all` or `any`), and the top-level
+require (`contains` in the rule, `all` or `any`; compared ignoring case and with every run of whitespace as one space, see
+`mesh-tools.md`; a marker given only as a regex is not checked against the prompt), and the top-level
 `input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
 `[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
+
+Every `[[typed]]` rule must need a regex to match (#1150): its own `regex`, or a `regex` in `all`, not empty. A regex only in `any`
+does not count (a phrase beside it can match instead), nor one only in `not` (it only excludes); a rule without one is refused as
+`typed[i].regex`, and a manifest file with such a rule is not loaded. Why: phrases are found with whitespace collapsed, so a prompt that
+holds a footer word the box breaks in its middle (`Entersend`, wrapped after `Enter`) reads as the footer `Enter send` once typed,
+and the prompt check above does not see it (`Entersend` is not `Enter send`). Regexes see the rows as they are. Validation can only
+check that the regex is there: write it so it needs the footer whole on one row, at its place right under the box, as the shipped
+manifests do.
 
 ## Launch settings (ADR-0066)
 

@@ -51,6 +51,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "task.dispatch",
     // ADR-0060
     "agent.resume",
+    // ADR-0108: the hub passes a person's forget of a closed agent on to its node (a node offers it), and keeps it owed meanwhile.
+    "agent.forget.local",
     // ADR-0059
     "agent.launch_options",
     // ADR-0066
@@ -561,7 +563,7 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
 /// machine, so no old password is asked. Setting reads the password twice from the terminal with echo off and refuses to read one
 /// from a pipe; setting or clearing it signs out every session, and both are in the audit trail.
 pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
-    use agora_hub::password::{check_new, PasswordError, ScreenPassword};
+    use agora_hub::password::{check_new, hash_with, PasswordError, ScreenPassword, ITERATIONS};
     let fail = |e: String| {
         say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
         ExitCode::from(1)
@@ -579,17 +581,6 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
         Err(e) => return fail(e.to_string()),
     };
     let screen = ScreenPassword::new(&store);
-    let now = server::now_ms();
-    // Every session ends, and so does every passkey added from another machine without the password (ADR-0067).
-    let sign_out_all = || {
-        let _ = agora_hub::password::drop_unvouched_passkeys(&store);
-        SignIn::new(&store, Arc::new(Lockout::new()))
-            .revoke_all()
-            .unwrap_or(0)
-    };
-    let audit = |action: &str| {
-        let _ = agora_hub::audit::Audit::new(&store).record(now, "owner", action, "cli", "ok");
-    };
     match op {
         "status" => {
             say.out(
@@ -607,22 +598,7 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
             if let Some(code) = crate::remotecmd::clear_refused(say, &dir) {
                 return code;
             }
-            match screen.clear() {
-                Ok(true) => {
-                    let revoked = sign_out_all();
-                    audit("password_clear");
-                    say.out(
-                        key!("cli-password-cleared"),
-                        &[("count", (revoked as i64).into())],
-                    );
-                    ExitCode::SUCCESS
-                }
-                Ok(false) => {
-                    say.out(key!("cli-password-off"), &[]);
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(format!("{e:?}")),
-            }
+            commit_password(say, &store, None)
         }
         "set" => {
             // The prompt appears only once echo is off: an answer typed or pasted right after it is never shown.
@@ -663,22 +639,53 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
                 say.err(key!("cli-password-mismatch"), &[]);
                 return ExitCode::from(1);
             }
-            match screen.set(&first) {
-                Ok(()) => {
-                    let revoked = sign_out_all();
-                    audit("password_set");
-                    say.out(
-                        key!("cli-password-set"),
-                        &[("count", (revoked as i64).into())],
-                    );
-                    ExitCode::SUCCESS
-                }
+            // Derived before the transaction: the store is never held through 600 000 rounds.
+            match hash_with(&first, ITERATIONS) {
+                Ok(hashed) => commit_password(say, &store, Some(&hashed)),
                 Err(e) => fail(format!("{e:?}")),
             }
         }
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// The store half of `agora password set|clear`: the password becomes `hashed` (or none), every session ends and every passkey added
+/// from another machine without the password goes (ADR-0067), in one transaction or not at all (#1029), then it goes in the audit
+/// trail. A failure says so and exits 1 with everything as it was.
+fn commit_password(say: &Say, store: &SqliteStore, hashed: Option<&str>) -> ExitCode {
+    let result = match hashed {
+        Some(hashed) => agora_hub::password::set_and_sign_out_all(store, hashed)
+            .map(|revoked| Some((revoked, "password_set", key!("cli-password-set")))),
+        None => agora_hub::password::clear_and_sign_out_all(store).map(|revoked| {
+            revoked.map(|revoked| (revoked, "password_clear", key!("cli-password-cleared")))
+        }),
+    };
+    match result {
+        Ok(Some((revoked, action, message))) => {
+            // As the window's change: the audit row follows the change it records.
+            let _ = agora_hub::audit::Audit::new(store).record(
+                server::now_ms(),
+                "owner",
+                action,
+                "cli",
+                "ok",
+            );
+            say.out(message, &[("count", (revoked as i64).into())]);
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            say.out(key!("cli-password-off"), &[]);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(
+                key!("cli-hub-failed"),
+                &[("reason", format!("{e:?}").into())],
+            );
+            ExitCode::from(1)
         }
     }
 }
@@ -708,6 +715,13 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             .create_code_for(Some(id), server::now_ms())
             .map_err(|_| "could not create a sign-in code".to_string())
     };
+    // What the hub has heard from its machines, as clients are shown it (a forgotten machine is not offered).
+    let view = || {
+        agora_hub::projection::View::rebuild(&store)
+            .map(|(v, _)| v.shown().into_owned())
+            .map_err(|e| e.to_string())
+    };
+    let folders = || view().map(|v| agora_hub::project_names::folders(&v));
     let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["add", name] => {
@@ -739,6 +753,10 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Ok(list) => {
+                let known = match folders() {
+                    Ok(f) => f,
+                    Err(e) => return fail(e),
+                };
                 for u in list {
                     say.out(
                         key!("cli-hub-user-line"),
@@ -748,8 +766,26 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                             ("role", u.role.as_str().into()),
                         ],
                     );
-                    for project in users.grants_of(&u.id).unwrap_or_default() {
-                        say.out(key!("cli-hub-user-project"), &[("project", project.into())]);
+                    for grant in users.grants_of(&u.id).unwrap_or_default() {
+                        let (project, path) = match grant.split_once('/') {
+                            Some((node, project)) => {
+                                agora_hub::project_names::shown_grant(&known, node, project)
+                            }
+                            None => (grant, None),
+                        };
+                        match path {
+                            Some(path) => say.out(
+                                key!("cli-hub-user-project-path"),
+                                &[
+                                    ("project", node_text(&project).into()),
+                                    ("path", node_text(&path).into()),
+                                ],
+                            ),
+                            None => say.out(
+                                key!("cli-hub-user-project"),
+                                &[("project", node_text(&project).into())],
+                            ),
+                        }
                     }
                 }
                 ExitCode::SUCCESS
@@ -769,25 +805,45 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 Err(e) => fail(e.to_string()),
             }
         }
-        [verb @ ("grant" | "revoke"), id, project] => {
-            let Some((node, project)) = project
-                .split_once('/')
-                .filter(|(n, p)| !n.is_empty() && !p.is_empty())
-            else {
-                return bad();
+        ["projects"] => {
+            let list = match folders() {
+                Ok(f) => f,
+                Err(e) => return fail(e),
             };
-            let done = if *verb == "grant" {
-                users.grant(id, node, project)
-            } else {
-                users.revoke(id, node, project)
+            if list.is_empty() {
+                say.out(key!("cli-hub-user-projects-none"), &[]);
+            }
+            for f in list {
+                project_line(say, &f, false);
+            }
+            ExitCode::SUCCESS
+        }
+        // #904: `MACHINE/PROJECT` or `MACHINE PROJECT`, as the window names them (a folder's full path or the project's id work too).
+        [verb @ ("grant" | "revoke"), id, rest @ ..] if !rest.is_empty() && rest.len() <= 2 => {
+            let (machine, project) = match rest {
+                [both] => match both.split_once('/') {
+                    Some((m, p)) if !m.is_empty() && !p.is_empty() => (m, p),
+                    _ => return bad(),
+                },
+                [m, p] if !m.is_empty() && !p.is_empty() => (*m, *p),
+                _ => return bad(),
             };
-            match done {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => {
+            match users.list() {
+                Ok(list) if list.iter().any(|u| u.id == *id) => {}
+                Ok(_) => {
                     say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
-                    ExitCode::from(1)
+                    return ExitCode::from(1);
                 }
-                Err(e) => fail(e.to_string()),
+                Err(e) => return fail(e.to_string()),
+            }
+            let view = match view() {
+                Ok(v) => v,
+                Err(e) => return fail(e),
+            };
+            if *verb == "grant" {
+                grant_by_name(say, &users, &view, id, machine, project)
+            } else {
+                revoke_by_name(say, &users, &view, id, machine, project)
             }
         }
         ["remove", id] => match users.remove(id) {
@@ -813,6 +869,156 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             Err(e) => fail(e.to_string()),
         },
         _ => bad(),
+    }
+}
+
+/// A host name, folder or project name a machine reported, for the owner's terminal: every control or hidden character (a line break
+/// too, so one entry cannot pass for two) written as a visible escape, never sent to the terminal as it is.
+fn node_text(s: &str) -> String {
+    agora_core::text::visible(s)
+        .replace('\n', "\\u{a}")
+        .replace('\t', "\\u{9}")
+}
+
+/// One line of `agora hub user projects` (or of the choice a name that fits several projects gives): what to type, the folder, and the
+/// machine's host name where what to type is its id.
+fn project_line(say: &Say, f: &agora_hub::project_names::Folder, err: bool) {
+    let args = [
+        ("name", node_text(&f.shown()).into()),
+        ("path", node_text(&f.path).into()),
+        ("host", node_text(&f.host).into()),
+    ];
+    let k = if f.host.is_empty() || f.host == f.machine {
+        key!("cli-hub-user-projects-line")
+    } else {
+        key!("cli-hub-user-projects-line-host")
+    };
+    if err {
+        say.err(k, &args);
+    } else {
+        say.out(k, &args);
+    }
+}
+
+/// #904: grants the project the owner named as the window does. An unknown machine or project is refused with a reason and nothing
+/// is stored; a name that fits several projects is refused with the folders to choose from.
+fn grant_by_name(
+    say: &Say,
+    users: &agora_hub::users::Users,
+    view: &agora_hub::projection::View,
+    id: &str,
+    machine: &str,
+    project: &str,
+) -> ExitCode {
+    use agora_hub::project_names::{resolve, Resolved};
+    match resolve(view, machine, project) {
+        Resolved::One { node, project } => match users.grant(id, &node, &project) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => {
+                say.err(key!("cli-hub-user-unknown"), &[("id", id.into())]);
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+                ExitCode::from(1)
+            }
+        },
+        Resolved::UnknownMachine => {
+            say.err(
+                key!("cli-hub-user-unknown-machine"),
+                &[("machine", machine.into())],
+            );
+            ExitCode::from(1)
+        }
+        Resolved::UnknownProject => {
+            say.err(
+                key!("cli-hub-user-unknown-project"),
+                &[("machine", machine.into()), ("project", project.into())],
+            );
+            ExitCode::from(1)
+        }
+        Resolved::Ambiguous(candidates) => {
+            ambiguous(say, id, project, &candidates);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn ambiguous(say: &Say, id: &str, project: &str, candidates: &[agora_hub::project_names::Folder]) {
+    let (machine, path) = candidates
+        .first()
+        .map(|f| (node_text(&f.machine), node_text(&f.path)))
+        .unwrap_or_default();
+    say.err(
+        key!("cli-hub-user-ambiguous-project"),
+        &[
+            ("project", project.into()),
+            ("id", id.into()),
+            ("machine", machine.into()),
+            ("path", path.into()),
+        ],
+    );
+    for f in candidates {
+        project_line(say, f, true);
+    }
+}
+
+/// #904: takes back a grant named as the window does, or exactly as it is stored: a row an older build stored without checking names
+/// no project, and must still be removable.
+fn revoke_by_name(
+    say: &Say,
+    users: &agora_hub::users::Users,
+    view: &agora_hub::projection::View,
+    id: &str,
+    machine: &str,
+    project: &str,
+) -> ExitCode {
+    use agora_hub::project_names::{resolve, Resolved};
+    let held = match users.grants_of(id) {
+        Ok(g) => g,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            return ExitCode::from(1);
+        }
+    };
+    let has = |node: &str, project: &str| held.iter().any(|g| *g == format!("{node}/{project}"));
+    let target = if has(machine, project) {
+        Some((machine.to_string(), project.to_string()))
+    } else {
+        match resolve(view, machine, project) {
+            Resolved::One { node, project } if has(&node, &project) => Some((node, project)),
+            Resolved::Ambiguous(candidates) => {
+                let theirs: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|f| has(&f.node, &f.project))
+                    .collect();
+                let distinct: std::collections::BTreeSet<_> =
+                    theirs.iter().map(|f| (&f.node, &f.project)).collect();
+                if distinct.len() > 1 {
+                    ambiguous(say, id, project, &theirs);
+                    return ExitCode::from(1);
+                }
+                theirs.first().map(|f| (f.node.clone(), f.project.clone()))
+            }
+            _ => None,
+        }
+    };
+    let Some((node, stored)) = target else {
+        say.err(
+            key!("cli-hub-user-not-granted"),
+            &[
+                ("id", id.into()),
+                ("project", format!("{machine}/{project}").into()),
+            ],
+        );
+        return ExitCode::from(1);
+    };
+    match users.revoke(id, &node, &stored) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -1855,8 +2061,8 @@ fn link_guard(dir: &Path, wait: std::time::Duration) -> std::io::Result<std::fs:
     let busy = || std::io::Error::from(std::io::ErrorKind::TimedOut);
     let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
     loop {
-        // On Windows a first save creates the file unshared for a moment (a sharing violation for anyone opening it then), so an open
-        // that fails for a reason that can clear is tried again within the wait (Codex review of F1031: only those).
+        // On Windows an open can fail for a moment for a reason that clears (another program, such as a virus scanner, holding the file
+        // just after it was written), so such an open is tried again within the wait (Codex review of F1031: only those).
         let file = match agora_platform::open_lock_private(&lock) {
             Ok(f) => f,
             Err(e) if lasting(&e) => return Err(e),
@@ -2854,5 +3060,161 @@ mod password_message_tests {
             let two = tr.text(id, &[("count", 2i64.into())]);
             assert!(two.ends_with(" Açık 2 oturum kapatıldı."), "{two}");
         }
+    }
+}
+
+#[cfg(test)]
+mod node_text_tests {
+    #[test]
+    fn what_a_machine_reported_reaches_the_owners_terminal_as_visible_text() {
+        let shown = super::node_text("ops\u{1b}]0;owned\u{7}\nlaptop/web\t\u{202e}x");
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+        assert_eq!(super::node_text("/home/a/web"), "/home/a/web");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod password_commit_tests {
+    use super::*;
+    use agora_hub::password::{hash_with, vouch_passkey, ScreenPassword};
+
+    fn tmp(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let d =
+            std::env::temp_dir().join(format!("agora-pw-{}-{nanos}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A hub folder whose store has a password, two sessions, a vouched passkey and an unvouched one. Returns the session tokens.
+    fn seed(dir: &Path, fail_vouched_write: bool) -> [String; 2] {
+        let tokens = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            ScreenPassword::with_iterations(&store, 1_000)
+                .set("old screen password")
+                .unwrap();
+            vouch_passkey(&store, "pk-v").unwrap();
+            let signin = SignIn::new(&store, Arc::new(Lockout::new()));
+            let now = server::now_ms();
+            [
+                signin.start_session(now).unwrap(),
+                signin.start_session(now).unwrap(),
+            ]
+        };
+        let conn = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES ('pk-v', x'01', 0, 1), ('pk-u', x'02', 0, 1);",
+        )
+        .unwrap();
+        if fail_vouched_write {
+            // The last step of a change writes the list of vouched passkeys: after the hash, the sessions and the passkeys.
+            conn.execute_batch(
+                "CREATE TRIGGER fail_vouched_update BEFORE UPDATE ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;
+                 CREATE TRIGGER fail_vouched_insert BEFORE INSERT ON settings WHEN NEW.key = 'passkeys_vouched'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        }
+        tokens
+    }
+
+    /// What a change could touch: which of the two passwords verifies, which sessions are live, which passkeys are left.
+    fn state(dir: &Path, tokens: &[String; 2]) -> (bool, bool, [bool; 2], Vec<String>) {
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        let screen = ScreenPassword::new(&store);
+        let signin = SignIn::new(&store, Arc::new(Lockout::new()));
+        let now = server::now_ms();
+        let mut passkeys = agora_hub::passkey::ids(&store).unwrap();
+        passkeys.sort();
+        (
+            screen.verify("old screen password"),
+            screen.verify("new screen password"),
+            [signin.check(&tokens[0], now), signin.check(&tokens[1], now)],
+            passkeys,
+        )
+    }
+
+    fn both() -> Vec<String> {
+        vec!["pk-u".to_string(), "pk-v".to_string()]
+    }
+
+    fn say() -> Say {
+        Say(agora_i18n::Catalog::english())
+    }
+
+    /// #1029: `agora password clear` that fails part way exits non-zero and leaves the password, the sessions and the passkeys.
+    #[test]
+    fn a_clear_that_fails_part_way_exits_non_zero_and_changes_nothing() {
+        let dir = tmp("clear-fail");
+        let tokens = seed(&dir, true);
+        let opts = Opts {
+            hub_dir: Some(dir.clone()),
+            ..Opts::default()
+        };
+        assert_ne!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        assert_eq!(state(&dir, &tokens), (true, false, [true, true], both()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1029: `agora password set` that fails part way (after its prompts) exits non-zero and leaves the old password, the sessions
+    /// and the passkeys.
+    #[test]
+    fn a_set_that_fails_part_way_exits_non_zero_and_changes_nothing() {
+        let dir = tmp("set-fail");
+        let tokens = seed(&dir, true);
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        let code = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            commit_password(&say(), &store, Some(&hashed))
+        };
+        assert_ne!(code, ExitCode::SUCCESS);
+        assert_eq!(state(&dir, &tokens), (true, false, [true, true], both()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `agora password clear` and `set` that succeed end every session and drop the unvouched passkey; a clear with no password
+    /// set changes nothing.
+    #[test]
+    fn set_and_clear_end_every_session_and_drop_the_unvouched_passkey() {
+        let dir = tmp("set-ok");
+        let tokens = seed(&dir, false);
+        let hashed = hash_with("new screen password", 1_000).unwrap();
+        let code = {
+            let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+            commit_password(&say(), &store, Some(&hashed))
+        };
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(
+            state(&dir, &tokens),
+            (false, true, [false, false], vec!["pk-v".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp("clear-ok");
+        let tokens = seed(&dir, false);
+        let opts = Opts {
+            hub_dir: Some(dir.clone()),
+            ..Opts::default()
+        };
+        assert_eq!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        assert_eq!(
+            state(&dir, &tokens),
+            (false, false, [false, false], vec!["pk-v".to_string()])
+        );
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        let fresh = SignIn::new(&store, Arc::new(Lockout::new()))
+            .start_session(server::now_ms())
+            .unwrap();
+        drop(store);
+        assert_eq!(password(&say(), &opts, "clear"), ExitCode::SUCCESS);
+        let store = SqliteStore::open(&dir.join("hub.db")).unwrap();
+        assert!(SignIn::new(&store, Arc::new(Lockout::new())).check(&fresh, server::now_ms()));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

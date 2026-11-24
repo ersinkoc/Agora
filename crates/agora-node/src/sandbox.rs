@@ -311,6 +311,33 @@ fn under_a_grant(file: &Path, write: &[PathBuf]) -> bool {
         .any(|w| std::fs::canonicalize(w).is_ok_and(|w| real.starts_with(w)))
 }
 
+/// #1114: whether one of the node's own paths lies at or below a grant: by name; by its name in its real parent folder (a link there
+/// that an agent may write could be swapped); or by where it really leads, a folder that is itself a link included (`--data` naming a
+/// link into `/tmp`). A path that does not exist yet is judged by its nearest existing folder ([`canonical`]) instead of failing closed
+/// as [`under_a_grant`] does: below a folder the agent cannot write it cannot make the rest of the name lead anywhere else. Except a
+/// link on the way whose target is missing (`--manifests` naming a link into `/tmp` after a reboot cleared it): where it leads cannot
+/// be resolved, and an agent that may write there could make it, so it fails closed.
+fn reaches(path: &Path, grants: &[PathBuf]) -> bool {
+    if grants.iter().any(|g| path.starts_with(g)) {
+        return true;
+    }
+    if path.ancestors().any(|a| {
+        std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::canonicalize(a).is_err()
+    }) {
+        return true;
+    }
+    let named = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical(parent).join(name),
+        _ => canonical(path),
+    };
+    let real = canonical(path);
+    grants
+        .iter()
+        .filter_map(|g| std::fs::canonicalize(g).ok())
+        .any(|g| named.starts_with(&g) || real.starts_with(&g))
+}
+
 impl SandboxPolicy {
     /// Whether the owner's own `sandbox.read` already grants the global git configuration (`~/.gitconfig`): then the node does not give
     /// the agent a file of its own (ADR-0078, decision 4) and the explicit choice stands as it is.
@@ -472,6 +499,47 @@ impl SandboxPolicy {
             .cloned()
             .collect();
         under_a_grant(path, &grants)
+    }
+
+    /// #1114: the first of the node's own paths (`protect`, and its data folder) that `profile` lets the agent read or write, where only
+    /// a refusal keeps them closed (`agora_platform::PROTECTED_PATHS_BY_REFUSAL`: Linux, whose Landlock cannot say "except", so
+    /// `Sandbox::deny` is ignored there). `None` where the system enforces `deny` itself, and when agents are not confined.
+    pub fn protected_reachable(&self, profile: &agora_platform::Sandbox) -> Option<&Path> {
+        if !agora_platform::PROTECTED_PATHS_BY_REFUSAL || self.level == Level::Off {
+            return None;
+        }
+        self.first_protected_reachable(profile)
+    }
+
+    /// #1150: the paths [`Self::token_reachable`] and [`Self::protected_reachable`] keep out of every grant, for the platform to check
+    /// again on what it opens (`agora_platform::Sandbox::closed`): the control token file, and where only a refusal keeps them closed
+    /// (Linux) the node's own paths and its data folder. Empty elsewhere and when agents are not confined.
+    pub fn closed_paths(&self) -> Vec<PathBuf> {
+        if !agora_platform::PROTECTED_PATHS_BY_REFUSAL || self.level == Level::Off {
+            return Vec::new();
+        }
+        self.control_token
+            .iter()
+            .chain(self.protect.iter())
+            .chain(self.data_dir.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// [`Self::protected_reachable`] on every system (the unit tests' entry). Only a grant at or above a protected path counts: one below
+    /// it (the agent's own worktree in the node's folder, a program `agora agent install` keeps there) is the opening the node meant.
+    fn first_protected_reachable(&self, profile: &agora_platform::Sandbox) -> Option<&Path> {
+        let grants: Vec<PathBuf> = profile
+            .read
+            .iter()
+            .chain(profile.write.iter())
+            .cloned()
+            .collect();
+        self.protect
+            .iter()
+            .chain(self.data_dir.iter())
+            .find(|p| reaches(p, &grants))
+            .map(PathBuf::as_path)
     }
 
     /// Whether agents can be started under this policy on this machine.
@@ -792,6 +860,115 @@ mod tests {
         // A node that does not require the token refuses nothing.
         let off = SandboxPolicy::default();
         assert!(!off.token_reachable(&grant(&[Path::new("/")], &[Path::new("/")])));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_link_to_a_missing_place_on_the_way_to_one_of_the_nodes_paths_counts_as_reached() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("agora-1114-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, open) = (base.join("home"), base.join("open"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&open).unwrap();
+        // `--manifests ~/m/manifests` where `~/m` leads into a granted folder whose target is gone (a reboot cleared `/tmp`): an agent
+        // that may write there makes the target and puts manifests in it. Also the protected path itself as such a link.
+        let (mlink, self_link) = (home.join("mlink"), home.join("self-link"));
+        if agora_platform::symlink(&open.join("later"), &mlink).is_err()
+            || agora_platform::symlink(&open.join("gone"), &self_link).is_err()
+        {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // No links on this system.
+        }
+        let grants = vec![open.clone()];
+        assert!(reaches(&mlink.join("manifests"), &grants));
+        assert!(reaches(&self_link, &grants));
+        // Fail closed: wherever the missing target would be, the place cannot be known.
+        assert!(reaches(
+            &mlink.join("manifests"),
+            &[Path::new("/usr").to_path_buf()]
+        ));
+        // A missing path with no link on its way is still judged by its nearest existing folder.
+        assert!(!reaches(&home.join("missing/manifests"), &grants));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_grant_at_or_above_one_of_the_nodes_paths_makes_it_reachable() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("agora-1114-reach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, data, open) = (base.join("home"), base.join("data"), base.join("open"));
+        std::fs::create_dir_all(home.join("worktrees/a")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&open).unwrap();
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            protect: vec![home.clone(), base.join("missing/deeper/manifests")],
+            data_dir: Some(data.clone()),
+            ..SandboxPolicy::default()
+        };
+        let grant = |read: &[&Path], write: &[&Path]| {
+            agora_platform::Sandbox::new(
+                read.iter().map(|p| p.to_path_buf()).collect(),
+                write.iter().map(|p| p.to_path_buf()).collect(),
+            )
+        };
+        let wt = home.join("worktrees/a");
+        // Outside every grant; a grant below the node's folder (its own worktree) is the opening the node meant; a path that does not
+        // exist yet below no grant is not refused.
+        assert_eq!(
+            policy.first_protected_reachable(&grant(&[Path::new("/usr"), &open], &[&wt])),
+            None
+        );
+        // The folder above, the node's folder, the data folder (in `data_dir` though not in `protect`), as read or write grants.
+        for (g, hit) in [(&base, &home), (&home, &home), (&data, &data)] {
+            assert_eq!(
+                policy.first_protected_reachable(&grant(&[g], &[])),
+                Some(hit.as_path())
+            );
+            assert_eq!(
+                policy.first_protected_reachable(&grant(&[], &[g])),
+                Some(hit.as_path())
+            );
+        }
+        // A path that does not exist yet, below a grant.
+        assert!(policy
+            .first_protected_reachable(&grant(&[&base.join("missing")], &[]))
+            .is_some());
+        // Where links lead counts: a grant that is a link to the node's folder, and a data folder that is a link into a grant.
+        let link = base.join("link");
+        let linked_data = base.join("linked-data");
+        if agora_platform::symlink(&home, &link).is_ok()
+            && agora_platform::symlink(&open.join("d"), &linked_data).is_ok()
+        {
+            std::fs::create_dir_all(open.join("d")).unwrap();
+            assert!(policy
+                .first_protected_reachable(&grant(&[&link], &[]))
+                .is_some());
+            let linked = SandboxPolicy {
+                protect: vec![linked_data.clone()],
+                data_dir: None,
+                ..policy.clone()
+            };
+            assert_eq!(
+                linked.first_protected_reachable(&grant(&[&open], &[])),
+                Some(linked_data.as_path())
+            );
+        }
+        // Only where the system cannot keep them closed itself, and only when agents are confined.
+        let wide = grant(&[&base], &[]);
+        assert_eq!(
+            policy.protected_reachable(&wide).is_some(),
+            agora_platform::PROTECTED_PATHS_BY_REFUSAL
+        );
+        let off = SandboxPolicy {
+            level: Level::Off,
+            ..policy.clone()
+        };
+        assert_eq!(off.protected_reachable(&wide), None);
         let _ = std::fs::remove_dir_all(&base);
     }
 

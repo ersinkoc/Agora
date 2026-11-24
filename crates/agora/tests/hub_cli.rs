@@ -626,7 +626,8 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     );
     let (ok, _, _) = run(&["hub", "user", "role", "ayse", "member"]);
     assert!(ok);
-    // A person sees and works in the projects they were granted, `NODE/PROJECT`, and nothing else.
+    // A person sees and works in the projects they were granted, `MACHINE/PROJECT` as the window names them, and nothing else.
+    seed_projects(&root);
     let (ok, _, _) = run(&["hub", "user", "grant", "ayse", "laptop/web"]);
     assert!(ok);
     let (ok, _, _) = run(&["hub", "user", "grant", "ayse", "no-slash"]);
@@ -664,14 +665,177 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
         [
             "user.add:ayse",
             "user.role:ayse",
-            "user.grant:ayse laptop/web",
-            "user.revoke:ayse laptop/web",
+            "user.grant:ayse n1/#web",
+            "user.revoke:ayse n1/#web",
             "user.remove:ayse"
         ],
         "{out}"
     );
     let (ok, out, _) = run(&["hub", "audit", "export", "--who", "nobody"]);
     assert!(ok && out.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// What the hub has heard from two machines (#904): `n1` is "laptop" with a git project `web` (id `#web`), a folder `notes` that is no
+/// repository (`id:notes`) and two different projects both called `api`; `n2` and `n3` are both called "box" and each has an `ops`.
+fn seed_projects(hub_dir: &Path) {
+    use agora_hub::store::EventStore;
+    use agora_protocol::v1::{
+        event::Body, CheckoutDiscovered, Event, NodeOnline, WorkspaceRegistered,
+    };
+    use prost::Message;
+    let store = SqliteStore::open(&hub_dir.join("hub.db")).unwrap();
+    let mut seqs = std::collections::BTreeMap::new();
+    let mut put = |node: &str, body: Body| {
+        let seq = seqs.entry(node.to_string()).or_insert(0u64);
+        *seq += 1;
+        let ev = Event {
+            producer_id: node.into(),
+            seq: *seq,
+            at_ms: 1,
+            body: Some(body),
+        };
+        store.append(node, *seq, 1, &ev.encode_to_vec()).unwrap();
+    };
+    let online = |node: &str, host: &str| {
+        Body::NodeOnline(NodeOnline {
+            node_id: node.into(),
+            hostname: host.into(),
+            ..Default::default()
+        })
+    };
+    let checkout = |node: &str, id: &str, project: &str, path: &str| {
+        Body::CheckoutDiscovered(CheckoutDiscovered {
+            checkout_id: id.into(),
+            node_id: node.into(),
+            project_id: project.into(),
+            path: path.into(),
+        })
+    };
+    put("n1", online("n1", "laptop"));
+    put("n1", checkout("n1", "c1", "#web", "/home/a/web"));
+    put("n1", checkout("n1", "c2", "#api1", "/home/a/api"));
+    put("n1", checkout("n1", "c3", "#api2", "/srv/api/"));
+    put(
+        "n1",
+        Body::WorkspaceRegistered(WorkspaceRegistered {
+            workspace_id: "w1".into(),
+            node_id: "n1".into(),
+            project_id: "id:notes".into(),
+            path: "/home/a/notes".into(),
+            ..Default::default()
+        }),
+    );
+    put("n2", online("n2", "box"));
+    put("n2", checkout("n2", "c1", "#ops2", "/opt/ops"));
+    put("n3", online("n3", "box"));
+    put("n3", checkout("n3", "c1", "#ops3", "/opt/ops"));
+}
+
+#[test]
+fn a_project_is_granted_by_the_name_the_window_shows_and_an_unknown_or_ambiguous_one_is_refused() {
+    let root = tmp("grant-names");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let (ok, _, err) = run(&["hub", "user", "add", "Ayse"]);
+    assert!(ok, "{err}");
+    seed_projects(&root);
+    let grants = || {
+        let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+        agora_hub::users::Users::new(&store)
+            .grants_of("ayse")
+            .unwrap()
+    };
+    // The owner can list what may be granted, by the names the window shows (never an internal id).
+    let (ok, out, err) = run(&["hub", "user", "projects"]);
+    assert!(ok, "{err}");
+    // Two machines share the name "box": each is listed by what tells them apart.
+    for line in [
+        "laptop/web",
+        "laptop/notes",
+        "laptop/api",
+        "/home/a/api",
+        "/srv/api",
+        "n2/ops",
+        "n3/ops",
+        "box",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(!out.contains("#web") && !out.contains("id:notes"), "{out}");
+    // By the machine and folder name the window shows: the hub stores the project's id.
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "laptop/web"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "laptop/notes"]);
+    assert!(ok, "{err}");
+    assert_eq!(grants(), ["n1/#web", "n1/id:notes"]);
+    // A name the hub has never seen is refused with a reason, and nothing is stored.
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "laptop/proj"]);
+    assert!(
+        !ok && err.contains("proj") && err.contains("agora hub user projects"),
+        "{err}"
+    );
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "desk/web"]);
+    assert!(!ok && err.contains("desk"), "{err}");
+    assert_eq!(grants(), ["n1/#web", "n1/id:notes"]);
+    // Two projects called `api`: refused, and the person is shown how to choose (by the folder).
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "laptop/api"]);
+    assert!(
+        !ok && err.contains("/home/a/api") && err.contains("/srv/api"),
+        "{err}"
+    );
+    assert_eq!(grants().len(), 2);
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "laptop", "/srv/api"]);
+    assert!(ok, "{err}");
+    assert!(grants().contains(&"n1/#api2".to_string()));
+    // Two machines called `box`: refused, and the machine is named by its id.
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "box/ops"]);
+    assert!(!ok && err.contains("n2") && err.contains("n3"), "{err}");
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "n3/ops"]);
+    assert!(ok, "{err}");
+    assert!(grants().contains(&"n3/#ops3".to_string()));
+    // An id the hub knows still works.
+    let (ok, _, err) = run(&["hub", "user", "grant", "ayse", "n1/#api1"]);
+    assert!(ok, "{err}");
+    // The list says where a person works by name.
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(
+        ok && out.contains("works in laptop/web") && out.contains("works in laptop/notes"),
+        "{out}"
+    );
+    assert!(!out.contains("#web"), "{out}");
+    // Two of the projects are called `api` there: each is told apart by its folder.
+    assert!(
+        out.contains("laptop/api (/home/a/api)") && out.contains("laptop/api (/srv/api/)"),
+        "{out}"
+    );
+    // A revoke by name, and of a row an older build stored without checking (it shows nothing, but must be removable).
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "laptop/notes"]);
+    assert!(ok, "{err}");
+    {
+        let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+        assert!(agora_hub::users::Users::new(&store)
+            .grant("ayse", "laptop", "proj")
+            .unwrap());
+    }
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && out.contains("works in laptop/proj"), "{out}");
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "laptop/proj"]);
+    assert!(ok, "{err}");
+    assert_eq!(grants(), ["n1/#api1", "n1/#api2", "n1/#web", "n3/#ops3"]);
+    // Revoking what the person does not have says so (not that the person is unknown).
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "laptop/notes"]);
+    assert!(!ok && !err.contains("no team member"), "{err}");
     let _ = std::fs::remove_dir_all(root);
 }
 

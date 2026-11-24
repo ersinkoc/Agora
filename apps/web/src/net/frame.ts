@@ -8,8 +8,9 @@ export const STREAM_EVENTS = 2;
 // Kind that ends a dynamic stream (a relayed terminal), from either side (ADR-0029).
 export const STREAM_CLOSE = 255;
 
-// Kinds on the control stream that a window uses: an application ping, answered by the hub with a pong (protocol section 1).
-export const CONTROL_KIND = { PING: 5, PONG: 6 } as const;
+// Kinds on the control stream that a window uses: the hub's first frame, naming the person's role (ADR-0106), and an application ping,
+// answered by the hub with a pong (protocol section 1).
+export const CONTROL_KIND = { WELCOME: 1, PING: 5, PONG: 6 } as const;
 
 // ADR-0026 frame kinds on the events stream; ADR-0065: the pairing notices an owner's window gets (memory only, never an event).
 export const EVENT_KIND = { EVENT: 0, EVENT_ACK: 1, SUBSCRIBE: 2, SNAPSHOT: 3, POSITIONED_EVENT: 4, PAIR_REQUESTED: 5, PAIR_DECIDED: 6 } as const;

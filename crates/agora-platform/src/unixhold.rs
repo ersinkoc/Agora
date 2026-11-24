@@ -529,6 +529,28 @@ const SEND_FLAGS: libc::c_int = 0;
 /// Room for one `SCM_RIGHTS` message of one descriptor, aligned for `cmsghdr`.
 const CONTROL_WORDS: usize = 8;
 
+/// Whether `sock`'s connection is shut in both directions, by the peer closing it or by a shutdown of this end: `poll(2)` with no
+/// wait reports a hang-up (Linux: both directions shut; macOS: the end of the stream, `EV_EOF`), also while bytes the peer sent are
+/// still to be read. This is the state in which macOS refuses a new socket timeout with `EINVAL`.
+pub(crate) fn hung_up(sock: RawFd) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd: sock,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one valid pollfd that lives through the call; a zero timeout never blocks.
+        let r = unsafe { libc::poll(&mut p, 1, 0) };
+        if r >= 0 {
+            return Ok(r > 0 && p.revents & libc::POLLHUP != 0);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
 /// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
 pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
     wait_writable_polling(sock, timeout, libc::c_int::MAX)
@@ -926,6 +948,37 @@ mod tests {
         assert!(took >= want, "ended early: {took:?}");
     }
 
+    /// Issue #830: the probe behind `LocalStream::set_read_timeout_or_closed` tells a connection shut in both directions apart from
+    /// one that is open, with or without bytes to read.
+    #[test]
+    fn a_hang_up_is_seen_only_once_the_connection_is_shut() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (a, mut b) = UnixStream::pair().unwrap();
+        assert!(!hung_up(a.as_raw_fd()).unwrap(), "open and idle");
+        b.write_all(b"buffered").unwrap();
+        assert!(!hung_up(a.as_raw_fd()).unwrap(), "open with bytes to read");
+        drop(b);
+        assert!(
+            hung_up(a.as_raw_fd()).unwrap(),
+            "the peer closed, bytes still to read"
+        );
+        let (c, d) = UnixStream::pair().unwrap();
+        drop(d);
+        assert!(hung_up(c.as_raw_fd()).unwrap(), "the peer closed");
+        let (e, _f) = UnixStream::pair().unwrap();
+        e.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(
+            !hung_up(e.as_raw_fd()).unwrap(),
+            "only this end's writing shut"
+        );
+        // A fresh pair: macOS refuses a second shutdown of a half-shut socket (`ENOTCONN`).
+        let (g, _h) = UnixStream::pair().unwrap();
+        g.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(hung_up(g.as_raw_fd()).unwrap(), "this end shut both ways");
+    }
+
     #[test]
     fn the_buffer_drops_the_oldest_first() {
         let mut b = HeldBuffer::with_capacity(8);
@@ -1139,6 +1192,38 @@ mod tests {
     }
 
     /// Letting go of a held terminal ends its read and closes the node's copy of the master (a copy that kept reading would take output
+    /// A pipe agent that is stopped (`SIGSTOP`) has not ended: the holder neither reports an end nor ends its group (review of #1108).
+    #[test]
+    fn a_stopped_pipe_agent_is_not_taken_for_ended() {
+        let mut p = HeldProcess::start(
+            &["sleep".to_string(), "30".to_string()],
+            None,
+            &[(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )],
+        )
+        .unwrap();
+        let pid = p.pid() as libc::pid_t;
+        // SAFETY: plain system calls on a child of this test.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        let end = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < end {
+            assert!(
+                p.try_wait().unwrap().is_none(),
+                "a stopped agent was taken for ended"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGCONT) },
+            0,
+            "the stopped agent was ended"
+        );
+        p.kill_and_reap();
+    }
+
     /// meant for the next node), and ends nothing: the agent runs on and its terminal can be read again.
     #[test]
     fn letting_go_of_a_held_terminal_ends_the_read_and_not_the_agent() {
@@ -1303,6 +1388,12 @@ impl HeldProcess {
     }
 }
 
+/// `siginfo_t.si_code` of a child that ended: exited, killed by a signal, killed with a core dump (the same values on Linux and macOS,
+/// which the `libc` crate names on Linux only).
+const CLD_EXITED: libc::c_int = 1;
+const CLD_KILLED: libc::c_int = 2;
+const CLD_DUMPED: libc::c_int = 3;
+
 /// Whether the child `pid` has ended, without collecting it (`waitid` with `WEXITED | WNOHANG | WNOWAIT`): an ended child stays a
 /// zombie, so its pid (and the group and session it led) stay its own until it is collected.
 fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
@@ -1323,7 +1414,10 @@ fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
         };
         if r == 0 {
             // SAFETY: filled in by a successful waitid; zero when the child has not ended (WNOHANG).
-            return Ok(unsafe { info.si_pid() } != 0);
+            let pid = unsafe { info.si_pid() };
+            // Only an end counts: a child that was stopped (`SIGSTOP`, a debugger) is never taken for ended, whatever a system's
+            // `waitid` reports (with only `WEXITED` neither Linux nor macOS reports another state: a defence, which costs nothing).
+            return Ok(pid != 0 && [CLD_EXITED, CLD_KILLED, CLD_DUMPED].contains(&info.si_code));
         }
         let e = io::Error::last_os_error();
         match e.raw_os_error() {

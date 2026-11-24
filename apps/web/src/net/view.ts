@@ -179,7 +179,50 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs), ...alwaysFields(p),
     });
   }
+  foldRecentMessages(v, s.recentMessages ?? []);
   return v;
+}
+
+// One mesh message, live or from the snapshot (ADR-0103), recorded by `producer` at `at`.
+function postMessage(v: View, producer: string, at: number, b: agora.v1.MessagePosted.$Properties): void {
+  const q = (id: string) => `${producer}/${id}`;
+  const to = String(b.to ?? '');
+  const from = String(b.fromAgentId ?? '');
+  // #905: a message between machines is recorded by both: the sender's node (`to` is `<node>/<agent>`) and the receiver's,
+  // whose `from` is already the hub-wide `<origin>/<agent>` (ADR-0031), so it is not qualified again. Message ids are per node
+  // (ADR-0074), so the two copies are matched by sender, recipient and text from two machines, one with one: a message sent
+  // twice stays two rows. A node may write any `from`: one that names another machine's agent is shown with the machine that
+  // said so until the sender's machine or the hub (the shared board, which writes hub-wide ids) records the same message.
+  const qualified = from.includes('/');
+  const sender = qualified ? from : q(from);
+  const vouched = !qualified || producer === 'hub' || producer === sender.split('/')[0];
+  const m: MessageV = { from: sender, to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer, ...(vouched ? {} : { via: producer }) };
+  // Two copies nobody confirmed (a receiver's and one some other node wrote) never vouch for each other.
+  const twin = v.messages.find((x) => !x.paired && x.producer !== producer && (vouched || !x.via) && x.from === m.from && x.to === m.to && x.body === m.body);
+  if (twin) {
+    twin.paired = true;
+    if (vouched) delete twin.via;
+    return;
+  }
+  v.messages.push(m);
+  if (v.messages.length > MAX_MESSAGES) v.messages.shift();
+}
+
+// ADR-0103: the snapshot's newest messages, oldest first, folded in as the live ones are (pairing, `via`, the cap), but not through
+// `applyEvent`'s position rule: their positions are at or before the snapshot's, which it would drop. Each position is folded once;
+// one after the snapshot's is left to the live stream, which brings it. Any other body is ignored: history carries messages only.
+function foldRecentMessages(v: View, recent: readonly agora.v1.PositionedEvent.$Properties[]): void {
+  const folded = new Set<number>();
+  const entries = recent
+    .map((pe) => ({ pos: num(pe.pos), ev: pe.event }))
+    .filter((x) => x.pos <= v.pos)
+    .sort((a, b) => a.pos - b.pos);
+  for (const { pos, ev } of entries) {
+    const b = ev?.messagePosted;
+    if (!ev || !b || folded.has(pos)) continue;
+    folded.add(pos);
+    postMessage(v, ev.producerId ?? '', num(ev.atMs), b);
+  }
 }
 
 // Applies one event at log position `pos`. An event at or before the view's position was already folded in
@@ -200,7 +243,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
   const e = ev as Record<string, any>;
   switch (ev.body) {
-    case 'workspaceRegistered': { const w = e.workspaceRegistered; v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged ?? 0 }); break; }
+    // A folder is registered again for each agent started in it, with no count (#1017): the machine's Git watcher counts it and says
+    // it again only when it changes, so a count already known for the folder stays.
+    case 'workspaceRegistered': { const w = e.workspaceRegistered; const known = v.workspaces.get(q(w.workspaceId)); v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged || known?.filesChanged || 0 }); break; }
     case 'agentWorkspaceBound': v.agentWorkspaces.set(q(e.agentWorkspaceBound.agentId), q(e.agentWorkspaceBound.workspaceId)); break;
     case 'workspaceStatusChanged': { const w = v.workspaces.get(q(e.workspaceStatusChanged.workspaceId)); if (w) w.filesChanged = e.workspaceStatusChanged.filesChanged ?? 0; break; }
     case 'nodeOnline': {
@@ -297,11 +342,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       // A new run of an id: whether it has a terminal is told again by the `terminalOpened` that follows (or not at all).
       v.withTerminal.delete(q(b.agentId));
       v.forgottenAgents?.delete(q(b.agentId));
+      // ADR-0104 (#930): the node re-states a process it announced before under this id (taken up from the holder after its restart,
+      // or in a resync). Its tokens, context level, own cost and start time stay, for that machine's own agent only; a new start, a
+      // resume, a restart after a crash and an older node's start begin again from 0. The rest starts again as for any start (the
+      // node re-states modes, settings, commands and always answers).
+      const was = b.sameProcess ? v.agents.get(q(b.agentId)) : undefined;
+      const kept = was && was.nodeId === producer ? was : undefined;
+      const s = kept?.session;
+      const session = s && (s.contextTokens || s.contextWindow || s.currency)
+        ? { ...emptySession(), contextTokens: s.contextTokens, contextWindow: s.contextWindow, ...(s.currency ? { costMicros: s.costMicros, currency: s.currency } : {}) }
+        : undefined;
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
-        reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
+        reported: false, running: true, sinceMs: at, tokens: kept ? kept.tokens : 0, startedMs: kept ? kept.startedMs : at,
         parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
         skipsPermissions: !!b.skipsPermissions,
+        ...(session ? { session } : {}),
       });
       break;
     }
@@ -420,30 +476,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'approvalResolved':
       v.approvals.delete(q(e.approvalResolved.approvalId));
       break;
-    case 'messagePosted': {
-      const b = e.messagePosted;
-      const to = String(b.to ?? '');
-      const from = String(b.fromAgentId ?? '');
-      // #905: a message between machines is recorded by both: the sender's node (`to` is `<node>/<agent>`) and the receiver's,
-      // whose `from` is already the hub-wide `<origin>/<agent>` (ADR-0031), so it is not qualified again. Message ids are per node
-      // (ADR-0074), so the two copies are matched by sender, recipient and text from two machines, one with one: a message sent
-      // twice stays two rows. A node may write any `from`: one that names another machine's agent is shown with the machine that
-      // said so until the sender's machine or the hub (the shared board, which writes hub-wide ids) records the same message.
-      const qualified = from.includes('/');
-      const sender = qualified ? from : q(from);
-      const vouched = !qualified || producer === 'hub' || producer === sender.split('/')[0];
-      const m: MessageV = { from: sender, to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer, ...(vouched ? {} : { via: producer }) };
-      // Two copies nobody confirmed (a receiver's and one some other node wrote) never vouch for each other.
-      const twin = v.messages.find((x) => !x.paired && x.producer !== producer && (vouched || !x.via) && x.from === m.from && x.to === m.to && x.body === m.body);
-      if (twin) {
-        twin.paired = true;
-        if (vouched) delete twin.via;
-        break;
-      }
-      v.messages.push(m);
-      if (v.messages.length > MAX_MESSAGES) v.messages.shift();
+    case 'messagePosted':
+      postMessage(v, producer, at, e.messagePosted);
       break;
-    }
     // The hub writes board events with ids that are already `<node>/<agent>`.
     case 'taskChanged': {
       const b = e.taskChanged;
@@ -691,18 +726,22 @@ export function projectChoices(v: View): ProjectChoice[] {
 // `via`: the machine whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`). It is the
 // machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
 // call itself after the sender's machine.
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
+// `fromId` is the sender's key, so the team chat can draw its avatar; `toMachine` names the recipient's machine on a message between machines.
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string; fromId?: string; toMachine?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
-  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
-  const label = (id: string) => names.get(id) ?? id;
+  const byId = new Map(tiles(v).map((t) => [t.id, t]));
+  const label = (id: string) => byId.get(id)?.name ?? id;
   const machine = (id: string) => id.split('/')[0];
-  return v.messages.slice(-limit).reverse().map((m) => ({
-    from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
-    crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
-    ...(m.via ? { via: m.via } : {}),
-  }));
+  return v.messages.slice(-limit).reverse().map((m) => {
+    const crossMachine = m.to.includes('/') && machine(m.from) !== machine(m.to);
+    return {
+      from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs, crossMachine, fromId: m.from,
+      ...(crossMachine ? { toMachine: byId.get(m.to)?.machine ?? machine(m.to) } : {}),
+      ...(m.via ? { via: m.via } : {}),
+    };
+  });
 }
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.

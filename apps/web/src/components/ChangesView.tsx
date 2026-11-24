@@ -222,7 +222,7 @@ export function ChangesView({ load, read, changed }: {
           title={windowed ? t('changes-wrap-long') : undefined} onClick={() => setWrap((w) => !w)}>{t('changes-wrap')}</button>}
         <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('changes-refresh')} title={t('changes-refresh')}><Icon name="restore" /></button>
       </div>
-      {diff.truncated && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{truncatedText(files.length, changed)}</p>}
+      {diff.truncated && <p role="status" className="m-0 flex-none border-b border-line bg-tint-accent px-3 py-1.5 text-xs text-ink">{truncatedText(files.length, changed)}</p>}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <div role="listbox" tabIndex={0} aria-label={t('changes-list')} aria-activedescendant={activeOption}
@@ -247,7 +247,7 @@ export function ChangesView({ load, read, changed }: {
                     className={`ide-row cursor-pointer ${g.folder !== '' ? 'ps-7' : ''}`}>
                     <StatusBadge status={f.status} />
                     <span className={`min-w-0 flex-1 truncate font-mono text-xs ${f.status === 'deleted' ? 'text-muted line-through' : ''}`} dir="ltr">{baseName(f.path)}</span>
-                    {f.partial && <span className="text-xs text-needs-you" title={t('changes-partial')}>…</span>}
+                    {f.partial && <span className="text-xs text-muted" title={t('changes-partial')}>…</span>}
                     {f.secret && <span className="flex-none text-muted" title={t('changes-secret')}><Icon name="lock" className="size-3" /><span className="sr-only">{t('changes-secret')}</span></span>}
                     {!f.binary && <Counts added={f.added} removed={f.removed} />}
                   </div>
@@ -360,15 +360,15 @@ export function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGa
 
   const notices: ReactNode[] = [];
   if (file.partial) {
-    notices.push(<div key="partial" className="flex flex-wrap items-center gap-2 border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs">
+    notices.push(<div key="partial" className="flex flex-wrap items-center gap-2 border-b border-line bg-tint-accent px-3 py-1.5 text-xs">
       <span>{t('changes-partial')}</span>
       {single === 'loading' ? <span className="text-muted">{t('start-loading')}</span>
         : <button type="button" className="button" onClick={onLoadSingle}>{t('changes-load-file')}</button>}
-      {single === 'failed' && <span role="alert" className="text-needs-you">{t('changes-load-file-failed')}</span>}
+      {single === 'failed' && <span role="alert" className="text-danger">{t('changes-load-file-failed')}</span>}
     </div>);
   }
   if (eolOnly > 0) notices.push(<p key="eol" role="note" className="m-0 border-b border-line px-3 py-1.5 text-xs text-muted">{t('changes-eol', { count: eolOnly })}</p>);
-  if (text === 'stale') notices.push(<p key="stale" role="status" className="m-0 border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs">{t('changes-stale')}</p>);
+  if (text === 'stale') notices.push(<p key="stale" role="status" className="m-0 border-b border-line bg-tint-accent px-3 py-1.5 text-xs">{t('changes-stale')}</p>);
   if (text === 'failed') notices.push(<p key="failed" role="alert" className="m-0 flex items-center gap-2 border-b border-line px-3 py-1.5 text-xs">{t('changes-gap-failed')}<button type="button" className="button" onClick={onRetryText}>{t('changes-retry')}</button></p>);
 
   if (file.secret) return <div role="note" className="flex items-start gap-2 p-4 text-muted"><Icon name="lock" className="mt-0.5 size-4" /><div><p className="m-0 font-semibold text-ink">{t('changes-secret')}</p><p className="m-0 text-xs">{t('files-secret')}</p></div></div>;

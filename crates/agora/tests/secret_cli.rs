@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod short_socket;
+
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
 const VALUE: &str = "sk-test-0123456789-not-a-real-token";
 
@@ -259,9 +261,14 @@ fn a_secret_is_in_no_output_of_the_node_the_cli_the_terminal_or_a_file() {
     if !agora_platform::PTY_SUPPORTED || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return;
     }
-    // Under the target folder: a confined node refuses to start where agents may write (ADR-0082), and `/tmp` is such a place.
-    let h = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("agora-secret-out-{}", std::process::id()));
+    // Out of a confined agent's reach: a confined node refuses to start where agents may write (ADR-0082), and `/tmp` is such a
+    // place. Short enough for the node's sockets in a deep checkout (#1040); declared before every node, so removed after them.
+    let dir = short_socket::SocketDir::new(
+        &PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("agora-secret-out-{}", std::process::id())),
+        "secret-out",
+    );
+    let h = dir.path().to_path_buf();
     let _ = std::fs::remove_dir_all(&h);
     std::fs::create_dir_all(h.join("data")).unwrap();
     let repo = repo(&h);

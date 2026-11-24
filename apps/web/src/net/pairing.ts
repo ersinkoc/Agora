@@ -102,10 +102,13 @@ export function applyPairNote(s: PairState, n: PairNote): PairState {
     case 'name-taken':
       return { ...s, cards: s.cards.map((c) => (c.id === n.id ? { ...c, nameTaken: true } : c)) };
     case 'decided': {
-      const card = s.cards.find((c) => c.id === n.id);
-      if (!card) return s;
+      // One machine per opening (#942): the hub closes the switch when it takes an approval, from any window or `agora pair open`,
+      // so the switch is shown closed at once instead of at the next `PairStatus`.
+      const t = n.outcome === 'approved' && s.window?.open ? { ...s, window: { open: false, closesAtMs: 0, pending: 0 } } : s;
+      const card = t.cards.find((c) => c.id === n.id);
+      if (!card) return t;
       const line: PairRecent = { id: card.id, kind: card.kind, name: card.name, outcome: n.outcome, at: n.at };
-      return { ...s, cards: s.cards.filter((c) => c.id !== n.id), recent: [line, ...s.recent].slice(0, MAX_RECENT) };
+      return { ...t, cards: t.cards.filter((c) => c.id !== n.id), recent: [line, ...t.recent].slice(0, MAX_RECENT) };
     }
   }
 }

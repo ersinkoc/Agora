@@ -91,7 +91,8 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 - **Start failures.** When `initialize` or `session/start` fails with an error whose `data.code` is `adapter.agent_exited`,
   `adapter.agent_refused` or `adapter.option_refused`, the node answers the client with that code and only that code's parameters
   (`docs/specs/error-codes.md`), as strings cut at 600 bytes (`exit_code` is `?` when the adapter sent none). Any other failure is
-  still `internal`.
+  still `internal`. A prompt or the answer to an approval request that the adapter does not take (no answer in time, it exited, or it
+  answered with an error) is `internal` too, with `incident_id` `agent.prompt` or `approval.resolve` (#1150).
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
 
@@ -127,7 +128,9 @@ An agent that speaks the Agent Client Protocol over stdio needs no adapter. Its 
 and the node runs `agora acp-bridge -- <argv>` as the adapter: the bridge is the ACP *client* towards the agent and an adapter
 towards the node, so chat items, approvals, state and cancel work as for any L3 agent and nothing else knows about ACP.
 `agora agent kinds` reports such a kind as level L2. On Windows the bridge starts a `.cmd` shim such as `npx` by its full path
-(`agora_platform::program_path`, see agent-manifest.md).
+(`agora_platform::program_path`, see agent-manifest.md). `agora acp-bridge --runner-cwd <dir> -- <argv>` starts the agent's command
+in `<dir>` instead of the bridge's own working folder (the worktree); the node passes it only for an ACP registry kind that starts
+through a package runner (#1150, agent-manifest.md), and the agent still gets the worktree as the session's `cwd`.
 
 Each input accepts lines up to 4 MiB, excluding the line feed. The two readers share an eight-entry queue of raw lines and
 wait for space when it fills. The bridge parses lines as it dispatches them, preserving each sender's order. Malformed JSON
@@ -159,7 +162,7 @@ an overlong line being sent.
 | `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement); the tool's arguments and the diff are each cut to 64 KiB (head and tail kept) |
 | `session/update` `plan` | `chat/append` plan, one step per entry; with `chat.rich` also `entries` (`text`, `status`, `priority`), at most 256 entries with text cut at 4 KiB and status and priority at 40 bytes |
 | `session/update` `agent_thought_chunk` | With `chat.rich`: `chat/append` `thought`, chunks joined like a message (150 ms, 4 KiB; a message and a thought never share an item); thinking does not count as the agent saying something (a turn of only thinking is still an empty turn). Otherwise dropped |
-| `session/update` `tool_call` and `tool_call_update` with `toolCallId` | With `chat.rich`: `chat/append` tool call with `callId`, `kind`, `status`, `locations` (at most 64) and `output`: the text blocks of `content`, or else `rawOutput`, cut to 64 KiB (head and tail kept) and with anything that looks like a secret replaced (the same removal as for a stderr tail); only the fields the update carries are sent. A `diff` in `content` still becomes a diff item. Without `chat.rich`, or without an id, as before |
+| `session/update` `tool_call` and `tool_call_update` with `toolCallId` | With `chat.rich`: `chat/append` tool call with `callId`, `kind`, `status`, `locations` (at most 64) and `output`: the text blocks of `content`, or else `rawOutput`, cleaned as the node cleans a tool's output (escape sequences, control characters, unbalanced direction isolates) and with anything that looks like a secret replaced, then cut to 64 KiB (head and tail kept); arguments, plan steps and location paths are likewise cleaned as the node cleans them before the bridge cuts them (the secret removal is the same as for a stderr tail); only the fields the update carries are sent. A `diff` in `content` still becomes a diff item. Without `chat.rich`, or without an id, as before |
 | `session/update` `available_commands_update` | With `chat.rich`: `session/commands` (at most 100) |
 | `session/new` `configOptions` and `config_option_update` | With `chat.rich`: `session/config` (at most 64 options of 64 choices; the choices of a grouped select flattened). When the agent gave no `modes` (or no `models`) of its own, the mode (model) list of `session/options` is built from its option of category `mode` (`model`), and `session/set_option` then calls `session/set_config_option` on that option |
 | `session/request_permission` | `approval/request` (action: the tool call's title, detail: its input cut at 300 characters) and state `blocked` |

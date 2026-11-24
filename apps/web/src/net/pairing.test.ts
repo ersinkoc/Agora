@@ -73,6 +73,20 @@ describe('the pairing notices (ADR-0065)', () => {
     expect(shownRecent(s, 1000 + RECENT_MS)).toHaveLength(0);
   });
 
+  it('shows the switch closed once a machine was approved, wherever it was approved (#942: one machine per opening)', () => {
+    const open = { open: true, closesAtMs: 600_000, pending: 2 };
+    let s = apply(owner(), { type: 'window', window: open }, { type: 'requested', card: card('a') }, { type: 'requested', card: card('b') });
+    // A deny, an expiry or a closed request leaves the switch as it was.
+    for (const outcome of ['denied', 'expired', 'closed'] as const) {
+      expect(applyPairNote(s, { type: 'decided', id: 'a', outcome, at: 5 }).window).toEqual(open);
+    }
+    s = applyPairNote(s, { type: 'decided', id: 'a', outcome: 'approved', at: 5 });
+    expect(s.window).toEqual({ open: false, closesAtMs: 0, pending: 0 });
+    // Also for an approval of a request this window never held (another window, `agora pair open`).
+    const other = applyPairNote(apply(owner(), { type: 'window', window: open }), { type: 'decided', id: 'zzz', outcome: 'approved', at: 5 });
+    expect(other.window).toEqual({ open: false, closesAtMs: 0, pending: 0 });
+  });
+
   it('removes stale cards when the connection starts over: only what the hub sends again is shown', () => {
     let s = apply(owner(), { type: 'requested', card: card('a') }, { type: 'requested', card: card('b') });
     s = applyPairNote(s, { type: 'reset' });

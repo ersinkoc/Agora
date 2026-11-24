@@ -58,11 +58,29 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   for a deletion. A changed line says so by shape as well as colour: a `-` or `+` glyph and a 2 px bar on its left edge. The red
   reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. This documents a
   content-colour exception to "colour is reserved for state"; it does not change the state-colour rule.
-  The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`), for the sign of an agent that acts without asking
+  The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`, the same colour as `--danger` below), for the sign of an agent that acts without asking
   (ADR-0059, ADR-0090 Amendment A), a lightning bolt with no words whose meaning is its tooltip and accessible name. It is never amber, so
   it cannot be read as "needs you" or as the quota chip (an amber warning sign that always shows its percentage); shape (bolt against
   triangle) and the words in the tooltip carry the difference too, never the colour alone.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
+- **Colour is a surface, never a stripe** (ADR-0102). State and identity show as soft tinted backgrounds, hairline borders, pills and
+  avatars, never as a thick bar on one side of a card, row or tile. The only edge bars are content conventions: the diff's 2 px line bar
+  above, and a quote in a chat. A soft tint of a state colour is allowed as the background of the thing in that state.
+- **One meaning per colour** (ADR-0102). Amber means only "needs you" (plus the quota warning sign, with its triangle and percentage).
+  Red is the one **danger** role (`--danger`, the fixed `--diff-removed`, never a theme colour): a failed agent, errors shown to the
+  person, deleted files and lines, destructive actions (Forget, Remove, Delete, a destructive dialog's primary button) and acting without
+  asking (the risk sign, an Allow that lets an agent act without asking, a switch that turns it on). The accent is the brand: selection,
+  primary actions, links. Green is finished and online; blue is working. Neutral facts (an OS, a version, a branch, a count of changed
+  files) are grey tags, never a state colour.
+  On the screens (redesign PR 3): errors and refused actions are `text-danger`, and so are a failed tool group in the chat, the options
+  and notes of a start that would not ask, and the confirm box of a destructive or acts-freely choice (close a working agent, drop a
+  queued message, turn asking off); a deleted file's mark is red; change counts are grey tags or chips; an offline machine's dot is the
+  idle grey; a "run" step in the chat is the working blue; a list cut short or out of date is a neutral accent-tinted notice; a hint (two
+  machines change one project, a device that does not trust this browser) is plain text. The terminal's search matches are the theme's
+  accent mixed toward the terminal background (opaque, as xterm needs; recomputed on a theme change), the current one stronger with a
+  full accent border, and the terminal's text stays at 4.5:1 on both. Besides "needs you" and the quota sign, amber stays in two places: a
+  usage or context meter at 80 % or more (the quota sign's family) and the muted syntax colours mixed from it. A web test lists every
+  file that uses the amber token or its classes, with a count and a reason, so a new use has to be one of these.
 
 ### Agent state language
 | State | Color role | Shape | Motion |
@@ -72,12 +90,18 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Finished | green | check | single settle animation, then still |
 | Idle | neutral | hollow dot | none |
 | Unknown | muted | dashed ring | none |
+| Failed | danger red (ADR-0102) | cross in a ring | none |
+
+An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
+status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2) and the phone's lists (PR 13); the screens that still
+draw it in neutral ink (the agent list) switch over as they adopt the kit.
 
 ### Agent identity
 - Each agent kind shows its brand mark (provider logos used per their trademark guidelines; models.dev provides
   provider logos for model providers).
 - Each agent *instance* gets a stable generated accent and short name ("claude · amber", "codex · teal") so
-  several agents of the same kind are distinguishable at a glance.
+  several agents of the same kind are distinguishable at a glance. The accent is drawn as the agent's avatar (a soft square with a ring
+  and the kind's first letter) beside its name, never as a coloured edge of a tile or row.
 
 ### Signature visuals
 - **Live tiles:** fleet tiles show a miniature live preview of the agent's terminal or latest chat line,
@@ -90,7 +114,20 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Typography:** one sans family for UI, one monospace for terminals and code; a short type scale
   (12/13/14/16/20/28).
 - **Spacing:** 4 px base grid.
-- **Radius and depth:** soft radii, almost no shadows; depth from surface tone, not drop shadows.
+- **Type roles:** caption 12 (meta, tags, counts), body 13 (rows, text), strong 14 (card and section titles), title 16 (panel, dialog
+  and group titles), page 20 (page titles, stat numbers), display 28 (the pairing number). Section titles are sentence case.
+- **Radius and depth:** soft radii (xs 5, s 8, m 12, l 18, and full for pills), almost no shadows; depth from surface tone, not drop
+  shadows. **One elevation** (ADR-0102): overlays only (dialogs, menus, the palette, toasts, tooltips) use the raised surface
+  (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
+- **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
+  reach them as they adopt the kit (the redesign plan's PRs 2–13). Home has (PR 2): its tiles are flat cards with an avatar and a status
+  pill, its counts are stat tiles and what needs you is request cards, with no stripe, glow or moving foot line. Settings has (PR 8), and
+  My machines and its forget dialog have (PR 9), their animated links gone. The Agents list, the pane tabs and bars, the rail and the file
+  rows carry the avatar and a tinted selection with no bar (PR 7). The chat view, the board and the Usage panel are on the kit
+  (PR 12; `docs/ux/screens/polish-redesign-*`): one status pill, the agent avatar in each turn, the acts-freely sign as a red-tinted tag
+  beside Mode, board columns with a mark and hue, Usage stat tiles. Until the rest follow, existing overlays (except the command
+  palette) use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label. Amber
+  means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.
@@ -99,10 +136,31 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Tokens first:** colors, type, spacing, radius, motion, and state colors defined once in `design/tokens`
   and generated for the web client (CSS variables), desktop, and TUI (truecolor/256-color mapping).
 - **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
-  the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
+  the person's own, checked for WCAG AA contrast before they are shown (the derived colours below too, as a warning). Text and spacing sizes are rem-based so a theme's
   text size (and the browser's) scales them; components never use pixel font sizes.
+- **Widget kit** (`apps/web/src/components/kit/`): one widget per job, and every new or changed screen reuses them instead of setting
+  its own padding, border or colour:
+  Button (primary, secondary, ghost, danger, danger-ghost; sm and md), StatusPill and Pill, Tag, AgentAvatar (the agent's colour and
+  the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
+  SettingRow, SegmentedControl (a radio group: arrows move and choose; red when its chosen item lets an agent act without asking), Toggle (a switch; red when it lets an agent act without asking),
+  StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
+  (icon, title, one line, at most one action; Home's first run, the one page-sized empty state, has a primary and a secondary action),
+  CopyChip (a command or id in mono with Copy; where the clipboard is missing or refuses, it selects the text and says to copy it with
+  the keyboard), Tooltip, KeyValue and ConfirmDialog (a question before something destructive: an overlay with a red icon chip, the safe
+  answer first and focused, the destructive answer as a red button). They use tokens only and logical properties, grow to the 44 px
+  touch target on a touch screen, and respect reduced motion.
+- **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
+  (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed
+  per scheme in `tokens.css`, never the theme's on-accent, so a theme cannot make a filled danger button unreadable), `--surface-raised`,
+  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint, the red on every surface and an agent's initial on its badge reach 4.5:1 in every built-in
+  theme, and control indicators (a switch's track and thumb, a filled button, a selected ring, the focus ring, a role's icon on its chip)
+  reach 3:1; a test computes both from the real tokens. The theme editor computes the same pairs from one shared table
+  (`themes/tints.ts`) for a person's own theme and warns about any below its minimum (`themes.md`); the test holds that table equal to
+  the kit's rules. The `--line-*` hairlines are
+  decoration around a tinted surface whose icon and words carry the meaning, never the only sign of a control or a state, so they are
+  only held visible (about 1.5–2:1), not to 3:1.
 - **Component gallery:** every component rendered in all states, both themes, and an RTL locale; this is the
-  review surface for UI pull requests.
+  review surface for UI pull requests. The widget kit is its first section.
 - **Visual regression tests:** screenshot tests for components and key screens in CI.
 - **UI pull requests** include before/after screenshots or a short recording in both themes.
 

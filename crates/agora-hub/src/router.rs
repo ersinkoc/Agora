@@ -658,6 +658,8 @@ impl Router {
             Some(command_request::Command::AgentCancelTurn(_)) => Some("agent.cancel_turn"),
             // ADR-0095: a node that cannot dispatch a task is never sent the command.
             Some(command_request::Command::TaskDispatch(_)) => Some("task.dispatch"),
+            // ADR-0108: only the hub passes a forget on, and only to a node that removes what it keeps of the agent.
+            Some(command_request::Command::AgentForget(_)) => Some("agent.forget.local"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
@@ -718,6 +720,18 @@ impl Router {
                 Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join")
             );
         }
+        // ADR-0109: a delivery goes only to a node that negotiated the capability; an older one keeps the best-effort path.
+        if matches!(
+            request.command,
+            Some(command_request::Command::DeliverTaskHandoff(_))
+        ) && !link
+            .capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::TASK_HANDOFF_V1)
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", agora_protocol::handshake::TASK_HANDOFF_V1));
+        }
         // Counted before it is queued, so the connection's loop never takes one off before it was counted; refused, without
         // queueing it, when the node already has NODE_QUEUE_MAX waiting (R5).
         if link
@@ -770,6 +784,8 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::MeshPost(_)
             | command_request::Command::BoardCall(_)
             | command_request::Command::BoardJoin(_)
+            // ADR-0109: the hub's own durable handoff delivery; a client forwarding one would place work in an agent's inbox.
+            | command_request::Command::DeliverTaskHandoff(_)
             // ADR-0061: answered or carried by the hub itself, never forwarded as a client's command.
             | command_request::Command::DeviceRegister(_)
             | command_request::Command::DeviceList(_)
@@ -860,6 +876,26 @@ mod tests {
         assert!(old_rx.try_recv().is_err());
         let mut request = req("new");
         request.command = resume;
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    /// ADR-0108: the hub passes a forget only to a node that offers `agent.forget.local`; an older one is never sent it.
+    #[test]
+    fn a_forget_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register_with_capabilities("old", vec!["agent.resume".into()]);
+        let (_new, mut new_rx) =
+            r.register_with_capabilities("new", vec!["agent.forget.local".into()]);
+        let forget = Some(command_request::Command::AgentForget(v1::AgentForget {
+            agent_id: "agent-3".into(),
+        }));
+        let mut request = req("");
+        request.command = forget.clone();
+        let refused = r.send("old", request.clone()).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        request.command = forget;
         assert!(r.send("new", request).is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
@@ -1046,6 +1082,28 @@ mod tests {
             r.send("old", req("old")).is_ok(),
             "legacy requests still work"
         );
+    }
+
+    #[test]
+    fn a_handoff_delivery_goes_only_to_a_node_with_the_capability() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec![agora_protocol::handshake::TASK_HANDOFF_V1.into()],
+        );
+        let mut request = req("old");
+        request.command = Some(command_request::Command::DeliverTaskHandoff(
+            v1::DeliverTaskHandoff::default(),
+        ));
+        assert!(
+            matches!(r.send("old", request.clone()), Err(e) if e.code == ErrorCode::ProtocolCapabilityMissing
+                && e.to_info().params["capability"].value
+                    == Some(v1::param_value::Value::Str(agora_protocol::handshake::TASK_HANDOFF_V1.into())))
+        );
+        assert!(old_rx.try_recv().is_err());
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
 
     #[tokio::test]
@@ -1474,6 +1532,10 @@ mod tests {
         e.command = Some(command_request::Command::BoardCall(v1::BoardCall::default()));
         assert!(forwardable(&e).is_err());
         e.command = Some(command_request::Command::BoardJoin(v1::BoardJoin::default()));
+        assert!(forwardable(&e).is_err());
+        e.command = Some(command_request::Command::DeliverTaskHandoff(
+            v1::DeliverTaskHandoff::default(),
+        ));
         assert!(forwardable(&e).is_err());
     }
 

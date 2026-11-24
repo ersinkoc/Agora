@@ -16,7 +16,8 @@ export const MAX_USER_THEMES = 20;
 
 type KV = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 export interface ThemeState { mode: Mode; choice: Record<Scheme, string>; user: readonly Theme[] }
-export type Saved = { ok: true; theme: Theme } | { ok: false; issues: ThemeIssue[] } | { ok: false; full: true };
+// `warnings`: the theme was saved, but some of its text or controls are hard to see in the kit's colours (tokens.ts `themeWarnings`).
+export type Saved = { ok: true; theme: Theme; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] } | { ok: false; full: true };
 
 function read(kv: KV | undefined, key: string): string | null {
   try { return kv?.getItem(key) ?? null; } catch { return null; }
@@ -126,12 +127,13 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       const user = state.user.map((u) => (u.id === id ? theme : u));
       persistUser(user);
       set({ ...state, user });
-      return { ok: true, theme };
+      return p.warnings ? { ok: true, theme, warnings: p.warnings } : { ok: true, theme };
     },
     import(text: string): Saved {
       const p = deserialiseTheme(text);
       if (!p.ok) return p;
-      return adopt({ id: freshId(), name: p.name, scheme: p.scheme, tokens: p.tokens });
+      const r = adopt({ id: freshId(), name: p.name, scheme: p.scheme, tokens: p.tokens });
+      return r.ok && p.warnings ? { ...r, warnings: p.warnings } : r;
     },
     remove(id: string) {
       if (!state.user.some((u) => u.id === id)) return;

@@ -111,6 +111,9 @@ const CRASH_SIGNALS = new Set([4, 6, 7, 8, 11]);
 // A closed agent that genuinely failed: its program exited with a non-zero status, or crashed. A stop (i32::MIN), a signal the node
 // sends itself, an unknown status and an agent interrupted with its machine are not failures. Interim (no state token for it yet): it
 // is drawn with a neutral cross and the words "Ended with an error", never as finished.
+// The kind an agent's avatar takes its letter from: what the node reported, else the first part of its generated name ("claude · amber").
+export const agentKind = (a: { kind?: string; name: string }): string => a.kind || a.name.split(' · ')[0] || '?';
+
 export function endedWithError(a: { closed?: boolean; exitCode?: number; interrupted?: unknown }): boolean {
   if (!a.closed || a.interrupted || a.exitCode === undefined) return false;
   const code = a.exitCode;

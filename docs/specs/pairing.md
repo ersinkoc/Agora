@@ -14,6 +14,10 @@ to compare. The join string and the code stay as the fallback.
   it; `agora pair status` says which. Opening and closing are owner-only and audited.
 - While closed: no discovery answer (the hub is invisible), and every pairing message is refused with `pair.closed`.
 - Closing ends every pending pairing session at once.
+- **One machine per opening.** An approval closes the switch too, whoever gives it (an owner window, `agora pair open`): the hub does it when
+  it takes the approval, so the approved machine still gets its certificate and every other request still waiting ends as closed (not a
+  failure for anyone; its machine gets `pair.closed`). A refused approval (`pair.state`, `name_in_use`) closes nothing. The `pair.approve` audit
+  row is the record of that closing (#942).
 
 ## 3. Finding a hub (UDP)
 - A fixed UDP port (`DISCOVERY_PORT`, one constant, chosen at implementation), `std::net` only, no new dependency.
@@ -244,10 +248,16 @@ What this document did not say, and what the code does:
   moment, so a leaf that is swapped (section 5b, not built) must be set at the same time as the listener switches.
 - **`node_name` is the node id.** It is checked at the reveal by the rules enrolment uses (`ca::valid_node_id`), and at the request only for size
   (1 to 64 bytes, no control characters; `os` and `version` the same).
+- **An approval closes the switch** (section 2, #942): `Pairing::approve` ends every other session that is still waiting for its reveal or for the
+  owner (`PairDecided` `closed` for the ones with a card, not counted as failures) and sets the switch closed, but leaves every approved
+  session alone (this one, and one from an earlier opening that its connection has not collected yet), unlike `close`, which also voids an
+  approval nobody collected. The window's later `PairStatus` says closed; discovery stops within half a second as for any closing.
 - **Results.** A deny is `PairResult { approved: false }` with empty fields (the schema says so); an expiry is `pair.expired`; the switch closing
   is `pair.closed`. `pair.denied` is not sent by the hub core (the browser path may use it).
-- **Errors for the wrong order.** A second request on a connection is `pair.state` with `state = requested`; a second reveal, a reveal after the
-  session ended, or any other message while waiting is `pair.state` naming the state. A first message that is a reveal (a connection naming a
+- **Errors for the wrong order.** A second request on a connection is `pair.state` naming the session's state (`awaiting_reveal` before
+  the reveal, `pending` while the owner decides); a second reveal or any other message while waiting is `pair.state` naming the state.
+  A reveal after the session ended is answered with how it ended (`pair.expired` or `pair.closed`); another message that arrives just as
+  the session ends can instead get `pair.state` naming `expired` or `closed`. A first message that is a reveal (a connection naming a
   session it cannot own) is `pair.unknown`, and a repeated commitment, exporter or nonce is `pair.mismatch`; each ends the session and counts as a failure.
 - **Approving a taken name.** If the node id belongs to an enrolled machine and `replace` is false, Approve is refused with `pair.state`
   (`state = name_in_use`) and the request stays pending, so the owner can approve again with `replace`. The same check runs again inside the
@@ -317,7 +327,7 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
 - **The number is shown once.** `join` prints one line on standard output (`Number 482-193. Approve this machine on the hub...`) as soon as the reveal is sent.
   `Number`'s `Debug` prints `Number(..)`; the nonces and the exchange have no `Debug`. A test greps the captured output and every file of the machine (and the node's
   logs) after the flow: the number is in that one line and nowhere else.
-- **Timeouts.** Connect and handshake 10 s each; the challenge 15 s; the owner's decision 5 minutes 30 seconds (the hub's session is 5 minutes from the reveal).
+- **Timeouts.** Connect and handshake 10 s each; the challenge 15 s, and the same 15 s for the answer to the WebSocket upgrade (a peer that completes the handshake and then says nothing ends the pairing in time, audit F1440); the owner's decision 5 minutes 30 seconds (the hub's session is 5 minutes from the reveal).
 - **`agora pair open` is the owner's screen at a terminal (the window's cards are section 14), and only a person at a terminal can answer it.** It opens the switch (the
   hub's 10 minutes; `--minutes N` with N from 1 to 10 makes this command close it earlier, which only works while the command runs, because `PairOpen` carries no
   duration and the schema is append-only), stays in the foreground, and for each machine card prints the name, system, address and number and asks `y/N`.
@@ -325,8 +335,26 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   terminal", nothing opened), so a pipe, a file or a script (`yes | agora pair open`, a loop of `echo y`) can never approve. On a terminal, what was typed, held or sent before the
   question is discarded when the read starts (`tcflush` on Unix, `FlushConsoleInputBuffer` on Windows), a first key that arrives sooner than 700 ms after that is ignored (three
   such tries, then the request is denied), the line is at most 256 bytes, and nothing is echoed. Only `y` (or the locale's yes word) then Enter approves; any other line,
-  including an empty one, denies. A taken name (`pair.state`, `name_in_use`) asks once more whether to replace. After one approval it closes the switch and exits ("one machine
-  per opening"); when the terminal goes away it leaves the switch open for its time and exits. Ctrl+C leaves the switch open for the rest of its time (run `agora pair close`).
+  including an empty one, denies. A taken name (`pair.state`, `name_in_use`) asks once more whether to replace. After one approval the hub has closed the switch itself
+  ("one machine per opening", section 2): the command asks `PairStatus`, says the hub is closed again and exits, sending no `PairClose` at all. It never closes an
+  opening that is not its own: it keeps the `closes_at_ms` its `PairOpen` was answered with (each opening has its own deadline), and only a
+  hub that still shows **that** opening open after an approval, which only a hub from before #942 does, is closed with `PairClose` (the legacy
+  fallback; reading the status and closing are two commands, so on such an old hub an opening made between them would be closed too: a known
+  limit). An opening a window made meanwhile (the owner approved there and opened a new round while this command fell behind) is left open
+  and the screen says so; a status that cannot be read closes nothing and says to run `agora pair status`. The `--minutes` deadline closes
+  only this command's own opening by the same rule (Codex review of #1042); when the terminal goes away it leaves the switch open for its time and exits. **An owner's window
+  may answer first** (#942): while it asks, the command keeps reading the hub's notices (`agora_platform::read_confirmation_until`, the same
+  terminal-only discipline, read straight from the terminal and checked every 50 ms), and when the request it asks about ends anywhere else the
+  question ends, nothing typed counts, and it says how: approved in a window (then it says the hub is closed again and exits, as after its own
+  approval), denied in a window, or ended (ran out, the machine stopped, the hub closed), after which it waits for the next machine. The replace
+  question ends the same way. **A question that comes without a keystroke** (the one before ended elsewhere, so the owner may have been typing an
+  answer to it) is set apart: a separator line ("The last request ended without your answer here. A different machine is asking now...") comes
+  before its card, which names the machine and its number, and an answer counts only from **2 seconds** after the question (`NEXT_THINK`,
+  instead of 700 ms). A key sooner than that is thrown away with everything typed before it, said once ("That key came before you could read
+  the new request..."), and the question and its wait start again, as often as it happens: it never counts toward the three tries, so a burst
+  meant for the last request can neither approve nor deny this one. The ordinary first question keeps the 700 ms and three-try rules; an answer
+  typed here makes the next question ordinary again. Tested in `pair_cli.rs` (a `y` typed as the window denies the first machine and 1.2 s
+  after the next question, twice, approves nothing; a `y` after the wait approves it). Ctrl+C leaves the switch open for the rest of its time (run `agora pair close`).
   Browser cards are ignored here: they wait for a window. The owner's windows (section 14) answer without this command.
 - **How `agora pair` reaches the hub.** The switch and the cards are memory of the running hub, so these commands connect to it as the owner with the client token in
   `<hub dir>/token` (the same path as `agora tui` on the hub's machine) over the TLS the hub already serves; `agora_tui::client::Session` now keeps the
@@ -350,12 +378,13 @@ Web: `apps/web/src/net/pairing.ts` (pure: the notices, the state, the rules), `u
 - **Where the card is.** A request is a "needs you" item: a row in the fleet console's list (it counts in the header strip and the status bar) with one button, Review.
   The row never has Approve and never shows the number. The full card is in the right-hand Needs you list (on a phone, at the top of the list), and Review brings it into
   view. Away from Home, the first card floats over the window. On a hub with no machine yet the row is above the empty state.
-- **Two presses to approve.** Approve asks "Do the two numbers match exactly?" and only "Yes, the numbers match" sends it; Deny is one press. The question has a place of its own, so the buttons do not move when it appears, and the yes is disabled for 500 ms (`MIN_THINK_MS`) after it appears, so a double-click on Approve cannot reach it. `pairClicks.test.tsx` presses the real buttons in a DOM (mutations of each rule fail it). Replace is shown only after the
+- **Two presses to approve.** The first press (labelled **Numbers match…** since the My machines redesign) asks "Do the two numbers match exactly?" and only "Yes, the numbers match" sends it; Deny is one press. The question has a place of its own, so the buttons do not move when it appears, and the yes is disabled for 500 ms (`MIN_THINK_MS`) after it appears, so a double-click on Approve cannot reach it. `pairClicks.test.tsx` presses the real buttons in a DOM (mutations of each rule fail it). Replace is shown only after the
   hub answered `pair.state name_in_use` to an approval (the frame has no field for it, see section 12), starts unticked, and choosing it starts the two presses again.
   While the link is down, or the hub's expiry has passed, both buttons are disabled with the reason. The countdown is the frame's `expires_ms` against the window's clock.
 - **Peer text.** Name, system and address are stripped of control, bidirectional and zero-width characters when the notice is read (`peerText`), shown isolated (`bdi`), and a name placed inside a sentence goes between Unicode isolates, because the web formats messages without Fluent's isolation.
 - **Name, system and address** have a row each; the name and the system are isolated with `bdi` and the address is left-to-right; the number is two groups of three in large type.
 - **Open the window.** On a fresh hub's empty state the owner can press "Allow a new machine to join" (`PairOpen`: 10 minutes), sees the time left, and can Close it (`PairClose`).
+  A `PairDecided` `approved`, for any request and from wherever it was approved, shows the switch closed at once (the hub closed it, section 2), instead of at the next 20-second `PairStatus`.
 - **Terminal client.** `agora tui` reads `p`: the first request as a card (name, system and address in rows, the number in two groups). `a` then `y` approves; any other key after
   `a` goes back; `d` denies; `r` chooses Replace on a taken name; Esc leaves it for later; nothing is sent once the request has run out or a command found the link gone. Keys typed before the card was shown are discarded, and a key sooner than 500 ms after it is
   shown is not an answer (the same rule as `agora pair open`). The footer says a machine wants to join, and counts it in "need you".
@@ -391,14 +420,19 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   any other (`pair.name_unverified`). After `PairOpen` (which re-issues the leaf first when a name is missing) the command reads the listen address from
   `<hub dir>/listen` and the names from `<hub dir>/server-cert.pem` (`paircmd::join_hint`, no I/O, unit-tested). A loopback listen address: it says the hub
   listens on this computer only, so another machine cannot reach it, and how to make it listen on the network: first on this computer's address on it (the
-  first private or 100.64/10 IPv4 address of an interface that is up, `agora --listen ADDRESS:PORT`, then `agora down` and `agora`; `--listen` for a hub run by
-  hand), with `0.0.0.0:PORT` as the fallback, said plainly to listen on every IPv4 interface, a public one too (reaching the listener is broader than opening the
+  private or 100.64/10 IPv4 address of an interface that is up, `agora --listen ADDRESS:PORT`, then `agora down` and `agora`; `--listen` for a hub run by
+  hand; with several such addresses it lists them all and asks for the one on the other machine's network instead of picking one, #993), with `0.0.0.0:PORT` as the fallback, said plainly to listen on every IPv4 interface, a public one too (reaching the listener is broader than opening the
   switch, though a join still needs the number). It offers only a join from this same computer (the loopback address it listens on, else `localhost`, whichever
   the certificate names). Addresses are offered only where the hub surely listens: a specific address alone; for `0.0.0.0` the certificate's IPv4 addresses;
   for `::` its IPv6 addresses only, because whether `::` also serves IPv4 depends on the system (the listener does not set `IPV6_V6ONLY`, and Windows binds it
-  IPv6-only), never a loopback one. The first address is the one to type, the rest are listed. The certificate's DNS names other than `localhost` are listed as
-  names that *may* reach the hub if the network resolves them to this computer, never as a promise; with no address to offer, the first name is suggested with
-  that condition. Neither: it says so and suggests `--name ADDRESS`. It no longer suggests the computer's host name as the address to type.
+  IPv6-only), never a loopback one. For a wildcard listen address the command lists this computer's interfaces (the only I/O besides the two files; the
+  list is passed to `join_hint`), because the leaf keeps the addresses it names while the wanted ones are covered, so an address an interface no longer has
+  (a changed DHCP lease) can still be in it (#993): an address of an interface that is up comes first, in the certificate's order; one no interface that is up
+  has now is listed apart, as an address that may be old or may lead here through the network (an address in front of a NAT given with `--name`), never as one
+  the hub surely answers at. When the interfaces cannot be listed, every address counts as present. The first present address is the one to type, the rest are
+  listed. The certificate's DNS names other than `localhost` are listed as names that *may* reach the hub if the network resolves them to this computer, never
+  as a promise; with no present address to offer, the first name is suggested with that condition, else the first address no interface has, with the same
+  condition. None: it says so and suggests `--name ADDRESS`. It no longer suggests the computer's host name as the address to type.
 
 **Discovery (section 3).**
 - Port `DISCOVERY_PORT` = **7446**, UDP, IPv4 only. Not IPv6: it has no broadcast, and multicast needs a group membership per interface; a finder on an IPv6-only

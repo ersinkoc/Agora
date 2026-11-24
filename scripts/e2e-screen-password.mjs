@@ -35,7 +35,7 @@ try {
   await other.context().close();
 
   // The first window is signed out and signs in again with a new code, without reloading the page.
-  await page.getByRole('heading', { name: 'Sign in', exact: true }).waitFor({ timeout: 30000 });
+  await page.getByRole('heading', { name: 'Sign in to your Agora', exact: true }).waitFor({ timeout: 30000 });
   await page.fill('input', code());
   await page.click('button[type=submit]');
   await page.waitForSelector('text=Start an agent');

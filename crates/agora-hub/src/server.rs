@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agora_protocol::frame::{
-    kinds, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS,
+    kinds, DEFAULT_MAX_PAYLOAD, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS,
+    STREAM_CONTROL, STREAM_EVENTS,
 };
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::{self, command_ok, command_request, command_response};
@@ -260,6 +261,14 @@ where
     if verifies_devices {
         give_device_changes(hub, node_id);
     }
+    // ADR-0108: the forgets owed to it, oldest first (a node without `agent.forget.local` is never sent one; they wait).
+    give_forgets(hub, node_id, hub.forgets().pending(node_id));
+    // ADR-0039 amendment B, #1036: board membership looks now, not only at the node's next event. A redial that wrote the node's
+    // late end together with its `up` makes it due to hand over its local work, and an idle node that is caught up may send no
+    // event for a long time (ADR-0054). The asks go out after the device changes, before anything the connection carries.
+    for (node, project) in hub.board_membership(now_ms()) {
+        ask_board_join(hub, node, project);
+    }
     let mut last_heard = tokio::time::Instant::now();
     let mut events = NodeEvents {
         session: Some(session),
@@ -287,7 +296,69 @@ where
             ask_board_join(hub, node, project);
         }
     }
+    // #996: the store refused the end: it is written as soon as the store works, even if nothing else happens on the hub.
+    if hub.has_unrecorded() {
+        record_later(hub);
+    }
     result
+}
+
+/// #996: retries the presence facts the store refused until they are written, waiting longer each time (up to 5 s), at most one
+/// task per hub. Once they are, the board's membership is worked out again, as when a connection's end is recorded at once. The
+/// task holds the hub only during an attempt (a hub dropped meanwhile ends it), and however it ends, a panic included, it lets
+/// the next close start another.
+fn record_later(hub: &Arc<Hub>) {
+    use std::sync::atomic::Ordering;
+    /// Clears `recording_later` when the task ends while it still owns it.
+    struct Owner {
+        hub: std::sync::Weak<Hub>,
+        owns: bool,
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if let (true, Some(hub)) = (self.owns, self.hub.upgrade()) {
+                hub.recording_later.store(false, Ordering::Release);
+            }
+        }
+    }
+    if hub.recording_later.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut owner = Owner {
+        hub: Arc::downgrade(hub),
+        owns: true,
+    };
+    tokio::spawn(async move {
+        let mut wait = Duration::from_millis(100);
+        loop {
+            tokio::time::sleep(wait).await;
+            let Some(hub) = owner.hub.upgrade() else {
+                return;
+            };
+            let recorded = {
+                let hub = Arc::clone(&hub);
+                tokio::task::spawn_blocking(move || hub.record_unrecorded().is_ok())
+                    .await
+                    .unwrap_or(false)
+            };
+            if recorded {
+                for (node, project) in hub.board_membership(now_ms()) {
+                    ask_board_join(&hub, node, project);
+                }
+                owner.owns = false;
+                hub.recording_later.store(false, Ordering::Release);
+                // A connection that ended between the write and the line above found this task still running and left its
+                // facts to it.
+                if !hub.has_unrecorded() || hub.recording_later.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                owner.owns = true;
+                wait = Duration::from_millis(100);
+            } else {
+                wait = (wait * 2).min(Duration::from_secs(5));
+            }
+        }
+    });
 }
 
 /// Sends one frame to a node, but never waits longer than `limit` for it: a node that stopped reading fills the socket's buffer,
@@ -637,12 +708,41 @@ pub trait ClientAuth {
     }
 }
 
+/// The protocol generation a window speaks: windows send no `Hello`, and the hub's own is `schema/agora/v1`.
+const CLIENT_GENERATION: u32 = 1;
+
+/// ADR-0106: the `Welcome` a window gets first on its connection, naming the role of the person it signed in as. Nothing was negotiated
+/// (a window sends no `Hello`), so it carries no capabilities and no peer id. A hub not in team mode answers for its one person, the
+/// owner ([`ClientAuth::access`]). A hint for the window only: every command is still checked against `access`.
+pub(crate) fn client_welcome(access: &crate::users::Access, now_ms: u64) -> v1::Welcome {
+    use crate::users::Role;
+    let role = match access.role {
+        Role::Owner => v1::PersonRole::Owner,
+        Role::Member => v1::PersonRole::Member,
+        Role::Viewer => v1::PersonRole::Viewer,
+    };
+    let mut welcome = v1::Welcome {
+        chosen_generation: CLIENT_GENERATION,
+        server_time_ms: now_ms,
+        ..v1::Welcome::default()
+    };
+    welcome.set_person_role(role);
+    welcome
+}
+
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
+    snapshot_for_client(view, pos, true)
+}
+
+fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
+    // ADR-0103: keep the original view for the history filter, which needs to see forgotten machines and agents.
+    let recent_messages = view.recent_messages();
     // ADR-0073: forgotten machines and what they ran are not shown.
     let shown = view.shown();
     let view: &View = &shown;
-    v1::Snapshot {
+    let mut snapshot = v1::Snapshot {
+        recent_messages: Vec::new(),
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
             .agent_workspaces
@@ -667,7 +767,11 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
                 trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
-                binary: n.binary.clone(),
+                binary: if owner {
+                    n.binary.clone()
+                } else {
+                    crate::scope::short_binary(&n.binary)
+                },
             })
             .collect(),
         checkouts: view
@@ -782,7 +886,23 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 expires_at_ms: *exp,
             })
             .collect(),
+    };
+    if !recent_messages.is_empty() {
+        let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
+        // Each size includes the repeated field's tag and length. Keep the newest messages that fit, then send them oldest first.
+        for message in recent_messages.iter().rev() {
+            if message.size > remaining {
+                break;
+            }
+            remaining -= message.size;
+            snapshot.recent_messages.push(v1::PositionedEvent {
+                pos: message.pos,
+                event: Some(message.event.clone()),
+            });
+        }
+        snapshot.recent_messages.reverse();
     }
+    snapshot
 }
 
 /// A signed-in client: waits for `Subscribe`, answers with a snapshot or the backlog, then pushes live events until
@@ -847,15 +967,12 @@ async fn finish_unanswered(hub: &Hub, mut inflight: Vec<Inflight>) {
     inflight.sort_unstable_by_key(|item| item.deadline);
     for item in inflight {
         let Some(id) = item.audit else { continue };
-        let outcome = match tokio::time::timeout_at(item.deadline, item.reply).await {
-            Ok(Ok(r)) => match r.result {
-                Some(command_response::Result::Err(info)) => info.code,
-                _ => "ok".to_string(),
-            },
-            Ok(Err(_)) => ErrorCode::NodeOffline.as_str().to_string(),
-            Err(_) => ErrorCode::NodeTimeout.as_str().to_string(),
+        let audit = crate::audit::Audit::new(hub.store());
+        let _ = match tokio::time::timeout_at(item.deadline, item.reply).await {
+            Ok(Ok(r)) => audit.finish_response(id, &r, item.fresh_command),
+            Ok(Err(_)) => audit.finish(id, ErrorCode::NodeOffline.as_str()),
+            Err(_) => audit.finish(id, ErrorCode::NodeTimeout.as_str()),
         };
-        let _ = crate::audit::Audit::new(hub.store()).finish(id, &outcome);
     }
 }
 
@@ -874,14 +991,27 @@ where
     }
     let sub = v1::Subscribe::decode(first.payload.as_slice()).map_err(|_| invalid("subscribe"))?;
     let current = access().ok_or(ServeError::Refused)?;
+    // ADR-0106: the first frame a window gets says the role of the person it signed in as, for this connection (a change of role or
+    // grants ends it, below). A window sends no `Hello`, so this `Welcome` comes unasked, before the snapshot; an older window ignores
+    // a control frame it does not use.
+    conn.send(&frame(
+        STREAM_CONTROL,
+        kinds::WELCOME,
+        client_welcome(&current, now_ms()).encode_to_vec(),
+    ))
+    .await?;
     // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
     // everyone's), and from then on only the events that are theirs (ADR-0049).
     let restricted = current.projects.is_some();
     // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its file name.
     let owner = current.role == crate::users::Role::Owner;
-    let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
+    let mut subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
+    // Taken out of the subscription, which lives as long as the connection, and dropped once it is sent: the view it holds shares the
+    // hub's message rings (ADR-0103), and a window that kept it would keep messages the hub has since let go, and make the hub copy the
+    // rings at its next message.
+    let snapshot = subscription.snapshot.take();
     let mut scope = None;
-    if let Some((view, pos)) = &subscription.snapshot {
+    if let Some((view, pos)) = &snapshot {
         let body = match &current.projects {
             Some(projects) => {
                 let s = crate::scope::Scope::from_view(projects.clone(), view);
@@ -889,15 +1019,7 @@ where
                 scope = Some(s);
                 snapshot_of(&cut, *pos)
             }
-            None => {
-                let mut snap = snapshot_of(view, *pos);
-                if !owner {
-                    for n in &mut snap.nodes {
-                        n.binary = crate::scope::short_binary(&n.binary);
-                    }
-                }
-                snap
-            }
+            None => snapshot_for_client(view, *pos, owner),
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
@@ -905,7 +1027,7 @@ where
     // ADR-0090: the snapshot has no field for an agent's config options and slash commands; the last report of each follows it as
     // the event the node sent, at the snapshot's position (a window applies these two, which replace, at its own position). Only
     // what the window may see: the cut view of a member, the shown view of the owner.
-    if let Some((view, pos)) = &subscription.snapshot {
+    if let Some((view, pos)) = &snapshot {
         let replay = match &scope {
             Some(s) => s.filter_view(view).session_replay(),
             None => view.session_replay(),
@@ -914,6 +1036,7 @@ where
             send_positioned(&mut conn, &crate::hub::Delivered { pos: *pos, event }).await?;
         }
     }
+    drop(snapshot);
     for d in &subscription.backlog {
         send_shown(&mut conn, d, owner).await?;
     }
@@ -929,7 +1052,7 @@ where
         pair_feed = Some(feed);
     }
     loop {
-        answer_ready(&mut conn, inflight, hub).await?;
+        answer_ready(&mut conn, inflight, hub, scope.as_ref()).await?;
         if let Some(feed) = pair_feed.as_mut() {
             for f in feed.poll(hub) {
                 conn.send(&f).await?;
@@ -1030,6 +1153,11 @@ struct Inflight {
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+    /// A cached reply to a caller-supplied idempotency key cannot vouch for the current request's signer.
+    fresh_command: bool,
+    /// ADR-0049 Amendment A: a member's folder listing or folder details, by the command's schema name. The answer reaches them only
+    /// when the folder the machine opened is inside their projects (`Scope::confine_answer`), otherwise `auth.forbidden` naming it.
+    confined: Option<String>,
 }
 
 /// Resolves when a command on its way has its answer (or lost its node), keeping it in [`Inflight::answered`]: a client gets an
@@ -1098,7 +1226,7 @@ where
     let resp = match crate::dispatch::route(who, scope, &req) {
         crate::dispatch::Route::Forward => None,
         crate::dispatch::Route::Forbidden { action } => {
-            audit(hub, who, &action, &req.target_node, "auth.forbidden");
+            audit_command(hub, who, &req, &action, "auth.forbidden");
             Some(refuse(
                 Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
             ))
@@ -1107,16 +1235,28 @@ where
             Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"),
         )),
         // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
-        crate::dispatch::Route::ForgetAgent { agent_id, node } => {
-            Some(match hub.forget_agent(&agent_id, now_ms()) {
-                Ok(()) => {
-                    audit(hub, who, "agent.forget", &node, "ok");
+        crate::dispatch::Route::ForgetAgent { agent_id, .. } => {
+            let (target, _) = hub.audit_target(&req);
+            let result = hub.forget_agent(&agent_id, now_ms());
+            let outcome = result.as_ref().map_or_else(|e| e.code.as_str(), |_| "ok");
+            let _ = crate::audit::Audit::new(hub.store()).record_target(
+                &who.session,
+                now_ms(),
+                &who.user,
+                "agent.forget",
+                outcome,
+                &target,
+            );
+            Some(match result {
+                Ok((node, local)) => {
+                    // ADR-0108: passed on to its node now when it is connected and able; otherwise when it next connects. A key with
+                    // no node's own id (no `/`) names nothing a node keeps.
+                    if !local.is_empty() {
+                        give_forgets(hub, &node, vec![local]);
+                    }
                     ok_empty(client_request_id.clone())
                 }
-                Err(e) => {
-                    audit(hub, who, "agent.forget", &node, e.code.as_str());
-                    refuse(e)
-                }
+                Err(e) => refuse(e),
             })
         }
         // ADR-0073: the hub forgets an offline machine (owner only, decided in `dispatch`).
@@ -1164,13 +1304,7 @@ where
         hub.dispatches(),
         std::time::Instant::now(),
     ) {
-        audit(
-            hub,
-            who,
-            &audit_action(&req),
-            &req.target_node,
-            e.code.as_str(),
-        );
+        audit_command(hub, who, &req, &audit_action(&req), e.code.as_str());
         conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
             .await?;
         return Ok(());
@@ -1188,7 +1322,7 @@ where
                     t.rows = rows.into();
                 }
                 Resize::Unchanged => {
-                    audit(hub, who, &audit_action(&req), &req.target_node, "ok");
+                    audit_command(hub, who, &req, &audit_action(&req), "ok");
                     let resp = v1::CommandResponse {
                         request_id: client_request_id,
                         result: Some(command_response::Result::Ok(v1::CommandOk {
@@ -1203,9 +1337,11 @@ where
             }
         }
     }
+    // An answer may remove its approval from the hub projection. Capture the target before forwarding.
+    let (audit_target, known) = hub.audit_target(&req);
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
-        if !hub.node_known(&node) {
+        if !known {
             return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node.as_str()));
         }
         if inflight.len() >= MAX_INFLIGHT {
@@ -1260,20 +1396,37 @@ where
             answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
+            fresh_command: req.idempotency_key.is_empty(),
+            confined: scope
+                .is_some()
+                .then_some(req.command.as_ref())
+                .flatten()
+                .filter(|c| crate::scope::Scope::answers_confined(c))
+                .map(|_| command_name(&req)),
         })
     })();
     match outcome {
         Ok(mut i) => {
-            i.audit = audit(hub, who, &audit_action(&req), &i.node, "sent");
+            i.audit = crate::audit::Audit::new(hub.store())
+                .record_target(
+                    &who.session,
+                    now_ms(),
+                    &who.user,
+                    &audit_action(&req),
+                    "sent",
+                    &audit_target,
+                )
+                .ok();
             inflight.push(i);
         }
         Err(e) => {
-            audit(
-                hub,
-                who,
+            let _ = crate::audit::Audit::new(hub.store()).record_target(
+                &who.session,
+                now_ms(),
+                &who.user,
                 &audit_action(&req),
-                &req.target_node,
                 e.code.as_str(),
+                &audit_target,
             );
             conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
                 .await?;
@@ -1287,6 +1440,7 @@ async fn answer_ready<S>(
     conn: &mut Conn<S>,
     inflight: &mut Vec<Inflight>,
     hub: &Hub,
+    scope: Option<&crate::scope::Scope>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1303,6 +1457,15 @@ where
         let resp = match got {
             Ok(mut r) => {
                 r.request_id.clone_from(&item.client_request_id);
+                // A member's folder answer: only a folder inside their projects (a scope is always there when this is set).
+                if let Some(action) = &item.confined {
+                    if !scope.is_some_and(|s| s.confine_answer(&item.node, &mut r)) {
+                        r = error_response(
+                            &item.client_request_id,
+                            &Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
+                        );
+                    }
+                }
                 Some(r)
             }
             // The node's connection ended before it answered.
@@ -1322,11 +1485,11 @@ where
             Some(r) => {
                 let done = inflight.swap_remove(i);
                 if let Some(id) = done.audit {
-                    let outcome = match &r.result {
-                        Some(command_response::Result::Err(info)) => info.code.as_str(),
-                        _ => "ok",
-                    };
-                    let _ = crate::audit::Audit::new(hub.store()).finish(id, outcome);
+                    let _ = crate::audit::Audit::new(hub.store()).finish_response(
+                        id,
+                        &r,
+                        done.fresh_command,
+                    );
                 }
                 // A subscription the node refused (or never answered) leaves no relay behind.
                 if let (Some(stream), true) = (
@@ -1495,6 +1658,88 @@ fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
             _ => hub.board_join_settled(&node, &project),
         }
     });
+}
+
+/// ADR-0108: passes the person's forgets of `agents` (the node's own ids) on to `node`, one after another in one task, each after the
+/// node answered the one before: the node's queue is never filled with them. An answer that says the node decided settles that
+/// forget (`ok`: removed or unknown; `agent.running`; refused by its grants or policy; an invalid id). Amendment A: one that says it
+/// could not decide now ([`forget_failed_for_now`]) keeps it, counted, for the node's next connection (dropped at the bound,
+/// `forgets::MAX_TRANSIENT`); after a stopping node's `node.offline` the rest wait for that connection too. A node that is not
+/// connected, does not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Each answer
+/// is audited under the hub's own id with its code as the outcome, and the agent and its project in their own columns.
+fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
+    agents.retain(|a| !a.is_empty());
+    if agents.is_empty() || !hub.router().is_connected(node) {
+        return;
+    }
+    let (router, forgets, store) = (
+        Arc::clone(hub.router()),
+        Arc::clone(hub.forgets()),
+        hub.shared_store(),
+    );
+    let node = node.to_string();
+    // Each agent with its project, for its audit row (read now: the task does not hold the hub).
+    let agents: Vec<(String, String)> = agents
+        .into_iter()
+        .map(|a| {
+            let project = hub.agent_project(&node, &a);
+            (a, project)
+        })
+        .collect();
+    tokio::spawn(async move {
+        for (agent, project) in agents {
+            let req = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command_request::Command::AgentForget(v1::AgentForget {
+                    agent_id: agent.clone(),
+                })),
+            };
+            let Ok(reply) = router.send(&node, req) else {
+                return;
+            };
+            // No deadline: the reply ends when the node answers or its connection goes (the router drops the sender).
+            let Ok(resp) = reply.await else {
+                return;
+            };
+            let outcome = match &resp.result {
+                Some(command_response::Result::Err(e)) => e.code.clone(),
+                _ => "ok".to_string(),
+            };
+            let passing = forget_failed_for_now(&outcome);
+            if passing {
+                let _ = forgets.failed_for_now(&node, &agent);
+            } else {
+                let _ = forgets.answered(&node, &agent);
+            }
+            // The outcome column holds the code alone; the agent and its project have columns of their own.
+            let _ = crate::audit::Audit::new(&store).record_target(
+                "",
+                now_ms(),
+                crate::ca::RESERVED_HUB_ID,
+                "agent.forget.local",
+                &outcome,
+                &crate::audit::Target::of_agent(&node, &agent, &project),
+            );
+            // The node is stopping: it would answer the rest the same way.
+            if outcome == ErrorCode::NodeOffline.as_str() {
+                return;
+            }
+        }
+    });
+}
+
+/// ADR-0108 amendment A: the codes a node answers a forget with when it could not decide now: it is stopping (`node.offline`), the
+/// removal or the uplink's own wait ran out (`node.timeout`), or something failed (`internal`). Every other answer is a decision.
+fn forget_failed_for_now(code: &str) -> bool {
+    [
+        ErrorCode::NodeOffline,
+        ErrorCode::NodeTimeout,
+        ErrorCode::Internal,
+    ]
+    .iter()
+    .any(|c| c.as_str() == code)
 }
 
 /// Sends one board notice to its agent as a mesh message from the hub (best effort, like any mesh post).
@@ -1934,6 +2179,24 @@ fn audit(
     crate::audit::Audit::new(hub.store())
         .record_in(&who.session, now_ms(), &who.user, action, node, outcome)
         .ok()
+}
+
+fn audit_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+    action: &str,
+    outcome: &str,
+) {
+    let (target, _) = hub.audit_target(req);
+    let _ = crate::audit::Audit::new(hub.store()).record_target(
+        &who.session,
+        now_ms(),
+        &who.user,
+        action,
+        outcome,
+        &target,
+    );
 }
 
 /// The audit row's action: the command's schema name, with the launch options a start chose (ADR-0059: `AgentLaunch[skip-permissions]`).
@@ -2377,6 +2640,192 @@ async fn run_with(
 }
 
 #[cfg(test)]
+mod snapshot_budget_tests {
+    use super::*;
+    use crate::scope::Scope;
+    use v1::event::Body;
+
+    const SNAPSHOT_POS: u64 = 500;
+
+    fn record(view: &mut View, pos: u64, node: &str, body: Body) -> v1::PositionedEvent {
+        let event = v1::Event {
+            producer_id: node.into(),
+            body: Some(body),
+            ..Default::default()
+        };
+        view.apply_at(pos, &event);
+        v1::PositionedEvent {
+            pos,
+            event: Some(event),
+        }
+    }
+
+    fn fixture(binary: &str) -> View {
+        let mut view = View::default();
+        record(
+            &mut view,
+            1,
+            "n1",
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                binary: binary.into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            2,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "sender".into(),
+                project_id: "p".into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            3,
+            "n1",
+            Body::ApprovalRequested(v1::ApprovalRequested {
+                approval_id: "pad".into(),
+                agent_id: "sender".into(),
+                // Keep the padding in the same protobuf length-varint range through the 1 MiB boundary.
+                detail: "x".repeat(512 * 1024),
+                ..Default::default()
+            }),
+        );
+        view
+    }
+
+    fn say(view: &mut View, pos: u64, node: &str, from: &str, body: &str) -> v1::PositionedEvent {
+        record(
+            view,
+            pos,
+            node,
+            Body::MessagePosted(v1::MessagePosted {
+                message_id: format!("m-{pos}"),
+                from_agent_id: from.into(),
+                to: "sender".into(),
+                body: body.into(),
+            }),
+        )
+    }
+
+    fn wire_size(message: &v1::PositionedEvent) -> usize {
+        v1::Snapshot {
+            recent_messages: vec![message.clone()],
+            ..Default::default()
+        }
+        .encoded_len()
+    }
+
+    fn padding(view: &mut View) -> &mut String {
+        let Some(approval) = view.approvals.get_mut("n1/pad") else {
+            panic!("fixture approval is missing");
+        };
+        &mut approval.detail
+    }
+
+    fn leave_space(view: &mut View, bytes: usize, snapshot: impl Fn(&View) -> v1::Snapshot) {
+        let mut base = View {
+            messages: Arc::default(),
+            ..view.clone()
+        };
+        let additional = DEFAULT_MAX_PAYLOAD - bytes - snapshot(&base).encoded_len();
+        let detail = "x".repeat(additional);
+        padding(view).push_str(&detail);
+        padding(&mut base).push_str(&detail);
+        assert_eq!(snapshot(&base).encoded_len(), DEFAULT_MAX_PAYLOAD - bytes);
+    }
+
+    #[test]
+    fn snapshot_history_counts_the_complete_protobuf_element_at_the_boundary() {
+        let mut view = fixture("");
+        let message = say(&mut view, 128, "n1", "sender", &"a".repeat(256));
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&message), snapshot);
+
+        let exact = snapshot(&view);
+        assert_eq!(exact.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(exact.recent_messages, [message]);
+
+        padding(&mut view).push('x');
+        let short = snapshot(&view);
+        assert!(short.recent_messages.is_empty());
+        assert!(short.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn snapshot_history_stops_at_the_first_message_that_does_not_fit() {
+        let mut view = fixture("");
+        let old = say(&mut view, 128, "n1", "sender", "older");
+        say(&mut view, 129, "n1", "sender", &"x".repeat(16 * 1024));
+        let newest = say(&mut view, 130, "n1", "sender", "newest");
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&old) + wire_size(&newest), snapshot);
+
+        let result = snapshot(&view);
+        assert!(result.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [newest]);
+    }
+
+    #[test]
+    fn a_member_budgets_only_its_project_and_sender_copies() {
+        let mut view = fixture("/opt/releases/agora");
+        record(
+            &mut view,
+            4,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "other".into(),
+                project_id: "private".into(),
+                ..Default::default()
+            }),
+        );
+        let visible = say(
+            &mut view,
+            128,
+            "n1",
+            "sender",
+            &"shared project ".repeat(10),
+        );
+        say(&mut view, 129, "n1", "other", &"p".repeat(1024));
+        say(&mut view, 130, "n1", "n2/remote", &"r".repeat(1024));
+        let member = |view: &View| {
+            let scope = Scope::from_view(["n1/p".into()].into(), view);
+            snapshot_of(&scope.filter_view(view), SNAPSHOT_POS)
+        };
+        leave_space(&mut view, wire_size(&visible), member);
+        assert!(snapshot_of(&view, SNAPSHOT_POS).recent_messages.is_empty());
+
+        let result = member(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [visible]);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.agents.len(), 1);
+        assert_eq!(result.agents[0].agent_id, "n1/sender");
+    }
+
+    #[test]
+    fn the_shortened_binary_path_frees_budget_for_a_non_owner() {
+        let mut view = fixture("/opt/a-machine-specific-installation-directory/agora");
+        let message = say(&mut view, 128, "n1", "sender", &"hello ".repeat(40));
+        let non_owner = |view: &View| snapshot_for_client(view, SNAPSHOT_POS, false);
+        leave_space(&mut view, wire_size(&message), non_owner);
+
+        let result = non_owner(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.recent_messages, [message]);
+        let owner = snapshot_of(&view, SNAPSHOT_POS);
+        assert!(owner.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert!(owner.recent_messages.is_empty());
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod event_writer_tests {
     use super::*;
@@ -2438,29 +2887,48 @@ mod event_writer_tests {
         Conn<DuplexStream>,
         tokio::task::JoinHandle<Result<(), ServeError>>,
     ) {
+        let (mut node, link) = open_link(hub, node_id, &[]).await;
+        // This comes after the hub has recorded the link open, which also writes to SQLite.
+        ping(&mut node).await;
+        (node, link)
+    }
+
+    /// A node connection through `Hello` and an empty `Resume` (the node has nothing to send), both sides offering `caps`.
+    async fn open_link(
+        hub: &Arc<Hub>,
+        node_id: &'static str,
+        caps: &[&str],
+    ) -> (
+        Conn<DuplexStream>,
+        tokio::task::JoinHandle<Result<(), ServeError>>,
+    ) {
+        let caps: Vec<String> = caps.iter().map(|c| (*c).to_string()).collect();
         let (client, server) = tokio::io::duplex(8192);
         let hub = Arc::clone(hub);
+        let offered = caps.clone();
         let link = tokio::spawn(async move {
             let (conn, _) = agora_protocol::ws::accept_with_token(server).await.unwrap();
-            serve_node(conn, node_id, &hub, &support()).await
+            let support = Support {
+                capabilities: offered,
+                ..support()
+            };
+            serve_node(conn, node_id, &hub, &support).await
         });
         let mut node = agora_protocol::ws::connect(client, "ws://localhost/")
             .await
             .unwrap();
-        node.send(&frame(
-            STREAM_CONTROL,
-            kinds::HELLO,
-            hello().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+        let hello = v1::Hello {
+            capabilities: caps,
+            ..hello()
+        };
+        node.send(&frame(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+            .await
+            .unwrap();
         assert_eq!(recv(&mut node).await.kind, kinds::WELCOME);
         node.send(&frame(STREAM_CONTROL, kinds::RESUME, Vec::new()))
             .await
             .unwrap();
         assert_eq!(recv(&mut node).await.kind, kinds::RESUME_OK);
-        // This comes after the hub has recorded the link open, which also writes to SQLite.
-        ping(&mut node).await;
         (node, link)
     }
 
@@ -2751,6 +3219,180 @@ mod event_writer_tests {
         let _ = beta_link.await;
         assert!(reverted, "handoff must revert after giver disconnects");
     }
+
+    /// #996: a machine whose connection ends while the store refuses writes is recorded offline once the store works again, with
+    /// no reconnect, no restart and nothing else happening on the hub. Before, the failed `NodeLink { up: false }` was dropped and
+    /// the machine that had left stayed online in every view until it came back or the hub restarted.
+    #[tokio::test]
+    async fn a_machine_that_leaves_while_the_store_refuses_writes_is_shown_offline_once_it_works() {
+        let path = std::env::temp_dir().join(format!("agora-996-{}.db", std::process::id()));
+        let remove = |path: &std::path::Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+            }
+        };
+        remove(&path);
+        let hub = Arc::new(Hub::open(SqliteStore::open(&path).unwrap()).unwrap());
+        let (mut node, link) = connect(&hub, "n").await;
+        assert!(hub.view().0.nodes["n"].online);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        node.close().await;
+        link.await.unwrap().unwrap();
+        assert!(!hub.router().is_connected("n"));
+        assert!(hub.has_unrecorded());
+        // The retry fails at least once while the store still refuses.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(hub.has_unrecorded());
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let offline = tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.view().0.nodes["n"].online {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        // The retry task lets go once it is done, so a later close can start another.
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while hub
+                .recording_later
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let rebuilt = crate::projection::View::rebuild(hub.store()).unwrap().0;
+        drop(hub);
+        remove(&path);
+        assert!(offline.is_ok(), "the machine that left stayed online");
+        assert!(released.is_ok(), "the retry task kept its claim");
+        assert!(!rebuilt.nodes["n"].online);
+    }
+    /// #1036 (Codex review): a machine whose end the store refused, and whose redial then writes that end and its new `up`
+    /// together, is asked to hand over its local board work (`BoardJoin`) by the redial itself, even when it sends no event (an
+    /// idle node that is caught up only resumes and answers pings, ADR-0054) and no retry task is left to look at membership
+    /// (the redial wrote the end before the closing connection checked for one). Before, the ask waited for the node's next event.
+    #[tokio::test]
+    async fn an_idle_machine_whose_redial_writes_its_end_is_asked_to_rejoin_the_board() {
+        let path = std::env::temp_dir().join(format!("agora-1036-{}.db", std::process::id()));
+        let remove = |path: &std::path::Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+            }
+        };
+        remove(&path);
+        let hub = Arc::new(Hub::open(SqliteStore::open(&path).unwrap()).unwrap());
+        let mut links = Vec::new();
+        for node in ["alpha", "beta", "gamma"] {
+            let (mut conn, link) = open_link(&hub, node, &["board.join"]).await;
+            for (seq, body) in [
+                (
+                    1,
+                    v1::event::Body::NodeOnline(v1::NodeOnline {
+                        node_id: node.into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    2,
+                    v1::event::Body::AgentStarted(v1::AgentStarted {
+                        agent_id: "a".into(),
+                        node_id: node.into(),
+                        project_id: "p".into(),
+                        kind: "shell".into(),
+                        ..Default::default()
+                    }),
+                ),
+            ] {
+                let event = v1::Event {
+                    producer_id: node.into(),
+                    seq,
+                    at_ms: seq,
+                    body: Some(body),
+                };
+                conn.send(&frame(STREAM_EVENTS, kinds::EVENT, event.encode_to_vec()))
+                    .await
+                    .unwrap();
+            }
+            // Other frames (the `BoardJoin` asks of the project becoming shared) are left unanswered.
+            loop {
+                let f = recv(&mut conn).await;
+                if f.kind == kinds::EVENT_ACK
+                    && v1::EventAck::decode(f.payload.as_slice())
+                        .unwrap()
+                        .up_to_seq
+                        >= 2
+                {
+                    break;
+                }
+            }
+            links.push((conn, link));
+        }
+        assert!(hub.board_membership(now_ms()).is_empty());
+        for node in ["alpha", "beta", "gamma"] {
+            hub.board_join_settled(node, "p");
+        }
+
+        // No retry task will look at membership: as when the redial wrote the end before the closing connection checked.
+        hub.recording_later
+            .store(true, std::sync::atomic::Ordering::Release);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        let (mut alpha, alpha_link) = links.remove(0);
+        alpha.close().await;
+        alpha_link.await.unwrap().unwrap();
+        assert!(hub.has_unrecorded());
+        assert!(hub.view().0.nodes["alpha"].online);
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+
+        // The redial: resume and a ping, no event.
+        let (mut alpha, alpha_link) = open_link(&hub, "alpha", &["board.join"]).await;
+        assert!(!hub.has_unrecorded());
+        alpha
+            .send(&frame(STREAM_CONTROL, kinds::PING, b"ping".to_vec()))
+            .await
+            .unwrap();
+        let (mut ponged, mut asked) = (false, Vec::new());
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            while !(ponged && !asked.is_empty()) {
+                let f = alpha.recv().await.unwrap().expect("open node link");
+                if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PONG) {
+                    ponged = true;
+                } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 0) {
+                    if let Some(command_request::Command::BoardJoin(j)) =
+                        v1::CommandRequest::decode(f.payload.as_slice())
+                            .unwrap()
+                            .command
+                    {
+                        asked.push(j.project_id);
+                    }
+                }
+            }
+        })
+        .await;
+        let left_over = hub.board_membership(now_ms());
+        hub.recording_later
+            .store(false, std::sync::atomic::Ordering::Release);
+        alpha.close().await;
+        let _ = alpha_link.await;
+        for (mut conn, link) in links {
+            conn.close().await;
+            let _ = link.await;
+        }
+        drop(hub);
+        remove(&path);
+        assert!(ponged, "the redialled node got no pong");
+        assert!(
+            seen.is_ok(),
+            "the redialled node was not asked to rejoin the board"
+        );
+        assert_eq!(asked, ["p"]);
+        assert!(left_over.is_empty(), "{left_over:?}");
+    }
 }
 
 #[cfg(test)]
@@ -2817,9 +3459,11 @@ mod audit_cleanup_tests {
             node: "n".into(),
             relay: None,
             audit: Some(audit),
+            fresh_command: true,
             reply,
             answered: None,
             deadline,
+            confined: None,
         };
         // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.
         let inflight = vec![
@@ -2946,6 +3590,9 @@ mod opening_tests {
         })
         .await
         .unwrap();
+        // ADR-0106: the role first, then the snapshot.
+        let welcome = tokio::time::timeout(BOUND, good.recv()).await;
+        assert!(matches!(welcome, Ok(Ok(Some(f))) if f.kind == kinds::WELCOME));
         let snap = tokio::time::timeout(BOUND, good.recv()).await;
         assert!(matches!(snap, Ok(Ok(Some(f))) if f.kind == kinds::SNAPSHOT));
         assert!(tokio::time::timeout(OPENING * 4, good.recv())

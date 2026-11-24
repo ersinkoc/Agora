@@ -1,6 +1,7 @@
 # 0049. Team mode: users, roles and an audit trail first, Postgres only when SQLite is not enough
 Status: Accepted
 Date: 2026-11-10
+Amended: 2026-11-23 (Amendment A below: the maintainer's decision on the question in #1049)
 
 ## Context
 `docs/vision.md` lists a team (shared hub, several users, policies, audit) as a later phase, and the roadmap pairs it with
@@ -45,3 +46,31 @@ before any of that exists.
 - **One shared owner account:** what teams do today; no audit of who acted and no way to give someone read-only access.
 - **Roles enforced only by the hub:** simpler, but a hub compromise would then grant everything, against ADR-0020.
 - **Full ACLs per object:** more flexible than three roles and project membership, and far more to build, explain and get wrong.
+
+## Amendment A (2026-11-23, #1049): a member chooses folders and starts agents in their projects
+**Why.** Decision 2 lets a member "work in the projects granted to them", but the hub refused every folder command to members
+(`DirectoryList`, `DirectoryInspect`, `AgentLaunch`, ADR-0052/0053), so a member could not choose a folder or start an agent in one even
+inside a granted project. The maintainer decided on 2026-11-23 (relayed to the agent fixing #1049): yes, a member with a project grant
+may browse that project's folders on its machine and start agents there; viewers stay read-only; nothing outside the granted project
+is allowed.
+
+**Decision** (the maintainer's answer above; points 1 to 6 are how #1049 implements it, for the maintainer's review with that PR).
+1. The hub lets a member's `DirectoryList`, `DirectoryInspect` and `AgentLaunch` through only when the machine the request names is
+   the one the grant names and the folder is one of that project's folders on it or below one. A project's folders are the ones that
+   machine reported for it (its checkouts, and each workspace's repository root, or its folder when it is no repository), as
+   `agora hub user projects` lists them. The nearest reported folder that holds the path decides, as a node places a folder for a
+   device limited to some projects: a folder of another project inside a granted one is that other project's, and a folder reported
+   for two projects is neither's.
+2. The path must be absolute and plain in that machine's spelling: no `.` or `..` part, `/` only as a separator on a Unix machine,
+   and on Windows no part ending in a dot or a space and no `:` but the drive's. An empty path (the home folder) is refused.
+3. The machine follows links. A listing or a folder's details is therefore checked again in the machine's answer, which names the
+   folder it really opened: when that folder is not inside the granted project (a link inside the project that leads out), the member
+   gets `auth.forbidden` instead of the answer; a listing whose way up leads out of the project keeps no way up. A start needs no
+   second check: a node starts only in the exact real folder named and refuses a path through a link, and the start must name the
+   project the hub found for the folder, which the node checks against the folder's own identity.
+4. As a node refuses them to a limited device, a member may not make a new project identity (`create_project_id`) or accept a
+   changed one (`accept_identity_change`).
+5. A refusal stays `auth.forbidden` with `action` set to the refused command's schema name, so clients word it for the person's role
+   (#1044). A viewer's folder commands are refused as before, granted project or not.
+6. This is the hub's check. The node stays the authority (decision 3): a member's device that the node's policy limits to some
+   projects is checked there again by the node's own records.

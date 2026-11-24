@@ -166,6 +166,66 @@ not = [{ contains = "x" }]
     );
 }
 
+/// A manifest with one `[[ready]]` and one `[[typed]]` rule, each given by its conditions (lines of TOML).
+fn with_typed(ready: &str, typed: &str) -> Result<Manifest, ManifestError> {
+    let rule = |section: &str, conditions: &str| {
+        format!("[[{section}]]\nid = \"r\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\n{conditions}\n")
+    };
+    Manifest::parse(&format!(
+        "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{}{}",
+        rule("ready", ready),
+        rule("typed", typed)
+    ))
+}
+
+#[test]
+fn a_typed_rule_must_need_a_regex_on_screen() {
+    // ADR-0057, #1150: phrases are found with whitespace collapsed, so a prompt holding a footer word the box breaks in its middle
+    // (`Entersend` wrapped after `Enter`) would read as the footer. Only a regex sees the rows as they are, so every `[[typed]]` rule
+    // must need one to match: its own `regex` or one in `all`.
+    let footer = "contains = \"Enter send\"";
+    for ok in [
+        "regex = '^> .*\\n.*Enter send'".to_string(),
+        "all = [{ regex = '^.*Enter send' }]".to_string(),
+        format!("{footer}\nall = [{{ regex = 'Enter send$' }}]"),
+        format!("{footer}\nall = [{{ contains = \"x\" }}, {{ regex = 'Enter send$' }}]\nnot = [{{ regex = 'y' }}]"),
+        // An own regex still has to match beside an `any`.
+        "regex = 'Enter send$'\nany = [{ contains = \"x\" }, { contains = \"y\" }]".to_string(),
+    ] {
+        assert!(with_typed(footer, &ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        footer.to_string(),
+        format!("{footer}\nall = [{{ contains = \"x\" }}]"),
+        // A regex in `any` need not match (a phrase beside it can), and one in `not` only excludes.
+        format!("{footer}\nany = [{{ regex = 'Enter send$' }}, {{ contains = \"x\" }}]"),
+        "any = [{ regex = 'Enter send$' }]".to_string(),
+        format!("{footer}\nnot = [{{ regex = 'Enter send$' }}]"),
+        // A regex that matches empty text matches every screen.
+        "regex = ''".to_string(),
+        format!("{footer}\nall = [{{ regex = '' }}]"),
+        "regex = '^'".to_string(),
+        "regex = '.*'".to_string(),
+        "regex = '(?:)'".to_string(),
+        format!("{footer}\nall = [{{ regex = '\\s*' }}]"),
+    ] {
+        assert_eq!(
+            field(&with_typed(footer, &bad).unwrap_err()),
+            "typed[0].regex",
+            "{bad}"
+        );
+    }
+    // Other rule lists keep their rules: a `[[ready]]` or `[[rules]]` rule may be phrases only (the example has such a `[[rules]]`
+    // rule, `with_typed` such a `[[ready]]` one).
+    assert!(Manifest::parse(MANIFEST).is_ok());
+    assert!(with_typed(footer, "regex = 'Enter send$'").is_ok());
+    // A malformed `[[typed]]` rule still names what is wrong with it first.
+    assert_eq!(
+        field(&with_typed(footer, "not = [{ contains = \"x\" }]").unwrap_err()),
+        "typed[0].conditions"
+    );
+}
+
 #[test]
 fn a_rule_that_names_both_a_phrase_and_a_regex_is_rejected() {
     // Exactly one of `contains`/`regex`, like every condition in `all`/`any`/`not`: the detector would
@@ -227,4 +287,113 @@ fn a_phrase_the_agent_wraps_across_lines_on_a_narrow_screen_is_still_found() {
     assert_eq!(detector.detect(&narrow).unwrap().rule_id, "trust");
     // Only whitespace is collapsed: different words still do not match.
     assert_eq!(detector.detect(&other).unwrap().rule_id, "prompt");
+}
+
+#[test]
+fn a_wrapped_phrase_still_requires_the_whitespace_at_each_end() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "finished"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " build done "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    for text in ["note build done next", "note build\r\n  done next"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    // The region's edges are boundaries too: rows are read without their trailing blanks.
+    for text in ["note build done", "build done next"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    for text in ["note prebuild done next", "note build done-ish next"] {
+        assert_eq!(
+            detector.detect(&term_with(text.as_bytes())),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_padded_single_word_is_found_wrapped_and_only_as_a_whole_word() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "finished"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " done "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    for text in ["build\r\ndone next", "build done", "done"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    for text in ["undone next", "build doneish"] {
+        assert_eq!(
+            detector.detect(&term_with(text.as_bytes())),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_phrase_of_only_whitespace_does_not_match_every_screen() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "blank"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    assert_eq!(detector.detect(&term_with(b"oneword")), None);
 }

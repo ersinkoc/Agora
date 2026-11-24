@@ -49,10 +49,10 @@ export interface PaletteExtras {
 // request or opens the window for new machines by itself: "Allow a new machine to join" shows where that is done, and that screen asks.
 export function paletteExtras(x: PaletteExtras): PaletteItem[] {
   return [
-    ...x.machines.map((m) => ({ id: `machine-${m.id}`, label: t('palette-open-machine', { name: m.name }), run: () => x.go(machinesHash(m.id)) })),
-    ...(x.phone ? [] : x.projects.map((p) => ({ id: `project-${p.id}`, label: t('palette-open-project', { name: p.name }), run: () => x.showProject(p.id) }))),
-    ...(x.hub && x.canPair ? [{ id: 'pair', label: t('pair-window-allow'), run: x.showPairing }] : []),
-    ...(x.hub && x.passwordSet && x.lock ? [{ id: 'lock', label: t('lock-now'), run: x.lock }] : []),
-    { id: 'settings', label: t('palette-settings'), run: () => x.go('#/device') },
+    ...x.machines.map((m) => ({ id: `machine-${m.id}`, label: t('palette-open-machine', { name: m.name }), run: () => x.go(machinesHash(m.id)), group: 'places' as const, icon: 'machine' as const })),
+    ...(x.phone ? [] : x.projects.map((p) => ({ id: `project-${p.id}`, label: t('palette-open-project', { name: p.name }), run: () => x.showProject(p.id), group: 'places' as const, icon: 'folder' as const }))),
+    ...(x.hub && x.canPair ? [{ id: 'pair', label: t('pair-window-allow'), run: x.showPairing, icon: 'plus' as const }] : []),
+    ...(x.hub && x.passwordSet && x.lock ? [{ id: 'lock', label: t('lock-now'), run: x.lock, icon: 'lock' as const }] : []),
+    { id: 'settings', label: t('palette-settings'), run: () => x.go('#/device'), group: 'go', icon: 'settings' },
   ];
 }

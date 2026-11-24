@@ -3,6 +3,7 @@
 import { usableOptions } from '../components/launchChoice';
 import type { LaunchOptionChoice } from '../components/launchChoice';
 import { usableSettings, type LaunchSettingChoice } from '../components/launchSettingsModel';
+import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 
 // The wire's integration level (agora.v1.IntegrationLevel): 1 generic, 2 manifest, 3 ACP, 4 adapter process.
 export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[] }
@@ -20,13 +21,27 @@ export function plainText(s: string, max = 48): string {
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : one;
 }
 
+/** A kind's colour for its avatar: one of the agent colours, the same for a kind everywhere (Settings, and later the Start window). */
+export function kindAccent(kind: string): string {
+  let h = 0;
+  for (const c of kind) h = (h * 31 + (c.codePointAt(0) ?? 0)) >>> 0;
+  return `var(--agent-${AGENT_COLOUR_NAMES[h % AGENT_COLOUR_NAMES.length] ?? 'slate'})`;
+}
+
+/** ADR-0092: the prefix of every kind converted from the ACP registry (`agora_adapters::registry_convert`). Such a kind is untested in
+ * Agora; a hand-made kind of the same name or id has already replaced it on the machine. */
+export const REGISTRY_PREFIX = 'registry-';
+export const isRegistryKind = (kind: string): boolean => kind.startsWith(REGISTRY_PREFIX);
+
 export interface KindGroups { installed: KindInfo[]; missing: KindInfo[] }
 
-/** Installed first group and not installed second, each by name; the plain terminal ("shell") is not an agent and is left out. */
+/** Installed first group and not installed second, each with the hand-made kinds before the registry's (untested) ones, then by name;
+ * the plain terminal ("shell") is not an agent and is left out. */
 export function groupKinds(kinds: readonly KindInfo[]): KindGroups {
   const seen = new Set<string>();
   const rows = kinds.filter((k) => k.kind !== 'shell' && k.kind !== '' && !seen.has(k.kind) && (seen.add(k.kind), true));
-  const byName = (a: KindInfo, b: KindInfo) => plainText(a.name).localeCompare(plainText(b.name)) || a.kind.localeCompare(b.kind);
+  const byName = (a: KindInfo, b: KindInfo) => Number(isRegistryKind(a.kind)) - Number(isRegistryKind(b.kind))
+    || plainText(a.name).localeCompare(plainText(b.name)) || a.kind.localeCompare(b.kind);
   return { installed: rows.filter((k) => k.installed).sort(byName), missing: rows.filter((k) => !k.installed).sort(byName) };
 }
 
@@ -41,7 +56,7 @@ export function kindChoices(k: KindInfo): { settings: LaunchSettingChoice[]; opt
 export interface KnownKinds { kinds: KindInfo[]; atMs: number }
 
 const KEY = 'agora.agent-kinds.v1';
-const MAX_KINDS = 100;
+const MAX_KINDS = 160;
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const cleanKind = (v: unknown): KindInfo | undefined => {

@@ -12,6 +12,7 @@ cli-usage =
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
+      agora agent resume AJAN_KİMLİĞİ [--again] [--socket YOL]
       agora agent list [--socket YOL]
       agora agent kinds [--socket YOL]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
@@ -19,6 +20,9 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
+      agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
+      agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
@@ -39,6 +43,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
       agora node untrust CİHAZ_ID [--data DİZİN]
       agora node secret set AD | list | remove AD [--data DİZİN]
+      agora history purge [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -49,6 +54,8 @@ cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ 
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-prompted = İstem { $agent_id } ajanına gönderildi
+cli-agent-resumed = { $agent_id } ajanı { $worktree } içinde devam ettirildi
+cli-agent-started-again = { $agent_id } ajanı { $worktree } içinde yeniden başlatıldı (yeni bir konuşma)
 cli-agent-list-empty = Bu düğümde ajan yok.
 cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
@@ -78,6 +85,7 @@ doctor-git = Git kullanılabilir ({ $detail }).
 doctor-git-missing = Git bulunamadı. Agora, her ajana ayrı bir çalışma alanı vermek için buna ihtiyaç duyar.
 doctor-git-identity-missing = Buradaki ajanların git kimliği yok, bu yüzden commit yapamazlar. "git config --global" ile "user.name" ve "user.email" değerlerini ayarlayın.
 doctor-control-token-reachable = Buradaki ajanlar düğümün denetim belirtecini ({ $detail }) okuyabilir, çünkü düğümün klasörü ajanların okuyabildiği veya yazabildiği bir klasörün içinde (örneğin /tmp altında). Ajanlar başlamayacak. Düğümün klasörünü (--data) ilkedeki klasörlerin dışına taşıyın.
+doctor-protected-path-reachable = Buradaki ajanlar bu düğümün kendi dosyalarını ({ $detail }) okuyabilir, çünkü bunlar ajanların okuyabildiği veya yazabildiği bir klasörün içinde (/tmp, /var, /opt, /etc ya da /run altında veya ilkedeki bir klasörde) ve bu sistem onları orada kapalı tutamıyor. Ajanlar başlamayacak. Düğümün veri klasörünü (--data) ya da ajan türleri klasörünü (--manifests) bu klasörlerin dışına, örneğin ev klasörünüzün altına taşıyın.
 doctor-sockets-profile = Bu makinedeki korumalı alan profili, ajanlara verilmemiş unix soketlerini (ssh-agent, oturum veri yolu, docker, tmux) reddedecek şekilde ayarlıdır. Bir macOS geliştiricisi bunu 17.11.2026'da gerçek bir Mac'te ölçtü: ajanın kendi soketi çalışır, başka bir soket reddedilir ve ad çözücü çalışır. Diğer sistem soketleri (her araçta DNS, https üzerinden git, cargo, npm, Claude Code, Codex) gerçek ajanlarla henüz ölçülmedi; listede adı geçmeyen bir sokete ihtiyaç duyan araç çalışmayabilir, onu `sandbox.sockets` ile ekleyin.
 doctor-sockets-abstract = Bu çekirdek dosya olan unix soketlerini kısıtlayamaz: bir ajan hâlâ ssh-agent, oturum veri yolu, docker veya tmux soketine ulaşabilir (yalnızca soyut soketler kapalıdır). Diğer tek katman ortam değişkeni temizliğidir ve soketi arayan bir ajan onu bulabilir.
 doctor-sockets-none = Bu makine ({ $detail }) unix soketlerini kısıtlayamaz: tek katman ortam değişkeni temizliğidir ve ssh-agent, oturum veri yolu, docker veya tmux soketini arayan bir ajan onu bulabilir.
@@ -93,6 +101,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` bulundu{ $by ->
         [agora] , Agora kurdu (sürüm { $version })
@@ -101,10 +110,12 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] yerleşik
+        [registry] ACP kayıt defterinden, denenmedi
        *[folder] tanımlar klasöründen
     }): `{ $program }` orada ama bu hesap onu çalıştıramıyor. Dosyayı çalıştırılabilir yapın ya da yeniden kurun.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.
@@ -127,6 +138,19 @@ doctor-skip-permissions = { $detail ->
 doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır anlaşılamadı; bunlar düzelene kadar hiçbir ajan izin sorularını atlayamaz.
 doctor-show-secret = Dosya tarayıcısı ve inceleme ekranı, bir projeye bakabilen herkese gizli dosyaları (.env dosyaları, özel anahtarlar, ...) olduğu gibi gösteriyor (politika: files.show_secret = true).
 doctor-agent-unsafe = { $detail }: `{ $program }` Agora tarafından kurulmuş, ancak klasörü ya da dosyası güvenli değil (başka bir kullanıcı değiştirebilir); bu yüzden kullanılmıyor: varsa PATH üzerindeki kullanılır. `agora agent install` ile yeniden kurun ya da kurulum klasörlerini yalnızca size ait yapın.
+doctor-registry-kinds = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } biliniyor, Agora'da denenmedi; bunlardan { $ready } tanesi programını bu makinede buluyor. Penceredeki Ayarlar → Ajanlar hepsini listeler.
+doctor-runner-folders-left = ACP kayıt defteri ajanlarının başladığı { $detail ->
+        [one] 1 klasör
+       *[other] { $detail } klasör
+    } tamamen silinemedi (düğümün sildiğinden daha derin ya da büyük, ya da kullanmadığı adlar içeriyor); veri klasöründeki `runner` klasöründe `….left` adıyla duruyor ve elle silinebilir.
+doctor-registry-off = ACP kayıt defterinin ajanları bu makinede kapalı (politika satırı `agents.registry = off`): makine onları ne sunar ne başlatır. Kendi ajan tanımlarınız etkilenmez.
+doctor-registry-denied = ACP kayıt defterinden { $detail ->
+        [one] 1 ajan
+       *[other] { $detail } ajan
+    } bu makinede `agents.registry.deny` politika satırıyla kapalı.
 doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-cert-node = Bu makinenin hub sertifikası { $detail ->
@@ -231,6 +255,14 @@ cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = { $id } adında bir ekip üyesi yok.
 cli-hub-user-project =   { $project } projesinde çalışır
+cli-hub-user-project-path =   { $project } projesinde çalışır ({ $path })
+cli-hub-user-projects-none = Henüz hiçbir makine bu hub'a proje bildirmedi.
+cli-hub-user-projects-line = { $name }    { $path }
+cli-hub-user-projects-line-host = { $name }    { $path }    ({ $host } makinesi)
+cli-hub-user-unknown-machine = { $machine } adında bir makine bu hub'a bağlanmadı. Erişim verebileceğiniz projeleri `agora hub user projects` listeler.
+cli-hub-user-unknown-project = Bu hub { $machine } üzerinde { $project } adında bir proje bilmiyor. Erişim verebileceğiniz projeleri `agora hub user projects` listeler.
+cli-hub-user-ambiguous-project = { $project } birden fazla projeye uyuyor. Makinesi ve klasörüyle birini seçin, örneğin `agora hub user grant { $id } { $machine } { $path }`:
+cli-hub-user-not-granted = { $id } kullanıcısının { $project } projesine erişimi yok.
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.
 cli-enroll-refused = Hub bu makineyi kaydetmeyi reddetti ({ $code }). Kod yanlış, süresi dolmuş veya zaten kullanılmış olabilir.
@@ -477,6 +509,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi kullanın, rakamla başlamasın ve sistemin ya da Agora'nın kullandığı bir ad olmasın.
 cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
 cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
+cli-history-purged = Bu makinenin ajanları için tuttuğu sohbet geçmişi silindi.
+cli-history-purge-failed = Sohbet geçmişi silinemedi. Düğümün veri klasörünün size ait ve yazılabilir olduğunu kontrol edin.
 cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.
 
 # ADR-0065: hub'da `agora pair`, yeni makinede `agora join`.
@@ -488,7 +522,10 @@ pair-open-next = Yeni makinede `agora join { $address }` çalıştırın. Yeni m
 pair-open-also = Bu adres yeni makineden bu bilgisayara ulaşmıyorsa hub şu adreslerde de yanıt verir: { $addresses }.
 pair-open-next-name = Yeni makinede `agora join { $address }` çalıştırın; bu ad oradan bu bilgisayara ulaşıyorsa: hub'ın sertifikası bu adı içerir, ama adın nereye ulaştığına ağınız karar verir. Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
 pair-open-names = Şu adlar hub'ın sertifikasında var ve ağınız onları bu bilgisayara çözümlüyorsa hub'a ulaşabilir: { $names }.
+pair-open-next-elsewhere = Yeni makinede `agora join { $address }` çalıştırın; bu adres oradan bu bilgisayara ulaşıyorsa: hub'ın sertifikası bu adresi içerir, ama bu bilgisayarın hiçbir arayüzünde şu an yok, yani eski bir adres ya da ağınız üzerinden buraya ulaşan bir adres olabilir. Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-elsewhere = Hub'ın sertifikası, şu an bu bilgisayarın arayüzlerinde olmayan şu adresleri de içerir: { $addresses }. Bunlar eski bir adres olabilir ya da ağınız üzerinden buraya ulaşabilir.
 pair-open-local-only = Bu hub yalnızca bu bilgisayarda dinliyor ({ $listen }), bu yüzden başka bir makine ona ulaşamaz. Diğer makinelerinizin katılabilmesi için bu bilgisayarın ağınızdaki adresinde dinlemesini sağlayın: `agora --listen { $lan }` çalıştırın, sonra `agora down` ve `agora` (`agora hub run` ile başlattığınız bir hub da aynı `--listen` seçeneğini alır), ardından yeniden `agora pair open`. `0.0.0.0:{ $port }` ise bu bilgisayarın her IPv4 arayüzünde dinler, varsa genel (public) bir arayüzde de: ona ulaşabilen herkes bağlanmayı deneyebilir (yeni bir makine yine de sizin onayınıza ve sayıya ihtiyaç duyar).
+pair-open-local-only-several = Bu hub yalnızca bu bilgisayarda dinliyor ({ $listen }), bu yüzden başka bir makine ona ulaşamaz. Diğer makinelerinizin katılabilmesi için bu bilgisayarın, onların bulunduğu ağdaki adresinde dinlemesini sağlayın. Bu bilgisayarın birkaç adresi var: { $lans }. O ağdaki adresle `agora --listen ADRES:{ $port }` çalıştırın, sonra `agora down` ve `agora` (`agora hub run` ile başlattığınız bir hub da aynı `--listen` seçeneğini alır), ardından yeniden `agora pair open`. `0.0.0.0:{ $port }` ise bu bilgisayarın her IPv4 arayüzünde dinler, varsa genel (public) bir arayüzde de: ona ulaşabilen herkes bağlanmayı deneyebilir (yeni bir makine yine de sizin onayınıza ve sayıya ihtiyaç duyar).
 pair-open-local-only-no-lan = Bu hub yalnızca bu bilgisayarda dinliyor ({ $listen }), bu yüzden başka bir makine ona ulaşamaz. Diğer makinelerinizin katılabilmesi için bu bilgisayarın ağınızdaki adresinde (ADRES) dinlemesini sağlayın: `agora --listen ADRES:{ $port }` çalıştırın, sonra `agora down` ve `agora` (`agora hub run` ile başlattığınız bir hub da aynı `--listen` seçeneğini alır), ardından yeniden `agora pair open`. `0.0.0.0:{ $port }` ise bu bilgisayarın her IPv4 arayüzünde dinler, varsa genel (public) bir arayüzde de: ona ulaşabilen herkes bağlanmayı deneyebilir (yeni bir makine yine de sizin onayınıza ve sayıya ihtiyaç duyar).
 pair-open-local-join = Bu bilgisayardaki başka bir Agora şimdi katılabilir: orada `agora join { $address }` çalıştırın. O bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
 pair-open-no-address = Hub'ın sertifikası henüz başka bir makinenin bağlanabileceği bir adres içermiyor. Hub'ı `--name ADRES` ile başlatın (yeni makinenin bağlanacağı adres), sonra `agora pair open` komutunu yeniden çalıştırın.
@@ -501,13 +538,19 @@ pair-status-waiting = { $count ->
 }
 pair-closed-now = Hub'ınız yeni makinelere kapalı.
 pair-closed-after = Hub'ınız yeni makinelere yeniden kapalı. Bir tane daha eklemek için `agora pair open` çalıştırın.
+pair-reopened-elsewhere = Hub'ınız başka bir yerde yeni makinelere yeniden açıldı ({ $minutes } dakika sonra kapanır), bu yüzden bu ekran onu açık bırakıyor. Kapatmak için `agora pair close` çalıştırın.
+pair-status-unknown = Hub'ınızın yeni makinelere hâlâ açık olup olmadığı anlaşılamadı ({ $reason }), bu yüzden buradan hiçbir şey kapatılmadı. Görmek için `agora pair status`, kapatmak için `agora pair close` çalıştırın.
 pair-time-up = Verdiğiniz süre doldu. Hub'ınız yeni makinelere kapalı.
 pair-needs-terminal = Bir makineyi onaylamak için bir terminalin başında olmanız gerekir: `agora pair open` yanıtınızı yalnızca klavyeden okur, hiçbir zaman bir boru hattından ya da betikten değil. Bir terminal penceresinde çalıştırın. Hiçbir şey açılmadı.
 pair-too-fast = Bu tuş, soruyu gördükten çok kısa süre sonra geldi, yanıt sayılmaz. İki sayıya da bakın, sonra yanıtlayın.
 pair-input-ended = Buradan yanıt yazılamıyor, bu yüzden hub süresi boyunca açık kalır; isteyen makine bir pencerede sizi bekler, ya da `agora pair close` çalıştırın.
 pair-card = Yeni makine "{ $name }" ({ $os }, { $address }) katılmak istiyor. Sayı { $number }.
 pair-card-ask = O makinedeki sayı aynı mı? Onaylansın mı? [e/H]
-pair-card-ended = "{ $name }" istemekten vazgeçti, yanıtlanacak bir şey kalmadı.
+pair-card-ended = "{ $name }" artık istemiyor (vazgeçti, süresi doldu ya da hub'ınız yeni makinelere kapatıldı), yanıtlanacak bir şey kalmadı.
+pair-card-approved-elsewhere = Bir pencerede yanıtlandı: "{ $name }" onaylandı ve katılıyor.
+pair-card-denied-elsewhere = Bir pencerede yanıtlandı: "{ $name }" reddedildi. O makineye hiçbir şey verilmedi.
+pair-card-next = ---- Son istek burada yanıtınız olmadan bitti. Şimdi başka bir makine istiyor: yanıtlamadan önce adını ve sayısını okuyun. ----
+pair-next-too-fast = Bu tuş yeni isteği okuyabileceğiniz süreden önce geldi, bu yüzden ondan önce yazılan her şeyle birlikte yok sayıldı. İki saniye bekleyin, yukarıdaki ada ve sayıya bakın, sonra yanıtlayın.
 pair-approved = Onaylandı. "{ $name }" katılıyor.
 pair-denied-now = Reddedildi. O makineye hiçbir şey verilmedi.
 pair-replace-ask = "{ $name }" adlı bir makine zaten katılmış. Yenisiyle değiştirilsin mi? Eskisi erişimini kaybeder. [e/H]

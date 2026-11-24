@@ -1,0 +1,9 @@
+{
+  "requestId": "r1",
+  "ok": {
+    "taskHandoffReceipt": {
+      "deliveryId": "AAECAwQFBgcICQoLDA0ODw==",
+      "receiverRunId": "EBESExQVFhcYGRobHB0eHw=="
+    }
+  }
+}

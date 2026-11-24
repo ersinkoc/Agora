@@ -39,6 +39,14 @@ pub const MAX_AGENT_ID: usize = 256;
 /// The most one agent costs in a `List` (`Agents`) reply: its id (length and bytes), pid, and state (a tag and two optional `i32`s).
 pub const MAX_LIST_ENTRY: usize = 4 + MAX_AGENT_ID + 4 + 1 + 5 + 5;
 
+/// The most agents one holder keeps, terminal and pipe agents together, ended ones not yet released included (#983): every one is an
+/// entry of the one `List` (`Agents`) reply, so this is as many as fit a frame (15,251). A `Start` or `StartPipe` past it is
+/// `Refused(Failed)` and nothing starts; the node then runs the agent itself, as for any start the holder cannot make.
+pub const MAX_HELD_AGENTS: usize = (MAX_FRAME - 1 - 4) / MAX_LIST_ENTRY;
+
+// A `List` reply (tag, count, and every entry at its longest) for a full holder fits a frame.
+const _: () = assert!(1 + 4 + MAX_HELD_AGENTS * MAX_LIST_ENTRY <= MAX_FRAME);
+
 // A `Terminal` frame (tag, entry, buffer-dropped flag, buffer length and the whole buffer) and a `PipeData` frame (tag, entry, dropped,
 // eof, two line counts, and everything kept, whose bound is on its encoded size) fit a frame with any id the holder takes.
 const _: () = assert!(1 + MAX_LIST_ENTRY + 1 + 4 + agora_platform::HELD_BUFFER <= MAX_FRAME);
@@ -104,7 +112,7 @@ pub enum Refusal {
     UnknownAgent = 4,
     AgentExists = 5,
     BadRequest = 6,
-    /// The system refused (the program did not start, the signal was not sent).
+    /// The system refused (the program did not start, the signal was not sent), or the holder already keeps [`MAX_HELD_AGENTS`].
     Failed = 7,
 }
 
@@ -771,7 +779,8 @@ impl Reply {
 
 // ----- frames -----
 
-/// Sends one frame (`payload` is a tag and body), with `terminal` attached to its first bytes when given.
+/// Sends one frame (`payload` is a tag and body), with `terminal` attached to its first bytes when given. It ends within
+/// [`FRAME_TIMEOUT`] whatever the stream's write timeout was, and leaves that at [`WRITE_SLICE`].
 pub fn write_frame(
     stream: &mut LocalStream,
     payload: &[u8],
@@ -784,7 +793,10 @@ pub fn write_frame(
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
     let began = Instant::now();
-    // In the frame's last slice each send waits only for what is left of its time (and the stream's own slice is put back after).
+    // Each blocked send waits at most a slice, whatever the stream's own write timeout was: with none, or a longer one, a send begun
+    // before the frame's last slices could block past its deadline. Not failed for this, as below.
+    let _ = stream.set_write_timeout(Some(WRITE_SLICE));
+    // In the frame's last slice each send waits only for what is left of its time (and the slice is put back after).
     let mut capped = false;
     let result = send_frame(stream, &frame, terminal, began, &mut capped);
     if capped {
@@ -850,28 +862,38 @@ fn piece(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(SEND_PIECE)]
 }
 
-/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream
-/// is waited on for writability for what is left (exact, by `poll`), and the stream's write timeout is cut to that as a bound where
-/// the wait cannot be done (Windows). `Ok(false)`: not writable yet, so no send now (the caller asks again, which ends the frame
-/// when its time is spent).
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent. In the frame's last two [`WRITE_SLICE`]s the stream
+/// is first waited on for writability (`LocalStream::wait_writable`, `poll` on Unix) for at most a slice and what is left: a timed
+/// `poll` ends on time, where a socket's own write timeout fires late (a 1 s one by 24-27 ms, measured on Linux, so a send begun with just
+/// over a slice left could end past the deadline), and a send of one [`SEND_PIECE`] into room does not wait. In the last slice the stream's
+/// write timeout is also cut to what is left after the wait, as a bound where a send waits still (room for less than a piece, or
+/// Windows, where the pipe is not polled). Earlier sends are not polled: `poll` reports room only once three quarters of a Unix
+/// socket's buffer are free, which halves the rate of a large frame to a reader that keeps up (measured). `Ok(false)`: not writable
+/// yet, so no send now (the caller asks again, which ends the frame when its time is spent).
 fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<bool, LinkError> {
-    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
-    if left.is_zero() {
-        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    let left = frame_left(began)?;
+    if left >= 2 * WRITE_SLICE {
+        return Ok(true);
     }
+    if !stream.wait_writable(left.min(WRITE_SLICE))? {
+        return Ok(false);
+    }
+    // What is left after the wait: the send's own bound is that, not what was left before it.
+    let left = frame_left(began)?;
     if left < WRITE_SLICE {
-        if !stream.wait_writable(left)? {
-            return Ok(false);
-        }
-        // What is left after the wait: the send's own bound is that, not what was left before it.
-        let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
-        if left.is_zero() {
-            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-        }
         stream.set_write_timeout(Some(left))?;
         *capped = true;
     }
     Ok(true)
+}
+
+/// What is left of the [`FRAME_TIMEOUT`] of a frame that began at `began`; a timeout error when nothing is.
+fn frame_left(began: Instant) -> Result<Duration, LinkError> {
+    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+    if left.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    Ok(left)
 }
 
 fn timed_out(e: &io::Error) -> bool {
@@ -890,20 +912,29 @@ pub type Frame = (Vec<u8>, Option<TerminalHandle>);
 /// used. Reads are in exact sizes (the 4-byte length, then the payload), so a terminal sent with one frame is never taken for the
 /// next one's.
 pub fn read_frame(stream: &mut LocalStream, wait: Duration) -> Result<Option<Frame>, LinkError> {
+    read_frame_at(stream, wait, &Instant::now)
+}
+
+/// [`read_frame`] with its clock given, so a test can say when the frame's time ran out (#1089).
+fn read_frame_at(
+    stream: &mut LocalStream,
+    wait: Duration,
+    now: &dyn Fn() -> Instant,
+) -> Result<Option<Frame>, LinkError> {
     let mut terminal: Option<TerminalHandle> = None;
     let mut set = None;
     let mut head = [0u8; 4];
     let mut have = 0;
     let mut began: Option<Instant> = None;
     while have < head.len() {
-        receive_budget(stream, wait, began, &mut set)?;
+        receive_budget(stream, wait, began, now, &mut set)?;
         match stream.recv_with_terminal(&mut head[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
-                let b = *began.get_or_insert_with(Instant::now);
+                let b = *began.get_or_insert_with(now);
                 terminal = terminal.or(t);
-                past_deadline(b)?;
+                past_deadline(b, now())?;
             }
             // Before the frame: nothing came. Within it: the next receive's budget says whether there is time left.
             Err(e) if timed_out(&e) && began.is_none() => return Ok(None),
@@ -915,18 +946,18 @@ pub fn read_frame(stream: &mut LocalStream, wait: Duration) -> Result<Option<Fra
     if len == 0 || len > MAX_FRAME {
         return Err(LinkError::Malformed("frame (size)"));
     }
-    let began = began.unwrap_or_else(Instant::now);
+    let began = began.unwrap_or_else(now);
     let mut payload = vec![0u8; len];
     let mut have = 0;
     while have < len {
-        receive_budget(stream, wait, Some(began), &mut set)?;
+        receive_budget(stream, wait, Some(began), now, &mut set)?;
         match stream.recv_with_terminal(&mut payload[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
                 terminal = terminal.or(t);
                 // Also after the receive that completes the frame: its last bytes must have come in time.
-                past_deadline(began)?;
+                past_deadline(began, now())?;
             }
             Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
@@ -942,9 +973,10 @@ fn receive_budget(
     stream: &LocalStream,
     wait: Duration,
     began: Option<Instant>,
+    now: &dyn Fn() -> Instant,
     set: &mut Option<Duration>,
 ) -> Result<(), LinkError> {
-    let timeout = receive_timeout(wait, began)?;
+    let timeout = receive_timeout(wait, began, now)?;
     receive_budget_with(timeout, set, |t| stream.set_read_timeout_or_closed(Some(t)))
 }
 
@@ -965,11 +997,15 @@ fn receive_budget_with(
 }
 
 /// The read timeout for the next receive (see [`receive_budget`]), or a timeout error when the frame's time is spent.
-fn receive_timeout(wait: Duration, began: Option<Instant>) -> Result<Duration, LinkError> {
+fn receive_timeout(
+    wait: Duration,
+    began: Option<Instant>,
+    now: &dyn Fn() -> Instant,
+) -> Result<Duration, LinkError> {
     let timeout = match began {
         None => wait,
         Some(b) => {
-            let left = FRAME_TIMEOUT.saturating_sub(b.elapsed());
+            let left = FRAME_TIMEOUT.saturating_sub(now().saturating_duration_since(b));
             if left.is_zero() {
                 return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
             }
@@ -982,9 +1018,9 @@ fn receive_timeout(wait: Duration, began: Option<Instant>) -> Result<Duration, L
     Ok(timeout)
 }
 
-/// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`].
-fn past_deadline(began: Instant) -> Result<(), LinkError> {
-    if began.elapsed() > FRAME_TIMEOUT {
+/// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`] at `now`.
+fn past_deadline(began: Instant, now: Instant) -> Result<(), LinkError> {
+    if now.saturating_duration_since(began) > FRAME_TIMEOUT {
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
     Ok(())
@@ -1192,17 +1228,90 @@ impl Client {
 mod budget_tests {
     use super::*;
 
+    /// #983: a `List` reply for a holder that keeps `MAX_HELD_AGENTS`, every one at its longest, fits a frame (and decodes); one more
+    /// would not, which is why the holder refuses to keep it.
+    #[test]
+    fn a_full_holder_list_fits_a_frame_and_one_more_agent_would_not() {
+        let longest = |n: usize| AgentInfo {
+            agent: format!("{n:0>width$}", width = MAX_AGENT_ID),
+            pid: u32::MAX,
+            state: AgentState::Exited {
+                code: Some(i32::MIN),
+                signal: Some(i32::MAX),
+            },
+        };
+        assert_eq!(MAX_HELD_AGENTS, 15_251);
+        let mut list: Vec<AgentInfo> = (0..MAX_HELD_AGENTS).map(longest).collect();
+        let full = Reply::Agents(list.clone()).encode();
+        assert_eq!(full.len(), 1 + 4 + MAX_HELD_AGENTS * MAX_LIST_ENTRY);
+        assert!(full.len() <= MAX_FRAME);
+        assert_eq!(Reply::decode(&full).unwrap(), Reply::Agents(list.clone()));
+        list.push(longest(MAX_HELD_AGENTS));
+        assert!(Reply::Agents(list).encode().len() > MAX_FRAME);
+    }
+
     #[test]
     fn a_frame_past_its_time_gets_no_receive() {
         let long_ago = Instant::now() - FRAME_TIMEOUT - Duration::from_secs(1);
-        let r = receive_timeout(Duration::from_secs(10), Some(long_ago));
+        let r = receive_timeout(Duration::from_secs(10), Some(long_ago), &Instant::now);
         assert!(matches!(r, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
-        let r = receive_timeout(Duration::from_secs(10), Some(Instant::now())).unwrap();
+        let r =
+            receive_timeout(Duration::from_secs(10), Some(Instant::now()), &Instant::now).unwrap();
         assert!(r <= WRITE_SLICE && !r.is_zero());
         assert_eq!(
-            receive_timeout(Duration::from_secs(10), None).unwrap(),
+            receive_timeout(Duration::from_secs(10), None, &Instant::now).unwrap(),
             Duration::from_secs(10)
         );
+    }
+
+    /// #1089 (Codex review of #789): the receive that completes a frame can itself return after the frame's deadline (a kernel
+    /// timer that fires late, a thread that was not run in time), and the frame is refused then too. The clock here says the time
+    /// ran out from its fourth reading on, the one just after the frame's last receive: the first two readings are taken when the
+    /// 4-byte length arrives, the third before the payload's receive. The whole frame is buffered first, so each receive returns
+    /// at once and only the clock decides. Without the check after the completing receive, the late read would give the frame.
+    #[cfg(unix)]
+    #[test]
+    fn a_frame_whose_last_receive_ends_after_its_deadline_is_refused() {
+        let payload = vec![7u8; 100];
+        let read = |late_from: usize| {
+            let dir = std::env::temp_dir()
+                .join(format!("agora-hl-late-{}-{late_from}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("s.sock");
+            let listener = agora_platform::local_listen(&path).unwrap();
+            let mut w = agora_platform::local_connect(&path).unwrap();
+            let mut r = listener.accept().unwrap();
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&payload);
+            io::Write::write_all(&mut w, &frame).unwrap();
+            let base = Instant::now();
+            let readings = std::cell::Cell::new(0usize);
+            let now = || {
+                readings.set(readings.get() + 1);
+                if readings.get() >= late_from {
+                    base + FRAME_TIMEOUT + Duration::from_millis(1)
+                } else {
+                    base
+                }
+            };
+            let got = read_frame_at(&mut r, Duration::from_secs(10), &now);
+            let _ = std::fs::remove_dir_all(&dir);
+            (got, readings.get())
+        };
+        // Out of time only after the last receive: refused.
+        let (got, _) = read(4);
+        assert!(
+            matches!(&got, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut),
+            "a frame completed after its deadline was accepted: {got:?}"
+        );
+        // A clock that never runs out: the frame is read whole, with the four readings counted on above.
+        let (got, readings) = read(usize::MAX);
+        assert!(
+            matches!(&got, Ok(Some((p, None))) if *p == payload),
+            "{got:?}"
+        );
+        assert_eq!(readings, 4, "the clock readings this test counts on");
     }
 
     #[test]

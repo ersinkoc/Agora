@@ -1,6 +1,7 @@
 // Approvals are answered with a signature from this device's own key (ADR-0020, ADR-0028): ECDSA P-256 over the exact
 // message the node rebuilds (crates/agora-node/src/approvals.rs `signed_message`). The private key never leaves the
 // browser (non-extractable); the node only accepts it after its owner ran `agora node trust` with the public key.
+import { ROLE_REFUSAL } from './startRefusal';
 
 export function signedMessage(nodeId: string, approvalId: string, approved: boolean): Uint8Array {
   const enc = new TextEncoder();
@@ -106,12 +107,13 @@ export function detailSettings(detail: string): [string, string][] {
   }
 }
 
-/** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` is lasting (this device or this
- * person may not answer for that project), so it never says to try again. */
+/** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` (this device may not answer for
+ * that project) and `ROLE_REFUSAL` (this person's role may not, #1044) are lasting, so they never say to try again. */
 export function approvalFailureKey(code: string | undefined): string {
   switch (code) {
     case 'approval.signature_invalid': return 'approval-not-trusted';
     case 'auth.forbidden': return 'approval-forbidden';
+    case ROLE_REFUSAL: return 'approval-role';
     // ADR-0090 Amendment A: the run the request named is gone (the agent ended or restarted), or the request ran out of time.
     case 'agent.not_found': return 'approval-no-longer-valid';
     case 'approval.expired': return 'approval-ran-out';

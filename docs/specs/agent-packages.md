@@ -35,7 +35,7 @@ One entry per agent program and installer kind. Unknown fields are refused. `nam
 | `publisher` | an id declared in `publishers` |
 | `version` | the one exact version this entry installs: `major.minor.patch`, optional `-pre`/`+build`; no tags, ranges or carets |
 | `version_policy` | `pin`: exactly `version`. `track`: `version` is the newest the list names (a new list moves it). `range`: also `min` and `max` (exact), and `min <= version <= max` compared on major.minor.patch. `min`/`max` on `pin` or `track` are refused |
-| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell or interpreter name under any extension (`.exe`, `.cmd`, `.bat`, `.ps1`, `.com`, case-insensitive, repeated: `node.exe`, `pwsh.ps1`, `bash.exe.bat`), and the same rule applies to `cmd` and to the converter |
+| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell, interpreter or package-runner name (`registry_convert::PACKAGE_RUNNERS`) under any extension (`.exe`, `.cmd`, `.bat`, `.ps1`, `.com`, case-insensitive, repeated: `node.exe`, `pwsh.ps1`, `bash.exe.bat`), and the same rule applies to `cmd` and to the converter |
 | `verify` | `{ "args": [...], "regex": "..." }`. `args`: at most 4, each at most 32 characters of `A-Za-z0-9._=-` (so `--version` is fine; a space, quote, `$`, `;`, `|`, `&`, `/` is not). `regex`: at most 200 bytes, compiled by the `regex` crate (linear-time, no backreferences) with a 100 000-byte compile limit and nest limit 20; a pattern that matches the empty string is refused because it would verify nothing. A pattern that matches any non-empty output is still allowed, so a `verify` match alone proves little: a passing `verify` also requires the executable named in `provides` to exist in the agent directory (rung 3 checks both). The version output is matched on its first 4096 bytes only |
 | `installer` | one of the four below |
 
@@ -69,6 +69,21 @@ entries of the signed list. The two do not fork; the differences, all deliberate
 `tests/agent_packages.rs::converter_output_fits_the_entry_format_after_review` runs a real converter fixture (`goose`) through this
 parser to keep the two aligned.
 
+The drafts for the whole registry are committed as `manifests/agents/registry/<id>.package.json` (unsigned; no release step signs an
+agent list yet, so nothing in the repository is a signed entry). Two shapes of real entries: uvx's own `name@version` pin is read as
+`name==version`; a `binary` whose program has a different name on each platform (`tool-linux-amd64`, `tool-windows-arm64.exe`) gets
+`provides = [<registry id>]`, the one name the installer leaves on the path for all of them, and the manifest runs that name (the
+arguments must still be the same on every platform, else `registry.inconsistent_command`). An entry the registry's own
+`quarantine.json` names is skipped (`registry.quarantined`), and a `repository`, `website` or `license_url` that is not an `https://`
+address under the URL rule above refuses the entry (`registry.bad_url`). A `binary` entry whose program (or, with per-platform names,
+whose registry id) is a package runner or fetcher (`registry_convert::PACKAGE_RUNNERS`: `npm`, `pnpm`, `yarn`, `uv`, `uvx`, `npx`,
+`pipx`, `bunx`, `go`, `docker`, `podman`, `corepack` and more) is refused (`registry.forbidden_executable`); the same rule refuses such a
+name in a signed-list entry's `provides` and `cmd`. The registry's `quarantine.json` is required: a clone without it is not converted.
+The maintainer's answers on #1133: quarantined entries stay
+skipped (not shown); a per-platform program is named by the registry id as is (`poolside`); an npx or uvx entry is "not installable
+from the window" and its kind starts only on a signed start (`docs/specs/protocol.md`, "ACP registry kinds"), and a node's policy can
+switch registry kinds off.
+
 ## Rung 3: `agora agent install` (binary-download only)
 `agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]` installs one agent program on the machine the owner is
 typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with the network and the signature tool behind traits) and
@@ -81,10 +96,14 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    again there: a list checked against an older record is refused as `rollback` when another install recorded a newer list
    meanwhile, and the same version is already recorded. The check fails closed (#923): only a missing file means "no list accepted
    yet" (the list is accepted and its version recorded). The file is opened without following a link at its last path component
-   (`list-state.json` itself) and checked on the opened handle; the folders above it are reached by path. The `agents` folder is
-   private to the user and a link there is refused before anything is written, but the lock, the read and the replace are not done
-   relative to one held folder handle, so a process running as the same user that replaces the `agents` folder between those steps
-   is not excluded (the same limit as the later install steps in item 7). A file that is there but cannot be read or understood (no permission, a folder or link at that path, larger than
+   (`list-state.json` itself) and checked on the opened handle. Recording a version opens the `agents` folder once (a link or
+   junction there is refused) and does everything else through that held handle (`agora_platform::ConfinedDir`, #1000): the first
+   read, the install lock (`agents/.lock`), the read again under it, and the replace (a new private file beside the record, renamed
+   over it), so all of them address the same folder even if another folder is put at its path meanwhile. Not covered: the folder is
+   opened by path that one time (a link checked and then opened, as in item 7), the check before an install
+   (`last_seen_version`) is one read by path, the removal of `.lock.stale-*` names left by older versions goes by path, and on
+   Windows the lock file is opened at the held folder's present path and then refused when it is not inside the held folder (an
+   empty file may be left in a folder put there) and a replace fails while another process has the record open. A file that is there but cannot be read or understood (no permission, a folder or link at that path, larger than
    4 KiB, not a JSON object with exactly one whole-number `version`) refuses **every** list, older or newer, with
    `agent.install.index_invalid`, detail `list_state_unreadable`, and is never overwritten. The owner recovers by removing the file
    and running the install again with the newest list from its publisher, which is then accepted as the first one; the message says
@@ -115,8 +134,9 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    link on Unix, a copy on Windows; `<name>/exe` records which launcher name an agent owns (another agent is refused that name, and
    an agent cannot be named `bin`). The `agents` folder itself must not be a link or junction (refused); it is opened once and the
    temporary folder, the staged program, the signature file and the version-folder checks go through `agora_platform::ConfinedDir`
-   (a link is refused, never followed). The later steps (the rename into place, the launcher, `current`, `list-state.json`, the
-   removal of old versions) use ordinary paths inside that private folder, under the install lock; they are not handle-relative.
+   (a link is refused, never followed), as do the install lock and `list-state.json` (item 1). The later steps (the rename into
+   place, the launcher, `current`, the removal of old versions) use ordinary paths inside that private folder, under the install
+   lock; they are not handle-relative.
    The folder is made in `.tmp-<pid>` and renamed into place; nothing in `bin` changes until `verify` passed.
 8. **Verify, then switch.** The new program is run with the entry's `verify` arguments, 10 seconds, stdin closed, an empty environment
    but `PATH=/usr/bin:/bin` (system folders on Windows) and a home inside its own folder (no token or secret of Agora reaches it); the
@@ -125,8 +145,8 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    written; if either step fails the previous launcher is put back first. A failed verify removes the new folder and leaves the old
    launcher. A folder the launcher resolves into is never removed. The new version and the one before it are kept; older
    ones are removed.
-9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` is held with the system's file lock (`File::try_lock`; opened by
-   `agora_platform::open_lock_private`), which the system releases when its owner ends, so a crash never leaves it held and nothing
+9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` is held with the system's file lock (`File::try_lock`; opened through
+   the held `agents` folder with `ConfinedDir::open_lock`, the checks of `agora_platform::open_lock_private`), which the system releases when its owner ends, so a crash never leaves it held and nothing
    is taken over (audit F100: the earlier rename-and-check takeover let two installs hold it at once). A lock held by another install
    is `agent.install.in_progress` after a wait of at most one second (a process another thread is starting holds a copy of the
    handle until its exec). While held, the file holds `pid start boot` of its owner (a reused pid does not look alive) for older

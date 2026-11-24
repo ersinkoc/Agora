@@ -1,5 +1,6 @@
-// Screenshots for ADR-0068 rung 2 (docs/ux/themes.md): the theme editor in both schemes, four themes, and a change refused for
-// contrast, from the built web app's demo window (`#/demo`, no hub). Needs a built web app and playwright-core with a Chromium:
+// Screenshots for ADR-0068 rung 2 (docs/ux/themes.md): the theme editor in both schemes, four themes, a change refused for
+// contrast, and changes applied with warnings (text on a coloured background, #1021; the kit's other colours, #1054), from the
+// built web app's demo window (`#/demo`, no hub). Needs a built web app and playwright-core with a Chromium:
 //   cd apps/web && npm run build
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/screenshots-themes.mjs [dist] [outdir]
 import { createServer } from 'node:http';
@@ -22,13 +23,22 @@ const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbo
 const errors = [];
 async function open(scheme, setup) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
+  // The demo has an agent that needs you, and its "Needs you" card covers the window (and makes the rest of it inert). These shots
+  // are of the theme, so this browser asks for no card or banner (This device > Needs you > Off, `agora.attention.mode`).
+  await ctx.addInitScript(() => { try { localStorage.setItem('agora.attention.mode', 'off'); } catch { /* the card is dismissed below */ } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(url);
   await page.waitForSelector('.ide');
-  // Two agents side by side, then the editor from the command palette.
+  // If the card shows anyway, wait out its dwell and answer Later (Esc), so it does not cover the shot.
+  if (await page.locator('.attention-card').waitFor({ timeout: 1500 }).then(() => true, () => false)) {
+    await page.waitForTimeout(900);
+    await page.keyboard.press('Escape');
+    await page.locator('.attention-card').waitFor({ state: 'detached' });
+  }
+  // One pane, then the editor from the command palette (it opens beside it).
   await page.getByRole('button', { name: 'Layout' }).click();
-  await page.getByRole('menuitem', { name: /^One pane/i }).click();
+  await page.getByRole('menuitemradio', { name: /^One pane/i }).click(); // the presets are a row of tiles (radio items)
   await page.keyboard.press('Control+k');
   await page.keyboard.type('Edit theme');
   await page.keyboard.press('Enter');
@@ -54,6 +64,27 @@ for (const scheme of ['dark', 'light']) {
     await p.locator('section[aria-label="Theme"]').getByText('Readability').scrollIntoViewIfNeeded();
   });
   await shot(page, `adr68-theme-contrast-warning-${scheme}`); await ctx.close();
+}
+// A customized theme applied with warnings, shot as the editor's own pane scrolled to Readability: text on a coloured background
+// (#1021), and the kit's other colours (#1054: an agent's badge, a role's icon on its chip).
+const custom = (values) => async (p) => {
+  await p.getByRole('button', { name: 'Customize' }).click();
+  for (const [label, value] of values) {
+    const id = await p.locator('label', { hasText: new RegExp(`^${label}$`) }).getAttribute('for');
+    await p.locator(`[id="${id}"]`).fill(value);
+  }
+  await p.locator('section[aria-label="Theme"]').getByText('Readability').scrollIntoViewIfNeeded();
+};
+const pane = (page) => page.locator('section[aria-label="Theme"]').locator('xpath=ancestor::*[contains(@class, "pane") or @data-pane][1]');
+for (const [file, scheme, values] of [
+  ['theme-tint-warning', 'dark', [['Idle', '#707078']]], ['theme-tint-warning', 'light', [['Idle', '#80808a']]],
+  ['theme-kit-warning', 'dark', [['Text', '#9c9ca4'], ['Idle', '#66666e']]], ['theme-kit-warning', 'light', [['Idle', '#868692']]],
+]) {
+  const { page, ctx } = await open(scheme, custom(values));
+  const f = `${out}/${file}-${scheme}.png`;
+  await ((await pane(page).count()) ? pane(page) : page.locator('section[aria-label="Theme"]')).screenshot({ path: f });
+  console.log(f);
+  await ctx.close();
 }
 await browser.close();
 server.close();

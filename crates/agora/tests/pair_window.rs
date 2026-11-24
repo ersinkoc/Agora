@@ -284,6 +284,12 @@ fn the_window_opens_the_switch_reads_the_card_and_approving_through_the_owner_co
         std::fs::read_to_string(machine.join("link").join("node-id")).unwrap(),
         "laptop"
     );
+    // One machine per opening, whoever approved (#942, RM-07): the approval from the window closed the hub to new machines, as an
+    // approval at `agora pair open` does.
+    assert!(
+        !status(&mut window).open,
+        "the hub stayed open after the window approved"
+    );
     // Both windows hear how it ended, and the card is gone.
     assert_eq!(
         decided(&mut window, &card.pair_id),
@@ -303,7 +309,11 @@ fn the_window_opens_the_switch_reads_the_card_and_approving_through_the_owner_co
         "a stale card came back"
     );
 
-    // The window closes the switch with the owner command too.
+    // The window opens it again, and closes it with the owner command too.
+    window
+        .command_info("", Cmd::PairOpen(v1::PairOpen {}), WAIT)
+        .unwrap();
+    assert!(status(&mut window).open);
     window
         .command_info("", Cmd::PairClose(v1::PairClose {}), WAIT)
         .unwrap();
@@ -336,6 +346,10 @@ fn a_name_that_already_belongs_to_a_machine_is_refused_until_the_owner_says_repl
     let card = card_for(&mut window, "laptop", &mut Vec::new());
     approve(&mut window, &card.pair_id, false).unwrap();
     assert!(j.finish().0);
+    // The approval closed the hub to new machines; the owner opens it again for the next one.
+    window
+        .command_info("", Cmd::PairOpen(v1::PairOpen {}), WAIT)
+        .unwrap();
 
     // Another machine asks for the same name: the hub refuses the approval and keeps the request, saying why in a parameter the card
     // reads (`pair.state`, `state = name_in_use`).

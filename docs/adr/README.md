@@ -118,3 +118,12 @@ Date: YYYY-MM-DD
 | 0099 | A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell rejected 2026-11-22) | Accepted |
 | 0100 | The terminal repaint carries the program's modes and its history | Accepted |
 | 0101 | A structured agent can be allowed always for its session | Accepted |
+| 0102 | Red is the one danger colour; amber means only "needs you" | Accepted |
+| 0103 | A window gets recent Team chat history | Accepted |
+| 0104 | A kept agent keeps its conversation, usage and options across a node restart | Accepted |
+| 0105 | Confined Node.js agents on Windows: keep the restricted token, fix the stdio pipe in libuv | Accepted |
+| 0106 | A window is told the role of the person it signed in as | Accepted |
+| 0107 | `agent.list` lists the agents a node found interrupted | Accepted |
+| 0108 | Forgetting an agent in the window reaches its node, which deletes its saved conversation | Accepted |
+| 0109 | Recover a cross-node task handoff after a hub restart | Accepted |
+| 0111 | Adapters report where they cut text, so redaction sees every edge | Accepted |

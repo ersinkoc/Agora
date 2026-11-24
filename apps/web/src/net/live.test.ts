@@ -48,6 +48,9 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+    // The team chat draws the sender's avatar from its key, and names the other machine of a message between machines.
+    expect(m.map((x) => x.fromId)).toEqual(['a/x', 'a/x']);
+    expect(m.map((x) => x.toMachine)).toEqual(['b', undefined]);
   });
 
   it('lists a message between machines once, from its sender, marked, whichever copy comes first (#905)', () => {
@@ -576,6 +579,7 @@ describe('refused sessions', () => {
 });
 
 describe('shared terminal size', () => {
+  // ADR-0106: once the connection has said the role (here an older hub's first frame, the snapshot), never before it.
   it('says the window\'s size again right behind every subscription, after a reconnect too', async () => {
     const sockets: FakeSocket[] = [];
     const live = connectLive({
@@ -585,6 +589,7 @@ describe('shared terminal size', () => {
     });
     const first = sockets[0] as FakeSocket;
     first.onopen?.();
+    first.deliver(EVENT_KIND.SNAPSHOT, v1.Snapshot.encode({ pos: 1 }).finish());
     const session = live.terminal('laptop', 't-1').connect(() => {});
     session.resize(120, 40);
     const commands = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.kind === 0 && (f.streamId === STREAM_COMMANDS || f.streamId >= 3))
@@ -595,6 +600,8 @@ describe('shared terminal size', () => {
     await new Promise((r) => setTimeout(r, 10));
     const second = sockets[1] as FakeSocket;
     second.onopen?.();
+    expect(shape(second)).toEqual(['subscribe']);
+    second.deliver(EVENT_KIND.SNAPSHOT, v1.Snapshot.encode({ pos: 1 }).finish());
     expect(shape(second)).toEqual(['subscribe', '120x40']);
     live.close();
   });

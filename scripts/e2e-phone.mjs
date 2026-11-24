@@ -185,8 +185,10 @@ try {
   // Allow on the list answers the request, signed by this browser like anywhere else.
   await page.goto(`${origin}/#/`);
   const allow = page.locator('.phone').getByRole('button', { name: 'Allow', exact: true });
+  // T44: Allow does nothing for its dwell after the screen is drawn (aria-disabled meanwhile); wait it out, as a person reading it does.
+  await page.locator('.phone button.kit-btn--primary:not([aria-disabled])', { hasText: /^Allow$/ }).first().waitFor({ timeout: 10000 });
   await allow.first().click();
-  await page.waitForFunction(() => !document.querySelector('.phone-card--needs .button--primary'), null, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(() => !document.querySelector('.phone .kit-btn--primary'), null, { timeout: 10000 }).catch(() => {});
   check((await allow.count()) === 0, 'one tap on Allow answers the request and it leaves the list');
   check((await page.locator('[role=alert]').count()) === 0, 'no error is shown');
 

@@ -12,6 +12,7 @@ cli-usage =
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
       agora agent prompt AGENT_ID TEXT... [--socket PATH]
+      agora agent resume AGENT_ID [--again] [--socket PATH]
       agora agent list [--socket PATH]
       agora agent kinds [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
@@ -19,6 +20,9 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
+      agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
+      agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
@@ -39,6 +43,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
       agora node untrust DEVICE_ID [--data DIR]
       agora node secret set NAME | list | remove NAME [--data DIR]
+      agora history purge [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -49,6 +54,8 @@ cli-node-events-set-aside = Events recorded before this machine was linked as { 
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
 cli-agent-prompted = Sent the prompt to agent { $agent_id }
+cli-agent-resumed = Resumed agent { $agent_id } in { $worktree }
+cli-agent-started-again = Started agent { $agent_id } again in { $worktree } (a new conversation)
 cli-agent-list-empty = This node has no agents.
 cli-agent-kinds-empty = This node has no agent descriptions.
 cli-terminal-detached = Detached from { $agent_id }.
@@ -78,6 +85,7 @@ doctor-git = Git is available ({ $detail }).
 doctor-git-missing = Git was not found. Agora needs it to give each agent its own workspace.
 doctor-git-identity-missing = Agents here have no git identity, so they cannot commit. Set "user.name" and "user.email" with "git config --global".
 doctor-control-token-reachable = Agents here could read the node's control token ({ $detail }), because the node's folder lies inside a folder agents may read or write (a node folder under /tmp). Agents will not start. Move the node's folder (--data) outside the folders in the policy.
+doctor-protected-path-reachable = Agents here could read this node's own files ({ $detail }), because they lie inside a folder agents may read or write (under /tmp, /var, /opt, /etc or /run, or a folder in the policy), and this system cannot keep them closed there. Agents will not start. Move the node's data folder (--data) or its agent types folder (--manifests) outside those folders, for example under your home folder.
 doctor-sockets-profile = The sandbox profile on this machine refuses unix sockets agents were not given (the ssh-agent, the session bus, docker, tmux). A macOS developer measured this on a real Mac on 2026-11-17: the agent's own socket works, another socket is refused, and the name resolver works. Other system sockets (DNS in every tool, git over https, cargo, npm, Claude Code, Codex) have not been measured with real agents yet, so one that needs a socket the list does not name may fail; add it with `sandbox.sockets`.
 doctor-sockets-abstract = This kernel cannot restrict unix sockets that are files: an agent can still reach an ssh-agent, a session bus, docker or tmux socket (only abstract sockets are closed). The environment scrub is the only other layer, and an agent that looks for the socket can find it.
 doctor-sockets-none = This machine ({ $detail }) cannot restrict unix sockets: the environment scrub is the only layer, and an agent that looks for an ssh-agent, session bus, docker or tmux socket can find it.
@@ -93,6 +101,7 @@ doctor-manifests = { $detail ->
     }
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is found{ $by ->
         [agora] , installed by Agora (version { $version })
@@ -101,6 +110,7 @@ doctor-agent-installed = { $detail } ({ $from ->
     }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
@@ -127,9 +137,23 @@ doctor-policy-problems = { $detail ->
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
 doctor-agent-broken = { $detail } ({ $from ->
         [built-in] built in
+        [registry] from the ACP registry, untested
        *[folder] from the manifests folder
     }): `{ $program }` is there but this account may not run it. Make the file executable, or reinstall it.
 doctor-agent-unsafe = { $detail }: `{ $program }` was installed by Agora, but its folder or file is not safe (another user could change it), so it is not used: using the one on your PATH, if there is one. Reinstall it with `agora agent install`, or make the install folders yours alone.
+doctor-registry-kinds = { $detail ->
+        [one] 1 agent
+       *[other] { $detail } agents
+    } of the ACP registry are known here, untested in Agora; { $ready } of them find their program on this machine. Settings → Agents in the window lists them all.
+doctor-runner-folders-left = { $detail ->
+        [one] 1 folder
+       *[other] { $detail } folders
+    } that agents of the ACP registry started in could not be removed in full (deeper or larger than the node removes, or with names it does not use); they stay in the data folder's `runner` folder, named `….left`, and can be deleted by hand.
+doctor-registry-off = The ACP registry's agents are switched off on this machine (policy line `agents.registry = off`): it neither offers nor starts them. Your own agent descriptions are not affected.
+doctor-registry-denied = { $detail ->
+        [one] 1 agent of the ACP registry is
+       *[other] { $detail } agents of the ACP registry are
+    } switched off on this machine by the policy line `agents.registry.deny`.
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
     [one] 1 agent now
@@ -238,6 +262,14 @@ cli-hub-user-none = No team members yet. Add one with `agora hub user add NAME -
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = There is no team member called { $id }.
 cli-hub-user-project =   works in { $project }
+cli-hub-user-project-path =   works in { $project } ({ $path })
+cli-hub-user-projects-none = No machine has reported a project to this hub yet.
+cli-hub-user-projects-line = { $name }    { $path }
+cli-hub-user-projects-line-host = { $name }    { $path }    (machine { $host })
+cli-hub-user-unknown-machine = No machine called { $machine } has reported to this hub. `agora hub user projects` lists the projects you can give access to.
+cli-hub-user-unknown-project = This hub knows no project called { $project } on { $machine }. `agora hub user projects` lists the projects you can give access to.
+cli-hub-user-ambiguous-project = More than one project fits { $project }. Choose one by its machine and folder, for example `agora hub user grant { $id } { $machine } { $path }`:
+cli-hub-user-not-granted = { $id } has no access to { $project }.
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
 cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.
@@ -489,6 +521,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = That is not a usable name: use letters, digits and underscores only, not starting with a digit, and not a name the system or Agora uses.
 cli-secret-bad-value = The value must be one line of at most 8192 bytes, with no control characters. Nothing was stored.
 cli-secret-failed = The secret could not be stored or read here. Check that the node's data folder is yours and can be written.
+cli-history-purged = Removed the chat history this machine kept for its agents.
+cli-history-purge-failed = The chat history could not be removed. Check that the node's data folder is yours and can be written.
 cli-secret-name-collides = A secret whose name differs only in capital letters is already stored. Use that exact name, or remove it first.
 
 # ADR-0065: `agora pair` on the hub and `agora join` on the new machine.
@@ -500,7 +534,10 @@ pair-open-next = On the new machine, run `agora join { $address }`. The new mach
 pair-open-also = If that does not reach this computer from the new machine, the hub also answers at: { $addresses }.
 pair-open-next-name = On the new machine, run `agora join { $address }`, if that name leads to this computer from there: the hub's certificate names it, but your network decides where it leads. The new machine shows a number, and this screen shows one too: approve only if they are the same.
 pair-open-names = These names are in the hub's certificate and may also reach it, if your network resolves them to this computer: { $names }.
+pair-open-next-elsewhere = On the new machine, run `agora join { $address }`, if that address leads to this computer from there: the hub's certificate names it, but no interface of this computer has it now, so it may be an old address, or one that leads here through your network. The new machine shows a number, and this screen shows one too: approve only if they are the same.
+pair-open-elsewhere = The hub's certificate also names these addresses, which are not on this computer's interfaces now: { $addresses }. One may be an old address, or lead here through your network.
 pair-open-local-only = This hub listens on this computer only ({ $listen }), so another machine cannot reach it. To let your other machines join, make it listen on this computer's address on your network: run `agora --listen { $lan }`, then `agora down` and `agora` (a hub you started with `agora hub run` takes the same `--listen`), then `agora pair open` again. `0.0.0.0:{ $port }` instead listens on every IPv4 interface of this computer, a public one too if it has one: anyone who can reach it can try to connect (a new machine still needs your approval and the number).
+pair-open-local-only-several = This hub listens on this computer only ({ $listen }), so another machine cannot reach it. To let your other machines join, make it listen on this computer's address on the network they are on. This computer has several addresses: { $lans }. Run `agora --listen ADDRESS:{ $port }` with the one on that network, then `agora down` and `agora` (a hub you started with `agora hub run` takes the same `--listen`), then `agora pair open` again. `0.0.0.0:{ $port }` instead listens on every IPv4 interface of this computer, a public one too if it has one: anyone who can reach it can try to connect (a new machine still needs your approval and the number).
 pair-open-local-only-no-lan = This hub listens on this computer only ({ $listen }), so another machine cannot reach it. To let your other machines join, make it listen on this computer's address on your network (ADDRESS): run `agora --listen ADDRESS:{ $port }`, then `agora down` and `agora` (a hub you started with `agora hub run` takes the same `--listen`), then `agora pair open` again. `0.0.0.0:{ $port }` instead listens on every IPv4 interface of this computer, a public one too if it has one: anyone who can reach it can try to connect (a new machine still needs your approval and the number).
 pair-open-local-join = Another Agora on this same computer can join now: run `agora join { $address }` there. It shows a number, and this screen shows one too: approve only if they are the same.
 pair-open-no-address = The hub's certificate names no address another machine can dial yet. Start the hub with `--name ADDRESS` (the address the new machine will dial), then run `agora pair open` again.
@@ -513,13 +550,19 @@ pair-status-waiting = { $count ->
 }
 pair-closed-now = Your hub is closed to new machines.
 pair-closed-after = Your hub is closed to new machines again. Run `agora pair open` to add another.
+pair-reopened-elsewhere = Your hub was opened for new machines again somewhere else (it closes in { $minutes } minutes), so this screen leaves it open. Run `agora pair close` to close it.
+pair-status-unknown = Could not tell whether your hub is still open to new machines ({ $reason }), so nothing was closed from here. Run `agora pair status` to see, and `agora pair close` to close it.
 pair-time-up = The time you gave is up. Your hub is closed to new machines.
 pair-needs-terminal = Approving a machine needs you at a terminal: `agora pair open` reads your answer from the keyboard only, never from a pipe or a script. Run it in a terminal window. Nothing was opened.
 pair-too-fast = That key came too soon after the question to be an answer. Look at both numbers, then answer.
 pair-input-ended = No answer can be typed here, so the hub stays open for its time; a machine that asks waits for you in a window, or run `agora pair close`.
 pair-card = New machine "{ $name }" ({ $os }, { $address }) wants to join. Number { $number }.
 pair-card-ask = Is it the same number on that machine? Approve it? [y/N]
-pair-card-ended = "{ $name }" stopped asking, so there is nothing to answer.
+pair-card-ended = "{ $name }" is no longer asking (it stopped, ran out of time, or your hub was closed to new machines), so there is nothing to answer.
+pair-card-approved-elsewhere = Answered in a window: "{ $name }" was approved and is joining.
+pair-card-denied-elsewhere = Answered in a window: "{ $name }" was denied. Nothing was given to that machine.
+pair-card-next = ---- The last request ended without your answer here. A different machine is asking now: read its name and number before you answer. ----
+pair-next-too-fast = That key came before you could read the new request, so it was ignored with everything typed before it. Wait two seconds, look at the name and number above, then answer.
 pair-approved = Approved. "{ $name }" is joining.
 pair-denied-now = Denied. Nothing was given to that machine.
 pair-replace-ask = A machine named "{ $name }" has already joined. Replace it? The old one loses its access. [y/N]

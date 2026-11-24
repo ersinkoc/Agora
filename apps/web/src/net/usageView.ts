@@ -5,7 +5,7 @@ import { contextPercent } from '../components/sessionChoice';
 // pay-per-token, are how most people pay, so a dollar figure says little; tokens, context and time say what happened.
 // Pure, so it is tested without a page. No money anywhere: not an estimate, not what an agent says it cost.
 
-export interface UsageAgent { id: string; name: string; tokens: number; contextPct?: number; activeMs?: number; running: boolean }
+export interface UsageAgent { id: string; name: string; accent: string; kind: string; tokens: number; contextPct?: number; activeMs?: number; running: boolean }
 export interface UsageGroup { key: string; machine: string; project: string; tokens: number; activeMs: number; agents: UsageAgent[] }
 export interface UsageView {
   totalTokens: number;
@@ -40,7 +40,7 @@ export function usageView(fleet: readonly AgentTileModel[], now: number): UsageV
     const pk = `${a.machineId ?? a.machine}\u0000${a.projectId ?? a.workspace}`;
     const g = projects.get(pk) ?? { key: pk, machine: a.machine, project: a.project || a.workspace, tokens: 0, activeMs: 0, agents: [] };
     g.tokens += tokens; g.activeMs += active ?? 0;
-    g.agents.push({ id: a.id, name: a.name, tokens, contextPct: pct, activeMs: active, running: !a.closed });
+    g.agents.push({ id: a.id, name: a.name, accent: a.accent, kind: a.kind || a.name, tokens, contextPct: pct, activeMs: active, running: !a.closed });
     projects.set(pk, g);
   }
   const heaviest = <T extends { tokens: number }>(l: T[]) => l.sort((x, y) => y.tokens - x.tokens);

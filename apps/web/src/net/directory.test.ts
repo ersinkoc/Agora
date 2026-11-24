@@ -1,6 +1,8 @@
 import { expect, it } from 'vitest';
 import { directoryMessage, directoryReasonKey, resumeReasonKey, signDirectory } from './directory';
 import { thisDevice } from './approval';
+import { ROLE_REFUSAL } from './startRefusal';
+import { t } from '../i18n';
 import { applyEvent, emptyView, fromSnapshot, tiles, projectChoices } from './view';
 import { machineKey } from '../model';
 import { agora } from '../gen/agora.js';
@@ -85,6 +87,14 @@ it('says a device limited to other projects is refused, not that the folder or t
   expect(directoryReasonKey('protocol.invalid_message')).toBe('start-directory-failed');
   expect(directoryReasonKey(undefined)).toBe('start-directory-failed');
   expect(resumeReasonKey('auth.forbidden')).toBe('resume-failed-forbidden');
+});
+it('says the person\'s role, not a device limit, when the hub refused a folder or a resume for it (#1044)', () => {
+  expect(directoryReasonKey(ROLE_REFUSAL)).toBe('start-directory-role');
+  expect(resumeReasonKey(ROLE_REFUSAL)).toBe('resume-failed-role');
+  for (const key of ['start-directory-role', 'resume-failed-role']) {
+    expect(t(key)).toContain('Your role');
+    expect(t(key)).not.toContain('device');
+  }
 });
 
 it('signs chosen launch settings in the order sent (ADR-0066, directory-action-v4)', async () => {

@@ -4,6 +4,9 @@
 use crate::error::{Error, ErrorCode};
 use crate::v1::{Hello, Resume, ResumeOk, Welcome};
 
+/// ADR-0109: durable cross-node task handoff delivery on the hub/node link.
+pub const TASK_HANDOFF_V1: &str = "mesh.task_handoff.v1";
+
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Support {
@@ -58,6 +61,8 @@ pub fn negotiate(
         capabilities: caps,
         peer_id: peer_id.to_string(),
         server_time_ms: now_ms,
+        // ADR-0106: a hub fills it in for a client connection, from the person's access; a node's stays unspecified.
+        person_role: crate::v1::PersonRole::Unspecified as i32,
     })
 }
 

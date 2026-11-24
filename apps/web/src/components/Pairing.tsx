@@ -74,7 +74,7 @@ export function PairWindowControl({ ui, now: clock, intro }: { ui: PairingUi; no
           {reason && <span className="text-xs text-muted">{reason}</span>}
         </div>
       </>}
-      {failed && <p role="alert" className="m-0 text-xs text-needs-you">{t('pair-window-failed')}</p>}
+      {failed && <p role="alert" className="m-0 text-xs text-danger">{t('pair-window-failed')}</p>}
     </div>
   );
 }

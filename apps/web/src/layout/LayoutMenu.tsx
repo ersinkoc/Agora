@@ -143,7 +143,7 @@ function ImportDialog({ onImport, onClose }: { onImport: (l: import('./tree').La
           if (f) void f.text().then((s) => { setText(s); setError(undefined); }).catch(() => setError('json'));
         }} />
       </label>
-      {error && <p id="layout-import-error" role="alert" className="m-0 text-needs-you">{errorText(error)}</p>}
+      {error && <p id="layout-import-error" role="alert" className="m-0 text-danger">{errorText(error)}</p>}
       <div className="flex justify-end gap-2">
         <button type="button" className="button" onClick={onClose}>{t('layout-cancel')}</button>
         <button type="button" className="button button--primary" disabled={!text.trim()} onClick={submit}>{t('layout-import-do')}</button>

@@ -5,10 +5,11 @@ import { parseHunks } from '../net/diff';
 import { blocks, inlines, type Block, type Inline } from '../net/markdown';
 import { titleSays, toolView, type ToolAction } from '../net/tool';
 import { actionOf, changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
-import { callMs, currentStep, initial, outputTail, planProgress, planSteps, stepTone, type StepStatus, type StepTone } from '../net/chatView';
+import { callMs, currentStep, outputTail, planProgress, planSteps, stepTone, type StepStatus, type StepTone } from '../net/chatView';
 import { preciseDuration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
+import { AgentAvatar } from './kit';
 import { alwaysText } from '../net/always';
 
 // How one conversation entry looks. Everything here was written by an agent or a person: it is drawn as React text, never as HTML
@@ -22,8 +23,9 @@ function Inlines({ parts }: { parts: Inline[] }) {
   return <>{parts.map((p, i) => p.kind === 'code'
     ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{p.text}</code>
     : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{p.text}</strong>
-      // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window.
-      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2 hover:brightness-110">{p.text}</a>
+      // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window. On a touch screen it reaches
+      // into the lines above and below (#1073); its text, in the inner span, stays above a neighbouring link's reach (`.tap-inline`).
+      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{p.text}</span></a>
         : <span key={i}>{p.text}</span>)}</>;
 }
 
@@ -45,7 +47,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
   const html = useHighlightedCode(lang, text);
   return (
     <div className="overflow-hidden rounded-s border border-line bg-surface-1">
-      <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-xs text-muted"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
+      <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-xs text-muted pointer-coarse:h-11"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
       <pre dir="ltr" className="m-0 max-h-96 overflow-auto p-3 font-mono text-xs leading-5">
         {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
       </pre>
@@ -63,7 +65,8 @@ function BlockView({ block }: { block: Block }) {
     case 'quote': return <blockquote className="m-0 border-s-2 border-line ps-3 whitespace-pre-wrap text-muted"><Inlines parts={block.inlines} /></blockquote>;
     case 'code': return <CodeBlock lang={block.lang} text={block.text} />;
     case 'table': return block.head && block.rows ? (
-      <div className="overflow-x-auto rounded-s border border-line">
+      // A link in its last row reaches past it to a finger on a touch screen (#1073): that must not make the table scroll up and down.
+      <div className="overflow-x-auto rounded-s border border-line pointer-coarse:overflow-y-hidden">
         <table className="w-full border-collapse text-start text-[0.8125rem]">
           <thead className="bg-surface-1"><tr>{block.head.map((c, i) => <th key={i} className="border-b border-line px-3 py-1.5 text-start font-semibold text-ink"><Inlines parts={c} /></th>)}</tr></thead>
           <tbody>{block.rows.map((r, i) => <tr key={i} className="border-t border-line first:border-t-0">{r.map((c, j) => <td key={j} className="px-3 py-1.5 align-top"><Inlines parts={c} /></td>)}</tr>)}</tbody>
@@ -84,10 +87,12 @@ const clock = (atMs: number): string => new Date(atMs).toLocaleTimeString([], { 
 const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }) {
   const parsed = useMemo(() => blocks(text), [text]);
   return (
-    <div className="group/msg relative max-w-3xl" title={fullStamp(atMs)} data-role="agent">
+    <div className="group/msg relative isolate max-w-3xl" title={fullStamp(atMs)} data-role="agent">
       <span className="sr-only">{t('chat-agent')}: </span>
       <div className="grid gap-2 leading-relaxed">{parsed.map((b, i) => <BlockView key={i} block={b} />)}</div>
-      <CopyButton text={text} label="chat-copy-reply" className={`absolute end-0 top-0 ${HOVER}`} />
+      {/* On a touch screen it is always shown at full size, so it sits under the reply rather than over its top corner, where it would
+          cover a code block's own Copy or the end of the first line (#1073). */}
+      <CopyButton text={text} label="chat-copy-reply" className={`absolute end-0 top-0 pointer-coarse:static pointer-coarse:ms-auto pointer-coarse:grid ${HOVER}`} />
     </div>
   );
 });
@@ -97,7 +102,7 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 // (`state`); either way it is drawn quieter, as what it is.
 export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
-    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border bg-accent/15 px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed border-accent/40 opacity-80' : 'border-accent/30'}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
+    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-(--line-accent) bg-tint-accent px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
       <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
         {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
@@ -108,11 +113,12 @@ export const UserText = memo(function UserText({ line, state }: { line: ChatLine
   );
 });
 
-// An agent's turn: its avatar tile, its name, the model it runs and when it began, and everything it said and did beside them.
-export function Turn({ name, model, atMs, children }: { name: string; model?: string; atMs: number; children: ReactNode }) {
+// An agent's turn: its avatar (the kit's agent avatar, in the agent's own colour, as on its tile and rows), its name, the model it runs and when
+// it began, and everything it said and did beside them.
+export function Turn({ name, accent, kind, model, atMs, children }: { name: string; accent?: string; kind?: string; model?: string; atMs: number; children: ReactNode }) {
   return (
     <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={name}>
-      <div aria-hidden className="grid size-7 place-items-center rounded-m border border-line bg-surface-1 text-xs font-semibold text-accent max-md:hidden">{initial(name)}</div>
+      <span className="max-md:hidden" data-turn-avatar><AgentAvatar accent={accent ?? 'var(--agent-slate)'} kind={kind || name} /></span>
       <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
         <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
         {model && <span className="truncate">{model}</span>}
@@ -128,7 +134,7 @@ export function Turn({ name, model, atMs, children }: { name: string; model?: st
 export function Thought({ text, seconds, live = false }: { text: string; seconds?: number; live?: boolean }) {
   return (
     <details className="group max-w-3xl rounded-m border border-dashed border-line" data-thought={live ? 'live' : ''}>
-      <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] text-muted italic hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
+      <summary className="flex min-h-9 pointer-coarse:min-h-11 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] text-muted italic hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
         <Icon name="think" className="size-3.5" />
         <span>{live ? t('chat-thinking') : seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
         <Icon name="chevron" className="ms-auto size-3 transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
@@ -143,7 +149,7 @@ function inlineTitle(title: string): Inline[] {
   return /^`[^`]+`$/.test(title) ? [{ kind: 'code', text: title.slice(1, -1) }] : inlines(title);
 }
 
-const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-needs-you', plain: 'text-muted' };
+const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-working', plain: 'text-muted' };
 const CHEVRON = 'size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!';
 
 // The lines of a change: a hunk bar, then each line with its number; added and deleted lines say so by glyph and bar as well as colour.
@@ -162,7 +168,7 @@ function DiffLines({ lines: all, fallback }: { lines: ReturnType<typeof parseHun
             <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text || ' '}</span>
           </div>
         ))}
-      {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
+      {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
     </pre>
   );
 }
@@ -198,7 +204,7 @@ function OutputBlock({ text, cut }: { text: string; cut?: boolean }) {
   return (
     <div data-output>
       <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{tail.text}</pre>
-      {tail.hidden > 0 && <button type="button" className="mt-1 text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: tail.hidden + OUTPUT_TAIL })}</button>}
+      {tail.hidden > 0 && <button type="button" className="mt-1 text-xs text-muted underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: tail.hidden + OUTPUT_TAIL })}</button>}
       {cut && <p className="m-0 mt-1 text-xs text-muted">{t('tool-output-cut')}</p>}
     </div>
   );
@@ -230,11 +236,11 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
   const heading = v.raw
     ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
     : <>
-      <span className="min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
+      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
       {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
       {line.locations && <PlaceChips places={line.locations} skip={showsSubject ? v.subject : undefined} />}
     </>;
-  const row = 'flex min-h-9 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
+  const row = 'flex min-h-9 pointer-coarse:min-h-11 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
   const icon = <span aria-hidden className={`grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 ${TONE[stepTone(action)]}`}><Icon name={ICONS[action]} className="size-3.5" /></span>;
   const tail = <>
     {took !== undefined && <span className="flex-none text-xs text-muted tabular-nums" data-took>{preciseDuration(took)}</span>}
@@ -287,15 +293,15 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended
   const [flagged, setFlagged] = useState(!!flag);
   if (flag && !flagged) setFlagged(true);
   return (
-    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
-      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
+    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag === 'needs-you' ? 'border-needs-you/70' : flag ? 'border-danger/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
+      <summary className="flex min-h-9 pointer-coarse:min-h-11 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
         {spinning && !flag
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
           : <Icon name="board" className="size-3.5 flex-none" />}
         <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
         <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
         <span className="flex-1 md:hidden" />
-        {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
+        {flag && <span className={`flex flex-none items-center gap-1 text-xs font-medium ${flag === 'needs-you' ? 'text-needs-you' : 'text-danger'}`}><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
         <Icon name="chevron" className={CHEVRON} />
       </summary>
       <div className="grid grid-cols-1 divide-y divide-line border-t border-line">
@@ -315,7 +321,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
   const dir = cut > 0 ? line.path.slice(0, cut + 1) : '';
   return (
     <details open={d.lines.length <= 24} className="group max-w-3xl overflow-hidden rounded-m border border-line bg-surface-1" data-diff-path={line.path}>
-      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
+      <summary className="flex min-h-9 pointer-coarse:min-h-11 min-w-0 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
         <span aria-hidden className="grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 text-accent"><Icon name="pencil" className="size-3.5" /></span>
         <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
         <Counts added={d.added} removed={d.removed} />
@@ -336,13 +342,13 @@ export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLi
   const removed = files.reduce((n, f) => n + f.removed, 0);
   const base = (p: string) => p.slice(p.replace(/\\/g, '/').lastIndexOf('/') + 1);
   return (
-    <div className="flex w-full flex-none flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-line bg-surface-1 px-3.5 py-2.5" data-files-changed>
+    <div className="flex w-full flex-none flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-line bg-surface-1 px-3.5 py-2.5 pointer-coarse:gap-y-3" data-files-changed>
       <Icon name="diff" className="size-4 flex-none text-muted" />
       <b className="font-semibold text-ink">{t('chat-files-title', { count: files.length })}</b>
       <Counts added={added} removed={removed} />
-      <ul className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0">
+      <ul className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0 pointer-coarse:gap-y-5">
         {files.slice(0, SHOWN_FILES).map((f) => <li key={f.path} className="min-w-0">
-          <button type="button" dir="ltr" title={f.path} className="inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
+          <button type="button" dir="ltr" title={f.path} className="tap-target inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
             <span className="truncate">{files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path)}</span>
           </button>
         </li>)}
@@ -362,7 +368,7 @@ export function PlanCard({ steps, status, label }: { steps: readonly string[]; s
   // The step being worked on: marked for a screen reader (`aria-current`) and in weight, as well as by its dot.
   const now = status ? currentStep(status) : undefined;
   return (
-    <div className="max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
+    <div className="isolate max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
       <div className="mb-2 flex items-center gap-2 font-semibold text-ink">
         <Icon name="board" className="size-4 text-accent" />{label}
         {progress && <small className="font-normal text-muted">{t('chat-plan-progress', { done: progress.done, total: progress.total })}</small>}
@@ -392,7 +398,7 @@ const PlanEntry = memo(function PlanEntry({ line, latest }: { line: ChatLine; la
   if (!latest) {
     return (
       <details className="max-w-3xl text-xs text-muted">
-        <summary className="cursor-pointer">{t('chat-plan-earlier', { count: steps.length })}</summary>
+        <summary className="cursor-pointer pointer-coarse:py-3.5">{t('chat-plan-earlier', { count: steps.length })}</summary>
         <div className="mt-1 ps-1"><PlanCard steps={steps} status={status} label={t('chat-plan-steps', { count: steps.length })} /></div>
       </details>
     );
@@ -407,14 +413,14 @@ const OUTCOME_TONE: Record<NonNullable<ChatLine['outcome']>, string> = { pending
 const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line: ChatLine; onShow?: () => void }) {
   const outcome = line.outcome ?? 'pending';
   return (
-    <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-needs-you/55 bg-needs-you/8' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
+    <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-(--line-needs) bg-tint-needs' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
       <span aria-hidden className={`grid size-5 flex-none place-items-center ${OUTCOME_TONE[outcome]}`}><Icon name={OUTCOME_ICON[outcome]} className="size-3.5" /></span>
       <span className="min-w-0 flex-1 break-words">
         {/* ADR-0101: an approval answered "always" says so (the agent remembers it). */}
         <span className="font-medium text-ink">{outcome === 'approved' && line.always ? t(alwaysText('permission-approved-always')) : t(`permission-${outcome}`)}</span>
         {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{line.text}</code></>}
       </span>
-      {outcome === 'pending' && onShow && <button type="button" className="text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}
+      {outcome === 'pending' && onShow && <button type="button" className="tap-target text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}
     </div>
   );
 });

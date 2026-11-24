@@ -12,7 +12,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_adapters::host::AdapterEvent;
-use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
 use agora_protocol::v1::{self, event::Body};
 use prost::Message;
@@ -132,21 +131,16 @@ pub struct EventSink {
     ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
     /// Usage reports gathered before they are logged ([`crate::usage_merge`]). Never held with `log`.
     usage: Mutex<crate::usage_merge::UsageMerge>,
+    /// #1147 (audit of #1157): the node's secret values, replaced in the agent's own words an event carries (see `redact_body`).
+    secrets: std::sync::OnceLock<Arc<crate::transcript::Store>>,
 }
 
 impl Drop for EventSink {
-    /// When the sink is dropped in-process, the usage still being gathered is logged. A node ended from outside (`agora down`, a
-    /// restart, a crash: `SIGTERM` or `TerminateProcess` with no handler) does not unwind, so up to [`crate::usage_merge::WINDOW_MS`]
-    /// of each agent's usage is lost then (#522 review; a stop handler that flushes first is the follow-up).
+    /// When the sink is dropped in-process, the usage still being gathered is logged. A node that stops cleanly logs it before
+    /// (`Node::drop`, which `agora node` runs on `SIGTERM`, ADR-0104 O2); one ended outright (a crash, `SIGKILL`, `TerminateProcess`)
+    /// does not unwind, so up to [`crate::usage_merge::WINDOW_MS`] of each agent's usage is lost then (#522 review).
     fn drop(&mut self) {
-        let rest = self
-            .usage
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_all();
-        for u in rest {
-            self.write(Body::AgentUsageReported(u));
-        }
+        self.flush_all_usage();
     }
 }
 
@@ -393,7 +387,61 @@ impl EventSink {
             set_aside,
             ledger: std::sync::OnceLock::new(),
             usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
+            secrets: std::sync::OnceLock::new(),
         })
+    }
+
+    /// #1147 (audit of #1157): the store whose secret values are replaced in the agent's words an event carries. Set once.
+    pub fn set_secrets(&self, store: Arc<crate::transcript::Store>) {
+        let _ = self.secrets.set(store);
+    }
+
+    /// #1147 (audit of #1157): the text an agent chose in `body`, with the node's secret values replaced (whole, and pieces of 4 bytes
+    /// or more at the text's ends), so the hub never records them: a mesh message's body, a task's title, a handoff's summary, and the
+    /// names, descriptions and hints of the agent's modes, options and commands. Ids are kept (they are answered back). An approval's
+    /// action and detail are replaced before the request is queued (the always signature binds what the card shows), not here.
+    fn redact_body(&self, body: Body) -> Body {
+        let Some(store) = self.secrets.get() else {
+            return body;
+        };
+        let sec = store.current();
+        if sec.is_empty() {
+            return body;
+        }
+        let r = |s: &mut String| *s = crate::transcript::redact_text(s, &sec);
+        let mut body = body;
+        match &mut body {
+            Body::MessagePosted(m) => r(&mut m.body),
+            Body::TaskChanged(t) => r(&mut t.title),
+            Body::HandoffCreated(h) => {
+                r(&mut h.summary);
+                h.refs.iter_mut().for_each(r);
+            }
+            Body::AgentSessionOptions(o) => {
+                for x in o.modes.iter_mut().chain(o.models.iter_mut()) {
+                    r(&mut x.name);
+                    r(&mut x.description);
+                }
+            }
+            Body::AgentSessionConfig(c) => {
+                for o in &mut c.options {
+                    r(&mut o.name);
+                    r(&mut o.description);
+                    for x in &mut o.choices {
+                        r(&mut x.name);
+                        r(&mut x.description);
+                    }
+                }
+            }
+            Body::AgentCommands(c) => {
+                for x in &mut c.commands {
+                    r(&mut x.description);
+                    r(&mut x.input_hint);
+                }
+            }
+            _ => {}
+        }
+        body
     }
 
     /// ADR-0060: the session ledger that learns from what this sink records. Set once; a second call is ignored.
@@ -509,7 +557,9 @@ impl EventSink {
                     }));
                 }
             }
-            self.agent_up(v, known.sessions.get(id), false);
+            // ADR-0104: this node announced the process that runs now under this id before (its start, a resume or a take-up), so the
+            // hub keeps the counters it summed for it.
+            self.agent_up(v, known.sessions.get(id), false, true);
             // `AgentStarted` leaves the hub with no session options: what an adapter agent last reported of its session follows it
             // (#932: a kept agent's adapter does not report it again by itself).
             if let Some(ledger) = self.ledger.get() {
@@ -532,16 +582,26 @@ impl EventSink {
     /// everything it ran before is gone, so the agent is said up again after it (started, its state, its session if known, its terminal
     /// if it has one), as an announcement says it. Re-stated: the ledger already holds the agent and took it back (`Ledger::reclaim`).
     /// What an adapter agent last reported of its session follows from the supervisor (`Supervisor::session_events`, #932).
+    /// ADR-0104: its `AgentStarted` says `same_process`, so the hub keeps the counters it summed for it before the node restarted.
     pub fn agent_taken_up(&self, view: &AgentView, session: Option<&String>) {
-        self.agent_up(view, session, false);
+        self.agent_up(view, session, false, true);
     }
 
     /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
-    /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)).
-    fn agent_up(&self, view: &AgentView, session: Option<&String>, learn: bool) {
+    /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)). `same_process` (ADR-0104):
+    /// this re-states a process this node announced before under this id (a take-up or an announcement); never for a new start, a
+    /// resume or a restart after a crash, whose counters start again from 0.
+    fn agent_up(
+        &self,
+        view: &AgentView,
+        session: Option<&String>,
+        learn: bool,
+        same_process: bool,
+    ) {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
         record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.into(),
             project_id: view.project.clone(),
             node_id: self.producer.clone(),
@@ -562,6 +622,7 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
+            same_process,
             launch_options: view.launch_options.clone(),
             skips_permissions: view.skips_permissions,
         }));
@@ -598,6 +659,7 @@ impl EventSink {
     }
 
     fn record_as(&self, body: Body, learn: bool) {
+        let body = self.redact_body(body);
         let ended = match &body {
             // Gathered for a few seconds and logged as one (see `crate::usage_merge`).
             Body::AgentUsageReported(u) => {
@@ -637,6 +699,18 @@ impl EventSink {
             .unwrap_or_else(|e| e.into_inner())
             .due(now_ms());
         for u in due {
+            self.write(Body::AgentUsageReported(u));
+        }
+    }
+
+    /// Logs all the usage still being gathered, due or not (a node that stops, ADR-0104 O2).
+    pub fn flush_all_usage(&self) {
+        let rest = self
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_all();
+        for u in rest {
             self.write(Body::AgentUsageReported(u));
         }
     }
@@ -708,6 +782,7 @@ impl EventSink {
         launch: &crate::launch_options::LaunchChoice,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
             node_id: node.to_string(),
@@ -715,6 +790,7 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
+            same_process: false,
             launch_options: launch.ids.clone(),
             skips_permissions: launch.skips_permissions,
         }));
@@ -726,7 +802,7 @@ impl EventSink {
             match e {
                 SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
                     if let Some(view) = views.iter().find(|v| v.id == *agent) {
-                        self.agent_up(view, None, true);
+                        self.agent_up(view, None, true, false);
                     }
                 }
                 SupervisorEvent::SessionReported { agent, session } => {
@@ -932,18 +1008,7 @@ impl EventSink {
     /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
     /// id and its kind can continue one.
     pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
-        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
-            agent_id: e.agent_id.clone(),
-            kind: e.kind.clone(),
-            project_id: e.project_id.clone(),
-            folder: e.folder.clone(),
-            parent_agent_id: e.parent_agent_id.clone(),
-            resumable,
-            started_at_ms: e.started_at_ms,
-            interrupted_at_ms: e.interrupted_at_ms,
-            last_state: crate::ledger::proto_state(&e.last_state) as i32,
-            still_running: e.still_running(),
-        }));
+        self.record(Body::AgentInterrupted(e.interrupted_event(resumable)));
     }
 
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
@@ -1323,6 +1388,13 @@ pub struct Policy {
     pub credentials: std::collections::BTreeMap<String, Vec<String>>,
     /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
     pub credentials_malformed: Vec<String>,
+    /// ADR-0092 (#1133): whether the ACP registry's kinds are offered here (`agents.registry = on | off`, default on) and which of
+    /// them are not (`agents.registry.deny = registry-a, registry-b`). A value other than `on` or `off` switches them off: a typo never
+    /// widens. An unreadable policy file switches them off too.
+    pub registry: crate::manifests::RegistryPolicy,
+    /// ADR-0089 decision 2: how much of each structured agent's chat history the node keeps on its disk (`chat.history_max_bytes`,
+    /// at most the default 32 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
+    pub history: crate::transcript::Limits,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1382,6 +1454,8 @@ impl Default for Policy {
             credentials: std::collections::BTreeMap::new(),
             credentials_malformed: Vec::new(),
             problems: Vec::new(),
+            registry: crate::manifests::RegistryPolicy::default(),
+            history: crate::transcript::Limits::default(),
         }
     }
 }
@@ -1435,6 +1509,16 @@ fn private_node_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A policy value without the quotes an owner may put around it (`"off"`, `'off'`), and without spaces around it.
+fn unquote(v: &str) -> &str {
+    let v = v.trim();
+    v.strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+        .unwrap_or(v)
+        .trim()
+}
+
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
     let text = match std::fs::read_to_string(path) {
@@ -1447,6 +1531,8 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
             // The stricter reading here too: a policy the owner wrote and the node cannot read may say `resume.continue = off`, so no
             // "carry on" message is typed into an agent (ADR-0060 Amendment A).
             p.resume.no_carry_on = true;
+            // ...and may switch the registry's kinds off (#1133).
+            p.registry.off = true;
             return p;
         }
     };
@@ -1463,6 +1549,15 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
+                // ADR-0089: a value that is not a number keeps the default and is a line the node did not understand.
+                "chat.history_max_bytes" => match crate::transcript::Limits::parse_max_bytes(v) {
+                    Some(b) => p.history.max_bytes = b,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
+                "chat.history_days" => match crate::transcript::Limits::parse_days(v) {
+                    Some(d) => p.history.days = d,
+                    None => p.problems.push(line.chars().take(80).collect()),
+                },
                 "signed_commands" => {
                     p.signed_commands = crate::grants::SignedCommands(
                         v.split(',')
@@ -1543,6 +1638,29 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         }
                     }
                 }
+                "agents.registry" => match unquote(v) {
+                    "on" => p.registry.off = false,
+                    "off" => p.registry.off = true,
+                    _ => {
+                        p.registry.off = true;
+                        p.problems.push(line.chars().take(80).collect());
+                    }
+                },
+                // Every deny line adds to the list (a second line never undoes the first), each name quoted or not. A name that is
+                // not one of this program's registry kinds is a policy problem: it may be a typo of one the owner meant to switch off.
+                "agents.registry.deny" => {
+                    for name in v.split(',').map(unquote).filter(|s| !s.is_empty()) {
+                        if !crate::manifests::is_registry_kind_name(name) {
+                            p.problems.push(
+                                format!("agents.registry.deny {name}")
+                                    .chars()
+                                    .take(80)
+                                    .collect(),
+                            );
+                        }
+                        p.registry.deny.insert(name.to_string());
+                    }
+                }
                 "sandbox.trust_manifest" => {
                     p.sandbox.trusted_kinds = v
                         .split(',')
@@ -1618,6 +1736,8 @@ pub struct Node {
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
     pub devices: Arc<crate::device_trust::DeviceTrust>,
     devices_watch: Option<JoinHandle<()>>,
+    /// ADR-0089: writes the chat history of structured agents (`crate::transcript`).
+    transcript_writer: Option<JoinHandle<()>>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1630,6 +1750,10 @@ pub struct Node {
     pub ledger: Arc<crate::ledger::Ledger>,
     /// See [`Node::crash`].
     crashed: bool,
+    /// See [`Node::stop_keeping_agents`].
+    keep_agents: bool,
+    /// The control commands' context, for the stop to wait for the commands it lets finish (ADR-0104 O2).
+    commands: Arc<ControlContext>,
 }
 
 impl Node {
@@ -1667,6 +1791,18 @@ impl Node {
         // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
         let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
         events.set_ledger(Arc::clone(&ledger));
+        // ADR-0089, #1147: the store of chat transcripts, and the node's secret values it reads, which every event that carries the
+        // agent's own words has replaced (from the first event recorded, the agents taken up included).
+        let policy = read_policy(&cfg.data_dir.join(POLICY_FILE));
+        let transcripts = Arc::new(
+            crate::transcript::Store::new(
+                &cfg.data_dir,
+                policy.history,
+                Some(crate::credentials::SecretStore::in_data(&cfg.data_dir)),
+            )
+            .with_env_secrets(policy.credentials.values().flatten().map(String::as_str)),
+        );
+        events.set_secrets(Arc::clone(&transcripts));
 
         // Short path on purpose: Unix socket paths are limited to about 100 bytes.
         let mesh_dir = cfg
@@ -1705,6 +1841,9 @@ impl Node {
             None
         };
         sup.set_sandbox(sandbox);
+        // #1150: registry kinds that start through a package runner (`npx`, `uvx`) start it in an empty folder of their own here, not
+        // in the project, whose package-manager configuration it would otherwise read.
+        sup.set_runner_root(cfg.data_dir.join("runner"));
         // ADR-0084: the secrets this node holds, and which kind may receive which (the node's own policy; the hub cannot set it).
         sup.set_credentials(crate::credentials::Credentials::new(
             crate::credentials::SecretStore::in_data(&cfg.data_dir),
@@ -1712,9 +1851,10 @@ impl Node {
         ));
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
+        sup.set_registry_policy(read_policy(&cfg.data_dir.join(POLICY_FILE)).registry);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
-        for m in found {
-            sup.register(m);
+        for l in found {
+            sup.register_loaded(l);
         }
 
         let mut projects = Vec::new();
@@ -1750,8 +1890,22 @@ impl Node {
                         },
                         l.identity.as_deref(),
                     )
+                    // #1093: the agent still starts, outside the mesh; the node's log says so (operational log, not UI text).
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} could not get its endpoint and runs outside the mesh: {e}",
+                            l.id.as_str()
+                        );
+                    })
                     .ok()?;
-                let command = std::env::current_exe().ok()?;
+                let command = std::env::current_exe()
+                    .inspect_err(|e| {
+                        eprintln!(
+                            "mesh: {} gets no endpoint (this program's path is unknown): {e}",
+                            l.id.as_str()
+                        );
+                    })
+                    .ok()?;
                 Some(agora_adapters::inject::Endpoint { command, socket })
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
@@ -1794,7 +1948,7 @@ impl Node {
         }
         // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
         for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+            events.agent_interrupted(&e, sup.offers_resume(&e));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1830,6 +1984,15 @@ impl Node {
         );
 
         let supervisor = Arc::new(Mutex::new(sup));
+        {
+            // #1133: a registry kind started through a package runner is started from the hub only by a signed launch.
+            let sup = Arc::clone(&supervisor);
+            grants.set_signed_start_check(Box::new(move |kind| {
+                sup.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .start_needs_signature(kind)
+            }));
+        }
         {
             let sup = Arc::clone(&supervisor);
             let sup2 = Arc::clone(&sup);
@@ -1884,7 +2047,7 @@ impl Node {
                     found
                         .into_iter()
                         .map(|e| {
-                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            let resumable = s.offers_resume(&e);
                             (e, resumable)
                         })
                         .collect()
@@ -1901,8 +2064,16 @@ impl Node {
                 }
             }));
         }
-        let chat = Arc::new(crate::chat::ChatBoard::new());
+        // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
+        // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
+        let chat = Arc::new(crate::chat::ChatBoard::saving(transcripts));
+        for (id, _) in &taken_up {
+            chat.seed_from_disk(id, now_ms());
+        }
         let git_wake = Arc::new(AtomicBool::new(false));
+        // The node's stop flag: its threads end on it, and its control commands and helper starts are refused once it is set (ADR-0104
+        // O2).
+        let stop = Arc::new(AtomicBool::new(false));
         // ADR-0057: agents may ask to start helpers; every start needs a decision a trusted device signed.
         let spawner = Arc::new(
             crate::spawn::Spawner::new(
@@ -1913,7 +2084,8 @@ impl Node {
                 Some(Arc::clone(&events)),
                 Arc::clone(&chat),
             )
-            .with_git_wake(Arc::clone(&git_wake)),
+            .with_git_wake(Arc::clone(&git_wake))
+            .with_stopping(Arc::clone(&stop)),
         );
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         let mut ctx = ControlContext::new(
@@ -1930,7 +2102,8 @@ impl Node {
         .with_git_wake(Arc::clone(&git_wake))
         .with_spawner(Arc::clone(&spawner))
         .with_ledger(Arc::clone(&ledger))
-        .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret);
+        .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret)
+        .with_stopping(Arc::clone(&stop));
         if let Some((token, file)) = control_token {
             ctx = ctx.with_control_token(token, file);
         }
@@ -1964,8 +2137,8 @@ impl Node {
             .collect();
         resume_round(&ctx, &ledger, &mut waiting, carry_on);
         let resume_ctx = Arc::clone(&ctx);
+        let commands = Arc::clone(&ctx);
         let server = ControlServer::start(&cfg.socket, ctx)?;
-        let stop = Arc::new(AtomicBool::new(false));
 
         let ticker = {
             let (sup, ev, stop, node_id, mesh, approvals, chat, spawner) = (
@@ -1995,7 +2168,7 @@ impl Node {
                         // ADR-0095: when the list below is taken (under the lock, after the tick): a dispatch made after this is not
                         // dropped by a list that predates it.
                         let views_at = Instant::now();
-                        let (
+                        let Some((
                             events,
                             views,
                             usage_targets,
@@ -2004,19 +2177,28 @@ impl Node {
                             pids,
                             held,
                             adapter_states,
-                        ) = {
+                        )) = ({
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                            let events = s.tick(Instant::now());
-                            (
-                                events,
-                                s.list(),
-                                s.usage_targets(),
-                                s.take_ended_usage_targets(),
-                                s.session_file_targets(),
-                                s.agent_pids(),
-                                s.held_agents(),
-                                s.held_adapter_states(),
-                            )
+                            // ADR-0104 O2: once the node is stopping, what the adapters said is the stop's to take (`Node::drop`), all
+                            // of it and in one place, never half by a last tick.
+                            if stop.load(Ordering::Acquire) {
+                                None
+                            } else {
+                                let events = s.tick(Instant::now());
+                                Some((
+                                    events,
+                                    s.list(),
+                                    s.usage_targets(),
+                                    s.take_ended_usage_targets(),
+                                    s.session_file_targets(),
+                                    s.agent_pids(),
+                                    s.held_agents(),
+                                    s.held_adapter_states(),
+                                ))
+                            }
+                        })
+                        else {
+                            break;
                         };
                         // ADR-0079 decision 9: which holder each running agent is in, so the next node attaches instead of calling
                         // it interrupted. An agent the node runs itself records none (also after a fallback).
@@ -2186,17 +2368,6 @@ impl Node {
                         let now = now_ms();
                         for e in &events {
                             match e {
-                                // What a chat agent says goes to its transcript (ADR-0038).
-                                SupervisorEvent::Adapter {
-                                    agent,
-                                    event: AdapterEvent::Chat { item, .. },
-                                } => {
-                                    // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
-                                    if let Some(word) = activity_word(item) {
-                                        mesh.set_activity(agent, word);
-                                    }
-                                    chat.push_item(agent, item, now);
-                                }
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:
@@ -2218,10 +2389,12 @@ impl Node {
                                         .unwrap_or_else(|e| e.into_inner())
                                         .approval_raise_terms(agent);
                                     let (strict, permitted) = terms.unwrap_or((false, false));
+                                    // #1147 (audit of #1157): the agent's name for its "always" option, as the card (and the always
+                                    // signature over it) shows it, with the node's secret values replaced; its id is kept.
                                     let raise = crate::approvals::raise_for(
                                         strict,
                                         scopes,
-                                        always_label,
+                                        &chat.redact_text(always_label),
                                         always_option_id,
                                         permitted,
                                     );
@@ -2233,8 +2406,8 @@ impl Node {
                                             if let Some(p) = approvals.request(
                                                 agent,
                                                 approval_id,
-                                                action,
-                                                detail,
+                                                &chat.redact_text(action),
+                                                &chat.redact_text(detail),
                                                 now,
                                             ) {
                                                 ev.approval_requested(&p);
@@ -2249,7 +2422,13 @@ impl Node {
                                                     approval_id,
                                                     false,
                                                 );
-                                            let _ = call.and_then(|c| c.run());
+                                            if let Err(e) = call.and_then(|c| c.run()) {
+                                                crate::supervisor::log_call_failure(
+                                                    "approval refusal",
+                                                    agent,
+                                                    &e,
+                                                );
+                                            }
                                             let code = if refused
                                                 == crate::approvals::Raise::AlwaysOnlyForbidden
                                             {
@@ -2264,11 +2443,13 @@ impl Node {
                                     let Some(offer) = offer else {
                                         continue;
                                     };
+                                    // #1147 (audit of #1157): the card (the queue, its event, the window) shows the agent's action and
+                                    // detail with the node's secret values replaced; the always signature binds those words.
                                     if let Some(p) = approvals.request_offered(
                                         agent,
                                         approval_id,
-                                        action,
-                                        detail,
+                                        &chat.redact_text(action),
+                                        &chat.redact_text(detail),
                                         now,
                                         offer,
                                     ) {
@@ -2283,42 +2464,25 @@ impl Node {
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner())
                                             .prepare_resolve_approval(agent, approval_id, false);
-                                        let _ = call.and_then(|c| c.run());
+                                        if let Err(e) = call.and_then(|c| c.run()) {
+                                            crate::supervisor::log_call_failure(
+                                                "approval refusal",
+                                                agent,
+                                                &e,
+                                            );
+                                        }
                                     }
-                                }
-                                // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now,
-                                // not the tick's, which is older than what this tick already said).
-                                SupervisorEvent::PromptSending { agent, tag } => {
-                                    chat.sending(agent, *tag, crate::daemon::now_ms());
-                                }
-                                // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
-                                SupervisorEvent::PromptDequeued { agent, tag, sent } => {
-                                    if *sent {
-                                        chat.unqueue(agent, *tag, now);
-                                    } else {
-                                        chat.drop_queued(agent, &[*tag], now);
-                                    }
-                                    // ADR-0095: a dispatch prompt that could not be sent gives its task back.
-                                    if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent)
-                                    {
-                                        mesh.give_back(&g);
-                                    }
-                                }
-                                SupervisorEvent::PromptsDropped { agent, tags } => {
-                                    chat.drop_queued(agent, tags, now);
-                                    for g in mesh.dispatches().dropped(agent, tags) {
-                                        mesh.give_back(&g);
-                                    }
-                                }
-                                SupervisorEvent::OutputDropped { agent, bytes } => {
-                                    chat.output_dropped(agent, *bytes, now);
                                 }
                                 SupervisorEvent::Restarting { .. }
                                 | SupervisorEvent::GaveUp { .. } => {
+                                    if let SupervisorEvent::GaveUp { agent, .. } = e {
+                                        chat.set_working(agent, false);
+                                    }
                                     restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    chat.set_working(agent, false);
                                     // The spawner first: a start the agent waited for is withdrawn and its slot released, before
                                     // the queue drops the request.
                                     spawner.agent_ended(agent);
@@ -2332,8 +2496,16 @@ impl Node {
                                         );
                                     }
                                 }
-                                _ => {}
+                                other => chat_event(&chat, &mesh, other, now),
                             }
+                        }
+                        // Review of #1103, round 3: the state each agent is in, as a backstop for a change no event carried (the
+                        // transcript writer holds an agent's newest words only while it works).
+                        for v in &views {
+                            chat.set_working_if_known(
+                                &v.id,
+                                v.running && v.state == agora_core::AgentState::Working,
+                            );
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
                             // ADR-0090 Amendment A: nobody decided a switch in time: nothing is applied, and no adapter asked.
@@ -2348,7 +2520,9 @@ impl Node {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .prepare_resolve_approval(&agent, &adapter_id, false);
-                            let _ = call.and_then(|c| c.run());
+                            if let Err(e) = call.and_then(|c| c.run()) {
+                                crate::supervisor::log_call_failure("approval refusal", &agent, &e);
+                            }
                             // ADR-0090: nobody decided in time.
                             chat.set_permission(
                                 &agent,
@@ -2416,6 +2590,56 @@ impl Node {
                     }
                 })?
         };
+        // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
+        let transcript_writer = {
+            let (sup, ledger, stopping) = (
+                Arc::clone(&supervisor),
+                Arc::clone(&ledger),
+                Arc::clone(&stop),
+            );
+            crate::transcript::spawn_writer(
+                Arc::clone(&chat),
+                // ADR-0089 decision 2 (review of #1103, N6): a running agent's file and one offered for Resume are kept; an ended one
+                // ages from when it ended (the ledger's last write for it), one the ledger no longer knows from its file.
+                Box::new(move |names: &[String]| {
+                    use crate::transcript::Kept;
+                    // #1119 item 2: a launch holds the supervisor for up to 30 s, and the stop joins this writer: once the node is
+                    // stopping the lock is not waited for, and every file is kept (this sweep removes nothing).
+                    let Some(sup) = lock_unless(&sup, &stopping) else {
+                        return names.iter().map(|n| (n.clone(), Kept::Keep)).collect();
+                    };
+                    let running: std::collections::HashSet<String> = sup
+                        .list()
+                        .into_iter()
+                        .filter(|v| v.running)
+                        .map(|v| v.id.as_str().to_string())
+                        .collect();
+                    drop(sup);
+                    names
+                        .iter()
+                        .filter_map(|n| {
+                            if running.contains(n) {
+                                return Some((n.clone(), Kept::Keep));
+                            }
+                            let e = ledger.get(n)?;
+                            let kept = if e.ended {
+                                Kept::EndedAt(e.updated_at_ms)
+                            } else {
+                                // Interrupted (offered for Resume), or still running as far as the ledger knows.
+                                Kept::Keep
+                            };
+                            Some((n.clone(), kept))
+                        })
+                        .collect()
+                }),
+                Arc::clone(&stop),
+            )
+            .unwrap_or_else(|e| {
+                // Operational log, not UI text.
+                eprintln!("transcripts: the writer did not start: {e}");
+                None
+            })
+        };
         // Started last, after every step that can fail: a node that did not start leaves nothing resuming behind it.
         let resume_wait = if waiting.is_empty() {
             None
@@ -2454,12 +2678,15 @@ impl Node {
             chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),
+            transcript_writer,
             node_id: cfg.node_id.clone(),
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
             ledger,
             crashed: false,
+            keep_agents: false,
+            commands,
         })
     }
 
@@ -2470,14 +2697,27 @@ impl Node {
         self.crashed = true;
     }
 
+    /// ADR-0104 O2: the stop of `agora node` on a stop request. As dropping the node (what the held adapters said is recorded, the
+    /// conversation, the usage and the ledger are written, the held adapters are let go), but no agent is ended and nothing more is
+    /// said: the agents the node runs itself are left as a node ended from outside leaves them (ADR-0060: a terminal agent in its own
+    /// session runs on and is found still running at the next start; an adapter sees its input end), and the hub learns that the
+    /// node went from its connection, as before. Only the drop of a node in-process (tests, an embedding) ends its own agents.
+    pub fn stop_keeping_agents(mut self) {
+        self.keep_agents = true;
+    }
+
+    /// Tells the node's threads that it is stopping, as dropping it does first: the supervision loop takes nothing more from the
+    /// agents, and the stop that follows ([`Drop`]) records what they said since (ADR-0104 O2). For a test that holds the supervisor
+    /// while it stops the node, so the loop cannot take what is waiting before the stop does.
+    pub fn begin_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
     pub fn socket(&self) -> Option<&Path> {
         self.server.as_ref().map(ControlServer::path)
     }
 }
 
-/// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
-/// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
-/// workspace is reported too, so a client that connects later sees the current state from the event log.
 /// How often the memory of running agents is measured between changes in their number.
 const MEMORY_CHECK: Duration = Duration::from_secs(30);
 
@@ -2505,7 +2745,11 @@ fn memory_moved(reported: u64, now: u64) -> bool {
     moved > reported / 4 || moved > 256 << 20
 }
 
+/// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
+/// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
+/// workspace is reported too, so a client that connects later sees the current state from the event log.
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
+/// It also makes every folder's count be said again: a start registers its folder with no count, even one already counted.
 fn watch_git(
     sup: &Mutex<Supervisor>,
     ev: &EventSink,
@@ -2566,10 +2810,13 @@ fn watch_git(
             }
         }
         let until = Instant::now() + GIT_POLL;
-        while Instant::now() < until
-            && !stop.load(Ordering::Acquire)
-            && !wake.swap(false, Ordering::AcqRel)
-        {
+        while Instant::now() < until && !stop.load(Ordering::Acquire) {
+            if wake.swap(false, Ordering::AcqRel) {
+                // A start registers its folder again with no count (#1017), also a folder another agent shares, whose changes are
+                // the same: every folder's count is said again, so it follows that registration for the hub and every window.
+                last.clear();
+                break;
+            }
             std::thread::sleep(TICK);
         }
     }
@@ -2591,6 +2838,10 @@ fn resume_round(
         // ADR-0060 Amendment A: an agent that was working gets its kind's one "carry on" message with its resume, if the owner's policy
         // allows it and it has not had one for this interruption; the message itself comes from the kind's manifest.
         let carry = carry_on && ledger.wants_continue(&id);
+        // #1119 item 3: as a command is, counted while it runs and not begun once the node is stopping (the agent stays offered).
+        let Some(_running) = ctx.admit() else {
+            return;
+        };
         if crate::control::resume_agent(ctx, &id, false, carry).is_ok() {
             ledger.mark_auto_resumed(&id, now_ms());
             brought += 1;
@@ -2599,35 +2850,249 @@ fn resume_round(
 }
 
 impl Drop for Node {
+    /// A clean stop (ADR-0104 O2). Control commands are refused from the first step on. Every adapter the holder runs is let go first
+    /// (a call still waiting on one, in the supervision loop or a command, returns at once and counts as given), then the supervision
+    /// loop is waited for, and what the node had read from those adapters and not recorded yet is recorded as the loop would (states,
+    /// options, usage and conversation; a request for the person is asked again by the next node from the holder's replay, ADR-0093).
+    /// Then the conversation's last batch, the usage still being gathered and the ledger's kept files are written. Waiting for the
+    /// supervisor's lock is bounded by [`LOCK_WAIT`], for the readers by [`DRAIN_WAIT`] and for the loop by [`LOOP_WAIT`]; the rest is
+    /// local work. Agents the holder runs keep running. With [`Node::stop_keeping_agents`] (what `agora node` does on `SIGTERM`) that
+    /// is all, and no other thread is waited for; otherwise the node's other threads are joined and its own agents end with it.
+    ///
+    /// #1119 item 2: a start or a resume launches its adapter under the supervisor's lock (its `initialize` may take 30 s). When the
+    /// lock cannot be had within [`LOCK_WAIT`], what does not need it is written at once (the conversation, the usage, the ledger as it
+    /// stands), and the lock is tried again until [`LOCK_RETRY_UNTIL`] after the stop began. Still busy then: `agora node`'s stop lets
+    /// nothing go (its held adapters see the link close, as at a kill, and what their readers had not handed over is the holder's to
+    /// keep); a node dropped in-process waits for the lock, as its agents must end.
     fn drop(&mut self) {
-        drop(self.server.take());
+        // Before the control server ends (it can take up to its poll time): a command that comes meanwhile is refused, not run.
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.ticker.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.resume_wait.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.git_watch.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.devices_watch.take() {
-            let _ = t.join();
-        }
+        drop(self.server.take());
         if self.crashed {
-            // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
+            self.join_threads();
+            // Nothing is said, recorded or stopped: the supervisor, which owns the agents' processes, is never dropped.
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
+        let began = Instant::now();
+        let supervisor = Arc::clone(&self.supervisor);
+        let mut sup = lock_by(&supervisor, began + LOCK_WAIT);
+        let missed = sup.is_none();
+        if missed {
+            self.write_held();
+            sup = lock_by(&supervisor, began + LOCK_RETRY_UNTIL);
+        }
+        // In-process, the agents must end: the lock is waited for, and the stop has no deadline.
+        let waited = sup.is_none() && !self.keep_agents;
+        if waited {
+            sup = Some(supervisor.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        // ADR-0104 O2: what the held adapters said that the supervision loop had not taken (it never ticks once the stop is set). The
+        // readers get DRAIN_WAIT from when the lock was had, within LOCK_WAIT + DRAIN_WAIT of the stop's start unless it was waited for.
+        let drain = sup.map(|mut s| {
+            let mut until = Instant::now() + DRAIN_WAIT;
+            if !waited {
+                until = until.min(began + LOCK_WAIT + DRAIN_WAIT);
+            }
+            let drained = s.let_go_held(until);
+            (drained, s.list())
+        });
+        // The loop's own last round and the commands already running go first: their events are older than the drained ones, and a
+        // call they waited on a held adapter for has just come back as given. Either may wait on an adapter the node runs itself (a
+        // call of up to 10 s), so the stop waits for them only so long; not at all when the lock was never had (they wait for it).
+        if drain.is_some() {
+            let until = Instant::now() + LOOP_WAIT;
+            while Instant::now() < until
+                && (self.commands.commands_running() > 0
+                    || self.ticker.as_ref().is_some_and(|t| !t.is_finished()))
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if let Some(t) = self.ticker.take() {
+            if t.is_finished() || !self.keep_agents {
+                let _ = t.join();
+            }
+        }
+        if let Some((drained, views)) = &drain {
+            if !drained.is_empty() {
+                self.events.supervisor_events(drained, views);
+                let now = now_ms();
+                for e in drained {
+                    chat_event(&self.chat, &self.mesh, e, now);
+                }
+            }
+            // Before anything that could take long, as a stop has a deadline (written once already when the lock was busy: again, with
+            // what came since).
+            self.write_held();
+        }
+        if self.keep_agents {
+            // The process ends right after: the other threads (a Git or device watcher may wait on a slow command) are not waited for,
+            // and as with `crash` the supervisor, which owns the agents' processes, is never dropped, so none is ended.
+            std::mem::forget(supervisor);
+            return;
+        }
+        self.join_threads();
         self.events.node_offline(&self.node_id);
         // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
-        self.supervisor
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .shutdown();
+        // Its hooks go too: they hold the mesh, which (through the helpers) holds the supervisor, so in a process that goes on the
+        // agents' mesh endpoints would stay locked and a next node there could not serve them.
+        {
+            let mut sup = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
+            sup.shutdown();
+            sup.clear_hooks();
+        }
         // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
         // what the kept agents last reported of their session (#932).
         let _ = self.ledger.flush_all();
+    }
+}
+
+impl Node {
+    /// ADR-0104 O2: the conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
+    /// gathered, then the ledger and the kept session files: none needs the supervisor's lock, and each is quick local work. Can be
+    /// called again (with what came since).
+    fn write_held(&mut self) {
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
+            let _ = t.join();
+        }
+        crate::transcript::flush(&self.chat);
+        self.events.flush_all_usage();
+        let _ = self.ledger.flush_all();
+    }
+
+    /// Joins the node's threads (each ends on the stop flag); the transcript writer is woken first.
+    fn join_threads(&mut self) {
+        for t in [
+            self.ticker.take(),
+            self.resume_wait.take(),
+            self.git_watch.take(),
+            self.devices_watch.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = t.join();
+        }
+        if let Some(t) = self.transcript_writer.take() {
+            if let Some(w) = self.chat.wake() {
+                w.notify();
+            }
+            let _ = t.join();
+        }
+    }
+}
+
+/// `m` locked, waiting until `until` at most (`None` when it is still held then). A lock poisoned by a panic is taken as it is, as
+/// everywhere in the node.
+fn lock_by<T>(m: &Mutex<T>, until: Instant) -> Option<std::sync::MutexGuard<'_, T>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// `m` locked, waiting for it as long as `stop` is not set (`None` once it is and the lock is still held).
+fn lock_unless<'a, T>(m: &'a Mutex<T>, stop: &AtomicBool) -> Option<std::sync::MutexGuard<'a, T>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if !stop.load(Ordering::Acquire) => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// #1119 item 2: how long a node that stops waits at first for the supervisor's lock, which a start or a resume holds while it launches
+/// an adapter (up to 30 s). Past it, what does not need the lock is written at once.
+pub const LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// #1119 item 2: until when, from the start of a stop, the supervisor's lock is tried again after [`LOCK_WAIT`] (and what does not need
+/// it was written). The readers then still get at least `LOCK_WAIT + DRAIN_WAIT - LOCK_RETRY_UNTIL` (1 s), and the loop [`LOOP_WAIT`]:
+/// 4 s in all at most, under `agora node`'s 5 s stop deadline.
+pub const LOCK_RETRY_UNTIL: Duration = Duration::from_secs(2);
+
+/// ADR-0104 O2: how long a node that stops waits at most for its supervision loop's last round, after it let the held adapters go.
+pub const LOOP_WAIT: Duration = Duration::from_secs(1);
+
+/// ADR-0104 O2: how long a node that stops waits at most for the readers of the adapters the holder runs to hand over what they read.
+/// A read of a holder that does not answer waits up to the link's frame time (5 s); the stop does not. Lines the holder hands such a
+/// reader after the wait count as given there and are lost, as with a kill. Under `agora node`'s whole stop deadline
+/// (`crates/agora/src/main.rs`).
+pub const DRAIN_WAIT: Duration = Duration::from_secs(2);
+
+/// What an adapter's event changes in its conversation (and the mesh's view of it), as the supervision loop and a clean stop's drain
+/// (ADR-0104 O2) both record it. Approval requests, ends and restarts are the loop's own.
+fn chat_event(
+    chat: &crate::chat::ChatBoard,
+    mesh: &crate::mesh_server::MeshServer,
+    e: &SupervisorEvent,
+    now: u64,
+) {
+    match e {
+        // What a chat agent says goes to its transcript (ADR-0038).
+        SupervisorEvent::Adapter {
+            agent,
+            event: AdapterEvent::Chat { item, .. },
+        } => {
+            // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
+            if let Some(word) = activity_word(item) {
+                mesh.set_activity(agent, word);
+            }
+            chat.push_item(agent, item, now);
+        }
+        // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now, not the tick's, which is older
+        // than what this tick already said).
+        SupervisorEvent::PromptSending { agent, tag } => {
+            chat.sending(agent, *tag, crate::daemon::now_ms());
+        }
+        // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
+        SupervisorEvent::PromptDequeued { agent, tag, sent } => {
+            if *sent {
+                chat.unqueue(agent, *tag, now);
+            } else {
+                chat.drop_queued(agent, &[*tag], now);
+            }
+            // ADR-0095: a dispatch prompt that could not be sent gives its task back.
+            if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent) {
+                mesh.give_back(&g);
+            }
+        }
+        SupervisorEvent::PromptsDropped { agent, tags } => {
+            chat.drop_queued(agent, tags, now);
+            for g in mesh.dispatches().dropped(agent, tags) {
+                mesh.give_back(&g);
+            }
+        }
+        SupervisorEvent::OutputDropped { agent, bytes } => {
+            chat.output_dropped(agent, *bytes, now);
+        }
+        // Review of #1103 (B1): a resumed session's replay of its conversation is shown only when this node holds none of it (its file
+        // was purged, never written, or the agent never spoke here).
+        SupervisorEvent::ReplayedChat { agent, items } => {
+            chat.replayed(agent, items, now);
+        }
+        // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in a turn; leaving one
+        // (or ending) closes them.
+        SupervisorEvent::StateChanged { agent, state } => {
+            chat.set_working(agent, *state == agora_core::AgentState::Working);
+        }
+        SupervisorEvent::Exited { agent, .. } => {
+            chat.set_working(agent, false);
+        }
+        _ => {}
     }
 }
 
@@ -2671,7 +3136,7 @@ fn deliver_held(
 /// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
 /// name or adds one; see `crate::manifests`), and each file that could not be read or parsed with the reason.
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
-pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
+pub fn load_manifests(dir: &Path) -> (Vec<crate::manifests::Loaded>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
     for (kind, file) in crate::manifests::shadowing(&loaded) {
         eprintln!(
@@ -2679,7 +3144,7 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
             file.display()
         );
     }
-    (loaded.into_iter().map(|l| l.manifest).collect(), problems)
+    (loaded, problems)
 }
 
 /// The state a ledger entry last knew (its `last_state` word), or `None` for one that is not a state worth showing again.
@@ -3202,6 +3667,56 @@ mod announce_tests {
             .any(|b| matches!(b, Body::AgentExited(_) | Body::TerminalClosed(_))));
     }
 
+    /// ADR-0104 decision 2 (#930): `AgentStarted.same_process` is set where the node re-states a process it announced before under the
+    /// id (a take-up from the holder, an announcement of either kind) and never for a new start or a resume, whose counters start
+    /// again.
+    #[test]
+    fn only_a_restatement_of_the_same_process_says_so() {
+        let s = sink("same-process");
+        let starts = |mark: u64| -> Vec<(String, bool)> {
+            said(&s, mark)
+                .into_iter()
+                .filter_map(|b| match b {
+                    Body::AgentStarted(a) => Some((a.agent_id, a.same_process)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let views = [view("a", true, false), view("b", true, false)];
+        let mark = s.next_seq() - 1;
+        launched(&s, "a", false);
+        s.agent_started(&AgentId::new("b"), "p", "n1", "/wt/b", "probe");
+        s.supervisor_events(
+            &[
+                SupervisorEvent::Started {
+                    agent: AgentId::new("a"),
+                },
+                SupervisorEvent::Resumed {
+                    agent: AgentId::new("b"),
+                    native: true,
+                },
+            ],
+            &views,
+        );
+        assert!(
+            starts(mark).iter().all(|(_, same)| !same),
+            "{:?}",
+            starts(mark)
+        );
+
+        let mark = s.next_seq() - 1;
+        s.agent_taken_up(&views[0], None);
+        assert_eq!(starts(mark), [("a".to_string(), true)]);
+        for how in [Announce::Present, Announce::Restart] {
+            let mark = s.next_seq() - 1;
+            s.announce_present(&views, &[], how);
+            assert_eq!(
+                starts(mark),
+                [("a".to_string(), true), ("b".to_string(), true)]
+            );
+        }
+    }
+
     /// #902: an adapter's agent the node gave up on is reported as exited without a `TerminalClosed` (it never had a terminal); a terminal
     /// agent that just ended (its view no longer has a terminal open) still gets one.
     #[test]
@@ -3425,6 +3940,36 @@ mod announce_tests {
         };
         // No file: the maintainer's default.
         assert_eq!(read_policy(&dir.join("absent")).skip_permissions, S::Allow);
+        // #1133: the registry line; anything but `on` or `off` switches the registry's kinds off and is a problem.
+        let reg = |text: &str| {
+            let f = dir.join("registry-policy");
+            std::fs::write(&f, text).unwrap();
+            read_policy(&f)
+        };
+        assert!(!read_policy(&dir.join("absent")).registry.off);
+        assert!(reg("agents.registry = off\n").registry.off);
+        assert!(!reg("agents.registry = on\n").registry.off);
+        let typo = reg("agents.registry = of\n");
+        assert!(typo.registry.off && !typo.problems.is_empty());
+        let deny = reg("agents.registry.deny = registry-gemini, registry-goose\n").registry;
+        assert!(!deny.off);
+        assert_eq!(deny.deny.len(), 2);
+        // #1133 review F4: quotes are taken off, a second line adds to the first, and a name that is no registry kind is a problem.
+        let quoted = reg("agents.registry.deny = \"registry-gemini\"\nagents.registry.deny = 'registry-goose'\nagents.registry = \"off\"\n");
+        assert!(quoted.problems.is_empty(), "{:?}", quoted.problems);
+        assert!(quoted.registry.off);
+        assert_eq!(
+            quoted
+                .registry
+                .deny
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["registry-gemini", "registry-goose"]
+        );
+        let unknown = reg("agents.registry.deny = registry-gemni\n");
+        assert_eq!(unknown.problems.len(), 1, "{:?}", unknown.problems);
+        assert!(unknown.registry.deny.contains("registry-gemni"));
         assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
         assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
         assert_eq!(
@@ -3450,6 +3995,86 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0089 decision 7: the transcripts folder is among the paths the node protects for every confined agent (a confined agent
+    /// that tries to read one is in `tests/sandboxed_agent.rs`).
+    #[test]
+    fn the_transcripts_folder_is_among_the_paths_confinement_protects() {
+        // Built from the (absolute) temporary folder, so the same on every OS: a data folder in the node's own home, and one elsewhere.
+        let tmp = std::env::temp_dir().join(format!("agora-test-private-{}", std::process::id()));
+        let home = tmp.join("agora-home");
+        for data in [home.join("data"), tmp.join("elsewhere").join("data")] {
+            let cfg = NodeConfig {
+                resume_all: false,
+                node_id: "n".into(),
+                socket: home.join("run").join("n.sock"),
+                data_dir: data.clone(),
+                worktree_root: home.join("worktrees"),
+                manifests_dir: home.join("manifests"),
+                projects: vec![],
+                limits: crate::supervisor::NodeLimits::default(),
+            };
+            // `node_private_paths` makes every path absolute, so compare the same way.
+            let transcripts =
+                std::path::absolute(data.join(crate::transcript::TRANSCRIPTS_DIR)).unwrap();
+            assert!(
+                node_private_paths(&cfg)
+                    .iter()
+                    .any(|p| transcripts.starts_with(p)),
+                "{}",
+                data.display()
+            );
+        }
+    }
+
+    /// ADR-0089 decision 2: the history bounds come from the policy, never past their caps; a value that is not a number keeps the
+    /// default and is a line the node did not understand.
+    #[test]
+    fn read_policy_bounds_the_chat_history() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-test-history-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        assert_eq!(
+            read_policy(&file).history,
+            crate::transcript::Limits::default()
+        );
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 1048576
+chat.history_days = 7
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!((p.history.max_bytes, p.history.days), (1 << 20, 7));
+        assert!(p.problems.is_empty());
+        std::fs::write(
+            &file,
+            "chat.history_max_bytes = 99999999999
+chat.history_days = 365
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.history.max_bytes, p.history.days),
+            (
+                crate::transcript::DEFAULT_MAX_BYTES,
+                crate::transcript::DEFAULT_DAYS
+            )
+        );
+        std::fs::write(
+            &file,
+            "chat.history_days = a week
+",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(p.history.days, crate::transcript::DEFAULT_DAYS);
+        assert_eq!(p.problems.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3733,5 +4358,98 @@ mod process_record_tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// #1147 (audit of #1157): the agent's own words an event carries reach the hub with the node's secret values replaced.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod event_redaction_tests {
+    use super::EventSink;
+    use agora_protocol::v1::{self, event::Body};
+    use std::sync::Arc;
+
+    #[test]
+    fn the_agents_words_in_an_event_hold_no_piece_of_a_secret() {
+        let value = "SK-EVENT-0123456789-ABCDEFGHIJ";
+        let dir = std::env::temp_dir().join(format!("agora-ev-redact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::credentials::SecretStore::in_data(&dir)
+            .set("T", &crate::credentials::Secret::new(value).unwrap())
+            .unwrap();
+        let store = Arc::new(crate::transcript::Store::new(
+            &dir,
+            crate::transcript::Limits::default(),
+            Some(crate::credentials::SecretStore::in_data(&dir)),
+        ));
+        let sink = EventSink::open(&dir.join("events"), "n1").unwrap();
+        sink.set_secrets(store);
+        let opt = |s: &str| v1::SessionOption {
+            id: "plan".into(),
+            name: format!("name {s}"),
+            description: format!("{s} more"),
+            skips_permissions: false,
+        };
+        // Whole, and cut at a text's end (the first 12 bytes of the value only).
+        for s in [value, &value[..12]] {
+            sink.record_bodies(vec![
+                Body::MessagePosted(v1::MessagePosted {
+                    message_id: "m1".into(),
+                    from_agent_id: "a".into(),
+                    to: "b".into(),
+                    body: format!("use {s}"),
+                }),
+                Body::TaskChanged(v1::TaskChanged {
+                    task_id: "t1".into(),
+                    title: format!("{s} title"),
+                    ..Default::default()
+                }),
+                Body::HandoffCreated(v1::HandoffCreated {
+                    summary: format!("x {s}"),
+                    refs: vec![format!("src/{s}")],
+                    ..Default::default()
+                }),
+                Body::AgentSessionOptions(v1::AgentSessionOptions {
+                    agent_id: "a".into(),
+                    modes: vec![opt(s)],
+                    models: vec![opt(s)],
+                    current_mode: "plan".into(),
+                    current_model: "plan".into(),
+                }),
+                Body::AgentSessionConfig(v1::AgentSessionConfig {
+                    agent_id: "a".into(),
+                    options: vec![v1::SessionConfigOption {
+                        id: "o".into(),
+                        name: format!("name {s}"),
+                        description: format!("{s} d"),
+                        choices: vec![opt(s)],
+                        ..Default::default()
+                    }],
+                }),
+                Body::AgentCommands(v1::AgentCommands {
+                    agent_id: "a".into(),
+                    commands: vec![v1::AgentCommand {
+                        name: "c".into(),
+                        description: format!("does {s}"),
+                        input_hint: format!("{s} hint"),
+                    }],
+                }),
+            ]);
+        }
+        let events = sink.events_after(0);
+        assert!(events.len() >= 12);
+        let text = format!("{events:?}");
+        for i in 0..=value.len() - 4 {
+            assert!(
+                !text.contains(&value[i..i + 4]),
+                "{:?} in {text}",
+                &value[i..i + 4]
+            );
+        }
+        // Ids are answered back: kept as they are.
+        assert!(text.contains("\"plan\""));
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

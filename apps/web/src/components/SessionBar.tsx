@@ -5,6 +5,8 @@ import { approvedHere, skipAnswerOf } from '../net/skipApproval';
 import { settingName } from './launchSettingsModel';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
+import { Pill, stateTone } from './kit';
+import { Mark } from './StateBadge';
 import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
 import { t } from '../i18n';
@@ -20,10 +22,8 @@ const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported. A mode or setting in which the agent acts without asking is sent like any other choice: the machine raises
 // an approval card the owner signs (ADR-0090 Amendment A); until it is answered the control says it waits and shows no new value.
-// `state` and `tokens` belong to the header (`status`): the agent's state as a pill with its running time, and the tokens used so far.
-const PILL: Record<UiState, string> = {
-  working: 'border-working/40 text-working', 'needs-you': 'border-needs-you/50 text-needs-you', finished: 'border-finished/40 text-finished', idle: 'border-line text-muted', unknown: 'border-line text-muted',
-};
+// `state` and `tokens` belong to the header (`status`): the agent's state as the kit's status pill with its running time, and the tokens used so
+// far. This is the one place a chat agent's state and tokens are shown: the window's and the pane's headers leave them out for a chat agent.
 // A switch the machine holds until the owner signs the card: which control, the value asked for and the card (`<node>/<approval id>`).
 // `asking`: the card waits; `confirming`: this window approved it and the agent has not reported it yet; `late`: that took long, the control shows what the agent reports.
 interface Wait { control: string; value: string; approval: string; state: 'asking' | 'confirming' | 'late'; at: number }
@@ -165,22 +165,31 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     const shown = o.type === 'boolean' ? t(value === 'true' ? 'session-on' : 'session-off') : configChoices(o).find((c) => c.id === value)?.name || value;
     return `${configWord(o)}: ${shown}`;
   }).join(', ');
+  // The acts-without-asking sign (ADR-0059, ADR-0090 Amendment A) stands beside Mode, the control that usually causes it, as a red-tinted tag:
+  // the bolt, no words, its meaning in its tooltip and name. Started so (`launchedFree`): for its whole life; switched so: while the agent's
+  // current mode or setting skips. Without a Mode control it leads the row.
+  const free = launchedFree ? <NoAskBadge key="free" agent={{ skipsPermissions: true }} look="tag" />
+    : !disabled && actsFreely(session) ? <NoAskBadge key="free" agent={{ skipsPermissions: true }} session look="tag" cause={freeCause} approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />
+    : null;
+  const modePicker = !groups.replaces.mode ? picker('mode', session.modes, session.currentMode) : null;
+  const modeChip = groups.chips.some((o) => o.category === 'mode');
   const controls = <>
-    {!groups.replaces.mode && picker('mode', session.modes, session.currentMode)}
+    {!modePicker && !modeChip && free}
+    {modePicker}{modePicker && free}
     {!groups.replaces.model && picker('model', session.models, session.currentModel)}
-    {groups.chips.map(configChip)}
+    {groups.chips.map((o) => (o.category === 'mode' ? [configChip(o), free] : configChip(o)))}
     {moreItems.length > 0 && <Menu label={t('session-more')} items={moreItems} align="start" className="ide-chip h-7 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink"><span>{t('session-more')}</span><Icon name="chevronDown" className="size-3" /></Menu>}
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
-    {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session cause={freeCause} approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />}
     {waits.some((w) => w.state === 'asking') && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
-    {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
+    {failed && <span role="status" className="text-xs text-danger">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';
   const status = <>
     {state && (
-      <span className={`inline-flex h-6 items-center gap-2 rounded-full border bg-surface-2 px-2.5 text-xs whitespace-nowrap ${PILL[state]}`} title={elapsed !== undefined ? t('session-elapsed-hint') : undefined} data-state-pill={state}>
-        <span aria-hidden className={`chat-dot size-2 rounded-full bg-current ${state === 'working' ? 'chat-dot--pulse' : ''}`} />
-        {elapsed !== undefined && elapsed >= 60000 ? t('chat-state-since', { state: word, time: elapsed < 3_600_000 ? `${Math.floor(elapsed / 60000)} min` : duration(Math.floor(elapsed / 60000) * 60000) }) : word}
+      <span className="inline-flex" title={elapsed !== undefined ? t('session-elapsed-hint') : undefined} data-state-pill={state}>
+        <Pill tone={stateTone(state)} icon={<Mark state={state} />}>
+          {elapsed !== undefined && elapsed >= 60000 ? t('chat-state-since', { state: word, time: elapsed < 3_600_000 ? `${Math.floor(elapsed / 60000)} min` : duration(Math.floor(elapsed / 60000) * 60000) }) : word}
+        </Pill>
       </span>
     )}
     {!state && elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}

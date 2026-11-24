@@ -1,6 +1,7 @@
 # 0089. The chat history of a structured agent survives the node and is read in pages
 Status: Accepted
 Date: 2026-11-19
+Amended: 2026-11-24 (Amendment A below: the maintainer's decision on #1147, live redaction)
 
 Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0089'u kabul ediyorum"). The open questions' proposed answers stand: 30 days and 32 MiB per agent, the node's own known secret values replaced by a marker (unknown secrets in output cannot be found and the ADR says so), export to Markdown later as its own small PR. It builds on ADR-0090 (Accepted): the new entry kinds and fields are what is stored.
 
@@ -65,3 +66,52 @@ a confined agent cannot read it; paging returns exactly the entries before an id
 2. Node writer, retention and paging.
 3. Resume wiring and the purge command.
 4. Web: pages on scroll up and the markers.
+
+## Build status
+
+- Decisions 1, 2, 3 (the node's side) and 7, and the seeding of decisions 4 and 5, are built ahead of the schema step, as ADR-0104 C1
+  (its build step 4, #931) decides: the writer, the bounds and policy keys (both only lower the defaults), retention counted from when
+  the agent ended, `agora history purge`, the node's secret values replaced, continuous ids, and a resume or a take-up that shows the
+  earlier turns once (an agent's own replay of a loaded session is not shown again). See ADR-0104 "Build status".
+- Not built: the schema step and paging (decision 4's `chat.history`), the window's scroll-back and its "resumed" and "earlier session"
+  markers (decision 5; a fresh start already keeps the earlier session as `<id>.earlier.jsonl`), search (decision 6).
+- Decision 3's "forgetting an agent forgets its history" is built by ADR-0108 (#1104): a forget at the hub reaches a node that offers
+  `agent.forget.local` (at once, or when it next connects), which removes the agent's file and its earlier session's and no longer
+  offers it for Resume. An older node still leaves the file to retention.
+
+## Amendment A (2026-11-24, #1147): the node's own secret values are replaced in what it sends live too
+Status: Accepted (2026-11-24, the maintainer's explicit message in the merger chat: "Yes, redact live too").
+
+**Why.** Decision 7 replaces the values of the secrets the node holds before an entry is **written**. The live chat stream did not:
+the ring sent each entry to `ChatSubscribe` followers as it was, so a value an agent printed reached the hub (in transit, as a relay)
+and the window while the file masked it. The invariant "Secrets never leave the node" asks for the same replacement on the way out.
+
+**Decision** (the maintainer's answer above). The node replaces its own known secret values (decision 7's: its secret store and the
+environment variables its policy passes to agents, ADR-0084) in everything it sends a follower: each entry of the live stream
+(every version of an entry that changes in place), the snapshot a new follower gets, and any page or history of the conversation it
+sends, with the same rule and residuals as the file. Paging (`chat.history`, decision 4) is not built yet; when it is, it serves the
+same redacted entries. No schema change: a follower gets the same messages, with `<redacted>` where a value was.
+
+**How #1147 builds it** (for the maintainer's review with that PR).
+1. The same rule from the same code: (a) whole values, raw and as JSON escapes them, in every text and across the agent's words as one
+   stream; (b) every part of 4 bytes or more of a value that touches or crosses an edge. The live path keeps its own stream of the
+   agent's words (a carry, its edges), as the writer keeps its own.
+2. Never a version unredacted first and redacted later: an entry is redacted before it is first sent, and the agent's words a value
+   may still continue wait. Only those wait: with no value held nothing waits; otherwise a piece waits only while the stream ends in
+   a part of a value of 4 bytes or more, until the next words show it is not one, until any other entry of the agent (so ids still
+   increase on the stream: a client may drop an older new id), until its turn ends, Start again, the ring's bound, or at most
+   `LIVE_HOLD_MS` (300 ms, checked on the node's 100 ms tick); a piece sent that way has its end treated as an edge.
+3. A new follower's snapshot shows the words as they were sent and leaves out those still waiting; the stream brings them.
+4. Residuals: those of the file (a value under 8 bytes, a fragment under 4 bytes, the cuts the node cannot see, JSON forms other than
+   `serde_json`'s, a secret it does not hold), and these of the live path: the live view and the file may differ where a part of a
+   value stands at an edge by chance (each masks it at its own edges); a value's first 3 bytes or fewer can be sent before the next
+   words show the value goes on (the rest is replaced; the file, which holds back more, masks them); text sent before a value was
+   added to the store stays as sent on streams already open (every later snapshot has it replaced), and a value added is replaced
+   from the node's next read of its values (at most a second later); a value over 16 KiB (only one from the node's environment can
+   be) can show in part when its words are sent without what follows.
+5. The same values are replaced in the agent's own words the node records as hub events (audits of #1157): on an approval card,
+   before the request is queued (so the queue, the event and the signature over it hold the same words), an adapter's action, detail
+   and always-option label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a
+   task's title, a handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids
+   are kept, and paths in other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted. Not covered: the body of a mesh message an agent sends to an agent on another machine, which the hub relays as written
+   (a question for the maintainer: replacing it changes what the other agent is told).

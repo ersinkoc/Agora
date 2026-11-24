@@ -1,9 +1,12 @@
 import { useState, useSyncExternalStore } from 'react';
 import { t } from '../i18n';
 import { ATTENTION_MODES, attentionPrefs, type AttentionMode, type NotifyMode } from '../net/attention';
+import { SegmentedControl, SettingRow, Toggle } from './kit';
+import { SettingsCard } from './SettingsCard';
 
 // This device: how the window gets the person's attention when an agent is blocked. Kept in this browser only. Notification permission is
-// asked for only here, on the click of "Turn on notifications", never when the window loads.
+// asked for only here, when the person turns the switch on, never when the window loads. A browser that blocks or cannot show
+// notifications gets the switch off and disabled, and says why under it.
 export function AttentionSettings() {
   const mode = useSyncExternalStore(attentionPrefs.subscribe, () => attentionPrefs.mode(), () => 'modal' as AttentionMode);
   const notify = useSyncExternalStore(attentionPrefs.subscribe, () => attentionPrefs.notify(), () => 'off' as NotifyMode);
@@ -14,32 +17,24 @@ export function AttentionSettings() {
       void Notification.requestPermission().then((p) => { setPerm(p); attentionPrefs.setNotify(p === 'granted' ? 'generic' : 'off'); }).catch(() => setPerm('denied'));
     } catch { setPerm('unsupported'); }
   };
+  const cannot = perm === 'unsupported' || perm === 'denied';
+  const notifyHint = perm === 'unsupported' ? 'attention-notify-unsupported' : perm === 'denied' ? 'attention-notify-blocked' : on ? 'attention-notify-on' : 'attention-notify-hint';
   return (
-    <section className="stack" aria-labelledby="attention-settings">
-      <h2 id="attention-settings" className="m-0">{t('attention-settings-title')}</h2>
-      <p className="muted m-0">{t('attention-settings-intro')}</p>
-      <fieldset className="stack m-0 border-0 p-0">
-        {ATTENTION_MODES.map((m) => (
-          <label key={m} className="flex items-center gap-2">
-            <input type="radio" name="attention-mode" checked={mode === m} onChange={() => attentionPrefs.setMode(m)} />
-            <span>{t(`attention-mode-${m}`)}</span>
-          </label>
-        ))}
-      </fieldset>
-      <p className="muted m-0">{t('attention-mode-hint')}</p>
-      <h3 className="m-0 text-sm">{t('attention-notify-title')}</h3>
-      {perm === 'unsupported' && <p className="muted m-0">{t('attention-notify-unsupported')}</p>}
-      {perm === 'denied' && <p className="muted m-0">{t('attention-notify-blocked')}</p>}
-      {perm !== 'unsupported' && perm !== 'denied' && !on && <p className="m-0"><button type="button" className="button" onClick={enable}>{t('attention-notify-enable')}</button></p>}
-      {on && <>
-        <p className="muted m-0">{t('attention-notify-on')}</p>
-        <label className="flex items-center gap-2">
-          <input type="checkbox" checked={notify === 'named'} onChange={(e) => attentionPrefs.setNotify(e.target.checked ? 'named' : 'generic')} />
-          <span>{t('attention-notify-names')}</span>
-        </label>
-        <p className="muted m-0">{t('attention-notify-names-warn')}</p>
-        <p className="m-0"><button type="button" className="button" onClick={() => attentionPrefs.setNotify('off')}>{t('attention-notify-off')}</button></p>
-      </>}
-    </section>
+    <SettingsCard icon="bell" title={t('attention-settings-title')} description={t('attention-settings-desc')}>
+      <SettingRow label={t('attention-mode-label')} hint={t('attention-mode-hint')}>
+        {(labelId, hintId) => (
+          <SegmentedControl labelledBy={labelId} describedBy={hintId} value={mode} onChange={(m) => attentionPrefs.setMode(m)}
+            items={ATTENTION_MODES.map((m) => ({ value: m, label: t(`attention-mode-short-${m}`), title: t(`attention-mode-${m}`) }))} />
+        )}
+      </SettingRow>
+      <SettingRow label={t('attention-notify-title')} hint={t(notifyHint)}>
+        {(labelId, hintId) => <Toggle checked={on} disabled={cannot} labelledBy={labelId} describedBy={hintId} onChange={(next) => { if (next) enable(); else attentionPrefs.setNotify('off'); }} />}
+      </SettingRow>
+      {on && (
+        <SettingRow label={t('attention-notify-names')} hint={t('attention-notify-names-warn')}>
+          {(labelId, hintId) => <Toggle checked={notify === 'named'} labelledBy={labelId} describedBy={hintId} onChange={(next) => attentionPrefs.setNotify(next ? 'named' : 'generic')} />}
+        </SettingRow>
+      )}
+    </SettingsCard>
   );
 }

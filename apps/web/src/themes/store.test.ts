@@ -125,6 +125,35 @@ describe('the person\'s themes', () => {
     expect(loadState(kv).user).toEqual([]);
   });
 
+  it('keeps a theme whose text is hard to read only on a coloured background: it loads, changes and imports, with the warning', () => {
+    // Idle reads 3:1 on the surfaces (enough before #1021) but not 4.5:1 as words on its own background.
+    const file = { 'agora-theme': 1, name: 'Dim idle', scheme: 'dark', tokens: { 'state-idle': '#707078' } } as const;
+    const kv = memory({ [USER_KEY]: JSON.stringify([{ id: 'user-1', file }]) });
+    expect(loadState(kv).user.map((u) => u.name)).toEqual(['Dim idle']); // stored before: never dropped
+    const s = createThemeStore({ kv });
+    const u = s.update('user-1', { tokens: { accent: '#9aa0ff' } });
+    expect(u.ok && u.warnings?.map((w) => w.code)).toEqual(['tint-contrast']);
+    expect(loadState(kv).user[0]?.tokens.accent).toBe('#9aa0ff');
+    const i = s.import(serialiseTheme(file));
+    expect(i.ok && i.warnings?.map((w) => (w.code === 'tint-contrast' ? `${w.fg}/${w.tint}` : w.code))).toEqual(['state-idle/idle']);
+    expect(s.update('user-1', { tokens: { 'state-idle': '#8b8b96' } })).not.toHaveProperty('warnings');
+  });
+
+  it('keeps a stored theme that only the later checks warn about: the red on its surfaces, a badge, a control (#1054)', () => {
+    const files = [
+      { name: 'Light raised', tokens: { 'surface-2': '#38383e', 'text-muted': '#c4c4cc', accent: '#b0b6ff' }, code: 'kit-contrast' },
+      { name: 'Dim text', tokens: { text: '#9c9ca4' }, code: 'kit-contrast' },
+      { name: 'Dim idle icon', tokens: { 'state-idle': '#66666e' }, code: 'control-contrast' },
+    ];
+    const kv = memory({ [USER_KEY]: JSON.stringify(files.map((f, i) => ({ id: `user-${i}`, file: { 'agora-theme': 1, name: f.name, scheme: 'dark', tokens: f.tokens } }))) });
+    expect(loadState(kv).user.map((u) => u.name)).toEqual(files.map((f) => f.name)); // never dropped
+    const s = createThemeStore({ kv });
+    files.forEach((f, i) => {
+      const u = s.update(`user-${i}`, { tokens: { ...f.tokens, 'radius-s': '9px' } });
+      expect(u.ok && u.warnings?.map((w) => w.code), f.name).toContain(f.code);
+    });
+  });
+
   it(`keeps at most ${MAX_USER_THEMES}`, () => {
     const s = createThemeStore({ kv: memory() });
     for (let i = 0; i < MAX_USER_THEMES; i++) expect(s.copy(slate, `n${i}`).ok).toBe(true);

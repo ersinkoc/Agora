@@ -78,6 +78,7 @@ fn online(node: &str) -> Body {
 
 fn agent(node: &str, id: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
+        run_id: Vec::new(),
         agent_id: id.into(),
         project_id: "p".into(),
         node_id: node.into(),
@@ -85,17 +86,45 @@ fn agent(node: &str, id: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
     })
 }
 
-async fn recv(c: &mut Conn<TcpStream>) -> Frame {
-    tokio::time::timeout(Duration::from_secs(10), c.recv())
+/// Subscribes as a window and reads the hub's first frame, which must be the `Welcome` naming the person's role (ADR-0106). [`recv`]
+/// refuses any later one.
+async fn subscribe<S>(c: &mut Conn<S>, payload: Vec<u8>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    c.send(&f(STREAM_EVENTS, kinds::SUBSCRIBE, payload))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), c.recv())
         .await
         .expect("timeout")
         .unwrap()
-        .expect("closed")
+        .expect("closed");
+    assert!(client_welcome(&first), "the Welcome comes first: {first:?}");
+}
+
+/// A `Welcome` that names the person's role: a window's, which comes once and first ([`subscribe`]). A node's names none.
+fn client_welcome(f: &Frame) -> bool {
+    (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::WELCOME)
+        && v1::Welcome::decode(f.payload.as_slice())
+            .is_ok_and(|w| w.person_role() != v1::PersonRole::Unspecified)
+}
+
+/// The next frame. A window's `Welcome` (ADR-0106) is read once, first, by [`subscribe`]; another one here is a bug.
+async fn recv(c: &mut Conn<TcpStream>) -> Frame {
+    let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert!(!client_welcome(&f), "a second Welcome: {f:?}");
+    f
 }
 
 /// A hub on a loopback port without TLS (the token and enrollment paths).
@@ -387,24 +416,19 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
 
     for tok in [None, Some("wrong")] {
         let mut c = dial(addr, tok).await;
-        c.send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+        // Refused before any Welcome: no subscription is answered.
+        let _ = c
+            .send(&f(
+                STREAM_EVENTS,
+                kinds::SUBSCRIBE,
+                v1::Subscribe::default().encode_to_vec(),
+            ))
+            .await;
         assert!(closed(&mut c).await, "{tok:?}");
     }
 
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut c).await;
     assert_eq!(
         (snap.stream_id, snap.kind),
@@ -432,13 +456,11 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
     );
 
     let mut c2 = dial(addr, Some("good-token")).await;
-    c2.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
+    subscribe(
+        &mut c2,
         v1::Subscribe { after_pos: Some(2) }.encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    )
+    .await;
     let fr = recv(&mut c2).await;
     assert_eq!(fr.kind, kinds::POSITIONED_EVENT);
     assert_eq!(
@@ -593,12 +615,15 @@ async fn dial_tls(addr: std::net::SocketAddr, connector: tokio_rustls::TlsConnec
         .unwrap()
 }
 
+/// The next frame. A window's `Welcome` (ADR-0106) is read once, first, by [`subscribe`]; another one here is a bug.
 async fn recv_tls(c: &mut TlsConn) -> Frame {
-    tokio::time::timeout(Duration::from_secs(10), c.recv())
+    let f = tokio::time::timeout(Duration::from_secs(10), c.recv())
         .await
         .expect("timeout")
         .unwrap()
-        .expect("closed")
+        .expect("closed");
+    assert!(!client_welcome(&f), "a second Welcome: {f:?}");
+    f
 }
 
 #[tokio::test]
@@ -722,13 +747,7 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "good-token")
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let first = recv(&mut c).await;
     assert_eq!(first.kind, kinds::SNAPSHOT);
 
@@ -736,13 +755,14 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
     let mut bad = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "nope")
         .await
         .unwrap();
-    bad.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = bad
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut bad).await);
 }
 
@@ -778,14 +798,7 @@ async fn a_clients_command_is_routed_to_its_node_and_the_answer_comes_back() {
     next_ack(&mut node).await;
 
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     // Unknown node, no target, and enrollment are refused by the hub itself.
@@ -846,14 +859,7 @@ async fn a_node_that_leaves_mid_command_gives_the_client_node_offline() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&routed("x", "n2")).await.unwrap();
     let _ = recv(&mut node).await; // the node got it and never answers
@@ -937,22 +943,17 @@ async fn signing_in_with_a_code_gives_a_session_token_the_hub_accepts() {
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     let mut bad = dial(addr, Some("0123456789abcdef0123456789abcdef")).await;
-    bad.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = bad
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut bad).await);
 
     // Guessing is rate limited.
@@ -1112,14 +1113,7 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     let ask = |target: &str| {
@@ -1322,13 +1316,7 @@ async fn a_live_client_connection_ends_when_its_session_stops_being_valid() {
     });
     let addr = start(st).await;
     let mut c = dial(addr, Some("any")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     // Expiry or "sign out everywhere": the connection that was already open goes too.
     valid.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1387,14 +1375,7 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
 
     // A viewer's stop is refused by the hub, naming what was refused; the node never hears of it.
@@ -1423,14 +1404,7 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
     client.send(&stop_request("s2", "n1")).await.unwrap();
     assert!(closed(&mut client).await);
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&stop_request("s3", "n1")).await.unwrap();
     let got = recv(&mut node).await;
@@ -1461,6 +1435,108 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
     );
 }
 
+/// ADR-0106: subscribes as a window and reads what the hub sends first, which must be the `Welcome` naming the person's role; the
+/// snapshot follows it.
+async fn welcomed(c: &mut Conn<TcpStream>) -> v1::PersonRole {
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .expect("closed");
+    assert_eq!(
+        (first.stream_id, first.kind),
+        (STREAM_CONTROL, kinds::WELCOME),
+        "the Welcome comes first"
+    );
+    let w = v1::Welcome::decode(first.payload.as_slice()).unwrap();
+    // Nothing was negotiated: a window sends no Hello.
+    assert_eq!(
+        (
+            w.chosen_generation,
+            w.capabilities.len(),
+            w.peer_id.as_str()
+        ),
+        (1, 0, "")
+    );
+    assert!(w.server_time_ms > 0);
+    assert_eq!(recv(c).await.kind, kinds::SNAPSHOT);
+    w.person_role()
+}
+
+#[tokio::test]
+async fn a_window_is_told_its_persons_role_first_and_a_role_change_reconnects_with_the_new_one() {
+    use agora_hub::users::Role;
+    let role = Arc::new(std::sync::Mutex::new(Role::Owner));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Demotable(Arc::clone(&role))),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    // One connection per role, each told its own.
+    for (r, want) in [
+        (Role::Owner, v1::PersonRole::Owner),
+        (Role::Member, v1::PersonRole::Member),
+        (Role::Viewer, v1::PersonRole::Viewer),
+    ] {
+        *role.lock().unwrap() = r;
+        let mut c = dial(addr, Some("good-token")).await;
+        assert_eq!(welcomed(&mut c).await, want, "{r:?}");
+    }
+    // A member made a viewer while connected: the hub ends the connection (checked once a second, with no command sent), and the
+    // next one says viewer. Then made the owner: the same, and owner.
+    *role.lock().unwrap() = Role::Member;
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Member);
+    *role.lock().unwrap() = Role::Viewer;
+    assert!(closed(&mut c).await);
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Viewer);
+    *role.lock().unwrap() = Role::Owner;
+    assert!(closed(&mut c).await);
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Owner);
+}
+
+#[tokio::test]
+async fn a_hub_not_in_team_mode_tells_its_window_owner_and_a_node_is_told_no_role() {
+    // `Tokens` answers `access` with the trait's default: the one person of a hub not in team mode.
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let mut c = dial(addr, Some("good-token")).await;
+    assert_eq!(welcomed(&mut c).await, v1::PersonRole::Owner);
+
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: vec![],
+        build: "t".into(),
+        locale: None,
+    };
+    node.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    let w = recv(&mut node).await;
+    assert_eq!((w.stream_id, w.kind), (STREAM_CONTROL, kinds::WELCOME));
+    let w = v1::Welcome::decode(w.payload.as_slice()).unwrap();
+    assert_eq!(
+        (w.person_role(), w.peer_id.as_str()),
+        (v1::PersonRole::Unspecified, "n1")
+    );
+}
+
 /// A member who was granted one project (ADR-0049).
 struct Scoped;
 
@@ -1480,6 +1556,7 @@ impl ClientAuth for Scoped {
 
 fn started(id: &str, project: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
+        run_id: Vec::new(),
         agent_id: id.into(),
         project_id: project.into(),
         node_id: "n1".into(),
@@ -1487,6 +1564,7 @@ fn started(id: &str, project: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
     })
@@ -1550,14 +1628,11 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
 
     let mut client = dial(addr, Some("good-token")).await;
     // Asking to replay the log from the start must not replay anyone else's events: the answer is a cut snapshot.
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(
+        &mut client,
+        v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+    )
+    .await;
     let fr = recv(&mut client).await;
     assert_eq!(fr.kind, kinds::SNAPSHOT);
     let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
@@ -1620,6 +1695,238 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
         }
     };
     assert_eq!(binary, "agora.exe");
+}
+
+/// A request on the command stream, as a window sends it.
+fn command_frame(id: &str, target: &str, command: command_request::Command) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+/// Sends `command` from the window, answers it on the node with `answer`, and returns what the window then gets.
+async fn answered(
+    client: &mut Conn<TcpStream>,
+    node: &mut Conn<TcpStream>,
+    id: &str,
+    command: command_request::Command,
+    answer: command_ok::Result,
+) -> v1::CommandResponse {
+    client
+        .send(&command_frame(id, "n1", command))
+        .await
+        .unwrap();
+    let got = recv(node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    node.send(&f(
+        STREAM_COMMANDS,
+        1,
+        v1::CommandResponse {
+            request_id: forwarded.request_id,
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(answer),
+            })),
+        }
+        .encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    response(client).await
+}
+
+/// ADR-0049 Amendment A (#1049), through a real hub: a member granted `n1/mine` (`/srv/mine`) browses, chooses and starts in it; another
+/// project's folder, a folder above it and an escape by `..` stop at the hub; a folder the machine really opened elsewhere (a link
+/// inside the project) is refused in place of the machine's answer; the way up from the project's folder is left out.
+#[tokio::test]
+async fn a_member_browses_and_starts_only_inside_a_project_granted_on_that_machine() {
+    let caps = || {
+        vec![
+            "directory.list".to_string(),
+            "workspace.directory".to_string(),
+        ]
+    };
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: caps(),
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Scoped),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: caps(),
+        build: "t".into(),
+        locale: None,
+    };
+    node.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut node).await.kind, kinds::WELCOME);
+    node.send(&f(
+        STREAM_CONTROL,
+        kinds::RESUME,
+        v1::Resume::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut node).await.kind, kinds::RESUME_OK);
+    let checkout = |id: &str, project: &str, path: &str| {
+        Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+            checkout_id: id.into(),
+            node_id: "n1".into(),
+            project_id: project.into(),
+            path: path.into(),
+        })
+    };
+    for (seq, body) in [
+        (1, online("n1")),
+        (2, checkout("c1", "mine", "/srv/mine")),
+        (3, checkout("c2", "theirs", "/srv/theirs")),
+    ] {
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, body)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    let list = |path: &str| {
+        command_request::Command::DirectoryList(v1::DirectoryList {
+            path: path.into(),
+            authorization: None,
+        })
+    };
+    let launch = |path: &str| {
+        command_request::Command::AgentLaunch(v1::AgentLaunch {
+            path: path.into(),
+            project_id: "mine".into(),
+            kind: "shell".into(),
+            ..Default::default()
+        })
+    };
+    // Refused at the hub, named by the command (#1044's role wording): the node hears nothing.
+    for (id, command) in [
+        ("x1", list("/srv/theirs")),
+        ("x2", list("/srv")),
+        ("x3", list("/srv/mine/../theirs")),
+        ("x4", list("")),
+        ("x5", launch("/srv/theirs")),
+    ] {
+        client
+            .send(&command_frame(id, "n1", command))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        assert_eq!(
+            (r.request_id.as_str(), err_code(&r)),
+            (id, "auth.forbidden")
+        );
+        let Some(command_response::Result::Err(info)) = &r.result else {
+            panic!("expected an error");
+        };
+        let action = if id == "x5" {
+            "AgentLaunch"
+        } else {
+            "DirectoryList"
+        };
+        assert_eq!(
+            info.params.get("action").and_then(|v| v.value.clone()),
+            Some(v1::param_value::Value::Str(action.into())),
+            "{info:?}"
+        );
+    }
+    // Inside the project: forwarded, and the machine's answer is checked on its way back.
+    let entries = |path: &str, parent: &str| {
+        command_ok::Result::DirectoryEntries(v1::DirectoryEntries {
+            path: path.into(),
+            parent: parent.into(),
+            entries: vec![v1::DirectoryEntry {
+                name: "api".into(),
+                is_git: false,
+            }],
+            truncated: false,
+        })
+    };
+    let r = answered(
+        &mut client,
+        &mut node,
+        "in",
+        list("/srv/mine"),
+        entries("/srv/mine", "/srv"),
+    )
+    .await;
+    let Some(command_response::Result::Ok(v1::CommandOk {
+        result: Some(command_ok::Result::DirectoryEntries(e)),
+    })) = r.result
+    else {
+        panic!("expected the listing: {r:?}");
+    };
+    assert_eq!((e.path.as_str(), e.parent.as_str()), ("/srv/mine", ""));
+    assert_eq!(e.entries.len(), 1);
+    // `/srv/mine/out` is a link the machine followed to `/etc`: the member gets a refusal, not `/etc`'s folders.
+    let r = answered(
+        &mut client,
+        &mut node,
+        "link",
+        list("/srv/mine/out"),
+        entries("/etc", "/"),
+    )
+    .await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("link", "auth.forbidden")
+    );
+    let r = answered(
+        &mut client,
+        &mut node,
+        "go",
+        launch("/srv/mine/api"),
+        command_ok::Result::AgentLaunch(v1::AgentLaunchResult {
+            agent_id: "a1".into(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert!(
+        matches!(r.result, Some(command_response::Result::Ok(_))),
+        "{r:?}"
+    );
+
+    // The audit trail says how each ended, the refused answer too.
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some("eda"), 100)
+        .unwrap();
+    let seen: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|e| (e.action.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("DirectoryList", "auth.forbidden"),
+            ("AgentLaunch", "auth.forbidden"),
+            ("DirectoryList", "ok"),
+            ("DirectoryList", "auth.forbidden"),
+            ("AgentLaunch", "ok"),
+        ]
+    );
 }
 
 async fn get_audit(addr: std::net::SocketAddr, token: Option<&str>, query: &str) -> (u16, String) {
@@ -1734,14 +2041,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     // It still runs: refused.
     let r = forget_agent(&mut client, "n1/a1").await;
@@ -1775,16 +2075,34 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         .unwrap();
     assert!(matches!(ev.body, Some(Body::AgentForgotten(ref e)) if e.agent_id == "n1/a1"));
 
+    let missing = forget_agent(&mut client, "n1/missing").await;
+    assert_eq!(err_code(&missing), "agent.not_found");
+
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 10)
+        .unwrap();
+    let rows: Vec<_> = rows.iter().filter(|r| r.action == "agent.forget").collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|r| r.outcome.as_str()).collect::<Vec<_>>(),
+        ["agent.running", "ok", "agent.not_found"]
+    );
+    println!("CONTROL OK: all three forget outcomes were recorded");
+    let targets: Vec<_> = rows
+        .iter()
+        .map(|r| (r.node.as_str(), r.project_id.as_str(), r.agent_id.as_str()))
+        .collect();
+    let expected = [("n1", "p", "a1"), ("n1", "p", "a1"), ("n1", "", "missing")];
+    if targets != expected {
+        println!("EXPECTED: {expected:?}\nACTUAL: {targets:?}\nPROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert_eq!(targets, expected);
+
     // A client that arrives now no longer sees the agent, but the hub's usage still counts it.
     let mut later = dial(addr, Some("good-token")).await;
-    later
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut later, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut later).await;
     assert_eq!(snap.kind, kinds::SNAPSHOT);
     let snapshot = v1::Snapshot::decode(snap.payload.as_slice()).unwrap();
@@ -1811,6 +2129,538 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         1,
         "a forgotten agent's tokens still count"
     );
+}
+
+/// ADR-0108: a node's handshake offering `caps`.
+async fn handshake_offering(c: &mut Conn<TcpStream>, caps: &[&str]) {
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: caps.iter().map(|c| (*c).to_string()).collect(),
+        build: "t".into(),
+        locale: None,
+    };
+    c.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(recv(c).await.kind, kinds::WELCOME);
+    c.send(&f(
+        STREAM_CONTROL,
+        kinds::RESUME,
+        v1::Resume::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(c).await.kind, kinds::RESUME_OK);
+}
+
+/// The next command the hub sends the node, or `None` when none comes within `wait`.
+async fn command_to_node(c: &mut Conn<TcpStream>, wait: Duration) -> Option<v1::CommandRequest> {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        let fr = match tokio::time::timeout(left, c.recv()).await {
+            Ok(Ok(Some(fr))) => fr,
+            _ => return None,
+        };
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 0) {
+            return Some(v1::CommandRequest::decode(fr.payload.as_slice()).unwrap());
+        }
+    }
+}
+
+/// A client's forget and the hub's answer, past the events the client hears meanwhile.
+async fn forget_answer(client: &mut Conn<TcpStream>, id: &str) -> v1::CommandResponse {
+    let req = v1::CommandRequest {
+        request_id: format!("forget-{id}"),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::AgentForget(v1::AgentForget {
+            agent_id: id.into(),
+        })),
+    };
+    client
+        .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+        .await
+        .unwrap();
+    loop {
+        let fr = recv(client).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            return v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+        }
+    }
+}
+
+async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !ok() {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// ADR-0108: a forget of a closed agent whose machine is offline is owed to it; when it connects it is sent the forget (the node's own
+/// id), again on the next connection if this one ends before it answers, and once it answers nothing is owed. A machine that does not
+/// offer `agent.forget.local` is never sent one.
+#[tokio::test]
+async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_answers() {
+    const CAP: &str = "agent.forget.local";
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec![CAP.into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    // Each machine ran an agent that has ended, then went away.
+    for (node, offers) in [("n1", true), ("n2", false)] {
+        let (mut conn, task) = node_conn(&st, node).await;
+        handshake_offering(&mut conn, if offers { &[CAP] } else { &[] }).await;
+        let exited = Body::AgentExited(v1::AgentExited {
+            agent_id: "agent-3".into(),
+            exit_code: 0,
+        });
+        for (i, b) in [online(node), agent(node, "agent-3"), exited]
+            .into_iter()
+            .enumerate()
+        {
+            conn.send(&f(
+                STREAM_EVENTS,
+                kinds::EVENT,
+                event(node, i as u64 + 1, b),
+            ))
+            .await
+            .unwrap();
+            next_ack(&mut conn).await;
+        }
+        drop(conn);
+        let _ = task.await;
+        until("the machine to leave", || {
+            !st.hub.router().is_connected(node)
+        })
+        .await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    for id in ["n1/agent-3", "n2/agent-3"] {
+        let r = forget_answer(&mut client, id).await;
+        assert!(
+            matches!(r.result, Some(command_response::Result::Ok(_))),
+            "{r:?}"
+        );
+    }
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    assert_eq!(st.hub.forgets().pending("n2"), vec!["agent-3"]);
+
+    // n1 connects and is sent the forget; its connection ends before it answers: still owed.
+    let (mut n1, task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut n1, &[CAP]).await;
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(ref f)) if f.agent_id == "agent-3"
+    ));
+    drop(n1);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+
+    // Again on the next connection; this time it answers (here: refused, the agent runs there), and nothing is owed any more.
+    let (mut n1, _task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut n1, &[CAP]).await;
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(_))
+    ));
+    let answer = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(command_response::Result::Err(
+            agora_protocol::Error::new(agora_protocol::ErrorCode::AgentRunning)
+                .with("agent_id", "agent-3")
+                .to_info(),
+        )),
+    };
+    n1.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the answer to settle the forget", || {
+        st.hub.forgets().pending("n1").is_empty()
+    })
+    .await;
+
+    // A forget while it is connected goes at once, and an `ok` settles it. Another machine that offers the capability and is
+    // connected is sent nothing: the forget goes to the agent's own machine only.
+    let (mut n3, _t3) = node_conn(&st, "n3").await;
+    handshake_offering(&mut n3, &[CAP]).await;
+    let r = forget_answer(&mut client, "n1/agent-3").await;
+    assert!(
+        matches!(r.result, Some(command_response::Result::Ok(_))),
+        "{r:?}"
+    );
+    let sent = command_to_node(&mut n1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(matches!(
+        sent.command,
+        Some(command_request::Command::AgentForget(_))
+    ));
+    let ok = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        })),
+    };
+    n1.send(&f(STREAM_COMMANDS, 1, ok.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the ok to settle the forget", || {
+        st.hub.forgets().pending("n1").is_empty()
+    })
+    .await;
+    assert!(command_to_node(&mut n3, Duration::from_millis(500))
+        .await
+        .is_none());
+    assert!(st.hub.forgets().pending("n3").is_empty());
+    // Each answer is in the audit trail under the hub's own id: its outcome the bare code, the agent and its project in their columns.
+    let rows: Vec<(String, String, String, String)> = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some(agora_hub::ca::RESERVED_HUB_ID), 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "agent.forget.local")
+        .map(|e| (e.node, e.outcome, e.agent_id, e.project_id))
+        .collect();
+    let row = |outcome: &str| {
+        (
+            "n1".to_string(),
+            outcome.to_string(),
+            "agent-3".to_string(),
+            "p".to_string(),
+        )
+    };
+    assert_eq!(rows, vec![row("agent.running"), row("ok")]);
+
+    // n2 does not offer the capability: it is never sent the forget, which stays owed.
+    let (mut n2, _t2) = node_conn(&st, "n2").await;
+    handshake_offering(&mut n2, &[]).await;
+    assert!(command_to_node(&mut n2, Duration::from_millis(500))
+        .await
+        .is_none());
+    assert_eq!(st.hub.forgets().pending("n2"), vec!["agent-3"]);
+}
+
+const FORGET_CAP: &str = "agent.forget.local";
+
+/// A hub that offers `agent.forget.local`, on `store`.
+fn forget_state(store: SqliteStore) -> Arc<ServerState> {
+    Arc::new(ServerState {
+        hub: Arc::new(Hub::open(store).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec![FORGET_CAP.into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    })
+}
+
+/// `n1` ran `agents`, which ended, and went away; then the person forgot them: each is owed to `n1`.
+async fn forgets_owed_while_away(st: &Arc<ServerState>, agents: &[&str]) {
+    let (mut conn, task) = node_conn(st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    let mut bodies = vec![online("n1")];
+    for a in agents {
+        bodies.push(agent("n1", a));
+        bodies.push(Body::AgentExited(v1::AgentExited {
+            agent_id: (*a).into(),
+            exit_code: 0,
+        }));
+    }
+    for (i, b) in bodies.into_iter().enumerate() {
+        conn.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("n1", i as u64 + 1, b),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut conn).await;
+    }
+    drop(conn);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+    for a in agents {
+        st.hub.forget_agent(&format!("n1/{a}"), 100).unwrap();
+    }
+    assert_eq!(st.hub.forgets().pending("n1"), agents.to_vec());
+}
+
+/// `n1` connects offering `agent.forget.local` and is sent the forget of `agent`.
+async fn forget_sent(
+    st: &Arc<ServerState>,
+    agent: &str,
+) -> (
+    Conn<TcpStream>,
+    tokio::task::JoinHandle<()>,
+    v1::CommandRequest,
+) {
+    let (mut conn, task) = node_conn(st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    let sent = command_to_node(&mut conn, Duration::from_secs(10))
+        .await
+        .expect("the forget is sent after the Welcome");
+    assert!(
+        matches!(sent.command, Some(command_request::Command::AgentForget(ref f)) if f.agent_id == agent),
+        "{sent:?}"
+    );
+    (conn, task, sent)
+}
+
+/// The node answers `sent` with `code` (`None`: `ok`), and the hub has taken the answer in (its audit row is written).
+async fn answer_forget(
+    st: &Arc<ServerState>,
+    conn: &mut Conn<TcpStream>,
+    sent: v1::CommandRequest,
+    code: Option<agora_protocol::ErrorCode>,
+) {
+    let rows = || {
+        agora_hub::audit::Audit::new(st.hub.store())
+            .list(0, Some(agora_hub::ca::RESERVED_HUB_ID), 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "agent.forget.local")
+            .count()
+    };
+    let before = rows();
+    let result = match code {
+        None => command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        }),
+        Some(c) => command_response::Result::Err(
+            agora_protocol::Error::new(c)
+                .with("node_id", "n1")
+                .to_info(),
+        ),
+    };
+    let answer = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(result),
+    };
+    conn.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the hub to take the answer in", || rows() > before).await;
+}
+
+async fn leave(st: &Arc<ServerState>, conn: Conn<TcpStream>, task: tokio::task::JoinHandle<()>) {
+    drop(conn);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+}
+
+/// ADR-0108 amendment A: an answer that says the node could not decide now (`node.offline` from a stopping node, `node.timeout`,
+/// `internal`) keeps the forget, which is sent again after the node's next `Welcome`; an `ok` then settles it. A stopping node's
+/// `node.offline` also ends this connection's round: the forgets behind it wait for the next one.
+#[tokio::test]
+async fn a_forget_answered_with_a_passing_failure_is_kept_and_sent_again_after_the_next_welcome() {
+    use agora_protocol::ErrorCode;
+    for code in [
+        ErrorCode::NodeOffline,
+        ErrorCode::NodeTimeout,
+        ErrorCode::Internal,
+    ] {
+        let st = forget_state(SqliteStore::open_in_memory().unwrap());
+        forgets_owed_while_away(&st, &["agent-3", "agent-4"]).await;
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, Some(code.clone())).await;
+        if code == ErrorCode::NodeOffline {
+            assert!(
+                command_to_node(&mut conn, Duration::from_millis(500))
+                    .await
+                    .is_none(),
+                "a stopping node is sent no more forgets"
+            );
+        } else {
+            // Another passing failure does not end the round: the next forget goes on this connection (and is settled).
+            let sent = command_to_node(&mut conn, Duration::from_secs(10))
+                .await
+                .unwrap();
+            answer_forget(&st, &mut conn, sent, None).await;
+        }
+        let kept = if code == ErrorCode::NodeOffline {
+            vec!["agent-3", "agent-4"]
+        } else {
+            vec!["agent-3"]
+        };
+        assert_eq!(st.hub.forgets().pending("n1"), kept, "{code:?}");
+        leave(&st, conn, task).await;
+        assert_eq!(st.hub.forgets().pending("n1"), kept, "{code:?}");
+
+        // The next connection is sent it again, and an `ok` settles it.
+        let (mut conn, _task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, None).await;
+        if code == ErrorCode::NodeOffline {
+            let sent = command_to_node(&mut conn, Duration::from_secs(10))
+                .await
+                .unwrap();
+            answer_forget(&st, &mut conn, sent, None).await;
+        }
+        assert!(st.hub.forgets().pending("n1").is_empty(), "{code:?}");
+    }
+}
+
+/// ADR-0108 amendment A: an answer that says the node decided drops the forget at once, as before.
+#[tokio::test]
+async fn a_forget_answered_with_a_decision_is_dropped() {
+    use agora_protocol::ErrorCode;
+    for code in [
+        None,
+        Some(ErrorCode::AgentRunning),
+        Some(ErrorCode::ProtocolInvalidMessage),
+        Some(ErrorCode::ApprovalGrantRequired),
+        Some(ErrorCode::NodePolicyDenied),
+    ] {
+        let st = forget_state(SqliteStore::open_in_memory().unwrap());
+        forgets_owed_while_away(&st, &["agent-3"]).await;
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, code.clone()).await;
+        assert!(st.hub.forgets().pending("n1").is_empty(), "{code:?}");
+        leave(&st, conn, task).await;
+        let (mut conn, _task) = node_conn(&st, "n1").await;
+        handshake_offering(&mut conn, &[FORGET_CAP]).await;
+        assert!(
+            command_to_node(&mut conn, Duration::from_millis(500))
+                .await
+                .is_none(),
+            "{code:?}"
+        );
+    }
+}
+
+/// ADR-0108 amendment A: a node that keeps answering `internal` is not sent the same forget for ever: after the fifth such answer
+/// (`forgets::MAX_TRANSIENT`) it is dropped (retention removes the files, as for a forget past the 1000 bound).
+#[tokio::test]
+async fn a_forget_that_keeps_failing_is_dropped_after_five_passing_failures() {
+    let st = forget_state(SqliteStore::open_in_memory().unwrap());
+    forgets_owed_while_away(&st, &["agent-3"]).await;
+    for i in 1..=agora_hub::forgets::MAX_TRANSIENT {
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(
+            &st,
+            &mut conn,
+            sent,
+            Some(agora_protocol::ErrorCode::Internal),
+        )
+        .await;
+        leave(&st, conn, task).await;
+        let left: Vec<&str> = if i < agora_hub::forgets::MAX_TRANSIENT {
+            vec!["agent-3"]
+        } else {
+            vec![]
+        };
+        assert_eq!(st.hub.forgets().pending("n1"), left, "after {i}");
+    }
+    let (mut conn, _task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    assert!(command_to_node(&mut conn, Duration::from_millis(500))
+        .await
+        .is_none());
+    // The person forgets it again: it is owed afresh.
+    st.hub.forget_agent("n1/agent-3", 200).unwrap();
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+}
+
+/// ADR-0108 amendment A: a connection that ends before the node answers keeps the forget and does not count (the node may never have
+/// received it): after three such ends it is still stored as a plain id, and it still takes `MAX_TRANSIENT` passing failures to drop.
+#[tokio::test]
+async fn a_connection_lost_before_the_answer_keeps_the_forget_uncounted() {
+    let st = forget_state(SqliteStore::open_in_memory().unwrap());
+    forgets_owed_while_away(&st, &["agent-3"]).await;
+    for _ in 0..3 {
+        let (conn, task, _sent) = forget_sent(&st, "agent-3").await;
+        leave(&st, conn, task).await;
+        assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    }
+    let stored = st.hub.store().setting("forget.n1").unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stored).unwrap(),
+        serde_json::json!(["agent-3"]),
+        "no passing failure counted"
+    );
+    for i in 1..=agora_hub::forgets::MAX_TRANSIENT {
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(
+            &st,
+            &mut conn,
+            sent,
+            Some(agora_protocol::ErrorCode::Internal),
+        )
+        .await;
+        leave(&st, conn, task).await;
+        assert_eq!(
+            st.hub.forgets().pending("n1").is_empty(),
+            i == agora_hub::forgets::MAX_TRANSIENT,
+            "after {i}"
+        );
+    }
+}
+
+/// ADR-0108 amendment A: a kept forget, and how many passing failures it has had, survive a hub restart.
+#[tokio::test]
+async fn a_kept_forget_and_its_failures_survive_a_hub_restart() {
+    let path =
+        std::env::temp_dir().join(format!("agora-hub-forget-kept-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let st = forget_state(SqliteStore::open(&path).unwrap());
+        forgets_owed_while_away(&st, &["agent-3"]).await;
+        for _ in 0..4 {
+            let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+            answer_forget(
+                &st,
+                &mut conn,
+                sent,
+                Some(agora_protocol::ErrorCode::NodeTimeout),
+            )
+            .await;
+            leave(&st, conn, task).await;
+        }
+        assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    }
+    // A new hub on the same store: still owed, and sent after the Welcome; one more passing failure reaches the bound.
+    let st = forget_state(SqliteStore::open(&path).unwrap());
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+    answer_forget(
+        &st,
+        &mut conn,
+        sent,
+        Some(agora_protocol::ErrorCode::Internal),
+    )
+    .await;
+    leave(&st, conn, task).await;
+    assert!(st.hub.forgets().pending("n1").is_empty());
+    drop(st);
+    let _ = std::fs::remove_file(&path);
 }
 
 /// The audit outcome of the newest `AgentList` row, once it is no longer `sent` (or `sent` after `wait`).
@@ -1851,14 +2701,7 @@ async fn a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail()
         .unwrap();
         next_ack(&mut node).await;
         let mut client = dial(addr, Some("good-token")).await;
-        client
-            .send(&f(
-                STREAM_EVENTS,
-                kinds::SUBSCRIBE,
-                v1::Subscribe::default().encode_to_vec(),
-            ))
-            .await
-            .unwrap();
+        subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
         assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
         client.send(&routed("gone", node_id)).await.unwrap();
         let got = recv(&mut node).await;
@@ -1916,14 +2759,7 @@ async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("any")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     client.send(&routed("revoked", "n3")).await.unwrap();
     let got = recv(&mut node).await;
@@ -1940,6 +2776,113 @@ async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail
         .await
         .unwrap();
     assert_eq!(agent_list_outcome(&st, Duration::from_secs(10)).await, "ok");
+}
+
+#[tokio::test]
+async fn audit_records_the_routed_project_agent_and_device_outcome() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _task) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    for (i, body) in [
+        online("n1"),
+        Body::AgentStarted(v1::AgentStarted {
+            agent_id: "a1".into(),
+            node_id: "n1".into(),
+            project_id: "p1".into(),
+            ..Default::default()
+        }),
+        Body::ApprovalRequested(v1::ApprovalRequested {
+            approval_id: "ap1".into(),
+            agent_id: "a1".into(),
+            action: "review".into(),
+            ..Default::default()
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        node.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("n1", (i + 1) as u64, body),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut node).await;
+    }
+
+    let mut client = dial(addr, Some("good-token")).await;
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    for (i, accepted) in [false, true, true].into_iter().enumerate() {
+        let req = v1::CommandRequest {
+            request_id: format!("req-{i}"),
+            target_node: "n1".into(),
+            idempotency_key: if i == 2 {
+                "cached-key".into()
+            } else {
+                String::new()
+            },
+            command: Some(command_request::Command::ApprovalResolve(
+                v1::ApprovalResolve {
+                    approval_id: "ap1".into(),
+                    signer_device_id: format!("device-{i}"),
+                    ..Default::default()
+                },
+            )),
+        };
+        client
+            .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let msg = recv(&mut node).await;
+        let routed = v1::CommandRequest::decode(msg.payload.as_slice()).unwrap();
+        let result = if accepted {
+            command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::Empty(v1::Empty {})),
+            })
+        } else {
+            command_response::Result::Err(v1::ErrorInfo {
+                code: "approval.signature_invalid".into(),
+                ..Default::default()
+            })
+        };
+        let response = v1::CommandResponse {
+            request_id: routed.request_id,
+            result: Some(result),
+        };
+        node.send(&f(STREAM_COMMANDS, 1, response.encode_to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(self::response(&mut client).await.request_id, req.request_id);
+    }
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 10)
+        .unwrap();
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == "ApprovalResolve")
+        .map(agora_hub::audit::json_value)
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["outcome"], "approval.signature_invalid");
+    assert_eq!(rows[1]["outcome"], "ok");
+    assert_eq!(rows[2]["outcome"], "ok");
+    println!("CONTROL OK: the routed outcomes appear in the audit");
+    if rows[1]["project_id"].is_null() {
+        println!("PROBLEM CONFIRMED: project, agent and signing device missing from {rows:?}");
+    }
+    for row in &rows {
+        assert_eq!(row["project_id"], "p1");
+        assert_eq!(row["agent_id"], "a1");
+    }
+    assert_eq!(rows[0]["requested_device_id"], "device-0");
+    assert_eq!(rows[0]["signer_device_id"], "");
+    assert_eq!(rows[1]["requested_device_id"], "device-1");
+    assert_eq!(rows[1]["signer_device_id"], "device-1");
+    assert_eq!(rows[2]["requested_device_id"], "device-2");
+    assert_eq!(rows[2]["signer_device_id"], "");
 }
 
 /// ADR-0058: a mode or model switch is never sent to a node that cannot do it, and every switch, refused or sent, is in the audit
@@ -1959,14 +2902,7 @@ async fn a_model_switch_for_a_node_without_it_is_refused_and_audited() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     for (id, command) in [
         (
@@ -2143,13 +3079,7 @@ async fn a_window_that_pings_the_hub_gets_a_pong() {
     let st = state(None);
     let addr = start(Arc::clone(&st)).await;
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut c).await;
     assert_eq!(
         (snap.stream_id, snap.kind),
@@ -2286,13 +3216,7 @@ fn size_of(req: &v1::CommandRequest) -> (u32, u32) {
 
 async fn signed_in(addr: std::net::SocketAddr) -> Conn<TcpStream> {
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
     c
 }
@@ -2410,14 +3334,7 @@ async fn an_offline_machine_is_forgotten_for_every_client() {
     .unwrap();
     next_ack(&mut node).await;
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     assert_eq!(
         err_code(&forget_node(&mut client, "n1", "").await),
@@ -2704,13 +3621,14 @@ async fn a_metrics_token_reaches_nothing_but_the_metrics() {
     let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
         .await
         .unwrap();
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe::default().encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    // Refused before any Welcome: no subscription is answered.
+    let _ = c
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await;
     assert!(closed(&mut c).await);
     // And a scrape did not start or renew any session.
     assert_eq!(get_metrics(addr, Some(&token)).await.0, 200);
@@ -2888,14 +3806,7 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
                 .unwrap();
             next_ack(&mut node).await;
             let mut client = dial(addr, Some("good-token")).await;
-            client
-                .send(&f(
-                    STREAM_EVENTS,
-                    kinds::SUBSCRIBE,
-                    v1::Subscribe::default().encode_to_vec(),
-                ))
-                .await
-                .unwrap();
+            subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
             let fr = recv(&mut client).await;
             assert_eq!(fr.kind, kinds::SNAPSHOT);
             let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
@@ -2907,14 +3818,11 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
             seen.push(("live", probe_online_binary(&mut client).await));
             if !scoped {
                 let mut replay = dial(addr, Some("good-token")).await;
-                replay
-                    .send(&f(
-                        STREAM_EVENTS,
-                        kinds::SUBSCRIBE,
-                        v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
-                    ))
-                    .await
-                    .unwrap();
+                subscribe(
+                    &mut replay,
+                    v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+                )
+                .await;
                 seen.push(("backlog", probe_online_binary(&mut replay).await));
             }
             for (route, shown) in seen {
@@ -3010,13 +3918,7 @@ async fn subscribe_after(
     after: Option<u64>,
 ) -> (Conn<TcpStream>, Frame) {
     let mut c = dial(addr, Some("good-token")).await;
-    c.send(&f(
-        STREAM_EVENTS,
-        kinds::SUBSCRIBE,
-        v1::Subscribe { after_pos: after }.encode_to_vec(),
-    ))
-    .await
-    .unwrap();
+    subscribe(&mut c, v1::Subscribe { after_pos: after }.encode_to_vec()).await;
     let first = recv(&mut c).await;
     (c, first)
 }
@@ -3313,14 +4215,7 @@ async fn a_window_that_connects_later_is_sent_the_last_config_and_commands_of_a_
         next_ack(&mut node).await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     let snap = recv(&mut client).await;
     assert_eq!(snap.kind, kinds::SNAPSHOT);
     let pos = v1::Snapshot::decode(snap.payload.as_slice()).unwrap().pos;

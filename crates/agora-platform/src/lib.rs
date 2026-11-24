@@ -130,16 +130,24 @@ pub struct LocalStream {
 pub enum ReadTimeout {
     /// The read timeout is set.
     Set,
-    /// The system refused a new timeout because the peer has shut the connection (macOS answers `EINVAL` then). A receive on it
-    /// returns what is buffered or the end at once, so it cannot wait; the timeout is not set.
+    /// The system refused a new timeout because the connection is shut (macOS answers `EINVAL` once the peer has closed it), and the
+    /// stream is seen to be hung up. A receive on it returns what is buffered or the end at once, so it cannot wait; the timeout is
+    /// not set.
     PeerClosed,
 }
 
-/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure.
-fn read_timeout_result(r: io::Result<()>) -> io::Result<ReadTimeout> {
+/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure: an `InvalidInput` answer is the peer having
+/// closed only when `hung_up` confirms the connection is shut; otherwise (or when the check fails) it is returned as it came.
+fn read_timeout_result(
+    r: io::Result<()>,
+    hung_up: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<ReadTimeout> {
     match r {
         Ok(()) => Ok(ReadTimeout::Set),
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(ReadTimeout::PeerClosed),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => match hung_up() {
+            Ok(true) => Ok(ReadTimeout::PeerClosed),
+            Ok(false) | Err(_) => Err(e),
+        },
         Err(e) => Err(e),
     }
 }
@@ -550,9 +558,9 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
                 std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
                 options.open(&tmp)?
             };
-            // Private from its creation on, not made private just after it (#320).
+            // Private from its creation on, not made private just after it (#320), and not shared while it is written.
             #[cfg(windows)]
-            let mut f = windows::create_private_new(&tmp)?;
+            let mut f = windows::create_private_new(&tmp, 0)?;
             f.write_all(contents)?;
             f.sync_all()?;
             // Windows cannot rename a file that is still open.
@@ -937,7 +945,8 @@ impl LocalStream {
     }
 
     /// [`Self::set_read_timeout`] for a caller that can go on without the timeout once the peer has shut the connection: that case
-    /// (an `InvalidInput` answer, macOS) is `Ok(ReadTimeout::PeerClosed)`; every other failure is returned.
+    /// (an `InvalidInput` answer, macOS, on a stream that is seen to be hung up: `poll(2)` on Unix) is `Ok(ReadTimeout::PeerClosed)`;
+    /// every other failure is returned, an `InvalidInput` on a stream still open too. Windows never refuses a read timeout.
     pub fn set_read_timeout_or_closed(
         &self,
         timeout: Option<std::time::Duration>,
@@ -946,12 +955,25 @@ impl LocalStream {
         if timeout.is_some_and(|t| t.is_zero()) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
-        read_timeout_result(self.set_read_timeout(timeout))
+        read_timeout_result(self.set_read_timeout(timeout), || self.hung_up())
+    }
+
+    /// Whether the connection is shut in both directions (see [`Self::set_read_timeout_or_closed`]).
+    fn hung_up(&self) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unixhold::hung_up(self.inner.as_raw_fd())
+        }
+        #[cfg(windows)]
+        {
+            Ok(false)
+        }
     }
 
     /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
     /// writability (an error or hang-up counts as ready, so the send itself reports it). Windows: pipe writes are not polled, so
-    /// this returns `Ok(true)` at once and the caller keeps its own bound on the send.
+    /// this returns `Ok(true)` at once and the send is bounded by its write timeout ([`Self::set_write_timeout`]).
     pub fn wait_writable(&self, timeout: std::time::Duration) -> io::Result<bool> {
         #[cfg(unix)]
         {
@@ -966,7 +988,9 @@ impl LocalStream {
     }
 
     /// How long a send may wait for the peer to take what it sent (`None`: for ever). Past it the send fails with `WouldBlock` or
-    /// `TimedOut`. Windows pipes have no such limit yet: the call does nothing there.
+    /// `TimedOut`, having sent nothing, so it can be tried again. A zero timeout is refused (`InvalidInput`). Windows: the pending
+    /// pipe write is cancelled at the timeout, and while a timeout is set one send writes at most 16 KiB, because only a write no
+    /// larger than the pipe's buffer is sure to have sent nothing when it is cancelled (measured, #1089).
     pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         #[cfg(unix)]
         {
@@ -974,8 +998,7 @@ impl LocalStream {
         }
         #[cfg(windows)]
         {
-            let _ = timeout;
-            Ok(())
+            self.inner.set_write_timeout(timeout)
         }
     }
 
@@ -1240,6 +1263,114 @@ pub fn read_confirmation(min_wait: std::time::Duration) -> io::Result<Option<Str
     line
 }
 
+/// What [`read_confirmation_until`] got.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Confirmation {
+    /// A line, ended with Enter.
+    Line(String),
+    /// The first key came sooner than the minimum wait: a held or scripted key, not an answer. Nothing more was read.
+    TooSoon,
+    /// The caller's check said the question is over (it was answered somewhere else) before a line was ended. Nothing typed counts.
+    Stopped,
+}
+
+/// How long [`read_confirmation_until`] waits for a key before it asks its caller again whether to go on.
+const KEY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// [`read_confirmation`] that can be ended from outside (#942): `stop` is called before each wait for a key, at least every
+/// [`KEY_WAIT`], and when it returns true the read ends with [`Confirmation::Stopped`], whatever was typed so far. The question
+/// itself is unchanged: the terminal only (a pipe or a file is `Unsupported`), what was typed before the call is discarded, a first
+/// key sooner than `min_wait` is [`Confirmation::TooSoon`], the line is at most 256 bytes, nothing is echoed and the terminal's
+/// settings are restored on every path. The keys are read from the terminal directly (not through the buffer of `std::io::stdin`),
+/// so nothing read here is left behind for a later read, and a key that arrives is never hidden from the wait.
+pub fn read_confirmation_until(
+    min_wait: std::time::Duration,
+    stop: &mut dyn FnMut() -> bool,
+) -> io::Result<Confirmation> {
+    #[cfg(unix)]
+    let mode = unix::secret_mode(true)?;
+    #[cfg(windows)]
+    let mode = {
+        let m = windows::secret_mode()?;
+        windows::flush_input();
+        m
+    };
+    #[cfg(not(any(unix, windows)))]
+    let mode: () = return Err(unsupported_io("reading an answer"));
+    let start = std::time::Instant::now();
+    #[cfg(unix)]
+    let mut key = unix::terminal_key;
+    #[cfg(windows)]
+    let mut key = windows::terminal_key;
+    let got = confirmation_from(&mut key, start, min_wait, stop);
+    drop(mode);
+    got
+}
+
+/// The keys of a terminal as a reader: waits for the next key in steps of [`KEY_WAIT`], asking `stop` before each step.
+struct Keys<'a> {
+    /// The bytes of the keys that came within the wait (`None` when none came; empty at the end of input).
+    key: &'a mut dyn FnMut(std::time::Duration) -> io::Result<Option<Vec<u8>>>,
+    stop: &'a mut dyn FnMut() -> bool,
+    stopped: bool,
+    held: std::collections::VecDeque<u8>,
+}
+
+impl io::Read for Keys<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(out) = buf.first_mut() else {
+            return Ok(0);
+        };
+        loop {
+            if let Some(b) = self.held.pop_front() {
+                *out = b;
+                return Ok(1);
+            }
+            if (self.stop)() {
+                self.stopped = true;
+                return Err(io::Error::other("the question was answered elsewhere"));
+            }
+            match (self.key)(KEY_WAIT)? {
+                None => {}
+                Some(k) if k.is_empty() => return Ok(0),
+                Some(k) => self.held.extend(k),
+            }
+        }
+    }
+}
+
+/// The rules of [`read_confirmation_until`] over any source of keys, so they are tested without a terminal. `start` is when the
+/// question was shown (after the typed-ahead input was discarded).
+fn confirmation_from(
+    key: &mut dyn FnMut(std::time::Duration) -> io::Result<Option<Vec<u8>>>,
+    start: std::time::Instant,
+    min_wait: std::time::Duration,
+    stop: &mut dyn FnMut() -> bool,
+) -> io::Result<Confirmation> {
+    use std::io::Read;
+    let mut keys = Keys {
+        key,
+        stop,
+        stopped: false,
+        held: Default::default(),
+    };
+    let got = (|| {
+        let mut first = [0u8; 1];
+        if keys.read(&mut first)? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        if start.elapsed() < min_wait {
+            return Ok(Confirmation::TooSoon);
+        }
+        let mut rest = io::Cursor::new(first).chain((&mut keys).take(255));
+        secret_from(&mut rest).map(Confirmation::Line)
+    })();
+    match got {
+        Err(_) if keys.stopped => Ok(Confirmation::Stopped),
+        other => other,
+    }
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]
@@ -1328,9 +1459,15 @@ pub struct Sandbox {
     /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
     /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
-    /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
-    /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
+    /// refuses to start an agent whose grants contain the control token file (ADR-0082) or any of these paths
+    /// ([`PROTECTED_PATHS_BY_REFUSAL`], #1114), and the platform checks the grants it opens against them again (`closed`, #1150); Windows keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
     pub deny: Vec<PathBuf>,
+    /// Where [`PROTECTED_PATHS_BY_REFUSAL`] holds (Linux): the paths the node checked no `read` or `write` grant reaches before the
+    /// start (its control token, its folder of stored secrets, the paths it keeps closed and its data folder). Checked again on each
+    /// grant as it is opened for the kernel (#1150): a grant whose opened file or folder is one of them, or a folder above one, refuses
+    /// the start ([`SandboxRefusal::ProtectedPathReachable`]), so a grant swapped for a link after the node's check cannot reach them.
+    /// Ignored elsewhere.
+    pub closed: Vec<PathBuf>,
     /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
     /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
     /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
@@ -1409,6 +1546,15 @@ pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
 /// Linux, whose Landlock rules do not restrict connecting to a pathname socket. macOS closes the node's home in the Seatbelt profile
 /// and Windows refuses the pipe to a restricted token. Callers use this instead of a `cfg`.
 pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
+
+/// True where [`Sandbox::deny`] is kept only by the node refusing the start (#1114): Linux, whose Landlock rules can only allow, so a
+/// node path below a folder an agent is given (a `--data` under `/tmp`, `/var` or `/opt`) would be open to it. There the node refuses
+/// to start a confined agent whose read or write grants reach one of its own paths, and the platform checks each grant again as it
+/// opens it for Landlock ([`Sandbox::closed`], #1150). macOS enforces `deny` in the Seatbelt profile. On
+/// Windows the check does not run either: there the node's files are out of reach when their ACLs leave the agent's restricted token
+/// out (the default folders under the user's profile; a data folder that `Users` may read is not checked, #1114). Callers use this
+/// instead of a `cfg`.
+pub const PROTECTED_PATHS_BY_REFUSAL: bool = cfg!(target_os = "linux");
 
 /// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents
 /// itself (Windows joins in a later step).
@@ -1496,8 +1642,12 @@ pub enum SandboxRefusal {
     BroadWriteGrant,
     /// A folder the agent would write could not be labelled for confined agents.
     LabelFailed,
-    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS).
+    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS; Linux: one of
+    /// `Sandbox::closed`, or a folder above it, could not be looked at, #1150).
     ProtectedPathUnresolved,
+    /// A file or folder the agent may read or write is, as opened for the kernel, one of the node's own paths (`Sandbox::closed`) or a
+    /// folder above one (Linux, #1150: a grant swapped for a link after the node checked it).
+    ProtectedPathReachable,
     /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
     WorktreeNotFolder,
     /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
@@ -1515,6 +1665,7 @@ impl SandboxRefusal {
             Self::BroadWriteGrant => "broad_write_grant",
             Self::LabelFailed => "label_failed",
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
+            Self::ProtectedPathReachable => "protected_path_reachable",
             Self::WorktreeNotFolder => "worktree_not_folder",
             Self::WritableIsLink => "writable_is_link",
             Self::WritableHasLinks => "writable_has_links",
@@ -1888,6 +2039,18 @@ pub fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) -> Path
     }
 }
 
+/// Makes a long-lived child of this process (an adapter agent) start with standard input, output and error and no other descriptor
+/// of this process, not even one another thread has open without close-on-exec at that moment. Where a pipe is not made close-on-exec
+/// in one step (macOS: std makes it, then marks it), a pipe another thread was making as the child started (a `git` whose output the
+/// node reads, a terminal agent's start waiting for its `exec` report) stayed open in the child for its whole life, and whoever waited
+/// for that pipe's end waited as long: three nodes in one test process hung on it until the CI step's limit (#1011). Unix: every other
+/// descriptor is marked close-on-exec between fork and exec. Elsewhere nothing changes.
+pub fn keep_only_standard_streams(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    unix::keep_only_standard_streams(cmd);
+    cmd
+}
+
 /// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
 /// Windows: nothing changes.
 pub fn own_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
@@ -2096,13 +2259,30 @@ pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
     }
 }
 
-/// For a supervisor: from now on `SIGTERM`, `SIGINT` and `SIGHUP` do not end this process; they set [`stop_requested`] and are
-/// passed on as `SIGTERM` to the process named by [`forward_stop_to`]. Windows has no such request for a detached process (`agora
+/// For a supervisor, and for `agora node`, which stops cleanly on them (ADR-0104 O2): from now on `SIGTERM`, `SIGINT` and `SIGHUP` do
+/// not end this process; they set [`stop_requested`] and are passed on as `SIGTERM` to the process named by [`forward_stop_to`] (none
+/// unless it is set). Windows has no such request for a detached process (`agora
 /// down` ends it with `TerminateProcess`, and the job of [`spawn_bound`] takes the child with it): there this does nothing.
 pub fn catch_stop_requests() -> io::Result<()> {
     #[cfg(unix)]
     {
         unix::catch_stop_requests()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// [`catch_stop_requests`] for a process that stops cleanly on the first request (ADR-0104 O2: `agora node`): a signal that was ignored
+/// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
+/// have without the catch. A request less than a second after the first is that first one reaching the process again, not a second
+/// (#1119 item 4: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor, which passes its own on), and is
+/// not acted on. Windows: nothing, as [`catch_stop_requests`].
+pub fn catch_stop_requests_once() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::catch_stop_requests_once()
     }
     #[cfg(not(unix))]
     {
@@ -2116,6 +2296,25 @@ pub fn forward_stop_to(pid: Option<u32>) {
     unix::forward_stop_to(pid);
     #[cfg(not(unix))]
     let _ = pid;
+}
+
+/// Whether [`catch_stop_requests`] catches anything here: Unix only (Windows ends a detached process with `TerminateProcess`, which
+/// cannot be caught).
+pub const STOP_REQUESTS_CAUGHT: bool = cfg!(unix);
+
+/// Ends this process as the stop request caught by [`catch_stop_requests`] would have ended it without the catch (Unix: that signal,
+/// with its default action again; `SIGTERM` when none was caught), so whoever waits for it (a supervisor, a shell, a service manager)
+/// sees the same end as before. For a process that stopped cleanly after the request (ADR-0104 O2: `agora node`). Other threads are not
+/// waited for. Elsewhere: exit code 0.
+pub fn end_as_stopped() -> ! {
+    #[cfg(unix)]
+    {
+        unix::end_as_stopped()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::exit(0)
+    }
 }
 
 /// Whether a stop request was caught since [`catch_stop_requests`].
@@ -3252,6 +3451,60 @@ mod secret_tests {
         assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
     }
+
+    use super::{confirmation_from, Confirmation};
+    use std::time::{Duration, Instant};
+
+    /// A terminal that gives `keys` one wait after another (`None` is a wait in which no key came), then no more keys.
+    fn answer(
+        keys: Vec<Option<&'static [u8]>>,
+        min_wait: Duration,
+        stop_after: Option<usize>,
+    ) -> (std::io::Result<Confirmation>, usize) {
+        let mut keys = keys.into_iter();
+        let mut key = move |_: Duration| -> std::io::Result<Option<Vec<u8>>> {
+            Ok(keys.next().flatten().map(<[u8]>::to_vec))
+        };
+        let mut asked = 0;
+        let mut stop = || {
+            asked += 1;
+            stop_after.is_some_and(|n| asked > n)
+        };
+        let got = confirmation_from(&mut key, Instant::now(), min_wait, &mut stop);
+        (got, asked)
+    }
+
+    /// #942: the owner's question at `agora pair open` ends when it was answered in a window, before or while a line is typed; what
+    /// was typed then counts for nothing. Otherwise the rules of `read_confirmation` hold.
+    #[test]
+    fn a_confirmation_ends_when_the_caller_says_it_was_answered_elsewhere() {
+        let z = Duration::ZERO;
+        // A line, with waits in which nothing came; the caller is asked before every wait.
+        let (got, asked) = answer(vec![None, Some(b"y"), None, Some(b"\r")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("y".into()));
+        assert_eq!(asked, 4);
+        // Several keys in one read.
+        let (got, _) = answer(vec![Some(b"yes\rmore")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("yes".into()));
+        // Answered elsewhere before any key, and in the middle of a line.
+        let (got, asked) = answer(vec![None, None, Some(b"y\r")], z, Some(2));
+        assert_eq!(got.unwrap(), Confirmation::Stopped);
+        assert_eq!(asked, 3);
+        let (got, _) = answer(vec![Some(b"y"), None, Some(b"\r")], z, Some(2));
+        assert_eq!(got.unwrap(), Confirmation::Stopped);
+        // A first key before the minimum wait is not an answer, and nothing more is read.
+        let (got, asked) = answer(vec![Some(b"y\r")], Duration::from_secs(3600), None);
+        assert_eq!(got.unwrap(), Confirmation::TooSoon);
+        assert_eq!(asked, 1);
+        // The end of input and Ctrl-C are not answers, and a line stops at 256 bytes.
+        let (got, _) = answer(vec![Some(b"")], z, None);
+        assert_eq!(got.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        let (got, _) = answer(vec![Some(b"y\x03\r")], z, None);
+        assert_eq!(got.unwrap_err().kind(), ErrorKind::Interrupted);
+        let long: &'static [u8] = Box::leak(vec![b'y'; 300].into_boxed_slice());
+        let (got, _) = answer(vec![Some(long), Some(b"\r")], z, None);
+        assert_eq!(got.unwrap(), Confirmation::Line("y".repeat(256)));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -3378,19 +3631,39 @@ mod atomic_replace_tests {
 mod read_timeout_tests {
     use super::*;
 
+    fn never_asked() -> io::Result<bool> {
+        panic!("the hang-up is checked only for an InvalidInput answer")
+    }
+
     #[test]
-    fn invalid_input_is_the_peer_closed_answer_and_others_are_errors() {
-        assert_eq!(read_timeout_result(Ok(())).unwrap(), ReadTimeout::Set);
-        let closed = read_timeout_result(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+    fn invalid_input_on_a_hung_up_stream_is_the_peer_closed_answer_and_others_are_errors() {
+        assert_eq!(
+            read_timeout_result(Ok(()), never_asked).unwrap(),
+            ReadTimeout::Set
+        );
+        let invalid = || Err(io::Error::from(io::ErrorKind::InvalidInput));
+        let closed = read_timeout_result(invalid(), || Ok(true));
         assert_eq!(closed.unwrap(), ReadTimeout::PeerClosed);
         for kind in [
             io::ErrorKind::PermissionDenied,
             io::ErrorKind::BrokenPipe,
             io::ErrorKind::Other,
         ] {
-            let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
+            let e = read_timeout_result(Err(io::Error::from(kind)), never_asked).unwrap_err();
             assert_eq!(e.kind(), kind);
         }
+    }
+
+    /// Issue #830: an `InvalidInput` answer on a stream that is still open (or whose state cannot be read) is a failure, not a
+    /// closed peer.
+    #[test]
+    fn invalid_input_on_an_open_stream_is_an_error() {
+        let invalid = || Err(io::Error::from(io::ErrorKind::InvalidInput));
+        let open = read_timeout_result(invalid(), || Ok(false)).unwrap_err();
+        assert_eq!(open.kind(), io::ErrorKind::InvalidInput);
+        let unknown = read_timeout_result(invalid(), || Err(io::Error::from(io::ErrorKind::Other)))
+            .unwrap_err();
+        assert_eq!(unknown.kind(), io::ErrorKind::InvalidInput);
     }
 }
 

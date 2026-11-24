@@ -403,6 +403,7 @@ fn footer<'a>(banner: &str, notice: &str, keys: String) -> Line<'a> {
 
 /// Draws the board: its project, the columns with the `selected` card chosen (kept in view), and the keys. `notice` (what the last
 /// "Give to an agent" came to) and `banner` (a request that wants the user meanwhile) lead the footer.
+/// `watching`: the person is a viewer (ADR-0106), whose footer does not offer giving a task.
 pub fn draw_board(
     f: &mut Frame<'_>,
     b: &Board,
@@ -410,6 +411,7 @@ pub fn draw_board(
     notice: &str,
     banner: &str,
     t: Text<'_>,
+    watching: bool,
 ) {
     let strong = Style::default().add_modifier(Modifier::BOLD);
     let dim = Style::default().add_modifier(Modifier::DIM);
@@ -448,7 +450,18 @@ pub fn draw_board(
         f,
         head,
         body,
-        footer(banner, notice, t(key!("tui-board-keys"), &[])),
+        footer(
+            banner,
+            notice,
+            t(
+                if watching {
+                    key!("tui-board-keys-viewer")
+                } else {
+                    key!("tui-board-keys")
+                },
+                &[],
+            ),
+        ),
     );
 }
 
@@ -1017,7 +1030,8 @@ mod tests {
         let s = snapshot();
         let b = board(&s, "p1", &[], &text);
         let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
-        term.draw(|f| draw_board(f, &b, 1, "", "", &text)).unwrap();
+        term.draw(|f| draw_board(f, &b, 1, "", "", &text, false))
+            .unwrap();
         let buf = term.backend().buffer().clone();
         let row = |y: u16| {
             (0..60)
@@ -1038,6 +1052,12 @@ mod tests {
         assert!(buf[(2, 3)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(2, 2)].modifier.contains(Modifier::REVERSED));
         assert!(row(11).starts_with("tui-board-keys"), "{}", row(11));
+        // ADR-0106: a viewer's board offers no Give.
+        term.draw(|f| draw_board(f, &b, 1, "", "", &text, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let last: String = (0..60).map(|x| buf[(x, 11)].symbol().to_string()).collect();
+        assert!(last.starts_with("tui-board-keys-viewer"), "{last}");
     }
 
     #[test]

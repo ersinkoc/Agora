@@ -208,6 +208,8 @@ pub struct Spawner {
     events: Option<Arc<EventSink>>,
     chat: Arc<crate::chat::ChatBoard>,
     git_wake: Option<Arc<AtomicBool>>,
+    /// #1119 item 3: the node's stop flag; once it is set no helper is started (`node.offline`).
+    stopping: Option<Arc<AtomicBool>>,
     names: AtomicU64,
     state: Mutex<State>,
 }
@@ -337,6 +339,7 @@ impl Spawner {
             events,
             chat,
             git_wake: None,
+            stopping: None,
             names: AtomicU64::new(0),
             state: Mutex::new(State::default()),
         }
@@ -347,6 +350,25 @@ impl Spawner {
     pub fn with_git_wake(mut self, wake: Arc<AtomicBool>) -> Self {
         self.git_wake = Some(wake);
         self
+    }
+
+    /// #1119 item 3: the node's stop flag (see [`Self::stopping`]).
+    #[must_use]
+    pub fn with_stopping(mut self, stopping: Arc<AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
+        self
+    }
+
+    /// `node.offline` once the node is stopping (ADR-0104 O2): it starts nothing more, as its commands do not.
+    fn stopping(&self) -> Result<(), Error> {
+        if self
+            .stopping
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Acquire))
+        {
+            return Err(Error::new(ErrorCode::NodeOffline).with("node_id", self.node_id.as_str()));
+        }
+        Ok(())
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -426,11 +448,7 @@ impl Spawner {
         };
         // The texts the kind's screen must show around typed text (its footer): a prompt that contains one could stand in for it when
         // a menu replaced the real one, so it is refused.
-        let lower = a.prompt.to_lowercase();
-        if markers
-            .iter()
-            .any(|m| !m.is_empty() && lower.contains(&m.to_lowercase()))
-        {
+        if carries_marker(&a.prompt, &markers) {
             return Err(invalid("prompt"));
         }
         let me = views
@@ -554,14 +572,16 @@ impl Spawner {
             "agent": r.caller.as_str(),
             "agent_kind": caller_kind,
             "kind": r.kind,
-            "folder": r.folder,
+            // #1147 (audit of #1157): the caller's own words (its prompt) and its folder, with the node's secret values replaced: the
+            // card, the hub's event and the start signature hold these words; the start itself uses the node's own request.
+            "folder": self.chat.redact_text(&r.folder),
             "inside": r.inside,
             "worktree": r.worktree,
             "depth": r.depth,
             // A scoped grant covers starts as they were approved here, and a later start never carries settings under a grant
             // (it is always asked), so a request with settings offers none: what the user approves is exactly this start.
             "grant_allowed": Self::grantable_start(r),
-            "prompt": r.prompt,
+            "prompt": self.chat.redact_text(&r.prompt),
         });
         // ADR-0066: shown on the card (`label` is the manifest's Fluent id, the window's own text names it) and signed with the request
         // (`agora-approval-start-v2`). Only present when there are some, so a request without settings is byte for byte what it was.
@@ -614,6 +634,8 @@ impl Spawner {
             base: None,
         };
         let mut sup = self.sup();
+        // Read under the lock the stop takes before it lets the agents go: a start either comes before it or not at all.
+        self.stopping()?;
         // ADR-0066: the settings the user approved, exactly, and ADR-0059 decision 5: the launch options the user's signed decision
         // named (that decision is the confirmation of each; a helper never inherits its parent's). Checked again against the manifest
         // and the owner's policy as they are now.
@@ -950,7 +972,14 @@ impl Spawner {
                     // The adapter's answer is waited for after the lock is let go.
                     let call = sup.prepare_prompt(&agent, &text, false);
                     drop(sup);
-                    call.and_then(crate::supervisor::AdapterCall::run).is_ok()
+                    match call.and_then(crate::supervisor::AdapterCall::run) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            // #1150: nobody is answered with this error, so the node's log says it (never the prompt's text).
+                            crate::supervisor::log_call_failure("prompt", &agent, &e);
+                            false
+                        }
+                    }
                 } =>
                 {
                     self.chat.push(
@@ -1015,6 +1044,8 @@ impl Helpers for Spawner {
     fn start(&self, caller: &AgentId, a: &StartArgs) -> Result<u64, Error> {
         let folder_shown = a.folder.clone().unwrap_or_default();
         let refuse = |e: Error| self.refused(caller, &a.kind, &folder_shown, e);
+        // Recorded as every refusal is (`agent_start_refused`).
+        self.stopping().map_err(refuse)?;
         if a.node
             .as_deref()
             .is_some_and(|n| !n.is_empty() && n != self.node_id)
@@ -1168,10 +1199,51 @@ impl Helpers for Spawner {
     }
 }
 
+/// Whether `prompt` holds one of a kind's `[[typed]]` marker texts, ignoring case and whitespace as the screen rules do: they find a
+/// phrase with its runs of whitespace (line breaks included) as one space, so a prompt that only spaces a marker differently could
+/// still stand in for it once typed (ADR-0057). Not covered here: a word the input box breaks in its middle reads as two words to the
+/// rules (`Entersend` wrapped after `Enter`), and a marker given only as a regex. For the first, manifest validation makes every
+/// `[[typed]]` rule need a regex (#1150), which sees the rows as they are; the shipped ones need their footer whole on one row.
+fn carries_marker(prompt: &str, markers: &[String]) -> bool {
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Both with case as written and lowercased: lowercasing is not the same letter by letter everywhere (a final sigma), so the
+    // case-kept comparison keeps every match the case-sensitive screen rules can make.
+    let (kept, lower) = (words(prompt), words(&prompt.to_lowercase()));
+    markers.iter().any(|m| {
+        let (m_kept, m_lower) = (words(m), words(&m.to_lowercase()));
+        !m_kept.is_empty() && (kept.contains(&m_kept) || lower.contains(&m_lower))
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0057: a prompt that spaces a marker differently (two spaces, a line break, a tab) is refused as the marker itself is, since
+    /// the screen rules find it either way; case does not matter, and a marker of only whitespace refuses nothing.
+    #[test]
+    fn a_marker_spaced_differently_is_still_found_in_a_prompt() {
+        let markers = vec!["Enter send".to_string(), "? for shortcuts".to_string()];
+        for prompt in [
+            "then press Enter send",
+            "then press enter  send",
+            "then press Enter\nsend",
+            "then press ENTER\t send now",
+            "type ?   for\r\nshortcuts",
+        ] {
+            assert!(carries_marker(prompt, &markers), "{prompt:?}");
+        }
+        for prompt in ["Enter, then send", "entersend", "? for short cuts"] {
+            assert!(!carries_marker(prompt, &markers), "{prompt:?}");
+        }
+        assert!(!carries_marker(
+            "any prompt",
+            &[" \n ".to_string(), String::new()]
+        ));
+        // A marker whose lowercase form differs letter by letter (final sigma) is still found as written.
+        assert!(carries_marker("ΑΣΒ", &["ΑΣ".to_string()]));
+    }
 
     #[test]
     fn output_is_cut_from_the_top_at_a_line() {

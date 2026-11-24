@@ -155,7 +155,12 @@ pub struct Grants {
     limits: Arc<crate::limits::DeviceLimits>,
     /// Which project a directory action lands in, for limited devices. Unset: a limited device can take no directory action.
     places: Mutex<Option<PlaceResolver>>,
+    /// #1133: whether a start of a kind must be signed (the node's loaded manifests say). Unset: every `registry-*` kind.
+    signed_starts: Mutex<Option<KindCheck>>,
 }
+
+/// Whether something holds for an agent kind, by the node's own manifests.
+pub type KindCheck = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// What a command is about, as far as a grant's scope can tell.
 #[derive(Default)]
@@ -176,12 +181,19 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentCancelTurn(a) => s.agent = Some(a.agent_id.clone()),
         // ADR-0095: the agent, so a project grant is matched against the agent's real project, never the command's `project_id`.
         Cmd::TaskDispatch(a) => s.agent = Some(a.agent_id.clone()),
+        // ADR-0108: the hub passes the person's forget on with the node's own id of the agent; an agent grant covers it.
+        Cmd::AgentForget(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
         Cmd::TerminalResize(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
+        // Watching names its agent, so a grant for that agent (or its project) covers it, as it covers typing into it.
+        Cmd::TerminalSubscribe(t) => {
+            s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
+        }
+        Cmd::ChatSubscribe(c) => s.agent = Some(c.agent_id.clone()),
         // Commands about a worktree or a new terminal name no agent: only a `node` grant covers them.
         _ => {}
     }
@@ -212,11 +224,27 @@ impl Grants {
             project_of: Mutex::new(None),
             limits: Arc::new(crate::limits::DeviceLimits::default()),
             places: Mutex::new(None),
+            signed_starts: Mutex::new(None),
         }
     }
 
     /// Tells grants which project a folder or an agent belongs to, so a device limited to some projects can take directory actions
     /// inside them.
+    /// #1133: how to tell a kind whose start must be signed (`crate::manifests::needs_signed_start` over the node's kinds).
+    pub fn set_signed_start_check(&self, f: KindCheck) {
+        *self.signed_starts.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// #1133 ("startable, but always signed"): whether a start of `kind` that reaches the node through the hub must carry a person's
+    /// device signature (a routed `AgentLaunch`), so that an unsigned `AgentStart` of it is refused whatever `signed_commands` says.
+    /// Without a check set, every registry kind (`registry-*`) does: the stricter reading.
+    pub fn start_needs_signature(&self, kind: &str) -> bool {
+        match &*self.signed_starts.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(f) => f(kind),
+            None => kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+        }
+    }
+
     pub fn set_place_resolver(&self, f: PlaceResolver) {
         *self.places.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
@@ -740,6 +768,76 @@ mod tests {
         assert!(refused(g.gate(&typing("a-2"), NOW)), "another agent");
         assert!(refused(g.gate(&prompt("a-1"), NOW)), "another command");
         assert!(refused(g.gate(&typing("a-1"), NOW + HOUR)), "expired");
+    }
+
+    /// ADR-0108: the forget the hub passes on goes through the gate like any routed command: free unless the policy lists
+    /// `agent.forget`, and then covered by a live grant for that agent (the gate names the agent the forget names) or its project.
+    #[test]
+    fn a_forget_the_hub_passes_on_needs_a_grant_for_its_agent_only_when_the_policy_lists_it() {
+        let forget = |a: &str| Cmd::AgentForget(v1::AgentForget { agent_id: a.into() });
+        assert!(
+            grants(&[]).gate(&forget("a-1"), NOW).is_ok(),
+            "unlisted: free"
+        );
+        let g = grants(&["agent.forget"]);
+        assert!(refused(g.gate(&forget("a-1"), NOW)), "listed, no grant");
+        g.create(
+            &grant("g1", "agent:a-1", &["agent.forget"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&forget("a-1"), NOW).is_ok());
+        assert!(refused(g.gate(&forget("a-2"), NOW)), "another agent");
+        g.set_project_resolver(Box::new(|a| (a == "a-3").then(|| "p-3".to_string())));
+        g.create(&grant("g2", "project:p-3", &["agent.*"], NOW + HOUR), NOW)
+            .unwrap();
+        assert!(g.gate(&forget("a-3"), NOW).is_ok(), "its project's grant");
+        assert!(refused(g.gate(&forget("a-4"), NOW)));
+    }
+
+    #[test]
+    fn watching_a_terminal_or_a_chat_is_covered_by_a_grant_for_that_agent() {
+        let g = grants(&["terminal.*", "chat.subscribe"]);
+        g.set_project_resolver(Box::new(|a| (a == "a-3").then(|| "p-3".to_string())));
+        let watch = |a: &str| {
+            Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+                terminal_id: format!("t-{a}"),
+                ..Default::default()
+            })
+        };
+        let follow = |a: &str| Cmd::ChatSubscribe(v1::ChatSubscribe { agent_id: a.into() });
+        assert!(refused(g.gate(&watch("a-1"), NOW)));
+        assert!(refused(g.gate(&follow("a-1"), NOW)));
+        g.create(
+            &grant(
+                "g1",
+                "agent:a-1",
+                &["terminal.*", "chat.subscribe"],
+                NOW + HOUR,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-1"), NOW).is_ok());
+        assert!(g.gate(&follow("a-1"), NOW).is_ok());
+        assert!(refused(g.gate(&watch("a-2"), NOW)), "another agent");
+        assert!(refused(g.gate(&follow("a-2"), NOW)), "another agent");
+        // A project grant covers its agents.
+        g.create(
+            &grant("g2", "project:p-3", &["terminal.subscribe"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-3"), NOW).is_ok());
+        assert!(refused(g.gate(&watch("a-2"), NOW)));
+        // A machine-wide grant still covers every agent.
+        g.create(
+            &grant("g3", "node", &["terminal.subscribe"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-2"), NOW).is_ok());
+        assert!(refused(g.gate(&follow("a-2"), NOW)), "another command");
     }
 
     #[test]

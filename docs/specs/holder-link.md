@@ -43,7 +43,8 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    between the two). Terminals are never read by the holder while a node is attached, and it never writes to them.
 4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. An agent id
    that is empty or longer than `MAX_AGENT_ID` (256 bytes) is `Refused(BadRequest)` and nothing starts (#929), so every reply that names
-   an agent fits a frame (below, "Limits of the holder itself"). (The
+   an agent fits a frame (below, "Limits of the holder itself"). A holder that already keeps `MAX_HELD_AGENTS` agents (15,251, terminal
+   and pipe agents together) answers a `Start` or `StartPipe` for a new id `Refused(Failed)` and starts nothing (#983). (The
    confinement a node builds is not carried yet; a later step adds it as a new tag.)
 5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
    then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
@@ -70,16 +71,19 @@ next frame's.
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
   most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
   has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
-  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
+  refused (tested, also when the receive that completes the frame returns after the deadline: the read's clock is given, #1089); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - **Agent ids** are at most `MAX_AGENT_ID` (256 bytes; the node's own are `agent-<n>`, at most 26), refused on `Start` and `StartPipe`
   (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
   larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and
   the whole 1 MiB buffer) and a `PipeData` frame (one id and everything kept) always fit (checked at compile time and tested), and one
-  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`. **Not bounded: the number of agents.** `List` (one frame for every agent)
-  fits up to 15,251 agents in one holder; a holder holding more could not send it (`write_frame` refuses a frame larger than `MAX_FRAME`
-  and the holder drops the node, which then sees the link fail). That is far past what a machine runs (every terminal agent is a PTY,
-  every pipe agent two threads of the holder), so no count is enforced and `List` is not paged; doing either is a new rule for a later
-  step.
+  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`.
+- **The number of agents** is at most `MAX_HELD_AGENTS`, as many as one `List` reply (one frame naming every agent) can carry:
+  `(MAX_FRAME - 5) / MAX_LIST_ENTRY`, 15,251 (#983; checked at compile time and tested). Every agent the holder keeps counts: terminal
+  and pipe agents, running ones and ended ones not yet released (`Release` frees the place). A `Start` or `StartPipe` for a new id
+  past it is `Refused(Failed)` before anything starts (an id it already keeps is still `AgentExists`), so `List` is never larger than
+  a frame and is not paged. Before, nothing bounded the count: a holder holding more could not send `List` (`write_frame` refuses a
+  frame larger than `MAX_FRAME`) and dropped the node on every try. The bound is far past what a machine runs (every terminal agent
+  is a PTY, every pipe agent two threads of the holder).
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -90,7 +94,7 @@ next frame's.
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
 - A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
   is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
-  waits only once). In its last `WRITE_SLICE` a send is first waited for with `LocalStream::wait_writable` (`poll(2)` on Unix, rounded up to a millisecond), so the frame ends at `FRAME_TIMEOUT` and not a few ms after it; on Windows the pipe is not polled (the call returns at once) and the write bound above stays. A receive on a stream whose peer has already shut the connection (macOS refuses a new read timeout with `EINVAL`) goes on without the timeout, decided in `LocalStream::set_read_timeout_or_closed`, and every other failure of that call fails the read. The holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
+  waits only once). `write_frame` sets the stream's write timeout to `WRITE_SLICE` itself, so the bound holds whatever the caller set (none, or a longer one; tested). In the frame's last two `WRITE_SLICE`s a send is first waited for with `LocalStream::wait_writable` (`poll(2)` on Unix, rounded up to a millisecond, at most a slice and what is left), so the frame ends at `FRAME_TIMEOUT` and not when a late socket timer fires after it (a 1 s send timeout fired 24-27 ms late on Linux; the late-timer case is reasoned, not reproduced by a test); earlier sends are not polled, since `poll` reports room only once three quarters of the buffer are free and that halves a large frame's rate. On Windows the pipe is not polled (the call returns at once); the write timeout bounds each send instead: a pending pipe write is cancelled at it, and while a timeout is set a send writes at most 16 KiB, because only a write no larger than the pipe's buffer is sure to have sent nothing when cancelled (measured, #1089; a larger one can be partly taken and still report 0). The holder link runs on Unix only until ADR-0079 W2. A receive on a stream whose peer has already shut the connection (macOS refuses a new read timeout with `EINVAL`) goes on without the timeout, decided in `LocalStream::set_read_timeout_or_closed`, which takes `EINVAL` for that case only when `poll(2)` shows the stream hung up; every other failure of that call, and `EINVAL` on a stream still open, fails the read. The holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
@@ -110,7 +114,8 @@ next frame's.
   a holder it started would refuse it and idle.
 - **What goes through it:** only an agent the node does not confine (`cfg.sandbox` is `None`). A confined agent (Landlock, Seatbelt) is
   started by the node as before: the holder does not carry a confinement yet, and `Start` is unchanged. A start the holder refuses
-  (`Failed`: the program is not there; `AgentExists`) is the node's own start's to report.
+  (`Failed`: the program is not there, or the holder is full; `AgentExists`) is the node's own start's to report: on `Failed` the node
+  runs the agent itself, so an agent past `MAX_HELD_AGENTS` still starts, it just does not outlive the node.
 - **Agent ids:** the node sends no id the holder would refuse (`holder_link::agent_id_fits`): an agent whose id is longer than
   `MAX_AGENT_ID` (none the node makes; a resumed agent keeps its id from the ledger, which takes up to 4 KiB) is run by the node itself, terminal or adapter, never refused.
 - **Environment:** the node sends the complete environment `spawn` would have given the agent (its own, minus the removed names,
@@ -276,14 +281,59 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
   and at every start for each agent not taken up, with any unfinished write. A failed removal keeps the report unavailable for the
   lifetime of the node and is retried on the next kept-session change or a clean flush. A new node rebuilds those marks when its
-  startup sweep cannot remove a report for an agent it did not take up. On take-up the node puts the reports back on the agent
-  (bounded and judged again as a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the
+  startup sweep cannot remove a report for an agent it did not take up. The file has only what the old node recorded, and a
+  report it had read (the holder counts it given) but not yet recorded when it stopped or was killed is not in it (#1080). So on
+  take-up the newest `session/options`, `session/config` and `session/commands` of the agent's session (`Entry::adapter_session`, or a
+  report that names no session) among the `seen` lines replace the file's copy of that kind; a kind with no report there keeps the
+  file's (ADR-0104 decision 1). Only the adapter's own reports set these and each replaces the last, so the newest one the holder still
+  has is at least as new as the file's. The node puts the reports back on the agent (bounded and judged again as a report is) and
+  re-states them from the supervisor's copy (`Supervisor::session_events`), which also records them in the file again, so the
   window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
-  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
-  conversation is not shown (the chat history is in memory, ADR-0089; #931).
+  (`skips_permissions_now`) until the agent reports new ones. Its `AgentStarted` says `same_process` (ADR-0104 decision 2), so the hub and the
+  window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering (up to 5 s) is lost only when it was
+  killed: a clean stop logs it first (below).
+  Its earlier conversation is shown again (ADR-0104 C1, #931): before the node reads anything new from the holder, it fills the agent's chat
+  ring from the end of the transcript the old node wrote (`<data>/transcripts/<id>.jsonl`, ADR-0089), numbers on after the file's highest
+  id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
+  asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
+  its last unwritten second is said dropped too). The transcript is
+  written in batches at most a second apart (while the node holds a secret value, the agent's newest words in a turn wait for what
+  follows or the turn's end), so a kill loses at most those (a clean stop writes them all first, its end masked as an edge, below):
+  they were shown live, are not in the file,
+  and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines a killed node had read
+  from the holder (the holder counts them given) and had not yet recorded are lost too, as before.
+- **A clean stop (ADR-0104 O2, Unix):** `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` (`agora down`, a service stop or restart, the
+  restart after an update, Ctrl-C), so a planned stop is no longer a kill. From then on control commands (local and the hub's) are refused
+  with `node.offline`, the node resumes no waiting agent and starts no helper (#1119), and the supervision loop takes nothing more; each
+  adapter the holder runs is let go (`Supervisor::let_go_held`: its reader stops asking, hands over the lines it already had and ends).
+  That needs the supervisor's lock, which a start or a resume holds while it launches an adapter (up to 30 s): it is waited for at most
+  1 s (`LOCK_WAIT`); past it, the transcript's last batch, the usage and the ledger are written at once, and the lock is tried again until
+  2 s into the stop. Still busy then, nothing is let go: the held adapters see the link close, as at a kill (#1119). A call still waiting
+  on a let-go adapter for its answer (a prompt, a queued prompt being sent, a person's decision being delivered) whose line was written
+  was given: it is answered `Detached`, and it is recorded as sent or decided, never taken back, dropped or recorded as not delivered. One
+  whose line was not written yet when the reader ended is answered `Exited` (not delivered) and its line is never written; one being
+  written is answered when that write returns (#1119). The commands already running and the loop's last round are
+  waited for (at most 1 s, `LOOP_WAIT`), and what the adapters had read and the node had not recorded is recorded as the loop would
+  (states, options, config, commands, usage and chat; a waiting request is not, the next node asks it again from `seen`). Then the transcript's last batch, all the usage still being gathered and the ledger with the
+  kept session files are written, and the process ends as the signal would have ended it (so its supervisor sees the same end). No agent
+  is ended: the holder's run on, and the node's own are left as a killed node leaves them (ADR-0060); no other thread is waited for. The
+  readers are waited for at most 2 s (`DRAIN_WAIT`; a read of a holder that does not answer waits up to the link's frame time, 5 s) and
+  the whole stop at most 5 s (`NODE_STOP_DEADLINE`), after which the process ends anyway; both are under `agora down`'s 10 s wait and
+  systemd's `TimeoutStopSec=25`. A request before the node is up (still starting), and a second request, end the process at once, as
+  before; a signal the node was started ignoring (`nohup`, a background job) stays ignored. A request less than 1 s after the first is
+  that first one reaching the node again, not a second (#1119): Ctrl-C on a foreground `agora supervise node` signals the node and its
+  supervisor (one process group), and the supervisor passes its own on as `SIGTERM`. `agora down` and the systemd unit
+  (`KillMode=process`) signal the supervisor only. launchd, from its documentation (`launchd.plist(5)`; not measured on macOS), stops the
+  job with `SIGTERM` and `SIGKILL` after `ExitTimeOut` (the page does not say whether to the job's process, the supervisor, or to its
+  whole process group), and with `AbandonProcessGroup` false kills what is left of the job's process group once the job died, which is
+  after its node. Either way the node gets one request. An adapter that really ended just before the stop, whose end the loop had not taken, is let go like the others and its end is
+  not recorded (the stop cannot act on it): the next node finds it ended in the holder, does not take it up, the holder lets it go, and
+  the ledger offers it for Resume (#1119). Windows ends the node with
+  `TerminateProcess` and has no clean stop.
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
-- **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
+- **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
+  reports above; `pending_approvals` is its requests), which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an
   `ApprovalRequest` event exactly as a new one, so the person is **asked again**: the node never answers it, and no line of the replay is a decision. A
   request the old node had already shown and the person had already answered shows the agent going on and is not asked again; one that cannot be told apart
@@ -294,13 +344,18 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 ### Limits, plainly
 - A request the old node had read, before it was killed and with fewer than 1 MiB of output after it, is rebuilt. A request more than 1 MiB of output back is not
   (the agent waits and the person can cancel the turn).
-- Lines in flight to a node that dies are lost (at most once). What the old node had *not yet turned into an event* when it was let go is lost with it.
-- Mode, model and configuration lists an adapter reported before the restart and not within the last 1 MiB are not known until it reports them again.
+- Lines in flight to a node that dies are lost (at most once). What a killed node had *not yet turned into an event* is lost with it, except what
+  is taken from `seen` (a waiting request, and the newest options, config and commands). A clean stop records it first (above), except what a
+  reader still waiting on a holder that does not answer is handed after the stop stopped waiting for it: the holder counts those lines given,
+  so they are lost as with a kill.
+- Mode, model, configuration and command lists come from the kept file and the newest report in `seen` (ADR-0104). A report the old node read and did
+  not record, when 1 MiB of newer output then pushed it out of the holder, is not known until the adapter reports again. Chat, usage and state are
+  never taken from `seen` (they append, so reading them twice would show or count them twice): those a killed node read and did not record are lost.
 - "Kept" against "continued" in the window (ADR-0093 decision 4) is **not built**: the snapshot has no field that says it without a schema change (`still_running`
   says the process runs, not that it survived a node). Left for build-order step 4.
 - **Delivered is forgotten as new.** A line is marked given when the holder takes it for a reply, before the reply is written. A reply that then
-  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines are rebuilt. Anything
-  else in them (chat, state, usage) is lost to the next node.
+  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines and the newest
+  options, config and commands are taken. Anything else in them (chat, state, usage) is lost to the next node.
 - **Evicted but delivered is not counted.** `dropped` counts only bytes pushed out of the buffer before any node was given them. An
   `approval/request` that a node had been given and that 1 MiB of newer output then pushed out is neither rebuilt nor counted. (Counting it would
   need a new field in `PipeData`, a new tag; not done.)
@@ -308,7 +363,9 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   whatever the lengths of the lines (a flood of one-byte lines is tested).
 - **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
   collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
-  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. Only an end counts (the
+  child exited, or a signal killed it, by `siginfo_t.si_code`): a stopped agent (`SIGSTOP`, a debugger) is not ended. `waitid` with only
+  `WEXITED` reports no other state on Linux or macOS, so this is a defence, not a fix of an observed case. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
   `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
   counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only

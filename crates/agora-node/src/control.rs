@@ -92,6 +92,20 @@ pub struct ControlContext {
     seen: Mutex<IdempotencyCache>,
     /// Signalled when an attempt claimed in `seen.running` ends (F1360).
     settled: Condvar,
+    /// ADR-0104 O2: set when the node is stopping; from then on no command is run (its connections, local and the hub's, outlive the
+    /// accept loop for a moment), so nothing new reaches an adapter the stop is letting go.
+    stopping: Option<Arc<AtomicBool>>,
+    /// ADR-0104 O2: commands being run now, so a node that stops can let them record what they did first ([`Self::commands_running`]).
+    running: AtomicU64,
+}
+
+/// Counts one command as running while it lives ([`ControlContext::admit`]).
+pub(crate) struct Running<'a>(&'a AtomicU64);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 #[derive(Default)]
@@ -148,6 +162,8 @@ impl ControlContext {
             ledger: None,
             show_secret: false,
             control_token: None,
+            stopping: None,
+            running: AtomicU64::new(0),
             seen: Mutex::new(IdempotencyCache::default()),
             settled: Condvar::new(),
         }
@@ -194,6 +210,31 @@ impl ControlContext {
         self
     }
 
+    /// ADR-0104 O2: how many commands are being run now (one that began before the node's stop flag was set runs to its end).
+    pub fn commands_running(&self) -> u64 {
+        self.running.load(Ordering::Acquire)
+    }
+
+    /// ADR-0104 O2: lets one piece of work in (a command, or an agent the node resumes by itself, #1119 item 3): counted as running
+    /// while the result lives, so a stop that waits for the running commands never misses one that began; `None` once the node is
+    /// stopping (counted before the flag is read).
+    pub(crate) fn admit(&self) -> Option<Running<'_>> {
+        self.running.fetch_add(1, Ordering::AcqRel);
+        let running = Running(&self.running);
+        let stopping = self
+            .stopping
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Acquire));
+        (!stopping).then_some(running)
+    }
+
+    /// ADR-0104 O2: the node's stop flag; once it is set every command is refused with `node.offline`.
+    #[must_use]
+    pub fn with_stopping(mut self, stopping: Arc<AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
+        self
+    }
+
     fn wake_git(&self) {
         if let Some(wake) = &self.git_wake {
             wake.store(true, Ordering::Release);
@@ -215,8 +256,8 @@ impl ControlContext {
         };
         let (found, _) = crate::daemon::load_manifests(dir);
         let mut sup = self.sup();
-        for m in found {
-            sup.register(m);
+        for l in found {
+            sup.register_loaded(l);
         }
     }
 
@@ -472,7 +513,11 @@ fn switch(
 }
 
 /// Raises the approval for `ask` (or finds the one already waiting) and returns the error that tells the window to show it.
-fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
+fn raise_skip(ctx: &ControlContext, mut ask: SkipAsk) -> Error {
+    // #1147 (audit of #1157): the agent's names for the option and the value, as its card (and the signature over it) shows them,
+    // with the node's secret values replaced; the ids the decision applies are kept.
+    ask.option_name = ctx.chat.redact_text(&ask.option_name);
+    ask.value_name = ctx.chat.redact_text(&ask.value_name);
     let Some(approvals) = &ctx.approvals else {
         // A node without an approvals queue cannot ask anyone: the switch stays refused, as it was before the approval existed.
         let option = match ask.kind {
@@ -616,6 +661,10 @@ pub(crate) fn record_always_answer(
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
+    // ADR-0104 O2: a node that is stopping runs nothing more; it is going offline.
+    let Some(_running) = ctx.admit() else {
+        return Err(Error::new(ErrorCode::NodeOffline).with("node_id", ctx.node_id.as_str()));
+    };
     if matches!(
         cmd,
         Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_) | Cmd::AgentResume(_)
@@ -658,6 +707,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // ADR-0039 amendment B: only the hub asks for this, and the uplink answers it where the hub's commands enter; from the
         // local socket it would hand this node's board work to nobody.
         Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
+        // ADR-0109: only the hub delivers a durable handoff, and this node does not take them yet.
+        Cmd::DeliverTaskHandoff(_) => Err(capability_missing(
+            agora_protocol::handshake::TASK_HANDOFF_V1,
+        )),
         // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
         // (the person at this machine is not routed through the hub, ADR-0041).
         Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
@@ -715,12 +768,48 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             if !l.node_id.is_empty() && l.node_id != ctx.node_id {
                 return Err(Error::new(ErrorCode::NodeOffline).with("node_id", l.node_id.as_str()));
             }
+            // #1120: the agents an earlier process of this node ran that ended and are still kept (ADR-0060), read before the
+            // supervisor's lock is taken (never both at once). Listed as that process listed them: stopped, in their folder.
+            let kept = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.ended(crate::daemon::now_ms()))
+                .unwrap_or_default();
+            // ADR-0107: the agents it found interrupted and still offers (oldest id first), read before the lock as well.
+            let found = ctx
+                .ledger
+                .as_ref()
+                .map(|l| l.interrupted())
+                .unwrap_or_default();
             // One lock for the whole answer (the mutex is not reentrant).
             let sup = ctx.sup();
-            let agents = sup
-                .list()
+            let views = sup.list();
+            // An id the supervisor holds (one being resumed or started again) is listed from the supervisor only. Whether Resume is
+            // offered is decided here, under the lock, as the node's announcement decides it.
+            let interrupted: Vec<(crate::ledger::Entry, bool)> = found
                 .into_iter()
-                .map(|v| {
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| {
+                    let resumable = sup.offers_resume(&e);
+                    (e, resumable)
+                })
+                .collect();
+            let earlier: Vec<v1::AgentSummary> = kept
+                .into_iter()
+                .filter(|e| !views.iter().any(|v| v.id.as_str() == e.agent_id))
+                .map(|e| v1::AgentSummary {
+                    state: crate::ledger::proto_state(&e.last_state) as i32,
+                    agent_id: e.agent_id,
+                    kind: e.kind,
+                    worktree_id: e.folder,
+                    terminal_id: String::new(),
+                    running: false,
+                    restarts: 0,
+                })
+                .collect();
+            let mut agents: Vec<v1::AgentSummary> = earlier
+                .into_iter()
+                .chain(views.into_iter().map(|v| {
                     let has_terminal = sup.terminal(&v.id).is_some();
                     v1::AgentSummary {
                         agent_id: v.id.as_str().to_string(),
@@ -741,10 +830,27 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         running: v.running,
                         restarts: v.restarts,
                     }
-                })
+                }))
+                .collect();
+            // One list in id order (`agent-2` before `agent-10`), whether a row comes from the ledger or the supervisor (#1122 review).
+            agents.sort_by_key(|a| {
+                (
+                    crate::ledger::id_number(&a.agent_id).unwrap_or(u64::MAX),
+                    a.agent_id.clone(),
+                )
+            });
+            drop(sup);
+            // Each row is the `AgentInterrupted` the node announces for it (the same builder), built after the lock is released: whether
+            // its process still runs is a look at the system.
+            let interrupted = interrupted
+                .iter()
+                .map(|(e, resumable)| e.interrupted_event(*resumable))
                 .collect();
             Ok(v1::CommandOk {
-                result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+                result: Some(Ok_::AgentList(v1::AgentListResult {
+                    agents,
+                    interrupted,
+                })),
             })
         }
         Cmd::WorkspaceQuery(q) => {
@@ -1448,7 +1554,67 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::FilesRead(v1::FilesReadResult { data })),
             })
         }
+        Cmd::AgentForget(f) => forget_agent(ctx, &f.agent_id),
         other => Err(capability_missing(command_name(other))),
+    }
+}
+
+/// ADR-0108: the longest a forget waits for the transcript writer to remove the files (it is woken at once; it may be writing a
+/// batch). Well under the uplink's own deadline for a routed command (`ROUTED_DEADLINE`, 25 s).
+const FORGET_WAIT: Duration = Duration::from_secs(10);
+
+/// ADR-0108: the person forgot a closed agent in the window and the hub passed it on (capability `agent.forget.local`). Decided from
+/// this node's own state, not the hub's view: an agent that runs here (in this node or in the holder, waiting for a restart, its
+/// process outliving an earlier node, a resume under way, or running as far as the ledger knows) is refused with `agent.running` and
+/// nothing is touched. Otherwise its ring and unsaved marks go, it is no longer offered for Resume, and the transcript writer removes
+/// `<id>.jsonl` and `<id>.earlier.jsonl` after any batch it took. An agent this node does not know is fine (a forget is idempotent).
+/// The agent tool's own session files, the terminal's scrollback and the worktree stay (ADR-0053).
+fn forget_agent(ctx: &ControlContext, agent_id: &str) -> Result<v1::CommandOk, Error> {
+    if !crate::transcript::plain_id(agent_id) {
+        return Err(invalid("agent_id"));
+    }
+    let id = AgentId::new(agent_id);
+    let running = || Error::new(ErrorCode::AgentRunning).with("agent_id", agent_id);
+    let entry = ctx.ledger.as_ref().and_then(|l| l.get(agent_id));
+    // Read before the supervisor's lock (it asks the system about a process).
+    if entry
+        .as_ref()
+        .is_some_and(crate::ledger::Entry::still_running)
+    {
+        return Err(running());
+    }
+    {
+        let sup = ctx.sup();
+        let known = sup.list().iter().any(|v| v.id == id);
+        let live = sup.live(&id)
+            // Started and not ended, and not found interrupted: it runs as far as the ledger knows.
+            || entry.as_ref().is_some_and(|e| !e.ended && !e.interrupted())
+            // Interrupted, and the supervisor holds it again: a resume is under way.
+            || (known && entry.as_ref().is_some_and(crate::ledger::Entry::interrupted));
+        if live {
+            return Err(running());
+        }
+        // Under the supervisor's lock, in memory only: a resume checks the ledger again under this lock before it brings the agent
+        // back, so one that read the entry before now is refused (`agent.not_interrupted`), and none comes between the check above
+        // and this.
+        if let Some(ledger) = &ctx.ledger {
+            ledger.forget(agent_id);
+        }
+    };
+    // Written, and the files removed, after the lock is let go (no disk work under the supervisor's lock). No take-up comes meanwhile
+    // (that happens only as the node starts) and no resume (the ledger no longer offers the agent).
+    if let Some(ledger) = &ctx.ledger {
+        let _ = ledger.flush_all();
+    }
+    let answer = ctx.chat.forget(&id);
+    match answer.recv_timeout(FORGET_WAIT) {
+        Ok(true) => {
+            // Operational log (codes only, never the conversation).
+            eprintln!("agent.forget: {agent_id}: conversation removed");
+            Ok(ok_empty())
+        }
+        Ok(false) => Err(Error::new(ErrorCode::Internal).with("incident_id", "agent.forget")),
+        Err(_) => Err(Error::new(ErrorCode::NodeTimeout).with("node_id", ctx.node_id.as_str())),
     }
 }
 
@@ -1466,7 +1632,7 @@ fn stop_survivor(
     }
     ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
-        let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
+        let resumable = ctx.sup().offers_resume(&e);
         ev.agent_interrupted(&e, resumable);
     }
     Ok(())
@@ -1560,6 +1726,10 @@ pub(crate) fn resume_agent(
                 .ok_or_else(folder_changed)
         })
         .transpose()?;
+    // ADR-0089 decision 5, ADR-0104 C1: a resume continues the conversation its file holds, and a fresh start begins a new file,
+    // numbering on after the earlier session's ids. Read here, outside the supervisor's lock; applied only once the resume went through
+    // (below), so a refused one leaves both as they were.
+    let seed = ctx.chat.read_seed(&id, new_session);
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),
@@ -1577,6 +1747,11 @@ pub(crate) fn resume_agent(
     };
     let (events, views, has_terminal, carried) = {
         let mut sup = ctx.sup();
+        // ADR-0108: checked again under the supervisor's lock, under which a forget drops the agent from the ledger: a forget that came
+        // after the check above is not undone by bringing the agent back (with the conversation it removed in its ring).
+        if !ledger.get(agent_id).is_some_and(|e| e.interrupted()) {
+            return Err(not_interrupted());
+        }
         if !sup.sandbox_policy().enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 entry.kind.clone(),
@@ -1593,12 +1768,18 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume_in(&id, Instant::now(), checked) {
-            Ok(events) => (
-                events,
-                sup.list(),
-                sup.terminal(&id).is_some(),
-                sup.carried_on(&id),
-            ),
+            // Still under the supervisor's lock: the new adapter's first words are recorded by the supervision tick, which needs it,
+            // so the transcript is seeded before any of them.
+            Ok(events) => {
+                ctx.chat
+                    .resumed(&id, seed, new_session, crate::daemon::now_ms());
+                (
+                    events,
+                    sup.list(),
+                    sup.terminal(&id).is_some(),
+                    sup.carried_on(&id),
+                )
+            }
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));
@@ -1801,6 +1982,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
+        Cmd::DeliverTaskHandoff(_) => agora_protocol::handshake::TASK_HANDOFF_V1,
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",
@@ -1980,6 +2162,15 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
+/// Whether `cmd` may arrive on a dynamic stream (3+): the commands that open one (protocol.md, "Terminal relay", "Chat transcript
+/// stream", `PreviewConnect`). Every other command belongs on stream 1, where the hub's commands pass the node's routed checks.
+pub(crate) fn opens_stream(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_) | Cmd::PreviewConnect(_)
+    )
+}
+
 fn handle_request(
     frame: &Frame,
     ctx: &Arc<ControlContext>,
@@ -2016,6 +2207,19 @@ fn handle_request(
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
+    // relay). Before the idempotency claim, so a refused request stores nothing.
+    let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+    let misplaced = match &req.command {
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
+        None => dynamic,
+    };
+    if misplaced {
+        let resp = response(&req.request_id, Err(invalid("stream_id")));
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
     // F1360: held until this attempt's answer is stored, so a retry with the same key waits for it instead of running again.
     let _claim = if req.idempotency_key.is_empty() {
         None
@@ -2044,27 +2248,12 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok(Subscribed {
-            agent,
-            history,
-            snap,
-            sub,
-        }) = outcome
-        {
-            let (ctx, writer, alive, stop) = (
-                Arc::clone(ctx),
-                Arc::clone(writer),
-                Arc::clone(alive),
-                Arc::clone(stop),
-            );
+        if let Ok(Subscribed { history, snap, sub }) = outcome {
+            let (writer, alive, stop) = (Arc::clone(writer), Arc::clone(alive), Arc::clone(stop));
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-term".into())
-                .spawn(move || {
-                    pump(
-                        &ctx, &writer, stream_id, &agent, history, &snap, &sub, &alive, &stop,
-                    )
-                });
+                .spawn(move || pump(&writer, stream_id, history, &snap, &sub, &alive, &stop));
         }
         return true;
     }
@@ -2083,12 +2272,12 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok((entries, rx)) = outcome {
+        if let Ok((entries, subscription)) = outcome {
             let (writer, alive, stop) = (Arc::clone(writer), Arc::clone(alive), Arc::clone(stop));
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-chat".into())
-                .spawn(move || pump_chat(&writer, stream_id, entries, &rx, &alive, &stop));
+                .spawn(move || pump_chat(&writer, stream_id, entries, subscription, &alive, &stop));
         }
         return true;
     }
@@ -2101,10 +2290,9 @@ fn handle_request(
     true
 }
 
-/// An accepted terminal subscription: whose terminal, the history frames the window asked for (ADR-0100), the snapshot they end at,
+/// An accepted terminal subscription: the history frames the window asked for (ADR-0100), the snapshot they end at,
 /// and the live output after it.
 struct Subscribed {
-    agent: AgentId,
     history: Vec<Vec<u8>>,
     snap: Snapshot,
     sub: OutputSubscription,
@@ -2135,7 +2323,6 @@ fn subscribe(
     drop(guard);
     let (history, snap, subscription) = watch.subscribe_with_history(lines);
     Ok(Subscribed {
-        agent: id,
         history,
         snap,
         sub: subscription,
@@ -2162,12 +2349,9 @@ fn size_payload(s: agora_vt::Size) -> Vec<u8> {
     p
 }
 
-#[allow(clippy::too_many_arguments)]
 fn pump(
-    ctx: &ControlContext,
     writer: &SharedWriter,
     stream: u32,
-    agent: &AgentId,
     history: Vec<Vec<u8>>,
     snap: &Snapshot,
     sub: &OutputSubscription,
@@ -2199,24 +2383,19 @@ fn pump(
             }
             // What was dropped can include the exit: a terminal that has ended says so after its last snapshot, and one that is
             // already gone (or a subscription that ends without its exit) gets the unknown exit, so the client still hears it ended.
-            Ok(Output::Lagged) => {
-                let snap = ctx
-                    .sup()
-                    .terminal(agent)
-                    .map(|h| (h.resync(sub), h.exit_status()));
-                match snap {
-                    Some((s, None)) => repaint(&s),
-                    Some((s, Some(st))) => {
-                        let _ = repaint(&s)
-                            .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
-                        return;
-                    }
-                    None => {
-                        let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
-                        return;
-                    }
+            // F1500: always this subscription's own terminal, never the one a restart started for the agent since.
+            Ok(Output::Lagged) => match sub.resync().map(|s| (s.exit, s)) {
+                Some((None, s)) => repaint(&s),
+                Some((Some(st), s)) => {
+                    let _ = repaint(&s)
+                        .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
+                    return;
                 }
-            }
+                None => {
+                    let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                    return;
+                }
+            },
             Err(RecvTimeoutError::Timeout) => Ok(()),
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
@@ -2233,7 +2412,7 @@ fn pump_chat(
     writer: &SharedWriter,
     stream: u32,
     entries: Vec<v1::ChatEntry>,
-    rx: &std::sync::mpsc::Receiver<v1::ChatEntry>,
+    subscription: crate::chat::ChatSubscription,
     alive: &AtomicBool,
     stop: &AtomicBool,
 ) {
@@ -2242,7 +2421,7 @@ fn pump_chat(
         return;
     }
     while alive.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
-        match rx.recv_timeout(POLL) {
+        match subscription.recv_timeout(POLL) {
             Ok(e) => {
                 if send(writer, stream, KIND_CHAT_ENTRY, e.encode_to_vec()).is_err() {
                     return;
@@ -2664,6 +2843,486 @@ mod idempotency_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(started.len(), 1, "the retry started a second agent");
         assert_eq!(a, b, "both attempts get the one answer");
+    }
+
+    /// ADR-0108: a node with a ledger and a saving chat board, its transcript writer running.
+    struct Forgetting {
+        ctx: ControlContext,
+        ledger: Arc<crate::ledger::Ledger>,
+        store: Arc<crate::transcript::Store>,
+        stop: Arc<AtomicBool>,
+        writer: Option<JoinHandle<()>>,
+        dir: PathBuf,
+    }
+
+    impl Forgetting {
+        fn new(
+            tag: &str,
+            sup: Supervisor,
+            projects: Vec<ProjectEntry>,
+            ledger: crate::ledger::Ledger,
+            dir: PathBuf,
+        ) -> Self {
+            let data = dir.join("data");
+            let store = Arc::new(crate::transcript::Store::new(
+                &data,
+                crate::transcript::Limits::default(),
+                None,
+            ));
+            let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::clone(&store)));
+            let stop = Arc::new(AtomicBool::new(false));
+            let writer = crate::transcript::spawn_writer(
+                Arc::clone(&chat),
+                Box::new(|_: &[String]| HashMap::new()),
+                Arc::clone(&stop),
+            )
+            .unwrap();
+            let ledger = Arc::new(ledger);
+            let ctx = ControlContext::new(
+                Arc::new(Mutex::new(sup)),
+                projects,
+                dir.join(format!("worktrees-{tag}")),
+                "n".into(),
+                None,
+                None,
+                None,
+                chat,
+            )
+            .with_ledger(Arc::clone(&ledger));
+            Self {
+                ctx,
+                ledger,
+                store,
+                stop,
+                writer,
+                dir,
+            }
+        }
+
+        /// The agent's two files, written as a node that ran it left them.
+        fn files(&self, agent: &str) -> (PathBuf, PathBuf) {
+            let path = self.store.path(agent).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{\"format\":\"chat-transcript\",\"version\":1}\n").unwrap();
+            let earlier = path.with_file_name(format!("{agent}.earlier.jsonl"));
+            std::fs::write(&earlier, b"{}\n").unwrap();
+            (path, earlier)
+        }
+
+        fn forget(&self, agent: &str) -> Result<v1::CommandOk, Error> {
+            execute(
+                &self.ctx,
+                &Cmd::AgentForget(v1::AgentForget {
+                    agent_id: agent.into(),
+                }),
+            )
+        }
+    }
+
+    impl Drop for Forgetting {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(w) = self.ctx.chat.wake() {
+                w.notify();
+            }
+            if let Some(w) = self.writer.take() {
+                let _ = w.join();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn bare_supervisor() -> Supervisor {
+        Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        })
+    }
+
+    fn forget_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("agora-ctl-forget-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn started(id: &str) -> v1::event::Body {
+        v1::event::Body::AgentStarted(v1::AgentStarted {
+            agent_id: id.into(),
+            project_id: "p".into(),
+            node_id: "n".into(),
+            worktree_id: "/wt/x".into(),
+            kind: "fake".into(),
+            level: 2,
+            ..Default::default()
+        })
+    }
+
+    /// ADR-0108: forgetting an interrupted agent removes both of its files, empties its ring and drops its Resume offer; a batch the
+    /// writer had not written yet never brings the file back.
+    #[test]
+    fn a_forget_removes_the_conversation_and_the_resume_offer() {
+        use agora_adapters::host::ChatItem;
+        let dir = forget_dir("ok");
+        let data = dir.join("data");
+        let ledger = crate::ledger::Ledger::open(&data, 1).unwrap();
+        ledger.observe(&started("agent-3"), 1);
+        drop(ledger);
+        // The node started again: agent-3 is interrupted, offered for Resume.
+        let ledger = crate::ledger::Ledger::open(&data, 20).unwrap();
+        assert!(ledger.get("agent-3").is_some_and(|e| e.interrupted()));
+        let n = Forgetting::new("ok", bare_supervisor(), Vec::new(), ledger, dir);
+        let (path, earlier) = n.files("agent-3");
+        let id = AgentId::new("agent-3");
+        n.ctx
+            .chat
+            .push_item(&id, &ChatItem::Text("not written yet".into()), 30);
+        assert!(!n.ctx.chat.snapshot(&id).is_empty());
+
+        let r = n.forget("agent-3");
+        assert!(r.is_ok(), "{r:?}");
+        assert!(!path.exists(), "the conversation is gone");
+        assert!(!earlier.exists(), "the earlier session's too");
+        assert!(n.ctx.chat.snapshot(&id).is_empty(), "the ring is empty");
+        assert!(n.ledger.get("agent-3").is_none());
+        assert!(n.ledger.interrupted().is_empty(), "no longer offered");
+        let resume = execute(
+            &n.ctx,
+            &Cmd::AgentResume(v1::AgentResume {
+                agent_id: "agent-3".into(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            resume.err().map(|e| e.code),
+            Some(ErrorCode::AgentNotInterrupted)
+        );
+        // Longer than a batch interval: nothing writes the file again.
+        std::thread::sleep(crate::transcript::BATCH_INTERVAL * 2);
+        assert!(!path.exists(), "no later batch brings it back");
+        // Forgetting it again, or an agent this node never knew, is fine and touches nothing.
+        assert!(n.forget("agent-3").is_ok());
+        assert!(n.forget("agent-77").is_ok());
+    }
+
+    /// ADR-0108: the node decides from its own state: an agent that runs as far as its ledger knows (whatever the hub thinks) is
+    /// refused with `agent.running`, and nothing of it is touched.
+    #[test]
+    fn a_forget_of_an_agent_the_ledger_holds_as_running_is_refused_and_touches_nothing() {
+        use agora_adapters::host::ChatItem;
+        let dir = forget_dir("ledger-running");
+        let ledger = crate::ledger::Ledger::open(&dir.join("data"), 1).unwrap();
+        ledger.observe(&started("agent-2"), 1);
+        let n = Forgetting::new("lr", bare_supervisor(), Vec::new(), ledger, dir);
+        let (path, earlier) = n.files("agent-2");
+        let id = AgentId::new("agent-2");
+        n.ctx
+            .chat
+            .push_item(&id, &ChatItem::Text("hello".into()), 2);
+        let e = n.forget("agent-2").unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert!(path.exists() && earlier.exists());
+        assert_eq!(n.ctx.chat.snapshot(&id).len(), 1);
+        assert!(n.ledger.get("agent-2").is_some());
+    }
+
+    /// ADR-0108: an agent the supervisor runs is refused, its file kept; once it is stopped the forget goes through.
+    #[test]
+    fn a_forget_of_a_running_agent_is_refused_until_it_has_stopped() {
+        if !agora_platform::PTY_SUPPORTED || !sh_on_path() {
+            return;
+        }
+        let dir = forget_dir("running");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let mut sup = bare_supervisor();
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let projects = vec![ProjectEntry {
+            id: "p".into(),
+            name: "proj".into(),
+            root: repo,
+        }];
+        let n = Forgetting::new(
+            "run",
+            sup,
+            projects,
+            crate::ledger::Ledger::in_memory(),
+            dir,
+        );
+        let started = execute(
+            &n.ctx,
+            &Cmd::AgentStart(v1::AgentStart {
+                kind: "shell".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+            panic!("not a start");
+        };
+        let (path, _) = n.files(&s.agent_id);
+        let e = n.forget(&s.agent_id).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert!(path.exists());
+        n.ctx.sup().stop(&AgentId::new(&s.agent_id)).unwrap();
+        assert!(n.forget(&s.agent_id).is_ok());
+        assert!(!path.exists());
+    }
+
+    /// ADR-0108: a resume that read the agent's ledger entry before a forget dropped it is refused when it takes the supervisor's lock
+    /// (`agent.not_interrupted`), so it never brings back an agent whose conversation the forget removed. The resume is held at the
+    /// lock while the forget's ledger change is made (as `forget_agent` makes it, under that lock).
+    #[test]
+    fn a_resume_that_read_the_entry_before_a_forget_is_refused() {
+        if !agora_platform::PTY_SUPPORTED || !sh_on_path() {
+            return;
+        }
+        let dir = forget_dir("race");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let project = git::discover_checkout(&repo).unwrap().project.to_string();
+        let data = dir.join("data");
+        let ledger = crate::ledger::Ledger::open(&data, 1).unwrap();
+        ledger.observe(
+            &v1::event::Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-6".into(),
+                project_id: project,
+                node_id: "n".into(),
+                worktree_id: repo.to_string_lossy().into_owned(),
+                kind: "shell".into(),
+                level: 1,
+                ..Default::default()
+            }),
+            1,
+        );
+        drop(ledger);
+        let ledger = crate::ledger::Ledger::open(&data, 20).unwrap();
+        let mut sup = bare_supervisor();
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let n = Arc::new(Forgetting::new("race", sup, Vec::new(), ledger, dir));
+        let held = n.ctx.supervisor.lock().unwrap();
+        let resuming = {
+            let n = Arc::clone(&n);
+            // "Start again" (a new session), so no session of the kind's own is needed.
+            std::thread::spawn(move || resume_agent(&n.ctx, "agent-6", true, false))
+        };
+        // Long enough for the resume to have read the entry and checked the folder, and to wait for the lock.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(n.ledger.forget("agent-6"));
+        drop(held);
+        let r = resuming.join().unwrap();
+        let running: Vec<AgentId> = n.ctx.sup().list().into_iter().map(|v| v.id).collect();
+        for id in &running {
+            let _ = n.ctx.sup().stop(id);
+        }
+        assert_eq!(
+            r.err().map(|e| e.code),
+            Some(ErrorCode::AgentNotInterrupted)
+        );
+        assert!(running.is_empty(), "nothing was brought back: {running:?}");
+    }
+
+    /// ADR-0108: an id that is not a plain name is refused before anything is touched.
+    #[test]
+    fn a_forget_with_an_invalid_id_is_refused_and_touches_nothing() {
+        let dir = forget_dir("invalid");
+        let n = Forgetting::new(
+            "inv",
+            bare_supervisor(),
+            Vec::new(),
+            crate::ledger::Ledger::in_memory(),
+            dir,
+        );
+        let (path, _) = n.files("x");
+        for bad in ["", "../x", "a/b", "x.earlier", "x y"] {
+            let e = n.forget(bad).unwrap_err();
+            assert_eq!(e.code, ErrorCode::ProtocolInvalidMessage, "{bad:?}");
+        }
+        assert!(path.exists());
+    }
+
+    /// F1500: a subscriber that fell behind a process that crashed is resynced from that process's terminal, never repainted with the
+    /// screen of the process the restart started since (it gets the unknown exit: the crashed terminal is gone).
+    ///
+    /// Unix only: the lag is made by flooding the terminal with output, and through ConPTY on a Windows runner that flood can take
+    /// minutes (it timed out on main after the merge of #1176). A Windows variant that lags without a flood is tracked on #1150.
+    #[cfg(unix)]
+    #[test]
+    fn a_lagged_subscriber_of_a_crashed_process_is_never_repainted_with_the_restarted_one() {
+        if !agora_platform::PTY_SUPPORTED
+            || !agora_platform::LOCAL_SOCKETS_SUPPORTED
+            || !sh_on_path()
+        {
+            return;
+        }
+        let dir = forget_dir("f1500");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        // Quoted and with forward slashes, so `sh` reads the same folder on every platform.
+        let d = format!("'{}'", dir.to_string_lossy().replace('\\', "/"));
+        // First run: waits for `go`, floods 6 MB (more than 256 chunks of at most 16 KiB, so a subscriber that reads nothing lags),
+        // then crashes. The restarted run prints a marker and stays.
+        let script = format!(
+            "if [ -f {d}/second ]; then echo NEWPROC; exec cat; fi; : > {d}/second; \
+             until [ -f {d}/go ]; do sleep 0.02; done; yes 0123456789abcdef | head -c 6000000; exit 3"
+        );
+        let manifest = format!(
+            "kind = \"crashy\"\ndisplay_name = \"C\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", '''{script}''']\n"
+        );
+        let mut sup = bare_supervisor();
+        sup.register(agora_adapters::Manifest::parse(&manifest).unwrap());
+        let projects = vec![ProjectEntry {
+            id: "p".into(),
+            name: "proj".into(),
+            root: repo,
+        }];
+        let n = Forgetting::new(
+            "f1500",
+            sup,
+            projects,
+            crate::ledger::Ledger::in_memory(),
+            dir.clone(),
+        );
+        let started = execute(
+            &n.ctx,
+            &Cmd::AgentStart(v1::AgentStart {
+                kind: "crashy".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+            panic!("not a start");
+        };
+        let id = AgentId::new(&s.agent_id);
+        let req = v1::TerminalSubscribe {
+            terminal_id: terminal_id_of(&id),
+            ..Default::default()
+        };
+        // Two subscribers of the first process, neither reading: one relayed before the restart, one after it.
+        let control = subscribe(&n.ctx, &req, 3).unwrap();
+        let case = subscribe(&n.ctx, &req, 5).unwrap();
+        std::fs::write(dir.join("go"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let ev = n.ctx.sup().tick(Instant::now());
+            if ev
+                .iter()
+                .any(|e| matches!(e, SupervisorEvent::Exited { .. }))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the first process never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Runs `pump` for one subscription on this thread and returns the frames it wrote.
+        let relay = |s: &Subscribed, stream: u32| -> Vec<Frame> {
+            // The case needs a subscriber that fell behind: say so instead of relaying (and blocking on) a queue that did not
+            // overflow on this platform. Looking does not take the lag away.
+            assert_eq!(
+                s.sub.recv_timeout(Duration::ZERO),
+                Ok(Output::Lagged),
+                "the subscriber did not fall behind"
+            );
+            let sock = dir.join(format!("p{stream}.sock"));
+            let listener = local_listen(&sock).unwrap();
+            let mut client = local_connect(&sock).unwrap();
+            let served = listener.accept().unwrap();
+            let writer: SharedWriter = Arc::new(Mutex::new(served));
+            let (alive, stop) = (AtomicBool::new(true), AtomicBool::new(false));
+            pump(&writer, stream, Vec::new(), &s.snap, &s.sub, &alive, &stop);
+            let _ = writer.lock().map(|w| w.shutdown());
+            drop(writer);
+            let mut bytes = Vec::new();
+            let _ = client.read_to_end(&mut bytes);
+            let mut dec = Decoder::new(DEFAULT_MAX_PAYLOAD);
+            dec.push(&bytes);
+            let mut frames = Vec::new();
+            while let Ok(Some(f)) = dec.next_frame() {
+                frames.push(f);
+            }
+            frames
+        };
+        let has = |p: &[u8], m: &[u8]| p.windows(m.len()).any(|w| w == m);
+        let describe = |frames: &[Frame]| -> String {
+            frames
+                .iter()
+                .map(|f| match f.kind {
+                    KIND_TERM_SNAPSHOT if has(&f.payload, b"NEWPROC") => {
+                        "snapshot(next process)".to_string()
+                    }
+                    KIND_TERM_SNAPSHOT => "snapshot".to_string(),
+                    KIND_TERM_RESIZE => "resize".to_string(),
+                    KIND_TERM_DATA => "data".to_string(),
+                    KIND_TERM_EXIT => format!(
+                        "exit({})",
+                        i32::from_le_bytes(f.payload[..4].try_into().unwrap())
+                    ),
+                    k => format!("kind{k}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        // Lagged, its terminal ended and not restarted yet: the unknown exit, nothing of another process.
+        let frames = relay(&control, 3);
+        let ok = frames.last().is_some_and(|f| f.kind == KIND_TERM_EXIT)
+            && !frames.iter().any(|f| has(&f.payload, b"NEWPROC"));
+        assert!(ok, "{}", describe(&frames));
+
+        // The restart starts the next process (its screen shows the marker) before this subscriber is relayed.
+        let ev = n.ctx.sup().tick(Instant::now() + Duration::from_secs(3600));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, SupervisorEvent::Started { .. })),
+            "no restart: {ev:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !n
+            .ctx
+            .sup()
+            .terminal(&id)
+            .is_some_and(|h| h.snapshot().lines.iter().any(|l| l.contains("NEWPROC")))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the restarted process printed nothing"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let frames = relay(&case, 5);
+        let _ = n.ctx.sup().stop(&id);
+        assert_eq!(
+            describe(&frames),
+            "snapshot, resize, exit(-2147483648)",
+            "nothing of the next process"
+        );
     }
 }
 

@@ -10,7 +10,8 @@
 //! Unknown or out-of-order facts are tolerated (a worktree event for an unseen checkout still records the
 //! worktree); the log is the truth, this is a cache.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::sync::Arc;
 
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{AgentState, Event};
@@ -202,6 +203,166 @@ pub struct View {
     /// ADR-0091: the newest `AgentQuotaObserved` per (machine, tool, window), a small bounded table ([`MAX_QUOTA_PER_NODE`] per
     /// machine). It carries no secret: percentage, reset time and labels only. Replayed to a window that connects later.
     pub quota: BTreeMap<(String, String, String), agora_protocol::v1::AgentQuotaObserved>,
+    /// ADR-0103: the newest mesh messages per project, for a window's snapshot. Shared, so a clone of the view under the hub lock copies
+    /// one pointer; folded in by [`View::apply_at`] only (a message needs its log position).
+    pub messages: Arc<MessageRings>,
+}
+
+/// ADR-0103: the newest messages the hub keeps per project ring, and their most encoded bytes (whichever is smaller); past either the
+/// oldest goes. A message larger than the byte cap alone is not kept. Hub constants, not policy (`docs/specs/protocol.md`).
+pub const RING_MESSAGES: usize = 50;
+pub const RING_BYTES: usize = 256 * 1024;
+/// ADR-0103: the most encoded bytes over all rings; past it the oldest message of any ring goes.
+pub const RINGS_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// ADR-0103: what one window's snapshot carries at most: the newest 50 it may see (the web's `MAX_MESSAGES`), then fewer until they
+/// encode to at most 256 KiB together.
+pub const WINDOW_MESSAGES: usize = 50;
+pub const WINDOW_BYTES: usize = 256 * 1024;
+
+/// ADR-0103: one stored `MessagePosted` as the hub keeps it for snapshots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptMessage {
+    /// Its log position.
+    pub pos: u64,
+    /// The stored event, sent as it is.
+    pub event: Event,
+    /// What it adds to a `Snapshot` as one `recent_messages` element (tag, length and the `PositionedEvent`).
+    pub size: usize,
+    /// Placed by its sender's own agent (`<producer>/<from>` is an agent the hub knows): the copy the live rule (`Scope::admit`) gives
+    /// a member of the sender's project. False for a copy placed by its recipient, which only the owner gets.
+    pub by_sender: bool,
+    /// The sender's hub-wide key: `from` when the node already qualified it, `<producer>/<from>` otherwise. For leaving out forgotten
+    /// machines and agents only, never for placing.
+    pub sender: String,
+}
+
+impl KeptMessage {
+    fn new(pos: u64, ev: &Event, from: &str, by_sender: bool) -> Self {
+        use prost::encoding::{encoded_len_varint, key_len};
+        let event = ev.encoded_len();
+        let positioned = if pos == 0 {
+            0
+        } else {
+            key_len(1) + encoded_len_varint(pos)
+        } + key_len(2)
+            + encoded_len_varint(event as u64)
+            + event;
+        Self {
+            pos,
+            event: ev.clone(),
+            size: key_len(12) + encoded_len_varint(positioned as u64) + positioned,
+            by_sender,
+            sender: if from.contains('/') {
+                from.to_string()
+            } else {
+                qualified(&ev.producer_id, from)
+            },
+        }
+    }
+}
+
+/// ADR-0103: the newest messages of one project (or of none), oldest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ring {
+    pub entries: VecDeque<Arc<KeptMessage>>,
+    pub bytes: usize,
+}
+
+/// ADR-0103: the hub's tail of mesh messages. A message goes to the ring of its sender's project when the sender is an agent of its
+/// producer the hub knows, else to the ring of its recipient's project when that is one, else to `unplaced`, which only the owner reads.
+/// The hub never resolves an already-qualified `from` to another machine's agent (T13). Copies are kept as stored; windows pair them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageRings {
+    /// `<node>/<project>` (the key [`crate::scope::Scope`] grants) → its ring. A ring is removed when it empties.
+    pub projects: BTreeMap<Arc<str>, Ring>,
+    pub unplaced: Ring,
+    /// Every kept message's position → its ring (`None`: `unplaced`), so the oldest over all rings is found without a scan. Keys are
+    /// shared, so copying the rings (a message after a snapshot was taken) allocates no string.
+    index: BTreeMap<u64, Option<Arc<str>>>,
+    /// The encoded bytes over all rings.
+    pub bytes: usize,
+}
+
+impl MessageRings {
+    fn ring_mut(&mut self, key: Option<&Arc<str>>) -> Option<&mut Ring> {
+        match key {
+            Some(k) => self.projects.get_mut(k),
+            None => Some(&mut self.unplaced),
+        }
+    }
+
+    /// Drops the oldest message of the ring `key`; removes a project ring that empties.
+    fn drop_oldest(&mut self, key: Option<&Arc<str>>) {
+        let Some(ring) = self.ring_mut(key) else {
+            return;
+        };
+        let Some(old) = ring.entries.pop_front() else {
+            return;
+        };
+        ring.bytes -= old.size;
+        let empty = ring.entries.is_empty();
+        self.bytes -= old.size;
+        self.index.remove(&old.pos);
+        if let (Some(k), true) = (key, empty) {
+            self.projects.remove(k);
+        }
+    }
+
+    fn keep(&mut self, key: Option<String>, m: KeptMessage) {
+        if m.size > RING_BYTES || self.index.contains_key(&m.pos) {
+            return;
+        }
+        let (pos, size) = (m.pos, m.size);
+        // The ring's own key when it has one, so every entry of a ring shares one string.
+        let key: Option<Arc<str>> = key.map(|k| match self.projects.get_key_value(k.as_str()) {
+            Some((k, _)) => Arc::clone(k),
+            None => Arc::from(k),
+        });
+        let ring = match &key {
+            Some(k) => self.projects.entry(Arc::clone(k)).or_default(),
+            None => &mut self.unplaced,
+        };
+        ring.entries.push_back(Arc::new(m));
+        ring.bytes += size;
+        self.bytes += size;
+        self.index.insert(pos, key.clone());
+        while self
+            .ring_mut(key.as_ref())
+            .is_some_and(|r| r.entries.len() > RING_MESSAGES || r.bytes > RING_BYTES)
+        {
+            self.drop_oldest(key.as_ref());
+        }
+        while self.bytes > RINGS_TOTAL_BYTES {
+            let Some((_, oldest)) = self.index.first_key_value() else {
+                break;
+            };
+            let oldest = oldest.clone();
+            self.drop_oldest(oldest.as_ref());
+        }
+    }
+
+    /// A member's or viewer's rings: the granted projects' messages placed by their sender, the copies the live rule gives them.
+    pub fn cut(&self, granted: impl Fn(&str) -> bool) -> Self {
+        let mut out = Self::default();
+        for (k, ring) in self.projects.iter().filter(|(k, _)| granted(k)) {
+            let entries: VecDeque<_> = ring
+                .entries
+                .iter()
+                .filter(|m| m.by_sender)
+                .cloned()
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let bytes = entries.iter().map(|m| m.size).sum();
+            for m in &entries {
+                out.index.insert(m.pos, Some(Arc::clone(k)));
+            }
+            out.bytes += bytes;
+            out.projects.insert(Arc::clone(k), Ring { entries, bytes });
+        }
+        out
+    }
 }
 
 /// ADR-0091: the most windows the hub keeps per machine (a node holds to 32; this is the hub's own bound). Past it the oldest
@@ -387,6 +548,76 @@ impl View {
         std::borrow::Cow::Owned(v)
     }
 
+    /// [`View::apply`] for an event at log position `pos`, which also keeps a `MessagePosted` for snapshots (ADR-0103). The hub's
+    /// publish and its rebuild from the log both come here, so a rebuilt view has the same tail as the live one.
+    pub fn apply_at(&mut self, pos: u64, ev: &Event) {
+        self.apply(ev);
+        if let Some(Body::MessagePosted(m)) = &ev.body {
+            self.keep_message(pos, ev, &m.from_agent_id, &m.to);
+        }
+    }
+
+    /// ADR-0103: places one message by what its producer can vouch for, its own agents only: the sender's (`<producer>/<from>`), else
+    /// the recipient's (`<producer>/<to>`), else none.
+    fn keep_message(&mut self, pos: u64, ev: &Event, from: &str, to: &str) {
+        let project = |agent: &str| {
+            let key = qualified(&ev.producer_id, agent);
+            self.agents
+                .get(&key)
+                .map(|a| qualified(&ev.producer_id, &a.project_id))
+        };
+        let (key, by_sender) = match project(from) {
+            Some(p) => (Some(p), true),
+            None => (project(to), false),
+        };
+        let m = KeptMessage::new(pos, ev, from, by_sender);
+        Arc::make_mut(&mut self.messages).keep(key, m);
+    }
+
+    /// ADR-0103: the messages a window is sent with this view's snapshot: from every ring it holds (a member's cut view holds only
+    /// theirs), without a sender under a forgotten machine, a producer that is a forgotten machine or a sender that is a forgotten
+    /// agent; the newest [`WINDOW_MESSAGES`], then fewer until they come to at most [`WINDOW_BYTES`]; oldest first.
+    pub fn recent_messages(&self) -> Vec<Arc<KeptMessage>> {
+        let forgotten_node = |n: &str| self.nodes.get(n).is_some_and(|n| n.forgotten);
+        let hidden = |m: &KeptMessage| {
+            forgotten_node(&m.event.producer_id)
+                || split_key(&m.sender).is_some_and(|(n, _)| forgotten_node(n))
+                || self.agents.get(&m.sender).is_some_and(|a| a.forgotten)
+        };
+        let rings: Vec<&Ring> = self
+            .messages
+            .projects
+            .values()
+            .chain(std::iter::once(&self.messages.unplaced))
+            .filter(|r| !r.entries.is_empty())
+            .collect();
+        // Newest first over all rings: each ring is in log order, so a merge from their ends.
+        let mut next: Vec<usize> = rings.iter().map(|r| r.entries.len()).collect();
+        let mut heads: BinaryHeap<(u64, usize)> = rings
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.entries.back().map(|m| (m.pos, i)))
+            .collect();
+        let (mut out, mut bytes) = (Vec::new(), 0usize);
+        while let Some((_, i)) = heads.pop() {
+            next[i] -= 1;
+            let m = &rings[i].entries[next[i]];
+            if next[i] > 0 {
+                heads.push((rings[i].entries[next[i] - 1].pos, i));
+            }
+            if hidden(m) {
+                continue;
+            }
+            if out.len() == WINDOW_MESSAGES || bytes + m.size > WINDOW_BYTES {
+                break;
+            }
+            bytes += m.size;
+            out.push(Arc::clone(m));
+        }
+        out.reverse();
+        out
+    }
+
     pub fn apply(&mut self, ev: &Event) {
         let producer = ev.producer_id.as_str();
         let q = |id: &str| qualified(&ev.producer_id, id);
@@ -542,6 +773,30 @@ impl View {
                 if !e.worktree_id.is_empty() {
                     self.agent_workspaces.remove(&q(&e.agent_id));
                 }
+                // ADR-0104 (#930): the node re-states a process it announced before under this id (taken up from the holder after
+                // its restart, or in a resync). What the hub summed for it stays: tokens, model, context level and its own cost. Only
+                // for that node's own agent (the key is qualified by the producer); a new start, a resume, a restart after a crash and
+                // every `AgentStarted` of an older node start again from 0. The rest starts again as for any start (the node
+                // re-states options, config, commands and always answers).
+                let (input_tokens, output_tokens, model, session) = match self
+                    .agents
+                    .get_mut(&q(&e.agent_id))
+                    .filter(|a| e.same_process && a.node_id == producer)
+                {
+                    Some(a) => (
+                        a.input_tokens,
+                        a.output_tokens,
+                        std::mem::take(&mut a.model),
+                        SessionView {
+                            context_tokens: a.session.context_tokens,
+                            context_window: a.session.context_window,
+                            cost_micros: a.session.cost_micros,
+                            currency: std::mem::take(&mut a.session.currency),
+                            ..SessionView::default()
+                        },
+                    ),
+                    None => (0, 0, String::new(), SessionView::default()),
+                };
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
@@ -555,11 +810,11 @@ impl View {
                         session_id: None,
                         running: true,
                         exit_code: None,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        model: String::new(),
+                        input_tokens,
+                        output_tokens,
+                        model,
                         forgotten: false,
-                        session: SessionView::default(),
+                        session,
                         parent_agent_id: if e.parent_agent_id.is_empty() {
                             String::new()
                         } else {
@@ -829,7 +1084,8 @@ impl View {
                 };
                 self.leases.remove(&format!("{agent}\0{}", l.path));
             }
-            // ADR-0057: a refused start changes no view; it is in the store and the audit trail.
+            // ADR-0057: a refused start changes no view; it is in the store and the audit trail. ADR-0103: a message is kept by
+            // `apply_at`, which knows its log position.
             Body::MessagePosted(_)
             | Body::HandoffCreated(_)
             // ADR-0095: the audit record changes no view; the task's move is its `TaskChanged`.
@@ -864,7 +1120,7 @@ impl View {
                     if view.brings_back(&ev) {
                         view.remembered_at = pos;
                     }
-                    view.apply(&ev);
+                    view.apply_at(pos, &ev);
                 }
             }
         }
@@ -1052,6 +1308,7 @@ mod tests {
 
     fn started(id: &str) -> Body {
         Body::AgentStarted(AgentStarted {
+            run_id: Vec::new(),
             agent_id: id.into(),
             project_id: "p".into(),
             node_id: "n1".into(),
@@ -1059,6 +1316,7 @@ mod tests {
             kind: "claude-code".into(),
             level: 2,
             parent_agent_id: String::new(),
+            same_process: false,
             launch_options: Vec::new(),
             skips_permissions: false,
         })
@@ -1785,6 +2043,146 @@ mod tests {
         assert_eq!((a.exit_code, a.state), (Some(3), AgentState::Done));
     }
 
+    /// ADR-0104 (#930): what a kept agent had used, as the hub summed it before its node restarted.
+    fn used_before(v: &mut View, producer: &str, id: &str) {
+        v.apply(&ev(producer, 1, started_again(producer, id, false)));
+        v.apply(&ev(
+            producer,
+            2,
+            Body::AgentSessionOptions(AgentSessionOptions {
+                agent_id: id.into(),
+                current_mode: "plan".into(),
+                ..AgentSessionOptions::default()
+            }),
+        ));
+        v.apply(&ev(
+            producer,
+            3,
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: id.into(),
+                model: "m".into(),
+                input_tokens: 5,
+                output_tokens: 7,
+                cost_micros: Some(10),
+                currency: "USD".into(),
+                context_tokens: 100,
+                context_window: 1000,
+            }),
+        ));
+    }
+
+    fn started_again(producer: &str, id: &str, same_process: bool) -> Body {
+        let Body::AgentStarted(mut s) = started(id) else {
+            unreachable!()
+        };
+        s.node_id = producer.into();
+        s.same_process = same_process;
+        Body::AgentStarted(s)
+    }
+
+    type Counters<'a> = (u64, u64, &'a str, u64, u64, Option<u64>, &'a str);
+
+    fn counters(a: &AgentView) -> Counters<'_> {
+        let s = &a.session;
+        (
+            a.input_tokens,
+            a.output_tokens,
+            a.model.as_str(),
+            s.context_tokens,
+            s.context_window,
+            s.cost_micros,
+            s.currency.as_str(),
+        )
+    }
+
+    const KEPT: Counters<'static> = (5, 7, "m", 100, 1000, Some(10), "USD");
+    const ZERO: Counters<'static> = (0, 0, "", 0, 0, None, "");
+
+    /// ADR-0104 decision 2 (#930): a node that takes a kept agent up after its restart says `NodeOnline`, then the agent's
+    /// `AgentStarted` with `same_process`. The hub keeps its tokens, model, context level and own cost (the cost report reads the same
+    /// numbers), and what the node re-states (options, config, commands, always answers) starts again as for any start. Usage reported
+    /// after the take-up adds to the kept totals. A view rebuilt from the log (a hub restart) has the same totals.
+    #[test]
+    fn a_kept_agent_taken_up_after_its_node_restarts_keeps_its_counters() {
+        let online = Body::NodeOnline(NodeOnline {
+            node_id: "n1".into(),
+            hostname: "n1".into(),
+            os: "linux".into(),
+            build: "b".into(),
+            binary: String::new(),
+        });
+        let log = [
+            ev("n1", 4, online),
+            ev("n1", 5, started_again("n1", "a", true)),
+            ev(
+                "n1",
+                6,
+                Body::AgentUsageReported(AgentUsageReported {
+                    agent_id: "a".into(),
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cost_micros: Some(3),
+                    currency: "USD".into(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&log[0]);
+        assert!(!v.agents["n1/a"].running);
+        v.apply(&log[1]);
+        let a = &v.agents["n1/a"];
+        assert!(a.running);
+        assert_eq!(counters(a), KEPT);
+        assert_eq!(a.session.options, None, "the node re-states its options");
+        v.apply(&log[2]);
+        assert_eq!(
+            counters(&v.agents["n1/a"]),
+            (6, 9, "m", 100, 1000, Some(13), "USD")
+        );
+        let mut rebuilt = View::default();
+        used_before(&mut rebuilt, "n1", "a");
+        for e in &log {
+            rebuilt.apply(e);
+        }
+        assert_eq!(rebuilt.agents["n1/a"], v.agents["n1/a"]);
+    }
+
+    /// ADR-0104 decision 2: a resync re-states every running agent with `same_process`, and a hub that only missed events keeps their
+    /// counters (no `NodeOnline` before it).
+    #[test]
+    fn a_resync_restatement_keeps_the_counters_of_an_agent_that_never_stopped() {
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n1", 9, started_again("n1", "a", true)));
+        assert!(v.agents["n1/a"].running);
+        assert_eq!(counters(&v.agents["n1/a"]), KEPT);
+    }
+
+    /// ADR-0104 decision 2: a new start, a resume or a restart after a crash of a reused id is a new process and starts again from 0,
+    /// and so does every `AgentStarted` of a node that predates the field (absent reads as false). One that says `same_process`
+    /// keeps only what the hub holds for that node's own agent: nothing for an id it never listed.
+    #[test]
+    fn a_new_process_under_a_reused_id_starts_its_counters_again() {
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n1", 4, started_again("n1", "a", false)));
+        assert_eq!(counters(&v.agents["n1/a"]), ZERO);
+
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started_again("n1", "b", true)));
+        assert_eq!(counters(&v.agents["n1/b"]), ZERO);
+        assert!(v.agents["n1/b"].running);
+
+        // Another node's agent of the same local id is another agent (T19): its counters are not taken.
+        let mut v = View::default();
+        used_before(&mut v, "n1", "a");
+        v.apply(&ev("n2", 1, started_again("n2", "a", true)));
+        assert_eq!(counters(&v.agents["n2/a"]), ZERO);
+        assert_eq!(counters(&v.agents["n1/a"]), KEPT);
+    }
+
     fn always(agent: &str, approval: &str, action: &str) -> Body {
         Body::AgentAlwaysAllowed(AgentAlwaysAllowed {
             agent_id: agent.into(),
@@ -2118,5 +2516,439 @@ mod tests {
         assert_eq!(snap.leases.len(), 1);
         assert_eq!(snap.leases[0].path, "src/x");
         assert!(snap.tasks.iter().any(|t| t.task_id == "t-1" && t.done));
+    }
+
+    /// ADR-0103 test helpers: a view fed with positions, as the hub's publish and rebuild feed it.
+    struct Fed {
+        view: View,
+        pos: u64,
+    }
+
+    impl Fed {
+        fn new() -> Self {
+            Self {
+                view: View::default(),
+                pos: 0,
+            }
+        }
+
+        fn push(&mut self, e: Event) -> u64 {
+            self.pos += 1;
+            self.view.apply_at(self.pos, &e);
+            self.pos
+        }
+
+        fn agent(&mut self, node: &str, id: &str, project: &str) {
+            self.push(ev(
+                node,
+                1,
+                Body::AgentStarted(AgentStarted {
+                    agent_id: id.into(),
+                    project_id: project.into(),
+                    node_id: node.into(),
+                    kind: "k".into(),
+                    ..AgentStarted::default()
+                }),
+            ));
+        }
+
+        fn say(&mut self, node: &str, from: &str, to: &str, body: &str) -> u64 {
+            self.push(message(node, from, to, body))
+        }
+    }
+
+    fn message(node: &str, from: &str, to: &str, body: &str) -> Event {
+        ev(
+            node,
+            7,
+            Body::MessagePosted(MessagePosted {
+                message_id: "m-1".into(),
+                from_agent_id: from.into(),
+                to: to.into(),
+                body: body.into(),
+            }),
+        )
+    }
+
+    /// The window's messages as (position, body).
+    fn sent(v: &View) -> Vec<(u64, String)> {
+        crate::server::snapshot_of(v, u64::MAX)
+            .recent_messages
+            .into_iter()
+            .map(|p| match p.event.and_then(|e| e.body) {
+                Some(Body::MessagePosted(m)) => (p.pos, m.body),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn ring_bodies(r: &Ring) -> Vec<(String, bool)> {
+        r.entries
+            .iter()
+            .map(|m| match &m.event.body {
+                Some(Body::MessagePosted(p)) => (p.body.clone(), m.by_sender),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// ADR-0103 decision 2: a message is placed by what its producer can vouch for, its own agents: the sender's project, else the
+    /// recipient's, else no project. An already-qualified `from` is never resolved to another machine's agent.
+    #[test]
+    fn a_message_goes_to_the_ring_its_producer_can_vouch_for() {
+        let mut f = Fed::new();
+        f.agent("n1", "a", "p");
+        f.agent("n2", "b", "q");
+        // The sender's own copy of a message between machines, and the receiver's.
+        f.say("n1", "a", "n2/b", "to b");
+        f.say("n2", "n1/a", "b", "to b");
+        // A `#channel` copy the hub delivered: recorded by the receiver, `from` already qualified.
+        f.say("n2", "n1/a", "b", "[#dev] all");
+        // A node that names another machine's agent as the sender, to nobody it hosts: no project.
+        f.say("n2", "n1/a", "nobody", "forged");
+        // Neither end known: no project.
+        f.say("n3", "x", "y", "strangers");
+        let rings = &f.view.messages;
+        assert_eq!(rings.projects.len(), 2, "{:?}", rings.projects.keys());
+        assert_eq!(
+            ring_bodies(&rings.projects["n1/p"]),
+            [("to b".to_string(), true)]
+        );
+        assert_eq!(
+            ring_bodies(&rings.projects["n2/q"]),
+            [
+                ("to b".to_string(), false),
+                ("[#dev] all".to_string(), false)
+            ]
+        );
+        assert_eq!(
+            ring_bodies(&rings.unplaced),
+            [
+                ("forged".to_string(), false),
+                ("strangers".to_string(), false)
+            ]
+        );
+        // The owner is sent every copy, in log order; the window pairs them.
+        assert_eq!(
+            sent(&f.view)
+                .iter()
+                .map(|(_, b)| b.as_str())
+                .collect::<Vec<_>>(),
+            ["to b", "to b", "[#dev] all", "forged", "strangers"]
+        );
+        // `apply` alone (no position) keeps nothing.
+        let mut plain = View::default();
+        plain.apply(&message("n3", "x", "y", "no position"));
+        assert!(plain.messages.unplaced.entries.is_empty());
+    }
+
+    /// ADR-0103: 51 messages in one project keep the newest 50, and a window is sent those, oldest first.
+    #[test]
+    fn a_ring_and_a_window_keep_the_newest_fifty_messages() {
+        let mut f = Fed::new();
+        f.agent("n1", "a", "p");
+        let first = f.say("n1", "a", "b", "0");
+        for i in 1..=50 {
+            f.say("n1", "a", "b", &i.to_string());
+        }
+        let ring = &f.view.messages.projects["n1/p"];
+        assert_eq!(ring.entries.len(), RING_MESSAGES);
+        assert_ne!(ring.entries[0].pos, first);
+        let got = sent(&f.view);
+        assert_eq!(got.len(), WINDOW_MESSAGES);
+        assert_eq!(got[0].1, "1");
+        assert_eq!(got[49].1, "50");
+        assert!(got.windows(2).all(|w| w[0].0 < w[1].0), "oldest first");
+    }
+
+    /// ADR-0103: a ring holds at most 256 KiB, a window is sent at most 256 KiB (as many of the newest as fit), and one message larger
+    /// than a ring alone is not kept and pushes nothing out. 17 bodies of 16 KiB (a node's largest) are more than fit: with their
+    /// envelopes 15 do, not 16.
+    #[test]
+    fn a_ring_and_a_window_keep_at_most_256_kib() {
+        let mut f = Fed::new();
+        f.agent("n1", "a", "p");
+        for i in 0..17 {
+            f.say(
+                "n1",
+                "a",
+                "b",
+                &format!("{i:02}{}", "x".repeat(16 * 1024 - 2)),
+            );
+        }
+        let ring = &f.view.messages.projects["n1/p"];
+        assert!(ring.bytes <= RING_BYTES);
+        assert_eq!(
+            ring.bytes,
+            ring.entries.iter().map(|m| m.size).sum::<usize>()
+        );
+        assert_eq!(ring.entries.len(), 15);
+        let snap = crate::server::snapshot_of(&f.view, f.pos);
+        let without = agora_protocol::v1::Snapshot {
+            recent_messages: Vec::new(),
+            ..snap.clone()
+        };
+        let added = snap.encoded_len() - without.encoded_len();
+        assert!(added <= WINDOW_BYTES, "{added}");
+        assert_eq!(
+            added, ring.bytes,
+            "the sizes kept are what the snapshot carries"
+        );
+        assert_eq!(snap.recent_messages.len(), 15);
+        assert!(matches!(
+            snap.recent_messages[0].event.as_ref().and_then(|e| e.body.as_ref()),
+            Some(Body::MessagePosted(m)) if m.body.starts_with("02")
+        ));
+        // Too large for a ring alone: dropped, and the ring is as it was.
+        let before = ring.clone();
+        f.say("n1", "a", "b", &"y".repeat(RING_BYTES));
+        assert_eq!(f.view.messages.projects["n1/p"], before);
+    }
+
+    #[test]
+    fn recent_team_chat_uses_only_the_remaining_snapshot_frame_budget() {
+        use agora_protocol::frame::DEFAULT_MAX_PAYLOAD;
+        use agora_protocol::v1::{ApprovalRequested, PositionedEvent};
+
+        let mut f = Fed::new();
+        for i in 0..500 {
+            let node = format!("machine-{}", i / 50);
+            let agent = format!("agent-{i}");
+            f.agent(&node, &agent, &format!("project-{}", i / 10));
+            if i < 450 {
+                f.push(ev(
+                    &node,
+                    1,
+                    Body::ApprovalRequested(ApprovalRequested {
+                        agent_id: agent,
+                        approval_id: format!("approval-{i}"),
+                        action: "review".into(),
+                        detail: "Example pending review detail. ".repeat(64),
+                        expires_at_ms: 60_000,
+                        ..Default::default()
+                    }),
+                ));
+            }
+        }
+        let no_history = crate::server::snapshot_of(&f.view, f.pos);
+        assert!(no_history.encoded_len() < DEFAULT_MAX_PAYLOAD);
+        println!("CONTROL OK: fleet state fits without history");
+
+        let body = "Example team update. ".repeat(560);
+        for _ in 0..20 {
+            f.say("machine-0", "agent-0", "agent-1", &body);
+        }
+        let eligible = f.view.recent_messages();
+        assert_eq!(eligible.len(), 20);
+        let snapshot = crate::server::snapshot_of(&f.view, f.pos);
+        let actual = snapshot.encoded_len();
+        if actual > DEFAULT_MAX_PAYLOAD {
+            println!("PROBLEM CONFIRMED: expected <= {DEFAULT_MAX_PAYLOAD}, actual {actual}");
+        }
+        assert!(
+            actual <= DEFAULT_MAX_PAYLOAD,
+            "snapshot uses {actual} bytes"
+        );
+        let history = &snapshot.recent_messages;
+        assert!(!history.is_empty());
+        assert!(history.len() < eligible.len());
+        let first = eligible.len() - history.len();
+        assert!(history
+            .iter()
+            .zip(&eligible[first..])
+            .all(|(a, b)| a.pos == b.pos));
+
+        let mut one_more = snapshot.clone();
+        let previous = &eligible[first - 1];
+        one_more.recent_messages.insert(
+            0,
+            PositionedEvent {
+                pos: previous.pos,
+                event: Some(previous.event.clone()),
+            },
+        );
+        assert!(one_more.encoded_len() > DEFAULT_MAX_PAYLOAD);
+        assert_eq!(snapshot.agents, no_history.agents);
+        assert_eq!(snapshot.approvals, no_history.approvals);
+
+        let padding = DEFAULT_MAX_PAYLOAD - no_history.encoded_len() - 8;
+        f.view
+            .approvals
+            .values_mut()
+            .next()
+            .expect("approval")
+            .detail
+            .push_str(&" ".repeat(padding));
+        let almost_full = crate::server::snapshot_of(&f.view, f.pos);
+        assert!(almost_full.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert!(almost_full.recent_messages.is_empty());
+    }
+
+    /// ADR-0103: a busy project does not push a quiet one's messages out of its ring.
+    #[test]
+    fn a_busy_project_does_not_push_a_quiet_ones_messages_out() {
+        let mut f = Fed::new();
+        f.agent("n1", "a", "busy");
+        f.agent("n1", "q", "quiet");
+        f.say("n1", "q", "a", "still here");
+        for i in 0..200 {
+            f.say("n1", "a", "q", &i.to_string());
+        }
+        assert_eq!(
+            ring_bodies(&f.view.messages.projects["n1/quiet"]),
+            [("still here".to_string(), true)]
+        );
+        assert_eq!(f.view.messages.projects["n1/busy"].entries.len(), 50);
+    }
+
+    /// ADR-0103: all rings together hold at most 8 MiB; the oldest message of any ring goes first and a ring that empties is removed.
+    #[test]
+    fn all_rings_together_keep_at_most_8_mib() {
+        let mut f = Fed::new();
+        let body = "z".repeat(16 * 1024);
+        for p in 0..40 {
+            f.agent("n1", &format!("a{p}"), &format!("p{p:02}"));
+        }
+        for p in 0..40 {
+            for _ in 0..15 {
+                f.say("n1", &format!("a{p}"), "x", &body);
+            }
+        }
+        let rings = &f.view.messages;
+        assert!(rings.bytes <= RINGS_TOTAL_BYTES, "{}", rings.bytes);
+        let sum: usize = rings.projects.values().map(|r| r.bytes).sum();
+        assert_eq!(rings.bytes, sum + rings.unplaced.bytes);
+        assert!(rings.bytes > RINGS_TOTAL_BYTES - RING_BYTES);
+        // The first projects lost their messages, the last kept all of theirs.
+        assert!(!rings.projects.contains_key("n1/p00"));
+        assert_eq!(rings.projects["n1/p39"].entries.len(), 15);
+        assert!(rings.projects.values().all(|r| !r.entries.is_empty()));
+    }
+
+    /// ADR-0103 decision 3 and ADR-0073, ADR-0053: the owner is sent no message whose sender is under a forgotten machine, recorded by
+    /// a forgotten machine, or a forgotten agent. They are kept, so a machine that comes back has them again.
+    #[test]
+    fn forgotten_machines_and_agents_leave_their_messages_out_of_the_snapshot_not_the_ring() {
+        let mut f = Fed::new();
+        let online = |n: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: n.into(),
+                hostname: n.into(),
+                ..NodeOnline::default()
+            })
+        };
+        f.push(ev("n1", 1, online("n1")));
+        f.push(ev("n2", 1, online("n2")));
+        f.agent("n1", "a", "p");
+        f.agent("n2", "b", "q");
+        f.agent("n2", "gone", "q");
+        f.say("n1", "a", "n2/b", "from n1");
+        f.say("n2", "n1/a", "b", "copy on n2");
+        f.say("n2", "b", "n1/a", "from n2");
+        f.say("n2", "gone", "b", "from gone");
+        assert_eq!(sent(&f.view).len(), 4);
+        f.push(ev(
+            "n2",
+            2,
+            Body::AgentExited(AgentExited {
+                agent_id: "gone".into(),
+                exit_code: 0,
+            }),
+        ));
+        f.push(ev(
+            RESERVED_HUB_ID,
+            1,
+            Body::AgentForgotten(AgentForgotten {
+                agent_id: "n2/gone".into(),
+            }),
+        ));
+        assert_eq!(
+            sent(&f.view)
+                .iter()
+                .map(|(_, b)| b.as_str())
+                .collect::<Vec<_>>(),
+            ["from n1", "copy on n2", "from n2"]
+        );
+        // n1 goes offline and is forgotten: its sender's messages go, wherever they were recorded.
+        f.push(ev(
+            RESERVED_HUB_ID,
+            2,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        f.push(ev(
+            RESERVED_HUB_ID,
+            3,
+            Body::NodeForgotten(NodeForgotten {
+                node_id: "n1".into(),
+                ..NodeForgotten::default()
+            }),
+        ));
+        assert_eq!(
+            sent(&f.view)
+                .iter()
+                .map(|(_, b)| b.as_str())
+                .collect::<Vec<_>>(),
+            ["from n2"]
+        );
+        assert_eq!(f.view.messages.projects["n1/p"].entries.len(), 1);
+        // Its link comes back with its agent still running: so do their messages.
+        f.push(ev(
+            RESERVED_HUB_ID,
+            4,
+            Body::NodeLink(NodeLink {
+                node_id: "n1".into(),
+                up: true,
+                generation: 1,
+                ..NodeLink::default()
+            }),
+        ));
+        assert_eq!(sent(&f.view).len(), 3);
+    }
+
+    /// ADR-0103: a hub that rebuilds its view from the log at start has the same tail as the live one, and sends the same snapshot.
+    #[test]
+    fn a_rebuilt_view_has_the_same_messages_as_the_live_one() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut f = Fed::new();
+        let mut events = vec![
+            ev("n1", 1, started("a")),
+            ev("n2", 1, {
+                let Body::AgentStarted(mut s) = started("b") else {
+                    unreachable!()
+                };
+                s.node_id = "n2".into();
+                s.project_id = "q".into();
+                Body::AgentStarted(s)
+            }),
+        ];
+        for i in 0..60 {
+            events.push(message("n1", "a", "n2/b", &format!("ping {i}")));
+            events.push(message("n2", "n1/a", "b", &format!("ping {i}")));
+        }
+        events.push(message("n3", "x", "y", "nobody's"));
+        let mut seqs = BTreeMap::<String, u64>::new();
+        for e in &mut events {
+            let seq = seqs.entry(e.producer_id.clone()).or_default();
+            *seq += 1;
+            e.seq = *seq;
+            let stored = store
+                .append(&e.producer_id, e.seq, e.at_ms, &e.encode_to_vec())
+                .unwrap();
+            assert_eq!(stored, crate::store::Append::Applied { pos: f.pos + 1 });
+            f.push(e.clone());
+        }
+        let (rebuilt, pos) = View::rebuild(&store).unwrap();
+        assert_eq!(pos, f.pos);
+        assert_eq!(rebuilt.messages, f.view.messages);
+        assert_eq!(rebuilt, f.view);
+        assert_eq!(
+            crate::server::snapshot_of(&rebuilt, pos),
+            crate::server::snapshot_of(&f.view, pos)
+        );
+        // The last event is a message: its position is the snapshot's own, and it is sent.
+        let last = crate::server::snapshot_of(&rebuilt, pos);
+        assert_eq!(last.recent_messages.last().map(|p| p.pos), Some(pos));
     }
 }

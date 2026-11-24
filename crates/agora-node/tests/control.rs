@@ -194,6 +194,16 @@ fn errors_travel_as_codes_with_params() {
         info.params["capability"].value,
         Some(v1::param_value::Value::Str("worktree.remove".into()))
     );
+    // ADR-0109: a node that does not take durable handoffs says so to an old or local caller.
+    let info = c
+        .call(Cmd::DeliverTaskHandoff(v1::DeliverTaskHandoff::default()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(info.code, "protocol.capability_missing");
+    assert_eq!(
+        info.params["capability"].value,
+        Some(v1::param_value::Value::Str("mesh.task_handoff.v1".into()))
+    );
 }
 
 #[test]
@@ -1380,8 +1390,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             .map(|k| (k.kind, k.display_name))
             .collect()
     };
+    // ADR-0092: the ACP registry's converted agents are offered too, each under `registry-<id>`.
     let shipped: Vec<String> = agora_node::manifests::BUILT_IN
         .iter()
+        .chain(agora_node::manifests::REGISTRY)
         .map(|(_, text)| {
             agora_adapters::Manifest::parse(text)
                 .expect("shipped manifest")
@@ -1397,9 +1409,10 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
             s.sort();
             s
         },
-        "every shipped kind and the built-in shell, nothing else"
+        "every shipped kind, the registry's and the built-in shell, nothing else"
     );
     assert_eq!(listed["shell"], "Shell");
+    assert!(listed.keys().filter(|k| k.starts_with("registry-")).count() >= 40);
     // With no file at all, the user's shell starts.
     let started = c.call(start_cmd("shell"));
     assert!(started.is_ok(), "{started:?}");
@@ -2212,9 +2225,15 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
         helpers_may_start: false,
         ..Default::default()
     }));
-    assert!(
-        r_is_err(r),
-        "the user is told the decision did not reach the agent"
+    // #1150: the user is told the decision did not reach the agent, as a failed approval answer (never as a failed start, reference
+    // `unassigned`).
+    let info = r
+        .expect("io")
+        .expect_err("the decision did not reach the agent");
+    assert_eq!(info.code, "internal");
+    assert_eq!(
+        info.params["incident_id"].value,
+        Some(v1::param_value::Value::Str("approval.resolve".into()))
     );
     assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
     // Codex review of #794: the request is over, so the hub is told as for a cancelled turn (unsigned, not approved), or it would
@@ -2377,4 +2396,151 @@ fn the_users_prompt_comes_before_the_agents_answer() {
             .unwrap()
     };
     assert!(id_of(v1::ChatRole::User, "first:hello") < id_of(v1::ChatRole::Agent, "hello"));
+}
+
+/// #1133 ("yes, add a policy line"): `agents.registry = off` in the node's own policy switches the ACP registry's kinds off on this
+/// machine: none is offered, a start of one is refused with `node.policy_denied` (rule `registry_off`), and the hand-made kinds are not
+/// affected. `agents.registry.deny` switches off the kinds it names only (rule `registry_denied`).
+#[test]
+fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_ones() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let rule_of = |r: std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>>| {
+        let e = r.expect("io").expect_err("expected a refusal");
+        let rule = match e.params.get("rule").and_then(|p| p.value.clone()) {
+            Some(v1::param_value::Value::Str(s)) => s,
+            other => format!("{other:?}"),
+        };
+        (e.code, rule)
+    };
+    let kinds = |c: &mut Client| -> Vec<String> {
+        match ok(c.call(Cmd::AgentKinds(v1::AgentKinds {}))).result {
+            Some(Ok_::AgentKinds(k)) => k.kinds.into_iter().map(|k| k.kind).collect(),
+            other => panic!("{other:?}"),
+        }
+    };
+    for (name, line, gone, kept) in [
+        (
+            "registry-off",
+            "agents.registry = off\n",
+            vec!["registry-gemini", "registry-goose"],
+            vec![],
+        ),
+        (
+            "registry-deny",
+            "agents.registry.deny = registry-gemini-mine, registry-gemini\n",
+            vec!["registry-gemini"],
+            vec!["registry-goose"],
+        ),
+    ] {
+        let e = env(name);
+        std::fs::create_dir_all(e.dir.join("data")).unwrap();
+        std::fs::write(e.dir.join("data").join("policy"), line).unwrap();
+        // Review F5: a hand-made description whose name looks like a registry kind's is the owner's own, never switched off.
+        std::fs::write(
+            e.dir.join("manifests").join("mine.toml"),
+            "kind = \"registry-gemini-mine\"\ndisplay_name = \"Mine\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+        )
+        .unwrap();
+        let n = node(&e, NodeLimits::default());
+        let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+        let listed = kinds(&mut c);
+        for k in ["codex", "claude-code", "shell"] {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays");
+        }
+        for k in &gone {
+            assert!(!listed.iter().any(|x| x == k), "{name}: {k} is not offered");
+            let want = if name == "registry-off" {
+                "registry_off"
+            } else {
+                "registry_denied"
+            };
+            assert_eq!(
+                rule_of(c.call(start_cmd(k))),
+                ("node.policy_denied".to_string(), want.to_string()),
+                "{name}: {k}"
+            );
+        }
+        for k in &kept {
+            assert!(listed.iter().any(|x| x == k), "{name}: {k} stays offered");
+        }
+        // Hand-made kinds still start, also one named like a registry kind.
+        assert!(listed.iter().any(|x| x == "registry-gemini-mine"), "{name}");
+        for k in ["shell", "registry-gemini-mine"] {
+            let s = started(ok(c.call(start_cmd(k))));
+            assert!(!s.agent_id.is_empty(), "{name}: {k}");
+        }
+        drop(n);
+        let _ = std::fs::remove_dir_all(&e.dir);
+    }
+}
+
+/// #1147 (audit of #1157): a value the node holds, in an agent's tool title and arguments, never reaches the hub's event for the
+/// approval card (nor the queue the window's card and the always signature read, nor the conversation's permission entry).
+#[test]
+fn a_secret_in_an_approvals_action_and_detail_never_reaches_the_hub_event() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let value = "SK-APPROVAL-0123456789-ABCDEFGHIJ";
+    let e = env("approval-secret");
+    agora_node::credentials::SecretStore::in_data(&e.dir.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    // The title holds the whole value; the arguments hold it whole and, cut where the bridge cut them, its first 20 bytes.
+    let detail = format!("{{\"cmd\":\"curl -H {value}\",\"tail\":\"{}…", &value[..20]);
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: format!("ask:login with {value}|{detail}"),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let a = loop {
+        let found = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::ApprovalRequested(a)) => Some(a),
+                _ => None,
+            });
+        if let Some(a) = found {
+            break a;
+        }
+        assert!(Instant::now() < end, "no approval request announced");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaks = |t: &str| pieces.iter().filter(|p| t.contains(**p)).count();
+    assert_eq!(leaks(&a.action), 0, "{a:?}");
+    assert_eq!(leaks(&a.detail), 0, "{a:?}");
+    assert!(a.action.starts_with("login with "), "{a:?}");
+    assert!(a.detail.starts_with("{\"cmd\":\"curl -H "), "{a:?}");
+    let queued = n.approvals.waiting();
+    assert!(queued
+        .iter()
+        .all(|p| leaks(&p.action) == 0 && leaks(&p.detail) == 0));
+    let entries = n
+        .chat
+        .snapshot(&agora_core::AgentId::new(s.agent_id.clone()));
+    // The agent's entries (the permission entry); the person's own prompt is theirs, typed through the window.
+    assert!(
+        entries
+            .iter()
+            .filter(|e| e.role == v1::ChatRole::Agent as i32)
+            .all(|e| leaks(&e.text) == 0),
+        "{entries:#?}"
+    );
 }

@@ -16,6 +16,14 @@ export const needsFolder = (p: string): boolean => p === 'changes' || p === 'fil
 // The key of the folder an agent works in: agents that share a folder share one entry.
 export const folderKey = (a: AgentTileModel): string => (a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id);
 
+// The right panel's Changes: one row per folder with uncommitted changes (agents that share a folder share its row, and its changes
+// belong to the folder, not to one of them: ADR-0052), only the chosen project's when one is chosen, the most changed first.
+export function changedFolders(fleet: readonly AgentTileModel[], projectId?: string): AgentTileModel[] {
+  const byKey = new Map<string, AgentTileModel>();
+  for (const a of fleet) if ((a.filesChanged ?? 0) > 0 && (!projectId || a.projectId === projectId)) byKey.set(folderKey(a), a);
+  return [...byKey.values()].sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
+}
+
 export interface FolderChoice { key: string; agent: AgentTileModel; changed: number }
 export interface FolderGroup { project: string; folders: FolderChoice[] }
 
@@ -96,3 +104,11 @@ export function filterEntries(items: readonly FileItem[], query: string): FileIt
 }
 
 export const parentOf = (path: string): string => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
+
+// A folder's path for a narrow row, in two parts: what leads to the folder, which gives way first (it ends in an ellipsis), and the
+// folder's own name with its separator, which stays in view (`/home/someone/Co…/login-fix`) at any width. The row's tooltip has it whole.
+export function pathParts(path: string): { dir: string; name: string } {
+  const sep = path.includes('\\') && !path.includes('/') ? '\\' : '/';
+  const at = path.replace(/[\\/]+$/, '').lastIndexOf(sep);
+  return at <= 0 ? { dir: '', name: path } : { dir: path.slice(0, at), name: path.slice(at) };
+}

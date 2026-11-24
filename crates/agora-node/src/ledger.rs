@@ -29,7 +29,7 @@ pub const LEDGER_FILE: &str = "ledger.json";
 pub const KEEP_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 /// Most entries kept; the oldest ended ones go first.
 pub const MAX_ENTRIES: usize = 512;
-/// A larger file is not read (it was not written by this ledger).
+/// The byte limit a ledger snapshot must fit for the next open to read it.
 const MAX_FILE_BYTES: u64 = 4 << 20;
 /// Longest text kept in one field; a longer one is not something the node wrote and is dropped.
 const MAX_FIELD: usize = 4096;
@@ -514,6 +514,24 @@ impl Entry {
         !self.ended && self.interrupted_at_ms != 0
     }
 
+    /// ADR-0060: the `AgentInterrupted` the node says for this entry, the one builder for the event announced to the hub and the row
+    /// `agent.list` gives (ADR-0107), so the two never differ. `resumable`: [`Supervisor::offers_resume`](crate::supervisor::Supervisor::offers_resume).
+    /// Reads whether its process still runs (a look at the system): callers build it outside the supervisor's lock.
+    pub fn interrupted_event(&self, resumable: bool) -> v1::AgentInterrupted {
+        v1::AgentInterrupted {
+            agent_id: self.agent_id.clone(),
+            kind: self.kind.clone(),
+            project_id: self.project_id.clone(),
+            folder: self.folder.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            resumable,
+            started_at_ms: self.started_at_ms,
+            interrupted_at_ms: self.interrupted_at_ms,
+            last_state: proto_state(&self.last_state) as i32,
+            still_running: self.still_running(),
+        }
+    }
+
     /// The process it ran as, when one was recorded.
     pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
         (self.pid > 1 && self.process_started != 0).then(|| agora_platform::ProcessIdentity {
@@ -536,7 +554,7 @@ impl Entry {
 }
 
 /// The number in a node's agent id (`agent-7` is 7).
-fn id_number(id: &str) -> Option<u64> {
+pub(crate) fn id_number(id: &str) -> Option<u64> {
     id.strip_prefix("agent-")?.parse().ok()
 }
 
@@ -660,6 +678,25 @@ impl Ledger {
             .entries
             .values()
             .filter(|e| e.interrupted())
+            .cloned()
+            .collect();
+        v.sort_by_key(|e| {
+            (
+                id_number(&e.agent_id).unwrap_or(u64::MAX),
+                e.agent_id.clone(),
+            )
+        });
+        v
+    }
+
+    /// #1120: the agents that ended and are still kept ([`KEEP_MS`] from `now_ms`), oldest id first. A restarted node lists them in
+    /// `agent.list` as its previous process did, whatever folder they ran in.
+    pub fn ended(&self, now_ms: u64) -> Vec<Entry> {
+        let mut v: Vec<Entry> = self
+            .st()
+            .entries
+            .values()
+            .filter(|e| e.ended && now_ms.saturating_sub(e.last_touched()) <= KEEP_MS)
             .cloned()
             .collect();
         v.sort_by_key(|e| {
@@ -839,6 +876,25 @@ impl Ledger {
         let _ = self.flush();
     }
 
+    /// ADR-0108: the person forgot the agent in the window: it is no longer offered for Resume (by hand, or by `resume = auto` at the
+    /// next start) and no longer kept, and the session it kept for a take-up goes with it. The ids already given stay given
+    /// ([`Self::next_id`] is not lowered), so the id is never used again. In memory only (the caller may hold the supervisor's lock):
+    /// the ledger and the kept session's file are written by the next [`Self::flush_all`]. Returns whether the ledger held it.
+    pub fn forget(&self, agent_id: &str) -> bool {
+        let mut st = self.st();
+        let held = st.entries.remove(agent_id).is_some();
+        st.early_sessions.remove(agent_id);
+        st.early_states.remove(agent_id);
+        st.bound.remove(agent_id);
+        if st.kept.remove(agent_id).is_some() || held {
+            st.mark_kept_pending(agent_id.to_string());
+        }
+        if held {
+            st.dirty = true;
+        }
+        held
+    }
+
     /// Learns from one event the node records. Writes the file when an agent started, reported its session, or ended; a failed
     /// write is retried with the next one (a full disk must never stop agents).
     pub fn observe(&self, body: &Body, now_ms: u64) {
@@ -973,14 +1029,9 @@ impl Ledger {
             if !st.dirty {
                 return Ok(());
             }
+            let bytes = ledger_bytes(&st)?;
             st.dirty = false;
-            let entries: Vec<Value> = st.entries.values().map(Entry::to_json).collect();
-            serde_json::to_vec(&json!({
-                "version": VERSION,
-                "next_id": st.next_id,
-                "entries": entries,
-            }))
-            .map_err(io::Error::other)?
+            bytes
         };
         let written = agora_platform::write_private(path, &bytes);
         if written.is_err() {
@@ -996,6 +1047,44 @@ impl Ledger {
         write_kept_pending(&self.state, &self.write, self.dir().as_deref());
         written
     }
+}
+
+/// Encodes one snapshot the reader can reopen. If it hits the byte limit before the count limit,
+/// omit entries in the same order as count pruning, keeping the next id for every entry we saw.
+fn ledger_bytes(st: &State) -> io::Result<Vec<u8>> {
+    let head = b"{\"entries\":[";
+    let tail = format!("],\"next_id\":{},\"version\":{VERSION}}}", st.next_id);
+    let mut entries = st
+        .entries
+        .values()
+        .map(|e| serde_json::to_vec(&e.to_json()).map(|bytes| (e, bytes)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
+    // Count a comma with each entry, then subtract the unused last comma when there are entries.
+    let mut payload: usize = entries.iter().map(|(_, bytes)| bytes.len() + 1).sum();
+    let size = |payload: usize| head.len() + payload.saturating_sub(1) + tail.len();
+    let mut first = 0;
+    if size(payload) > MAX_FILE_BYTES as usize {
+        entries.sort_by_key(|(e, _)| (!e.ended, e.last_touched(), e.agent_id.as_str()));
+        for (_, bytes) in &entries {
+            if size(payload) <= MAX_FILE_BYTES as usize {
+                break;
+            }
+            payload -= bytes.len() + 1;
+            first += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(size(payload));
+    out.extend_from_slice(head);
+    for (i, (_, bytes)) in entries[first..].iter().enumerate() {
+        if i != 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(bytes);
+    }
+    out.extend_from_slice(tail.as_bytes());
+    debug_assert_eq!(out.len(), size(payload));
+    Ok(out)
 }
 
 /// Folds one event in; true when the change must be written now.
@@ -1221,6 +1310,31 @@ mod tests {
             state: state as i32,
             reported: false,
         })
+    }
+
+    /// ADR-0108: a forgotten agent is no longer offered for Resume, also after the node starts again, its kept session goes, and its
+    /// id is never given again.
+    #[test]
+    fn a_forgotten_agent_is_not_offered_again_and_its_id_stays_given() {
+        let dir = temp("forget");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-4", "/wt/a", ""), 1);
+        l.observe(&started("agent-5", "/wt/b", ""), 1);
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        assert_eq!(l.interrupted().len(), 2);
+        let kept = dir.join(LEDGER_DIR).join("kept-agent-5.pb");
+        std::fs::write(&kept, b"x").unwrap();
+        assert!(l.forget("agent-5"));
+        assert!(l.get("agent-5").is_none());
+        l.flush_all().unwrap();
+        assert!(!kept.exists(), "its kept session goes too");
+        assert!(!l.forget("agent-5"), "a second forget finds nothing");
+        drop(l);
+        let l = Ledger::open(&dir, 30).unwrap();
+        let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
+        assert_eq!(offered, vec!["agent-4".to_string()]);
+        assert_eq!(l.next_id(), 6, "agent-5 is never given again");
     }
 
     #[test]
@@ -1727,6 +1841,54 @@ mod tests {
     }
 
     #[test]
+    fn the_ledger_round_trips_when_its_entries_exceed_the_file_budget() {
+        let dir = temp("byte-budget");
+        let mut l = Ledger::in_memory();
+        let folder = format!("/{}", vec!["p".repeat(248); 16].join("/"));
+        for i in 1..=MAX_ENTRIES {
+            let id = format!("agent-{i}");
+            directory_start(&l, &id, &folder, 100 + i as u64);
+            if i > 1 && i <= 32 {
+                l.observe(
+                    &Body::AgentExited(v1::AgentExited {
+                        agent_id: id,
+                        exit_code: 0,
+                    }),
+                    100 + i as u64,
+                );
+            }
+        }
+        let sessions = dir.join(LEDGER_DIR);
+        std::fs::create_dir(&sessions).unwrap();
+        let path = sessions.join(LEDGER_FILE);
+        // Write one snapshot of the same events an on-disk ledger receives.
+        l.path = Some(path.clone());
+        l.st().dirty = true;
+        l.flush().unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        drop(l);
+        let l = Ledger::open(&dir, 1_000).unwrap();
+        let first_active = l.get("agent-1");
+        let latest = l.get(&format!("agent-{MAX_ENTRIES}"));
+        let first_ended = l.get("agent-2");
+        let next = l.next_id();
+        drop(l);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        assert!(size <= MAX_FILE_BYTES, "{size} bytes");
+        assert!(
+            first_ended.is_none(),
+            "oldest ended entry kept ahead of a running one"
+        );
+        for active in [first_active, latest] {
+            let active = active.expect("running agent survived the write");
+            assert!(active.interrupted());
+            assert_eq!(active.folder, folder);
+        }
+        assert_eq!(next, MAX_ENTRIES as u64 + 1);
+    }
+
+    #[test]
     fn old_entries_go_after_fourteen_days_and_the_count_is_bounded() {
         let dir = temp("prune");
         let l = Ledger::open(&dir, 1).unwrap();
@@ -1757,6 +1919,52 @@ mod tests {
         }
         assert_eq!(l.st().entries.len(), MAX_ENTRIES);
         assert!(l.get("agent-10").is_none());
+    }
+
+    /// #1120: a reopened ledger offers the agents that ended, directory agents as well as worktree ones, for 14 days from their end;
+    /// an interrupted one is not among them (it is offered to resume instead).
+    #[test]
+    fn the_agents_that_ended_are_read_back_after_a_reopen_whatever_their_folder() {
+        let dir = temp("ended");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-2", "/wt/a", ""), 1);
+        directory_start(&l, "agent-1", "/work/repo", 2);
+        l.observe(&started("agent-3", "/wt/c", ""), 3);
+        for id in ["agent-1", "agent-2"] {
+            l.observe(&state_event(id, v1::AgentState::Done), 5);
+            l.observe(
+                &Body::AgentExited(v1::AgentExited {
+                    agent_id: id.into(),
+                    exit_code: 0,
+                }),
+                10,
+            );
+        }
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let ended = l.ended(20);
+        let rows: Vec<_> = ended
+            .iter()
+            .map(|e| {
+                (
+                    e.agent_id.as_str(),
+                    e.folder.as_str(),
+                    e.directory,
+                    e.last_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("agent-1", "/work/repo", true, "done"),
+                ("agent-2", "/wt/a", false, "done"),
+            ]
+        );
+        assert!(ended.iter().all(|e| !e.managed_worktree));
+        assert_eq!(l.interrupted().len(), 1, "agent-3 did not end");
+        assert_eq!(l.ended(10 + KEEP_MS).len(), 2);
+        assert!(l.ended(10 + KEEP_MS + 1).is_empty(), "kept 14 days only");
     }
 
     #[test]
@@ -1961,6 +2169,7 @@ mod carry_on_tests {
     fn agent(l: &Ledger, id: &str, now: u64) {
         l.observe(
             &Body::AgentStarted(v1::AgentStarted {
+                run_id: Vec::new(),
                 agent_id: id.into(),
                 project_id: "p".into(),
                 node_id: "n".into(),
@@ -1968,6 +2177,7 @@ mod carry_on_tests {
                 kind: "claude-code".into(),
                 level: 1,
                 parent_agent_id: String::new(),
+                same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
             }),

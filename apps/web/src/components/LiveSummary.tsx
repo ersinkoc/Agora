@@ -28,8 +28,8 @@ export function LiveSummary({ agent, now, onChanges }: { agent: AgentTileModel; 
         {elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}
         {!!agent.tokens && <span className="ide-chip">{t('agent-tokens', { count: shortCount(agent.tokens) })}</span>}
         {changed > 0 && (onChanges
-          ? <button type="button" className="ide-chip text-needs-you transition-colors hover:border-accent hover:text-ink" onClick={onChanges} title={t('live-open-changes')}><Icon name="diff" className="size-3" />{t('changes-files', { count: changed })}</button>
-          : <span className="ide-chip text-needs-you">{t('changes-files', { count: changed })}</span>)}
+          ? <button type="button" className="ide-chip transition-colors hover:border-accent hover:text-ink" onClick={onChanges} title={t('live-open-changes')}><Icon name="diff" className="size-3" />{t('changes-files', { count: changed })}</button>
+          : <span className="ide-chip">{t('changes-files', { count: changed })}</span>)}
       </span>
     </div>
   );

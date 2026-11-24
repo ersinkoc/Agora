@@ -1,4 +1,5 @@
 import { signedPairs, toHex, type Device } from './approval';
+import { ROLE_REFUSAL } from './startRefusal';
 
 export interface DirectoryInfo { path: string; projectId: string; gitRoot: string; branch: string; portable: boolean; previousProjectId?: string }
 export function directoryMessage(node: string, operation: string, path: string, kind: string, project: string, option: boolean, identityChange: boolean, nonce: string, expires: number): Uint8Array {
@@ -37,13 +38,15 @@ export function childPath(base: string, name: string): string {
   const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
   return base.endsWith(sep) ? base + name : base + sep + name;
 }
-/** Why a folder could not be selected (`directory.inspect`), as one of the web's own texts. `auth.forbidden`: the machine limits this
- * device (or the hub this person) to other projects, a lasting refusal and not a bad path. */
+/** Why a folder could not be selected (`directory.inspect`) or looked into (`directory.list`), as one of the web's own texts.
+ * `auth.forbidden`: the machine limits this device to other projects; `ROLE_REFUSAL`: the hub does not let this person's role choose
+ * folders (#1044). Both are lasting refusals, not a bad path. */
 export function directoryReasonKey(code: string | undefined): string {
   switch (code) {
     case 'approval.signature_invalid': return 'approval-not-trusted';
     case 'protocol.capability_missing': return 'start-directory-unsupported';
     case 'auth.forbidden': return 'start-directory-forbidden';
+    case ROLE_REFUSAL: return 'start-directory-role';
     default: return 'start-directory-failed';
   }
 }
@@ -59,6 +62,7 @@ export function resumeReasonKey(code: string): string {
     case 'protocol.capability_missing': return 'resume-failed-unsupported';
     case 'node.offline': return 'resume-failed-offline';
     case 'auth.forbidden': return 'resume-failed-forbidden';
+    case ROLE_REFUSAL: return 'resume-failed-role';
     default: return 'resume-failed';
   }
 }

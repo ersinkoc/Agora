@@ -78,6 +78,8 @@ export function shownKey(it: AttentionItem): string {
   // ADR-0101: the offer changes the card's words and buttons (the note, the agent's label, a third button).
   if (it.kind === 'approval' && it.approval.always) parts.push('always', it.approval.always.label, it.approval.always.optionId, it.approval.always.only ? 'only' : '');
   if (it.kind === 'pair') parts.push(it.card.kind, it.card.number);
+  // The dialog draws the agent's avatar (its colour and its kind's letter): a change of it is a change of what is shown.
+  if (it.kind !== 'pair' && it.agent) parts.push(it.agent.accent, it.agent.kind ?? '');
   return parts.join('\u0001');
 }
 

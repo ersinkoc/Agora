@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use agora_platform::{spawn, PtyConfig};
 
+mod short_socket;
+
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
 
 fn git(dir: &Path, args: &[&str]) {
@@ -37,7 +39,11 @@ fn setup(name: &str) -> Setup {
 }
 
 fn setup_in(base: &Path, name: &str) -> Setup {
-    let home = base.join(format!("agora-cli-{}-{name}", std::process::id()));
+    setup_at(base.join(format!("agora-cli-{}-{name}", std::process::id())))
+}
+
+/// A fresh node home at `home` (emptied first).
+fn setup_at(home: PathBuf) -> Setup {
     let _ = std::fs::remove_dir_all(&home);
     let repo = home.join("demo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -52,6 +58,14 @@ fn setup_in(base: &Path, name: &str) -> Setup {
     )
     .unwrap();
     Setup { home, repo }
+}
+
+/// The home is removed with the setup: before, every run left its homes in the temp folder. Everything a test starts is declared
+/// after its setup, so it ends first.
+impl Drop for Setup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
 }
 
 struct NodeProc(Child);
@@ -405,6 +419,342 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
     assert!(out.trim().ends_with("stopped"), "{out}");
 }
 
+/// The ledger entry of `id` as the node wrote it (`<home>/data/sessions/ledger.json`), `None` until it is there.
+fn ledger_entry(s: &Setup, id: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(s.home.join("data/sessions/ledger.json")).ok()?)
+            .ok()?;
+    v["entries"]
+        .as_array()?
+        .iter()
+        .find(|e| e["agent_id"] == id)
+        .cloned()
+}
+
+/// The lines of `agora agent list`, once the node answers (a restarted node's socket appears before it serves).
+fn agent_list_lines(s: &Setup) -> Vec<String> {
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (code, out, err) = cli(s, &["agent", "list"]);
+        if code == 0 {
+            return out.lines().map(str::to_string).collect();
+        }
+        assert!(Instant::now() < end, "agent list failed: {err}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// ADR-0107 (#1121): after the node was killed, `agora agent list` lists the agent it found interrupted with `interrupted` in the
+/// fourth column and what can be done in a fifth, in id order with the agent that ended, whose line is the four columns it always was.
+#[test]
+fn agent_list_shows_the_agents_a_restarted_node_found_interrupted() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("interrupted");
+    let node = start_node(&s);
+    for _ in 0..2 {
+        let (code, _, err) = cli(
+            &s,
+            &["agent", "start", "shell", "--project", "demo", "--worktree"],
+        );
+        assert_eq!(code, 0, "{err}");
+    }
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+    // The node records the end before it is killed, so agent-1 is an ended agent and only agent-2 was running.
+    let end = Instant::now() + Duration::from_secs(30);
+    while !ledger_entry(&s, "agent-1").is_some_and(|e| e["ended"] == true)
+        || ledger_entry(&s, "agent-2").is_none()
+    {
+        assert!(
+            Instant::now() < end,
+            "the ledger never recorded both agents"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Killed without stopping its agents; a new node starts on the same home.
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    let _node = start_node(&s);
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let ended: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(ended.len(), 4, "{lines:?}");
+    assert_eq!(
+        (ended[0], ended[1], ended[3]),
+        ("agent-1", "shell", "stopped"),
+        "{lines:?}"
+    );
+    let cols: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(cols.len(), 5, "{lines:?}");
+    assert_eq!(
+        (cols[0], cols[1], cols[3]),
+        ("agent-2", "shell", "interrupted"),
+        "{lines:?}"
+    );
+    // A shell has no session to continue: Start again, once its process is gone. Where it outlived the node, stop ends it.
+    if cols[4] == "still-running" {
+        let (code, _, err) = cli(&s, &["agent", "stop", "agent-2"]);
+        assert_eq!(code, 0, "{err}");
+        let lines = agent_list_lines(&s);
+        assert!(
+            lines[1].ends_with("\tinterrupted\tstart-again"),
+            "{lines:?}"
+        );
+    } else {
+        assert_eq!(cols[4], "start-again", "{lines:?}");
+    }
+}
+
+/// #1138 review F2: a node whose only agent is interrupted lists it, and does not also say it has no agents (that sentence is for no
+/// line at all, not for no `agents` row).
+#[test]
+fn a_node_with_only_an_interrupted_agent_does_not_say_it_has_none() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("only-interrupted");
+    let node = start_node(&s);
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let end = Instant::now() + Duration::from_secs(30);
+    while ledger_entry(&s, "agent-1").is_none() {
+        assert!(Instant::now() < end, "the ledger never recorded the agent");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    let _node = start_node(&s);
+    let lines = agent_list_lines(&s);
+    assert!(
+        !lines.iter().any(|l| l.contains("This node has no agents.")),
+        "{lines:?}"
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("agent-1\tshell\t"), "{lines:?}");
+    assert!(lines[0].contains("\tinterrupted\t"), "{lines:?}");
+    // A survivor is ended here, so the test leaves no `sh` behind.
+    if lines[0].ends_with("\tstill-running") {
+        let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+        assert_eq!(code, 0, "{err}");
+    }
+}
+
+/// `agora-fake-agent` next to the `agora` under test, built once per test binary (a binary left from an older checkout may lack what
+/// the tests need).
+fn fake_agent() -> String {
+    let mut p = PathBuf::from(AGORA);
+    p.pop();
+    let target = p.parent().map(Path::to_path_buf).unwrap_or_default();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut build = Command::new(cargo);
+        build
+            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+            .arg(&target);
+        if p.parent().is_some_and(|d| d.ends_with("release")) {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().expect("run cargo").success(),
+            "building agora-fake-agent failed"
+        );
+    });
+    p.to_string_lossy().into_owned()
+}
+
+/// Kills the node and starts a new one on the same home; its agents were not stopped.
+fn restart_node(s: &Setup, node: NodeProc) -> NodeProc {
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    start_node(s)
+}
+
+/// The fifth column of `id`'s line in `agora agent list` once its process from before the restart is gone: an agent whose process
+/// outlived the node (`still-running`) is stopped first, as the list says.
+fn interrupted_action(s: &Setup, id: &str) -> String {
+    let line = |lines: &[String]| {
+        lines
+            .iter()
+            .find(|l| l.starts_with(&format!("{id}\t")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut row = line(&agent_list_lines(s));
+    if row.ends_with("\tstill-running") {
+        let (code, _, err) = cli(s, &["agent", "stop", id]);
+        assert_eq!(code, 0, "{err}");
+        row = line(&agent_list_lines(s));
+    }
+    let cols: Vec<&str> = row.split('\t').collect();
+    assert_eq!(cols.len(), 5, "{row:?}");
+    assert_eq!(cols[3], "interrupted", "{row:?}");
+    cols[4].to_string()
+}
+
+/// #1137: `agora agent resume` brings back an agent `agora agent list` shows as interrupted with `resume`: the same id, running again,
+/// with its own session (the kind's `[resume]` command), and no longer listed as interrupted.
+#[test]
+fn agent_resume_brings_back_an_agent_a_restarted_node_found_interrupted() {
+    if !supported() {
+        return;
+    }
+    let s = setup("resume");
+    let q = |v: Vec<String>| serde_json::to_string(&v).unwrap();
+    let probe = |file: &str| {
+        vec![
+            fake_agent(),
+            "--probe-directory".into(),
+            s.home.join(file).to_string_lossy().into_owned(),
+        ]
+    };
+    let mut resume = probe("resume-{pid}.json");
+    resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+    std::fs::write(
+        s.home.join("manifests/probe.toml"),
+        format!(
+            "kind = \"probe\"\ndisplay_name = \"probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
+            q(probe("start-{pid}.json")),
+            q(resume)
+        ),
+    )
+    .unwrap();
+    let node = start_node(&s);
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "probe", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    // The node chose the session id at the start; it is in the ledger before the node is killed, so Resume is offered.
+    let end = Instant::now() + Duration::from_secs(30);
+    while !ledger_entry(&s, "agent-1")
+        .is_some_and(|e| e["session_id"].as_str().is_some_and(|id| !id.is_empty()))
+    {
+        assert!(
+            Instant::now() < end,
+            "the ledger never recorded the session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _node = restart_node(&s, node);
+    assert_eq!(interrupted_action(&s, "agent-1"), "resume");
+
+    let (code, out, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Resumed agent agent-1 in "), "{out}");
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let cols: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(cols.len(), 4, "no longer interrupted: {lines:?}");
+    assert_eq!(
+        (cols[0], cols[1], cols[3]),
+        ("agent-1", "probe", "running"),
+        "{lines:?}"
+    );
+    // With its own session: the kind's resume command, with the session id the node chose at the start.
+    let session = ledger_entry(&s, "agent-1").unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let end = Instant::now() + Duration::from_secs(30);
+    let resumed = loop {
+        let found = std::fs::read_dir(&s.home)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("resume-"))
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .find_map(|e| {
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok()
+            });
+        if let Some(v) = found {
+            break v;
+        }
+        assert!(Instant::now() < end, "the resumed agent never started");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let args: Vec<&str> = resumed["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert!(
+        args.windows(2).any(|w| w == ["--resume", session.as_str()]),
+        "{args:?}"
+    );
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// #1137: what `agora agent resume` refuses, each in words from the node's code, and Start again (`--again`) for an agent with no
+/// session to continue (`start-again` in the list).
+#[test]
+fn agent_resume_refuses_what_it_cannot_resume_and_starts_again() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("resume-refused");
+    let node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "resume"]);
+    assert_eq!(code, 2, "an id is needed: {err}");
+    // An id this node never knew.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-9"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("agent.not_interrupted")
+            && err.contains("agent-9 was not interrupted, or it is no longer offered to resume."),
+        "{err}"
+    );
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let end = Instant::now() + Duration::from_secs(30);
+    while ledger_entry(&s, "agent-1").is_none() {
+        assert!(Instant::now() < end, "the ledger never recorded the agent");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A running agent was not interrupted.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("agent.not_interrupted"), "{err}");
+
+    let _node = restart_node(&s, node);
+    assert_eq!(interrupted_action(&s, "agent-1"), "start-again");
+    // A shell has no session to continue: only Start again.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("agent.session_missing")
+            && err.contains("agent-1 cannot continue its own session. Start it again instead."),
+        "{err}"
+    );
+    let (code, out, err) = cli(&s, &["agent", "resume", "agent-1", "--again"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Started agent agent-1 again in "), "{out}");
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let cols: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(
+        (cols.len(), cols[0], cols[1], cols[3]),
+        (4, "agent-1", "shell", "running"),
+        "{lines:?}"
+    );
+    // Running again, so it is no longer offered.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1", "--again"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("agent.not_interrupted"), "{err}");
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+}
+
 /// RM-19 (#903): `agora agent start` for a kind whose program this machine cannot find says so in words, with the program, for a
 /// terminal kind and for an ACP kind (started through the bridge, which ends at once), as `agora agent kinds` already marks it missing.
 #[test]
@@ -533,7 +883,9 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     assert_eq!(code, expected, "{out}{err}");
     assert!(out.contains("Git is available"), "{out}");
     // The built-in kinds and the folder's `shell`.
-    let loaded = agora_node::manifests::BUILT_IN.len() + 1;
+    let loaded = agora_node::manifests::load(std::path::Path::new(""))
+        .0
+        .len();
     assert!(
         out.contains(&format!("{loaded} agent descriptions loaded.")),
         "{out}"
@@ -812,8 +1164,14 @@ fn with_a_confining_node_the_cli_reads_the_control_token_itself() {
     {
         return;
     }
-    // A folder agents are not granted (the system temp folder is writable to them, and the node refuses to start one then).
-    let s = setup_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "token");
+    // A folder agents are not granted (the system temp folder is writable to them, and the node refuses to start one then), short
+    // enough for the node's sockets in a deep checkout (#1040). Declared before the node, so it is removed after the node ends.
+    let dir = short_socket::SocketDir::new(
+        &Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("agora-cli-{}-token", std::process::id())),
+        "cli-token",
+    );
+    let s = setup_at(dir.path().to_path_buf());
     std::fs::create_dir_all(s.home.join("data")).unwrap();
     std::fs::write(s.home.join("data/policy"), "sandbox = worktree\n").unwrap();
     let _node = start_node(&s);

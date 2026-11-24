@@ -2,7 +2,7 @@ import { t } from '../i18n';
 import type { UiState } from '../model';
 
 // Shape per state (visual-language.md): filled dot, ring with notch, check, hollow dot, dashed ring.
-function Mark({ state, failed }: { state: UiState; failed?: boolean }) {
+export function Mark({ state, failed }: { state: UiState; failed?: boolean }) {
   const common = { className: 'state__mark', viewBox: '0 0 12 12', 'aria-hidden': true } as const;
   // Ended with an error: a cross in a ring, in the neutral text colour (shape and words say it, no state colour is borrowed).
   if (failed) return <svg {...common}><circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" strokeWidth="1.2" /><path d="M4 4l4 4M8 4l-4 4" stroke="currentColor" strokeWidth="1.4" /></svg>;

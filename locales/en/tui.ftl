@@ -77,6 +77,8 @@ tui-chat-plan = Plan
 tui-chat-diff = changed { $path }
 tui-chat-input = ›
 tui-chat-hint = Type a request and press Enter · /mode or /model followed by a name switches · Ctrl-] goes back
+# ADR-0106: in place of the hint and the line to type on, in a viewer's window (the hub refuses a viewer's request or switch).
+tui-chat-watching = You can watch here. Sending requests and switching the mode or model need a member's role · Ctrl-] goes back
 tui-chat-mode = mode { $mode }
 tui-chat-model = model { $model }
 tui-chat-context = context { $percent }%
@@ -89,6 +91,7 @@ tui-notice-output_dropped = (the agent kept running while Agora restarted; { $by
 tui-notice-restarting = (the agent stopped unexpectedly; Agora is starting it again, attempt { $attempt })
 tui-notice-gave_up = (the agent stopped unexpectedly again after { $restarts } restarts, last exit code { $exit_code }; Agora stopped starting it again)
 tui-notice-gave_up-no_code = (the agent stopped unexpectedly again after { $restarts } restarts; Agora stopped starting it again)
+tui-notice-history_not_saved = (this conversation could not be saved on its machine; the agent keeps working, but later turns may be missing after a restart)
 tui-notice-other = (the agent reported { $code })
 tui-option-switched = Switched.
 tui-option-unknown = The agent does not offer { $id }. It offers: { $ids }
@@ -100,12 +103,16 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-pick-page = Start which agent on { $machine }? Press its number, n for the next page ({ $page } of { $pages }), any other key cancels.
 tui-start-item = { $n }  { $name }
+tui-start-group-untested = Untested (from the ACP registry, not yet tried in Agora)
 tui-start-none = No agent is installed on { $machine }.
+tui-start-signed-only = { $name } downloads its program when it starts, so the machine starts it only when this device signs the start: press f and choose its folder.
 tui-start-missing-item = { $name } (`{ $program }`)
 tui-start-missing = Not found on this machine: { $names }. The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.
 tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
 tui-start-failed = Could not start it ({ $code }).
+tui-start-role = Your role does not let you start agents here. Ask the owner if you need to.
+tui-resume-role = Your role does not let you start this agent again. Ask the owner.
 tui-cost = about { $usd } USD
 tui-grant-ask = That machine wants your OK before it lets you do this. Press y to allow it for one hour, any other key to cancel.
 tui-grant-ask-typing = Allow this window to type into { $agent } for one hour? That is all it allows. Press y to allow it, any other key to cancel.
@@ -157,14 +164,21 @@ tui-split-status = { $online }/{ $total } { $total ->
        *[other] agents
     } · { $waiting } need you
 tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · a ask · v devices · q quit
+# ADR-0106: a viewer's list shows only the keys that read.
+tui-split-keys-viewer = ↑↓ choose · Enter open · a ask · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel
+tui-folder-projects = Your projects on this machine
+tui-folder-projects-keys = ↑↓ choose · Enter open · m machine · Esc cancel
 tui-folder-git = git
 tui-folder-empty = No folders here.
 tui-folder-more = … more folders than shown (the first { $n })
 tui-folder-unsupported = That machine cannot list its folders yet (update it).
 tui-folder-failed = Could not open that folder ({ $code }).
+tui-folder-role = Your role does not let you choose this folder. Ask the owner.
+# ADR-0106: a key that changes something, pressed in a viewer's window. Nothing was sent.
+tui-viewer-watching = You can watch here. Starting, stopping and answering requests need a member's role. Ask the owner.
 tui-folder-identity = This folder's project changed since an agent last ran here. Press y to start anyway, any other key to cancel.
 tui-forgot = Removed from the list.
 tui-forget-running = It is still running: stop it first (x).
@@ -211,7 +225,9 @@ tui-tool-other = Step
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · o files · b board · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-tree-viewer = Ctrl K commands · Enter open · N next that needs you · r changes · o files · b board · a ask · Tab next part · i details · q quit
 tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
+tui-app-keys-terminal-viewer = Ctrl-] or F12 back to the list · You are watching: your keys are not sent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
 tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
@@ -339,6 +355,7 @@ tui-board-col-done-empty = Nothing finished yet.
 tui-board-untitled = Untitled task
 tui-board-more = and { $count } more
 tui-board-keys = ↑↓ choose · Enter or g give a Backlog task to an agent · q or Esc back
+tui-board-keys-viewer = ↑↓ choose · q or Esc back
 tui-board-backlog-only = Only a task in Backlog can be given to an agent.
 tui-machine-name-id = { $name } · { $id }
 tui-give-title = Give to an agent

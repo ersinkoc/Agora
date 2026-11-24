@@ -4,8 +4,8 @@ import { type AgentTileModel, endedWithError, shownExitCode } from '../model';
 import { lastLine, span, type GroupBy, type ProjectSpread } from '../net/fleet';
 import { ProjectChip } from './ProjectMark';
 import { ago } from '../net/time';
-import { Icon } from './Icon';
-import { StateBadge } from './StateBadge';
+import { Icon, type IconName } from './Icon';
+import { AgentAvatar, StatusPill, Tag } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
 import { LimitChip } from './Quota';
@@ -31,20 +31,34 @@ function activity(a: AgentTileModel, ctx: TileContext): string {
   return line;
 }
 
+// The kind the avatar's letter comes from: what the node reported, else the first part of the generated name ("claude · amber").
+export const kindOf = (a: { kind?: string; name: string }): string => a.kind || a.name.split(' · ')[0] || '?';
+
+// Who it is and how it is: the avatar (its colour lives here, never on an edge of the tile), the name, and the state as a pill. Failed is
+// the red pill with a cross in a ring (ADR-0102).
+function Head({ agent, failed }: { agent: AgentTileModel; failed: boolean }) {
+  return (
+    <span className="tile__head">
+      <AgentAvatar accent={agent.accent} kind={kindOf(agent)} />
+      <span className="tile__name">{agent.name}</span>
+      <StatusPill state={agent.state} failed={failed} />
+    </span>
+  );
+}
+
 function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id: string) => void; context?: TileContext }) {
   const failed = endedWithError(agent);
-  const stateWord = t(failed ? 'state-failed' : `state-${agent.state}`);
+  // The same word as the pill, so the tile's name holds what it shows.
+  const stateWord = t(failed ? 'fleet-failed' : `state-${agent.state}`);
   if (!context) {
     return (
       <button
         type="button"
-        className={`tile tile--${agent.state}`}
-        style={{ ['--tile-accent' as string]: agent.accent }}
+        className={`tile tile--${failed ? 'failed' : agent.state}`}
         onClick={() => onOpen?.(agent.id)}
         aria-label={`${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
       >
-        <span className="tile__name">{agent.name}</span>
-        <StateBadge state={agent.state} failed={failed} />
+        <Head agent={agent} failed={failed} />
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <span className="muted">
@@ -56,7 +70,11 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
     );
   }
   const line = activity(agent, context);
-  const where = context.group === 'machine' ? [agent.project || agent.workspace, agent.branch] : context.group === 'project' ? [agent.machine, agent.branch] : [agent.machine, agent.project || agent.workspace, agent.branch];
+  // Where it is, as grey tags: the side the group does not already name, then the branch.
+  const machine: Fact = { icon: 'machine', text: agent.machine };
+  const folder: Fact = { icon: 'folder', text: agent.project || agent.workspace };
+  const branch: Fact = { icon: 'branch', text: agent.branch, mono: true };
+  const where = context.group === 'machine' ? [folder, branch] : context.group === 'project' ? [machine, branch] : [machine, folder, branch];
   const changed = agent.filesChanged ?? 0;
   const when = context.now === undefined ? undefined
     : agent.closed ? (agent.endedMs || agent.since ? t('fleet-tile-ended', { when: ago((agent.endedMs || agent.since) as number, context.now) }) : undefined)
@@ -65,27 +83,25 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
     <button
       type="button"
       className={`tile tile--compact tile--${failed ? 'failed' : agent.state}${agent.closed ? ' tile--closed' : ''}`}
-      style={{ ['--tile-accent' as string]: agent.accent }}
       onClick={() => onOpen?.(agent.id)}
       aria-label={t('fleet-open-for', { name: `${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
     >
-      <span className="tile__head">
-        <span className="tile__name">{agent.name}</span>
-        <StateBadge state={agent.state} failed={failed} />
-      </span>
-      <NoAskBadge agent={agent} nested />
-      <AsksLessChip agent={agent} nested />
-      <LimitChip agent={agent} />
-      {context.same && <ProjectChip spread={context.same} />}
-      {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}${agent.state === 'needs-you' && !agent.closed ? ' tile__activity--ask' : ''}`} dir="auto">{line}</span> : null}
-      <span className="tile__meta">
-        {where.filter(Boolean).map((x, i) => <span key={i} className="tile__where">{x}</span>)}
-        {changed > 0 ? <span>{t('changes-files', { count: changed })}</span> : null}
-        {typeof when === 'string' ? <span>{when}</span> : when ? <span className="tile__when" title={when.title}><Icon name="clock" className="size-3" />{when.text}</span> : null}
+      <Head agent={agent} failed={failed} />
+      {line ? <span className="tile__activity" dir="auto">{line}</span> : null}
+      <span className="tile__foot">
+        <NoAskBadge agent={agent} nested />
+        <AsksLessChip agent={agent} nested />
+        <LimitChip agent={agent} />
+        {context.same && <ProjectChip spread={context.same} />}
+        {where.filter((x) => x.text).map((x) => <Tag key={x.icon} mono={x.mono}><Icon name={x.icon} className="size-3" /><span className="tile__where">{x.text}</span></Tag>)}
+        {changed > 0 ? <Tag>{t('changes-files', { count: changed })}</Tag> : null}
+        {typeof when === 'string' ? <span className="tile__when">{when}</span> : when ? <span className="tile__when" title={when.title}><Icon name="clock" className="size-3" />{when.text}</span> : null}
       </span>
     </button>
   );
 }
+
+type Fact = { icon: IconName; text?: string; mono?: boolean };
 
 // A tile is redrawn only when what it shows changed: with hundreds of them, a filter or a regrouping redraws the ones that come or go,
 // not the ones that stay. (`context` is a new object on every render of the console, so it is compared by its parts.)

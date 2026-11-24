@@ -1,31 +1,35 @@
 import { t } from '../i18n';
+import { Icon } from './Icon';
+import { Button, Callout } from './kit';
 import { formatPairNumber, type SignInApprovalModel } from './pairChoice';
 
 // ADR-0065 decision 6: a browser on another machine signs in by the owner's approval instead of a code. While it waits it shows
 // the number the owner's card shows; denied or out of time, it can ask again (a new request, a new number) or fall back to a code.
+// Inside the sign-in card: the number in an accent-tinted box; a refusal is a danger callout, running out of time a neutral one.
 export function SignInWaiting({ approval, onAskAgain, onUseCode }: {
   approval: SignInApprovalModel;
   onAskAgain: () => void;
   onUseCode: () => void;
 }) {
   const waiting = approval.state === 'waiting';
+  const denied = approval.state === 'denied';
   return (
-    <section className="grid max-w-[28rem] gap-3" aria-live="polite">
+    <section className="signin-wait" aria-live="polite">
       {waiting ? (
         <>
-          <p className="m-0">{t('signin-waiting')}</p>
-          <div className="grid gap-1">
-            <span className="text-xs text-muted">{t('pair-number')}</span>
-            <span className="font-mono text-[length:var(--text-28)] tracking-wide text-ink">{formatPairNumber(approval.number)}</span>
+          <p className="signin-wait__status"><Icon name="clock" className="size-4 text-muted" />{t('signin-waiting')}</p>
+          <div className="signin-wait__number">
+            <span className="signin-wait__label">{t('pair-number')}</span>
+            <span className="signin-wait__digits">{formatPairNumber(approval.number)}</span>
           </div>
-          <p className="m-0 text-xs text-muted">{t('signin-waiting-hint')}</p>
+          <p className="signin__hint">{t('signin-waiting-hint')}</p>
         </>
       ) : (
-        <p role="alert" className="m-0 text-needs-you">{t(approval.state === 'denied' ? 'signin-denied' : 'signin-expired')}</p>
+        <Callout tone={denied ? 'danger' : 'info'} icon={denied ? 'close' : 'clock'} title={t(denied ? 'signin-denied' : 'signin-expired')} alert />
       )}
-      <div className="flex flex-wrap gap-2">
-        {!waiting && <button type="button" className="button button--primary" onClick={onAskAgain}>{t('signin-ask-again')}</button>}
-        <button type="button" className="button" onClick={onUseCode}>{t('signin-use-code')}</button>
+      <div className="signin-wait__actions">
+        {!waiting && <Button variant="primary" onClick={onAskAgain}>{t('signin-ask-again')}</Button>}
+        <Button onClick={onUseCode}>{t('signin-use-code')}</Button>
       </div>
     </section>
   );

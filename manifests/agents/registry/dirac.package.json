@@ -1,0 +1,28 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Dirac",
+  "installers": [
+    {
+      "args": [
+        "--acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "dirac-cli",
+      "version": "0.6.1"
+    }
+  ],
+  "name": "registry-dirac",
+  "skipped": [],
+  "source": {
+    "id": "dirac",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/dirac-run/dirac/blob/master/LICENSE",
+    "repository": "https://github.com/dirac-run/dirac",
+    "version": "0.6.1",
+    "website": "https://dirac.run"
+  },
+  "tested": false
+}

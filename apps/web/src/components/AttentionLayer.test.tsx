@@ -59,7 +59,8 @@ const ask = (id: string, over: Partial<ApprovalModel> = {}): ApprovalModel =>
   ({ id: `n1/${id}`, node: 'n1', localId: id, agentId: 'n1/a1', agentName: 'amber', machineName: 'laptop', action: 'Edit src/auth.rs', detail: '+12 -3', expiresAtMs: 0, ...over });
 const list = (...a: ApprovalModel[]): AttentionItem[] => attentionList(a, [agent]);
 
-const card = () => document.querySelector('.attention-card') as HTMLElement | null;
+// The attention dialog itself (Review, opened in its place for a start or a switch, shares its frame: #1070).
+const card = () => document.querySelector('.attention-card:not([data-review-dialog])') as HTMLElement | null;
 const banner = () => document.querySelector('.attention-banner') as HTMLElement | null;
 const button = (text: string) => [...document.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement | undefined;
 const click = (text: string) => { const b = button(text); if (!b) throw new Error(`no button ${text}`); act(() => { b.click(); }); };
@@ -85,8 +86,12 @@ describe('the card opens for a plain request', () => {
     mount(list(ask('r1')));
     await wait(0);
     expect(card()).not.toBeNull();
-    expect(card()!.textContent).toContain('Needs you');
-    expect(card()!.textContent).toContain('claude · amber on laptop');
+    // Redesign PR 4: the title is the ask itself, with the agent's avatar and the machine as a tag.
+    const named = document.getElementById(card()!.getAttribute('aria-labelledby')!)!;
+    expect(card()!.contains(named)).toBe(true);
+    expect(named.textContent).toContain('claude · amber wants to change a file');
+    expect(card()!.querySelector('.kit-avatar')).not.toBeNull();
+    expect(card()!.querySelector('.kit-tag')!.textContent).toBe('laptop');
     expect(card()!.textContent).toContain('Edit src/auth.rs · +12 -3');
     expect([...card()!.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Later', 'Deny', 'Allow']);
   });
@@ -195,6 +200,52 @@ describe('Allow and Deny wait out the dwell', () => {
   });
 });
 
+describe('the dialog keeps the shared guard (#1052, Codex)', () => {
+  it('an answer from the dialog that failed can be tried again after a fresh dwell, never before', async () => {
+    const onResolve = vi.fn(async () => false);
+    mount(list(ask('r1')), { onResolve });
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    await wait(0);
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    expect(card()!.textContent).not.toContain('Answer sent');
+    click('Allow'); // the fresh dwell has not passed
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    await wait(ATTENTION_DWELL_MS);
+    click('Allow');
+    expect(onResolve).toHaveBeenCalledTimes(2);
+  });
+  it('says "Answer sent" only once the answer went: while it is on its way the buttons are off and nothing says sent', async () => {
+    let done: (v: boolean) => void = () => undefined;
+    const onResolve = vi.fn(() => new Promise<boolean>((res) => { done = res; }));
+    mount(list(ask('r1')), { onResolve });
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    await wait(ATTENTION_DWELL_MS * 3);
+    expect(card()!.textContent).not.toContain('Answer sent');
+    expect(button('Allow')!.getAttribute('aria-disabled')).toBe('true');
+    click('Deny');
+    expect(onResolve).toHaveBeenCalledTimes(1);
+    await act(async () => { done(true); });
+    await wait(0);
+    expect(card()!.textContent).toContain('Answer sent');
+    expect(button('Review')).toBeTruthy();
+  });
+  it('the person coming back and a press in the same batch send nothing (focus, or the tab shown again)', async () => {
+    const { onResolve } = mount(list(ask('r1')));
+    await wait(ATTENTION_DWELL_MS + 100);
+    const allow = button('Allow')!;
+    act(() => { window.dispatchEvent(new Event('focus')); allow.click(); });
+    expect(onResolve).not.toHaveBeenCalled();
+    await wait(ATTENTION_DWELL_MS + 100);
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); button('Allow')!.click(); });
+    expect(onResolve).not.toHaveBeenCalled();
+    await wait(ATTENTION_DWELL_MS + 100);
+    click('Allow');
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('leaving the card is never an answer', () => {
   it('Esc is Later: nothing is sent, the card closes and does not come back by itself', async () => {
     const { onResolve } = mount(list(ask('r1')));
@@ -244,7 +295,9 @@ describe('what has to be read has no Allow', () => {
       await wait(ATTENTION_DWELL_MS + 100);
       expect([...card()!.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Later', 'Review']);
       click('Review');
-      expect(onReview).toHaveBeenCalledTimes(1);
+      // A start is read in Review, opened in the card's place (#1070); the others in their full card, as before.
+      expect(onReview).toHaveBeenCalledTimes(r.start ? 0 : 1);
+      expect(!!document.querySelector('[data-review-dialog]')).toBe(!!r.start);
       expect(onResolve).not.toHaveBeenCalled();
       expect(card()).toBeNull();
     });

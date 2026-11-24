@@ -80,9 +80,29 @@ never throws and reports **every** problem at once, each with a message from `lo
    (non-text contrast, 1.4.11: states are always colour + shape + word). A failing pair is reported as
    "Secondary text on Panels is 1.6:1; it needs at least 4.5:1 to be readable" (`theme-error-contrast`; the ratio is rounded
    down, so a shown 4.5 always passes).
+5. **Text on coloured backgrounds** (#1021), once the theme is otherwise accepted: the widget kit's soft backgrounds for
+   accent, working, needs you, finished, the red and idle (`--tint-*`, ADR-0102) are mixed from the theme's own colours
+   (`color-mix(in oklab)`, 14 % into `surface-1` in a dark theme, 10 % in a light one; the red is the fixed one). The check mixes
+   them the same way (`themes/tints.ts`, the math the kit's contrast test uses) and asks **4.5:1** of the role's own colour,
+   `text` and `text-muted` on each. A failing pair is reported in the same sentence, naming the background: "Idle on Idle
+   background is 3.4:1; it needs at least 4.5:1 to be readable" (`theme-error-contrast` with `theme-tint-*`, the red as
+   `theme-colour-danger`).
+6. **The kit's other colours** (#1054), with the same shared math and the same minimums the kit's contrast test holds the
+   built-in themes to (`design/kitContrast.test.ts`, ADR-0102 item 6):
+   - the fixed red as words (errors, a red text button) on each surface, and an agent's initial (`text`) on its badge (the
+     agent colour mixed 22 % into `surface-1`), at **4.5:1**: "Text on Mint agent badge is 4.4:1; it needs at least 4.5:1 to be
+     readable" (`theme-error-contrast` with `theme-colour-*`, `theme-avatar`);
+   - each **control indicator** at **3:1** (WCAG 1.4.11): a switch's track, thumb and outline, the chosen option's ring (red
+     on a risky choice), a selected card or count's ring, a filled button, the focus ring on every coloured background, a role's icon on its chip
+     (mixed 22 %). These pairs are one table (`themes/tints.ts` `INDICATORS`), which the kit test holds equal to the rules in
+     `app.css`. A failing pair names the control and says it must be seen, not read: "Icon: Idle on Idle icon background is
+     2.7:1; it needs at least 3:1 to be seen" (`theme-error-control`, `theme-control-*`). A pair that item 4 or another
+     warning already asks at least as much of is reported there only (an accent below 3:1 on a surface is already refused).
 
-A theme with any problem is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in), an
-edit is not applied.
+A theme with any problem in 1–4 is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in),
+an edit is not applied. A problem in 5 or 6 is a **warning**: the theme is accepted, saved and shown, and the warning is listed.
+These pairs came after people had saved themes under 1–4 alone (a state colour needs only 3:1 on a surface but 4.5:1 as words
+on its own background), and refusing would drop such a stored theme on the next load.
 
 ## Built-in themes
 
@@ -126,7 +146,21 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
   that is valid is saved and shown on the whole window at once; a value still being typed is kept in the field while the window
   keeps the last good one.
 - **Readability** lists every pair below its minimum; while any is listed the change is **not applied**, so the window never
-  becomes unreadable while it is being edited.
+  becomes unreadable while it is being edited. The warnings of 5 and 6 (text or a control that is hard to see only in the
+  kit's colours) are listed under "Applied, but some text or controls would be hard to see in places"
+  (`theme-contrast-warning`): the change is applied. When surface pairs fail too (not applied), they follow under "Also hard
+  to see in places" (`theme-contrast-also`). An imported theme with such warnings is added; when it is the theme of the
+  scheme not on screen, its warnings are listed under the buttons after "Added. When it is shown, some text or controls
+  would be hard to see in places" (`theme-import-warning`), since its Readability is not shown. With nothing to warn about,
+  Readability says "All text and controls are easy to see (WCAG AA)".
+
+  ![Applied, with a warning about Idle on its own background (Dark)](../screenshots/theme-tint-warning-dark.png)
+  ![The same in Light](../screenshots/theme-tint-warning-light.png)
+  ![Applied, with warnings about an agent's badge and Idle's icon on its chip (Dark)](../screenshots/theme-kit-warning-dark.png)
+  ![Idle's icon on its chip in Light](../screenshots/theme-kit-warning-light.png)
+
+  All of these are taken by `scripts/screenshots-themes.mjs` from the demo window (it turns the "Needs you" card off for
+  the shot, `agora.attention.mode`).
 - **Import…** reads a theme file (refused with its reasons, or added and selected), **Export** saves the theme on screen as
   `theme.json`, **Delete theme** removes one of yours (its scheme falls back to Light or Dark), **Reset to defaults** as above.
 

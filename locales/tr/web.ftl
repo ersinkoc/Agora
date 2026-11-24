@@ -7,6 +7,7 @@ attention-title = Sizi bekleyenler
 attention-empty = Her şey sakin. Sizi bekleyen yok.
 fleet-title = Ajanlarınız
 fleet-empty = Henüz ajan yok. Bir ajan başlatın, burada görünsün.
+fleet-watch-empty = Henüz çalışan ajan yok.
 
 state-working = Çalışıyor
 state-needs-you = Sizi bekliyor
@@ -22,8 +23,8 @@ machines-online =
         [one] { $count } makine çevrimiçi
        *[other] { $count } makine çevrimiçi
     }
-link-connecting = Hub'a bağlanılıyor…
-link-offline = Hub'a ulaşılamıyor. Yeniden deneniyor…
+link-connecting = Agora’nıza bağlanılıyor…
+link-offline = Agora’nıza ulaşılamıyor. Yeniden deneniyor…
 link-retry = Şimdi dene
 action-open = Aç
 action-start-agent = Ajan başlat
@@ -50,9 +51,19 @@ approvals-title = Yanıtınızı bekleyenler
 approval-title = { $name } izin istiyor
 approval-allow = İzin ver
 approval-deny = Reddet
+# Yeniden tasarım PR 4: bir isteğin başlığı isteğin kendisidir, pencerenin sözleriyle, kapalı bir tür kümesinden (başka her şey
+# approval-title). Komut, dosya veya adres altındaki satırda, bütün olarak kalır.
+approval-ask-run = { $name } bir komut çalıştırmak istiyor
+approval-ask-edit = { $name } bir dosyayı değiştirmek istiyor
+approval-ask-read = { $name } bir dosyayı okumak istiyor
+approval-ask-fetch = { $name } bir web adresini açmak istiyor
+approval-ask-delete = { $name } bir şeyi silmek istiyor
+approval-ask-start = { $name } başka bir ajan başlatmak istiyor
+approval-open-agent = { $name } ajanını aç
 approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
 approval-failed = Yanıt iletilemedi. Yeniden deneyin.
 approval-forbidden = Bu cihazdan bu proje için yanıt veremezsiniz: orada başka projelerle sınırlı. Bu projede çalışan birine sorun.
+approval-role = Rolünüz bu proje için yanıt vermenize izin vermiyor. Sahibine ya da bu projede çalışan birine sorun.
 approval-no-longer-valid = Bu istek artık geçerli değil. İlgili ajan sona erdi veya yeniden başladı.
 approval-ran-out = Bu isteğin süresi doldu. Ajanın denetimlerinden yeniden isteyin.
 # ADR-0101: "Hep izin ver", ajanın hatırladığı bir yanıt. Oturum sözleri ADR'nindir; hiçbir tür henüz böyle işaretli değil, pencere "-kept" sözlerini gösterir.
@@ -88,19 +99,27 @@ start-approval-prompt = İlk istemi
 start-approval-no-prompt = İstem yok: başlar ve bekler.
 start-approval-scope = Neye izin verilsin
 start-approval-once = Yalnızca bu
+start-approval-more-short = Bunun gibi daha fazla
 start-approval-no-grant = Yalnızca bu başlatmaya izin verilebilir: bu tür kendisine verilen her programı çalıştırır, bu yüzden hiçbir zaman sormadan başlatılmaz.
 start-approval-settings-once = Yalnızca bu başlatmaya izin verilebilir: kendi modeli veya eforuyla başlatma her zaman sorulur.
 start-approval-options-once = Yalnızca bu başlatmaya izin verilebilir: yanıtınız bu başlatmayı yalnızca burada gösterilen başlatma seçenekleriyle kapsar ve böyle her başlatma yeniden sorulur.
 start-approval-does-not-ask = İzin verirseniz bu yardımcı, çalıştığı sürece size sormadan komut çalıştırır ve dosyaları değiştirir.
 start-approval-more = { $name } çalıştığı sürece bu klasörde, yeniden sormadan en fazla { $count } { $kind } ajanı
 start-approval-nested = Yardımcıları da yardımcı başlatmak isteyebilir (her birini siz yanıtlarsınız)
+approval-review = İncele
+approval-review-for = { $name } isteğinin tamamını oku
+approval-review-close = Kapat
+start-summary-outside = kendi klasörünün dışında
+start-summary-more = { $count ->
+    [one] 1 satır daha
+   *[other] { $count } satır daha
+}
 helper-started-by = { $name } tarafından başlatıldı
 helper-grants = Yardımcı izinleri
 helper-grant-line = Sormadan hâlâ { $count } { $kind } başlatabilir, klasör:
 helper-grant-revoke = Geri al
 helper-grants-failed = Yardımcı izinleri okunamadı ya da değiştirilemedi.
 device-title = Bu cihaz
-device-intro = Makineler yalnızca güvendikleri bir cihazın yanıtını kabul eder. Bu tarayıcıyı şununla tanırlar:
 device-name = Cihaz adı
 device-key = Cihaz anahtarı
 device-link = Ayarlar
@@ -114,10 +133,10 @@ device-asked = İstendi. Makinelerinizin güvendiği bir cihazda pencereyi açı
 device-ask-failed = İstenemedi. Bağlantıyı denetleyip yeniden deneyin.
 device-command-intro = Ya da makinede şunu çalıştırın (`agora` orada bulunamazsa komutu agora programının klasöründe çalıştırın: ./agora, Windows'ta .\agora.exe):
 device-others = Diğer cihazlarınız
-device-removed = kaldırıldı
-device-waiting = onayınızı bekliyor
-device-trusted-on = güvenilen makineler: { $machines }
-device-trusted-nowhere = hiçbir makinede güvenilmiyor
+device-removed = Kaldırıldı
+device-waiting = Onayınızı bekliyor
+device-trusted-on = Güvenilen makineler: { $machines }
+device-trusted-nowhere = Hiçbir makinede güvenilmiyor
 device-last-used = son kullanım { $when }
 device-remove = Kaldır
 device-remove-failed = Kaldırılamadı.
@@ -138,7 +157,7 @@ pair-address = Adres
 pair-number = Numara
 pair-failed = Yanıtınız gönderilemedi. Yeniden deneyin.
 pair-deny = Reddet
-pair-approve = Onayla
+pair-approve = Numaralar aynı…
 pair-machine-compare = Yeni makinedeki numarayla karşılaştırın. Yalnızca aynıysa onaylayın.
 pair-browser-compare = O tarayıcıdaki numarayla karşılaştırın. Yalnızca aynıysa onaylayın.
 pair-expires-in = { $time } içinde sona erer
@@ -179,21 +198,19 @@ signin-use-code = Bunun yerine kod kullan
 trust-ask = Başka bir cihazdan onay iste
 trust-asked = İstendi. Bu tarayıcıyı o makinenin güvendiği bir cihazda onaylayın, sonra yeniden başlatın.
 
-signin-title = Giriş yap
-signin-intro = Hub'ınızdan bir kod isteyin: hub'ı çalıştıran makinede "agora hub login" komutunu çalıştırıp kodu buraya yazın.
+signin-title = Agora’nıza giriş yapın
+signin-intro = Agora’nın başladığı makinede bu komutu çalıştırın, sonra gösterdiği kodu buraya yazın.
 signin-code = Kod
 signin-action = Giriş yap
 signin-refused = Bu kod kabul edilmedi. Yanlış, süresi dolmuş veya daha önce kullanılmış olabilir.
 signin-too-many = Buradan çok fazla yanlış deneme yapıldı. Bir süre bekleyip yeniden deneyin.
-signin-failed = Hub'ınıza ulaşılamadı. Yeniden deneyin.
+signin-failed = Agora’nıza ulaşılamadı. Yeniden deneyin.
 signin-password = Ekran parolası
-signin-password-hint = Başka bir makineden giriş yaptığınız için bu hub ekran parolasını da istiyor.
+signin-password-hint = Başka bir makineden giriş yaptığınız için Agora’nız ekran parolasını da istiyor.
 signin-refused-password = Giriş yapılamadı. Kod yanlış, süresi dolmuş veya kullanılmış olabilir; ya da parola yanlış olabilir.
 lock-now = Kilitle
 lock-now-hint = Bu pencereden çıkış yapar. Ajanlar çalışmaya devam eder.
 password-title = Ekran parolası
-password-intro = Başka bir makineden yapılan girişin kodla birlikte vermesi gereken bir parola belirleyin. Bu makinenin kendi tarayıcısına hiç sorulmaz.
-password-intro-set = Ekran parolası ayarlı: başka bir makineden giriş bu parolayı ister. Değiştirmek diğer tüm pencerelerden çıkış yapar.
 password-current = Mevcut parola
 password-new = Yeni parola
 password-again = Bir kez daha yazın
@@ -202,10 +219,10 @@ password-change = Parolayı değiştir
 password-saved = Kaydedildi. Diğer tüm pencerelerden çıkış yapıldı.
 password-refused = Bu parola doğru değil.
 password-too-many = Çok fazla yanlış deneme. Bir süre bekleyip yeniden deneyin.
-password-busy = Hub şu anda yoğun. Birazdan yeniden deneyin.
+password-busy = Agora'nız şu anda yoğun. Birazdan yeniden deneyin.
 password-too-short = En az { $min } karakter kullanın.
 password-mismatch = İki parola aynı değil.
-password-failed = Hub'ınıza ulaşılamadı. Yeniden deneyin.
+password-failed = Agora'nıza ulaşılamadı. Yeniden deneyin.
 idle-lock = Kullanılmadığında bu pencereyi kilitle
 idle-lock-off = Hiçbir zaman
 idle-lock-minutes = { $minutes } dakika sonra
@@ -214,11 +231,13 @@ idle-lock-hint-no-password = Yalnızca bu tarayıcıda saklanır. Kullanılmayan
 audit-action-sign-out = Çıkış yaptı
 audit-action-password-set = Ekran parolasını ayarladı
 audit-action-password-clear = Ekran parolasını kaldırdı
-machines-title = Makineleriniz
+machines-title = Makinelerim
 machines-empty = Henüz bağlı makine yok.
 machine-online = Çevrimiçi
 machine-offline = Çevrimdışı
 machine-last-seen = son görülme: { $when }
+# The Agents list: an offline machine's row ends with how long it has been away ("offline · 2 hr").
+explorer-offline-for = çevrimdışı · { $when }
 machine-agents =
     { $count ->
         [one] { $count } ajan çalışıyor
@@ -236,15 +255,22 @@ start-kinds-failed = Makine yanıt vermedi. Yeniden deneyin.
 start-no-kinds = Bu makinede henüz ajan tanımlı değil.
 start-no-projects = Bağlı hiçbir makinede proje yok. Birinde "agora node run --project YOL" çalıştırın.
 start-not-installed = kurulu değil
-start-not-installed-why = Bu makine "kurulu değil" olarak işaretlenen ajanların programlarını PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
+start-not-installed-why = Bu makine bu ajanın programını PATH içinde bulamıyor. Onu oraya kurun ya da Agora'yı o makinede programın çalıştığı bir terminalden başlatın.
 start-not-installed-program = Bu makine { $program } programını PATH içinde bulamıyor. Onu oraya kurun ya da Agora'yı o makinede { $program } programının çalıştığı bir terminalden başlatın.
+start-group-installed = Kurulu
+start-group-missing = Kurulu değil
+start-group-untested = Denenmedi
+start-runs-terminal = Terminal
+start-runs-chat = Sohbet
+# Yeni ajanın Ana sayfada ve sekmelerde alacağı ad: türü, sonra başlarken seçilen bir renk ($name "codex · …" biçimindedir).
+start-preview = { $name } olarak görünecek; rengi başlarken seçilir.
 start-go = Başlat
 start-cancel = Vazgeç
 start-kind-unknown = Bu makine o ajanı tanımıyor.
 start-program-missing = O makine bu ajanın programını PATH içinde bulamıyor. Programı oraya kurun ya da Agora'yı o makinede programın çalıştığı bir terminalden başlatın.
 start-limit = Makine kapasitesine ulaştı. Bir ajanı durdurup yeniden deneyin.
 start-failed = Ajan başlamadı. Yeniden deneyin.
-signin-passkey = Geçiş anahtarıyla giriş yap
+signin-passkey = Geçiş anahtarı kullan
 signin-passkey-failed = Geçiş anahtarıyla giriş yapılamadı. Bunun yerine kod kullanın.
 device-passkey-intro = Bu cihazda kodsuz giriş yapmak için bir geçiş anahtarı ekleyin.
 device-passkey-add = Geçiş anahtarı ekle
@@ -315,7 +341,6 @@ start-for-task-other-project = Bu klasör { $project } projesine ait değil. Gö
 give-none-plain = { $project } projesinde, görev alabilen bağlı bir makinede çalışan ajan yok.
 give-start-late = Ajan henüz görünmedi. Geri dönün ve göründüğünde onu listeden seçin.
 give-machine-unsupported = O ajanın makinesi henüz görev alamıyor; güncellenmesi gerekebilir. Hiçbir şey gönderilmedi.
-messages-title = Son mesajlar
 message-cross = makineler arası
 message-via = bildiren: { $machine }
 console-agents = Ajanlar
@@ -440,6 +465,7 @@ filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
 console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
 prompt-intro = Bu ajan terminalle değil, isteklerle çalışır. Ona ne yapacağını söyleyin.
+prompt-intro-watching = Bu ajan terminalle değil, isteklerle çalışır.
 prompt-label = Ne yapmalı?
 prompt-send = Gönder
 prompt-sent = Gönderildi.
@@ -450,6 +476,7 @@ history-none = Burada henüz commit yapılmadı.
 history-failed = Geçmiş o makineden okunamadı.
 history-no-subject = (mesaj yok)
 chat-empty = Henüz bir şey söylenmedi. Aşağıdan ona ne yapacağını söyleyin.
+chat-empty-watching = Henüz bir şey söylenmedi.
 chat-log = Konuşma
 chat-plan = Plan
 chat-plan-steps =
@@ -494,6 +521,7 @@ notice-adapter-gave_up-no_code = Ajan { $restarts } yeniden başlatmadan sonra y
 notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
 notice-approval-always_only_forbidden = Ajan “{ $action }” için izin istedi ve yalnızca hatırlayacağı bir yanıt sundu. Bu makine yalnızca tek seferlik yanıtlara izin veriyor, bu yüzden reddedildi.
 notice-adapter-permission_unanswerable = Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi.
+notice-chat-history_not_saved = Bu konuşma çalıştığı makinede kaydedilemedi (diski dolu olabilir). Ajan çalışmaya devam ediyor, ancak bundan sonraki adımlar Agora yeniden başladıktan sonra eksik olabilir.
 session-header = Ajan ayarları
 session-elapsed-hint = Ne kadar süredir çalışıyor
 session-mode = Mod
@@ -521,6 +549,7 @@ grant-title-stop = { $agent } ajanını 1 saat boyunca durdurmaya izin verilsin 
 grant-title-interrupt = { $agent } ajanının sürmekte olan turunu 1 saat boyunca kesmeye izin verilsin mi?
 grant-title-settings = { $agent } ajanının modunu, modelini veya ayarlarını 1 saat boyunca değiştirmeye izin verilsin mi?
 grant-title-resize = { $agent } ajanının terminal boyutunu 1 saat boyunca değiştirmeye izin verilsin mi?
+grant-title-watch = { $agent } ajanını 1 saat boyunca izlemeye izin verilsin mi?
 grant-title-start = Bu projede 1 saat boyunca ajan başlatmaya izin verilsin mi?
 grant-title-task = { $agent } ajanına 1 saat boyunca görev vermeye izin verilsin mi?
 grant-title-other = Bu pencerenin 1 saat boyunca { $machine } üzerinde işlem yapmasına izin verilsin mi?
@@ -547,6 +576,15 @@ audit-action-user-role = Rol değiştirildi
 audit-action-user-remove = Ekipten biri çıkarıldı
 audit-action-user-grant = Bir projeye erişim verildi
 audit-action-user-revoke = Bir projeye erişim geri alındı
+audit-action-pair-open = Yeni makinelerin katılmak istemesine izin verdi
+audit-action-pair-close = Yeni makinelerin katılmak istemesini kapattı
+audit-action-pair-status = Yeni makinelerin katılmak isteyip isteyemeyeceğine baktı
+audit-action-pair-approve = Bir makinenin katılmasına izin verdi
+audit-action-pair-deny = Bir makineyi geri çevirdi
+audit-action-pair-request = Bir makine katılmak istedi
+audit-action-pair-reveal = Bir makine katılma isteğine baktı
+audit-action-pair-issued = Bir makineye sertifikası verildi
+audit-action-pair-refused = Katılma istekleri geri çevrildi
 audit-action-agentstart = Ajan başlattı
 audit-action-agentstop = Ajan durdurdu
 audit-action-agentprompt = İstek gönderdi
@@ -592,6 +630,8 @@ start-identity-change = Bu klasörü değişen proje kimliğiyle eşleştir
 start-directory-unsupported = Seçilen klasörde ajan başlatmak için bu makineyi güncelleyin.
 start-directory-failed = Klasör seçilemedi. Yolu ve erişim izinlerini kontrol edin.
 start-directory-forbidden = Bu cihaz bu makinede başka projelerle sınırlı. Üzerinde çalıştığınız bir projenin klasörünü seçin ya da makinenin sahibine sorun.
+start-directory-role = Rolünüz bu klasörü seçmenize izin vermiyor. Sahibine sorun.
+start-role = Rolünüz burada ajan başlatmanıza izin vermiyor. Gerekirse sahibine sorun.
 workspace-shared = Ortak klasör · değişiklikler çalışma alanına ait
 filter-project = Proje
 filter-all-projects = Tüm projeler
@@ -652,25 +692,21 @@ ide-agent-pick = Ajan
 ide-options = Seçenekler
 ide-copy-address = Adresi kopyala
 ide-tab-changes = Değişiklikler
-ide-tab-messages = Mesajlar
+ide-tab-messages = Ekip sohbeti
 ide-more-tabs = Diğer sekmeler
 ide-more-tabs-needs = gizli bir sekme sizi bekliyor
 ide-more-tabs-failed = gizli bir sekme hatayla bitti
 ide-more-tabs-working = gizli bir sekme çalışıyor
 theme-label = Renk düzeni
 theme-system = Sistemi izle
+theme-system-short = Sistem
 ide-shared = Paylaşılan
 ide-memory = Bu makinedeki ajanların kullandığı bellek
-network-hub = Hub'ınız
+network-hub = Agora'nız
 network-build = Bu makinede çalışan sürüm
 network-never = hiç
 network-heard = { $when } duyuldu
 network-last-seen = son görülme: { $when }
-network-online =
-    { $total ->
-        [one] { $total } makineden { $online } tanesi çevrimiçi
-       *[other] { $total } makineden { $online } tanesi çevrimiçi
-    }
 network-terminals =
     { $count ->
         [one] { $count } terminal açık
@@ -698,6 +734,7 @@ terminal-copy-offer-copy = Kopyala
 terminal-copy-offer-ignore = Yoksay
 closed-section = Kapananlar
 closed-clear = Kapananları temizle
+closed-clear-short = Temizle
 closed-dismiss = Bu listeden kaldır
 closed-forget = Herkes için kaldır
 closed-ok = Tamamlandı
@@ -736,6 +773,7 @@ trust-show-path = Yolun tamamını göster
 trust-copy = Kopyala
 trust-copied = Kopyalandı
 interrupted-section = Makine kapanınca durdu
+interrupted-section-short = Durdu
 interrupted-hint = Bunlar makine durduğunda çalışıyordu.
 interrupted-note = Makinesi durduğunda çalışıyordu. Devam Et, konuşmasını aynı klasörde sürdürür.
 interrupted-note-new = Makinesi durduğunda çalışıyordu. Konuşması sürdürülemiyor; Yeniden Başlat aynı klasörde yeni bir konuşma açar.
@@ -752,6 +790,7 @@ resume-failed-unsupported = O makine henüz ajanları devam ettiremiyor. Güncel
 resume-failed-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce durdurun.
 resume-failed-offline = O makine çevrimdışı.
 resume-failed-forbidden = Bu cihaz bu makinede başka projelerle sınırlı, bu yüzden bu ajanı başlatamaz.
+resume-failed-role = Rolünüz bu ajanı yeniden başlatmanıza izin vermiyor. Sahibine sorun.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan
@@ -844,7 +883,6 @@ layout-error-invalid = Bu, bu pencerenin okuyabileceği bir yerleşim değil.
 layout-error-newer = Bu yerleşim daha yeni bir sürümle yapılmış. Kullanmak için güncelleyin.
 layout-error-too-deep = Bu yerleşim çok derin iç içe (en çok { $max } düzey).
 layout-error-too-many = Bu yerleşimde çok fazla bölme var (en çok { $max }).
-layout-board-empty = Henüz ortak görev ya da dosya yok.
 
 ## Temalar (ADR-0068 2. basamak, docs/ux/themes.md)
 theme-editor-title = Tema
@@ -862,8 +900,11 @@ theme-colours = Renkler
 theme-shape = Yazı ve biçim
 theme-readability = Okunabilirlik
 theme-incomplete = Bazı değerler henüz geçerli değil; pencere son geçerli değerleri korur.
-theme-contrast-ok = Tüm yazılar okunabilir (WCAG AA).
+theme-contrast-ok = Tüm yazılar ve denetimler kolay görünür (WCAG AA).
 theme-contrast-not-applied = Uygulanmadı: bazı yazılar zor okunur.
+theme-contrast-warning = Uygulandı, ancak bazı yerlerde yazılar veya denetimler zor görünür:
+theme-contrast-also = Bazı yerlerde ayrıca zor görünür:
+theme-import-warning = Eklendi. Gösterildiğinde bazı yerlerde yazılar veya denetimler zor görünür:
 theme-px = { $size } px
 theme-import = İçe aktar…
 theme-export = Dışa aktar
@@ -897,6 +938,40 @@ theme-token-radius-xs = Köşeler: çok küçük
 theme-token-radius-s = Köşeler: küçük
 theme-token-radius-m = Köşeler: orta
 theme-token-radius-l = Köşeler: büyük
+theme-tint-accent = Vurgu arka planı
+theme-tint-working = Çalışıyor arka planı
+theme-tint-needs = Sizi bekliyor arka planı
+theme-tint-finished = Bitti arka planı
+theme-tint-danger = Hata arka planı
+theme-tint-idle = Boşta arka planı
+theme-colour-danger = Kırmızı (hatalar)
+theme-colour-on-danger = Kırmızı üzerindeki yazı
+theme-colour-surface-raised = Seçili seçenek arka planı
+theme-chip-accent = Vurgu simgesi arka planı
+theme-chip-working = Çalışıyor simgesi arka planı
+theme-chip-needs = Sizi bekliyor simgesi arka planı
+theme-chip-finished = Bitti simgesi arka planı
+theme-chip-danger = Hata simgesi arka planı
+theme-chip-idle = Boşta simgesi arka planı
+theme-avatar = { $colour } ajan rozeti
+theme-agent-colour-amber = Kehribar
+theme-agent-colour-teal = Turkuaz
+theme-agent-colour-violet = Mor
+theme-agent-colour-rose = Gül
+theme-agent-colour-slate = Arduvaz
+theme-agent-colour-sky = Gök mavisi
+theme-agent-colour-mint = Nane
+theme-control-segmented = Seçili seçenek halkası
+theme-control-risk-segmented = Riskli seçili seçenek halkası
+theme-control-switch-off = Anahtar (kapalı)
+theme-control-switch-on = Anahtar (açık)
+theme-control-risk-switch = Riskli anahtar (açık)
+theme-control-selected-card = Seçili kart halkası
+theme-control-pressed-count = Seçili sayaç halkası
+theme-control-primary-button = Ana düğme
+theme-control-danger-button = Kırmızı düğme
+theme-control-focus-ring = Odak halkası
+theme-control-icon = Simge
 theme-error-json = Bu dosya JSON değil.
 theme-error-invalid = Bu bir Agora tema dosyası değil.
 theme-error-newer = Bu tema Agora'nın daha yeni bir sürümüyle yapılmış.
@@ -909,6 +984,7 @@ theme-error-bad-color = { $label } ("{ $token }") #1a2b3c gibi bir renk olmalı.
 theme-error-bad-size = { $label } ("{ $token }") { $min } ile { $max } px arasında olmalı.
 theme-error-bad-font = { $label } ("{ $token }") virgülle ayrılmış yazı tipi adlarından oluşmalı.
 theme-error-contrast = { $bg } üzerinde { $fg } { $ratio }:1; okunabilir olması için en az { $min }:1 gerekir.
+theme-error-control = { $control }: { $bg } üzerinde { $fg } { $ratio }:1; görünür olması için en az { $min }:1 gerekir.
 theme-error-full = { $max } temanız var; önce birini silin.
 palette-theme-editor = Temayı düzenle
 palette-theme = Tema: { $name }
@@ -929,7 +1005,11 @@ phone-no-agents = Bu makinede ajan yok.
 phone-needs = Sizi bekleyenler · { $count }
 phone-answer-below = Yanıtı ekranın altındaki düğmelerle verin.
 phone-next = Sıradaki · { $count }
-phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+phone-untrusted-title = Bu cihaz henüz güvenilir değil
+phone-untrusted-machines = { $count ->
+    [one] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+   *[other] { $machines } bu cihaza henüz güvenmiyor; buradan verilen yanıtları reddederler.
+}
 key-bar = Terminal tuşları
 key-esc = Esc
 key-tab = Tab
@@ -958,16 +1038,57 @@ forget-machine-agents = { $count ->
     [one] o sırada bir ajan çalışıyordu; orada hâlâ çalışıyor olabilir
    *[other] o sırada { $count } ajan çalışıyordu; orada hâlâ çalışıyor olabilirler
 }
-forget-machines-refuse = Yeniden bağlanırlarsa reddet (her biri yeni bir katılım kodu ister)
 forget-machines-cancel = Kalsın
 forget-machines-confirm = { $count ->
     [one] Unut
    *[other] { $count } makineyi unut
 }
-forget-machine-reason-forbidden = Makineleri yalnızca hub'ın sahibi unutabilir.
+forget-machine-reason-forbidden = Makineleri yalnızca sahibi unutabilir.
 forget-machine-reason-online = Yeniden bağlandı, bu yüzden unutulmadı.
-forget-machine-reason-gone = Hub bu makineyi artık tanımıyor.
-forget-machine-reason-other = Hub unutamadı. Yeniden deneyin.
+forget-machine-reason-gone = Agora'nız bu makineyi artık tanımıyor.
+forget-machine-reason-other = Unutulamadı. Yeniden deneyin.
+
+# My machines as cards (the redesign's PR 9): the page's header, the steps to add a machine, the strip of counts, a machine's card.
+machines-intro = Agora'nıza bağlı her makine. Bir makine uzaktayken ajanları orada çalışmaya devam eder.
+machines-add = Makine ekle
+machines-add-step-allow = Yeni bir makinenin katılmasına izin verin. 10 dakika açık kalır.
+machines-add-step-run = Yeni makinede şu komutu çalıştırın:
+machines-add-command = agora join
+machines-add-step-compare = Ardından iki ekranda da bir numara görünür. Yalnızca ikisi aynıysa burada onaylayın.
+machines-add-hint = Yeni makinelere izin verin, o makinede agora join çalıştırın, sonra numarayı burada karşılaştırın.
+machines-stat-of = / { $total }
+machines-stat-online = { $total ->
+    [one] makine çevrimiçi
+   *[other] makine çevrimiçi
+}
+machines-stat-agents = { $count ->
+    [one] ajan çalışıyor
+   *[other] ajan çalışıyor
+}
+machines-stat-needs = { $count ->
+    [one] sizi bekliyor
+   *[other] sizi bekliyor
+}
+machines-stat-memory = Agora'nın kullandığı bellek
+machine-memory = Bu makinede Agora
+machine-memory-share = Agora'nın tüm makinelerinizde kullandığı belleğin %{ $percent } kadarı
+machine-start-here = Burada bir ajan başlat
+machine-new-terminal = Yeni terminal
+machine-more = { $name } için diğer işlemler
+machine-copy-id = Makine kimliğini kopyala
+machine-agent-settings = Ajan ayarları
+machine-away-agents = { $count ->
+    [one] Bir ajan çalışıyordu
+   *[other] { $count } ajan çalışıyordu
+}
+machine-away-explain = { $name } üzerinde çalışmaya devam ederler. Yaptıkları, makine yeniden bağlandığında burada görünür.
+machine-not-back = Geri gelmeyecek mi?
+forget-machine-explain = Makine ve biten ajanları her pencereden kalkar. Geçmişi ve kullanımı kalır. Yeniden bağlanırsa geri gelir.
+forget-machine-refuse = Yeniden bağlanırsa reddet
+forget-machine-refuse-hint = Yeni bir katılım kodu gerekir.
+forget-machines-refuse-title = Yeniden bağlanırlarsa reddet
+forget-machines-refuse-hint = Her biri yeni bir katılım kodu ister.
+forget-machine-confirm-one = { $name } makinesini unut
 
 # ADR-0066: bir türün aldığı model ve efor, başlatma penceresinde.
 setting-default = Ajanın kendi varsayılanı
@@ -986,6 +1107,11 @@ fleet-machines =
         [one] { $total } makineden { $online } tanesi çevrimiçi
        *[other] { $total } makineden { $online } tanesi çevrimiçi
     }
+fleet-stat-machines =
+    { $total ->
+        [0] Çevrimiçi makine
+       *[other] { $total } makineden çevrimiçi olan
+    }
 fleet-filter-active = Yalnızca “{ $name }” gösteriliyor.
 fleet-filter-clear = Hepsini göster
 fleet-filter-none = Burada gösterilecek bir şey yok.
@@ -995,7 +1121,6 @@ fleet-attention-count = { $count ->
 }
 fleet-asked = { $when } soruldu
 fleet-waiting-in-terminal = Terminalinde sizi bekliyor
-fleet-asks-start = Başka bir ajan başlatmak istiyor
 fleet-allow-for = İzin ver: { $name }
 fleet-deny-for = Reddet: { $name }
 fleet-review = İncele ve karar ver
@@ -1033,10 +1158,14 @@ fleet-empty-step-code = Agora'nın başladığı makinede
 fleet-empty-step-join = Eklenecek makinede
 fleet-empty-ca = ca.pem, o makinedeki ~/.agora/hub/ca.pem dosyasıdır.
 fleet-empty-machines = Makinelerinizi görün
+fleet-guest-title = Henüz size ait bir proje yok
+fleet-guest-text = Yalnızca size erişim verilen projeleri görürsünüz. Sahibinden sizi bir projeye eklemesini isteyin; eklediği anda burada görünür.
 fleet-firstrun-title = Makineleriniz hazır. İlk ajanı başlatın.
-fleet-firstrun-text = Bir makine ve proje klasörü seçin, ajan orada başlasın. Burada görünür ve sizi gerektiğinde çağırır.
+fleet-firstrun-text = Bir makine ve klasör seçin. Ajan burada görünür ve size gerektiğinde haber verir.
 fleet-firstrun-cli = Ya da o makinedeki bir terminalden
 fleet-firstrun-offline = Şu an tüm makineler çevrimdışı. Birinde Agora'yı başlatın, burada görünsün.
+fleet-watch-title = Henüz çalışan bir şey yok
+fleet-watch-text = Burada izleyebilirsiniz. Üyelerin ya da sahibin başlattığı ajanlar, neye ihtiyaç duydukları ile birlikte burada görünür.
 fleet-offline-title = Agora'ya ulaşılamıyor
 fleet-offline-text = Ajanlarınız makinelerinde çalışmaya ve yaptıklarını kaydetmeye devam ediyor. Bağlantı geri gelir gelmez yeniden burada görünürler.
 fleet-offline-stale = Agora ile bağlantı kesildi. Gördükleriniz bu pencerenin bildiği son durum ve eski olabilir. Ajanlar makinelerinde çalışmaya devam ediyor.
@@ -1049,11 +1178,9 @@ fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi 
 fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
-attention-who = { $machine } üzerinde { $name }
-attention-who-only = { $name }
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
-attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce isteği tam kartında okuyun.
-attention-start = { $name } başka bir ajan başlatmak istiyor. Klasörü, istemi ve ayarları tam kartta okunur.
+attention-skip = { $name } sormadan çalışmaya geçirilmek istendi. Yanıtlamadan önce İncele isteğin tamamını gösterir.
+attention-start-read = Yanıtlamadan önce İncele klasörünü, istemini ve ayarlarını tam olarak gösterir.
 attention-pair = Onaylamadan önce, tam kartta numarasını ekranındaki numarayla karşılaştır.
 attention-later = Sonra
 attention-review = İncele
@@ -1066,14 +1193,11 @@ attention-banner = { $count ->
    *[other] { $count } şey sana ihtiyaç duyuyor
 }
 attention-settings-title = Sana ihtiyaç var
-attention-settings-intro = Bir ajan takıldığında bu pencerenin dikkatini nasıl çektiği. Sana ihtiyaç var listesi ve sayıları her zaman görünür kalır. Yalnızca bu tarayıcıda saklanır.
 attention-mode-modal = Pencerenin üstünde bir kart
 attention-mode-banner = Yalnızca küçük bir şerit
 attention-mode-off = Ek bir şey yok
-attention-mode-hint = Kart yalnızca bu pencere odaktayken ve bir terminalde ya da alanda yazmıyorken açılır; aksi halde bekler ve bir şerit onu gösterir. Senin yerine asla yanıt vermez.
-attention-notify-title = Pencere arka plandayken bildirimler
-attention-notify-enable = Bildirimleri aç
-attention-notify-off = Bildirimleri kapat
+attention-mode-hint = Kart yalnızca bu pencere odaktayken ve yazmıyorken açılır; aksi halde bir şerit onu gösterir. Senin yerine asla yanıt vermez.
+attention-notify-title = Arka planda bildirimler
 attention-notify-on = Bildirimler açık. Yalnızca bir ajanın sana ihtiyaç duyduğunu söylerler.
 attention-notify-names = Ajanın ve makinenin adını ekle
 attention-notify-blocked = Bu tarayıcı bu sayfa için bildirimleri engelliyor. Açmak için tarayıcının site ayarlarından izin ver.
@@ -1086,12 +1210,16 @@ notify-body = { $count ->
 notify-body-named = { $name } sana ihtiyaç duyuyor
 notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
 attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
+# A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
+approval-sent = Yanıt gönderildi.
+approval-watching = Burada izleyebilirsiniz. İstekleri bir üye ya da sahibi yanıtlar.
 attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.
 
 # Usage (no money: tokens, context and time)
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
-usage-empty = Henüz gösterilecek bir şey yok. Bir ajan çalışınca kullanım burada görünür.
+usage-stat-tokens = Kullanılan token
+usage-stat-agents = Ajan
 usage-agents = { $count } ajan
 usage-by-machine = Makineye göre
 usage-by-project = Projeye göre
@@ -1124,12 +1252,21 @@ chat-files-more = Ve { $count } tane daha
 chat-plan-label = Plan
 chat-error-label = Bir şey ters gitti
 prompt-hint = Enter gönderir, Shift+Enter yeni satır açar.
+prompt-watching = Burada izleyebilirsiniz. Bu ajanla bir üye ya da sahibi konuşur.
 session-started-with = { $name }: { $value }
 session-started-hint = Bu ajan başlatılırken seçildi. Ajan bunu bildirmez, bu yüzden sonradan değişmiş olabilir.
 empty-changes-title = Her şey temiz
 empty-changes-hint = Bir ajanın değiştirip kaydetmediği dosyalar burada görünür.
 empty-messages-title = Henüz mesaj yok
 empty-messages-hint = Ajanlar birbirine yazdığında burada izleyebilirsiniz.
+# Ekip sohbeti (sağ panel): "codex · teal  alıcı: claude · plum  2 dk. önce", metin iki satırda kesilir; satır tüm metni açar.
+team-chat-to = alıcı: { $name }
+team-chat-show-all = Tümünü göster
+team-chat-close = Kapat
+empty-board-title = Henüz ortak görev yok
+empty-board-hint = Ajanların bir projede paylaştığı görevler ve dosyalar burada görünür.
+empty-usage-title = Henüz kullanım yok
+empty-usage-hint = Bir ajan çalıştıktan sonra token, bağlam, süre ve plan limitleri burada görünür.
 loading-label = Yükleniyor
 chat-code = Kod
 live-summary = Canlı özet
@@ -1305,7 +1442,6 @@ settings-group-machines = Makinelerim
 settings-device = Ad ve parmak izi
 settings-passkeys = Geçiş anahtarı
 settings-machines = Makineler
-settings-machines-intro = Bu hub'a bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
 settings-machines-manage = Makineleri yönet
 
 # Çalışan bir ajanı kapatma (ajan menüsü, komut paleti, sohbet ajanının mesaj kutusunda /exit ve /quit)
@@ -1331,15 +1467,46 @@ close-failed-hub = hub'a ulaşılamadı
 
 # Ayarlar → Ajanlar: her makinenin başlatabildiği ajanlar, hangilerinin kurulu olduğu ve başlatırken ne seçilebildiği.
 settings-agents = Ajanlar
-agents-intro = Her makinenin başlatabildiği ajanlar. Model, çaba ve diğer seçimler bir ajanı başlatırken yapılır; her birinin neler sunduğunu görmeniz için burada listelenir.
+settings-subtitle = Aksi belirtilmedikçe bu tarayıcıda tutulur.
+device-desc = Makineler yalnızca güvendikleri bir cihazdan gelen yanıtları kabul eder.
+device-fingerprint-hint = Bir makine sorduğunda bunu karşılaştırın.
+device-trust-on = { $count ->
+    [one] 1 makinede güveniliyor
+   *[other] { $count } makinede güveniliyor
+}
+device-trust-none = Henüz güvenilmiyor
+device-others-desc = Agora'nızda oturum açmış tarayıcılar.
+device-remove-named = { $name } cihazını kaldır
+device-remove-title = { $name } kaldırılsın mı?
+device-remove-body = Makineleriniz artık ondan gelen yanıtları kabul etmeyecek. Bu işlem buradan geri alınamaz.
+device-remove-keep = Kalsın
+device-remove-confirm = Kaldır
+when-day-time = { $day }, { $time }
+attention-settings-desc = Bir ajan beklediğinde bu pencerenin dikkatinizi nasıl çektiği. Yalnızca bu tarayıcıda tutulur.
+attention-mode-label = Bir ajan size ihtiyaç duyduğunda
+attention-mode-short-modal = Kart
+attention-mode-short-banner = Şerit
+attention-mode-short-off = Ek bir şey yok
+attention-notify-hint = Ad eklemediğiniz sürece yalnızca bir ajanın size ihtiyaç duyduğunu söyler.
+password-desc = Diğer makinelerdeki tarayıcılardan, kodlarıyla birlikte istenir. Bu makinenin kendi tarayıcısından asla istenmez.
+password-desc-set = Diğer makinelerdeki tarayıcılardan istenir. Değiştirmek diğer tüm pencerelerin oturumunu kapatır.
+password-state-set = Ayarlı
+password-state-unset = Ayarlı değil
+settings-machines-desc = Agora'nıza bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
+settings-machines-online = { $online } / { $total } çevrimiçi
+agents-desc = Her makinenin başlatabildikleri. Seçimler bir ajanı başlatırken yapılır; neler aldığını görmek için bir kartı açın.
+agents-machine = Makine
+agents-runs-short-terminal = Terminal
+agents-runs-short-chat = Sohbet
+agents-runs-short-adapter = Sohbet
+agents-kind = Kimlik
+agents-runs = Çalışma biçimi
+agents-offers-skip = "Sorma" seçeneği sunar: izin sorularını atlayacak şekilde başlatılabilir. Asla sizin yerinize seçilmez.
 agents-loading = Bu makineye soruluyor…
 agents-none-known = Bu makine çevrimdışı ve hangi ajanlara sahip olduğunu bu tarayıcıya bildirmedi.
 agents-empty = Bu makine hiç ajan listelemiyor.
 agents-stale = Çevrimdışı · { $when } itibarıyla
-agents-installed = Kurulu
 agents-not-installed = Kurulu değil
-agents-state-installed = kurulu
-agents-state-missing = kurulu değil
 agents-runs-terminal = Terminalde çalışır
 agents-runs-chat = Sohbet
 agents-runs-adapter = Adaptör üzerinden sohbet
@@ -1348,3 +1515,51 @@ agents-setting-any = ajanın kabul ettiği herhangi bir değer
 agents-setting-default = varsayılan { $value }
 agents-options = Seçenekler
 agents-option-skips = izin sorularını atlar
+agents-group-here = Bu makinede
+agents-group-add = Ajan ekle
+agents-group-add-desc = Bu makinede kurulu değil. Programı oraya kurun, sonra başlatılabilir; burada hiçbir şey çalışmaz ya da indirilmez.
+agents-untested = Denenmedi
+agents-untested-desc = ACP kayıt defterinden. Henüz kimse Agora'da denemedi: başlamayabilir ya da bazı özellikleri eksik olabilir.
+agents-runs-fetch = Başlatmak { $program } çalıştırır; o da bu sürümü ilk seferde indirir.
+agents-version = Sürüm
+agents-license = Lisans
+agents-repository = Depo
+agents-website = Web sitesi
+agents-source = Listeleyen
+agents-source-registry = ACP kayıt defteri
+
+# Bileşen galerisindeki bileşen takımı (visual-language.md §3). Yalnızca galeri için örnek metin.
+kit-title = Bileşen takımı
+kit-buttons = Düğmeler
+kit-states = Durumlar ve etiketler
+kit-avatars = Ajan simgeleri
+kit-cards = Kartlar, satırlar ve ayarlar
+kit-controls = Denetimler
+kit-counts = Sayılar
+kit-notices = Bildirimler ve istekler
+kit-empty = Boş durumlar
+kit-copy = Kopyalanacak komut
+kit-rtl = Sağdan sola
+kit-sample-forget = Unut
+kit-sample-shared = Paylaşılan
+kit-sample-notify = Arka planda bildirimler
+kit-sample-notify-hint = Adlar yalnızca siz isterseniz görünür.
+kit-sample-ask = { $name } bir komut çalıştırmak istiyor
+kit-sample-offline = Bu makine çevrimdışı
+kit-sample-offline-line = Ajanları çalışmayı sürdürür ve makine dönünce durumlarını bildirir.
+kit-sample-joined = Makine katıldı. Makinelerim listesinde görünüyor.
+
+# Yeniden tasarımın giriş ekranları (ADR-0102): giriş kartı, boş Ana sayfa ve komut paleti.
+signin-or = ya da
+copy-selected = Kopyalanamadı. Metin seçildi: klavyenizle kopyalayın.
+fleet-add-machine = Makine ekle
+palette-empty-hint = Başka bir sözcük deneyin: bir ajan, bir makine ya da bir eylem.
+palette-group-go = Şuraya git
+palette-group-actions = Eylemler
+palette-group-agents = Ajanlar
+palette-group-places = Makineler ve projeler
+palette-group-tasks = Görevler
+palette-group-appearance = Görünüm
+palette-key-move = Gezin
+palette-key-open = Aç
+palette-key-close = Kapat

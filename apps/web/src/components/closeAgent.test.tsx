@@ -14,14 +14,16 @@ import { PromptBox } from './PromptBox';
 let host: HTMLElement;
 let root: Root;
 beforeEach(() => { setLanguage('en'); closeAsk.cancel(); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
-afterEach(() => { act(() => root.unmount()); host.remove(); closeAsk.cancel(); });
+afterEach(() => { act(() => root.unmount()); host.remove(); closeAsk.cancel(); document.body.replaceChildren(); });
 
 const agent = (over: Partial<AgentTileModel> = {}): AgentTileModel => ({ id: 'n1/a-1', machineId: 'n1', name: 'one', accent: '#fff', machine: 'm', workspace: '/w', state: 'idle', preview: '', terminal: false, ...over });
 const session = (names: string[]): SessionModel => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 0, contextWindow: 0, commands: names.map((name) => ({ name, description: 'd', inputHint: '' })) });
 const flush = () => act(async () => { await Promise.resolve(); });
 const click = (el: Element | null | undefined) => { if (!el) throw new Error('missing element'); act(() => { (el as HTMLElement).click(); }); };
 const byText = (text: string, scope: ParentNode = document) => [...scope.querySelectorAll('button,[role=menuitem]')].find((b) => b.textContent?.trim() === text);
-const confirmBox = () => host.querySelector('[role=alertdialog]') as HTMLElement;
+// The confirm is a dialog over the window (#1070), drawn in a portal: looked up in the document.
+const confirmBox = () => document.querySelector('[role=alertdialog]') as HTMLElement;
+const confirmTitle = () => confirmBox()?.querySelector('h2')?.textContent;
 
 // The header menu and the confirm, for several agents on one page, like the agent list.
 function Rows({ agents }: { agents: AgentTileModel[] }) {
@@ -31,7 +33,7 @@ const withClose = (close: (a: AgentTileModel) => Promise<string | undefined>, no
 const openMenu = (id: string) => click(host.querySelector(`[data-agent="${id}"] button[aria-haspopup=menu]`));
 
 describe('Close agent: the confirm', () => {
-  it('asks inline, says what happens, and one click closes an idle agent', async () => {
+  it('asks in a dialog, says what happens, and one click closes an idle agent', async () => {
     const close = vi.fn(async () => undefined);
     act(() => root.render(withClose(close, <Rows agents={[agent()]} />)));
     expect(confirmBox()).toBeNull();
@@ -51,7 +53,7 @@ describe('Close agent: the confirm', () => {
       closeAsk.cancel();
       act(() => root.render(withClose(async () => undefined, <Rows agents={[agent({ state })]} />)));
       openMenu('n1/a-1'); click(byText(t('close-agent')));
-      expect(host.querySelector('[data-close-warning]')?.textContent).toBe(t('close-working'));
+      expect(document.querySelector('[data-close-warning]')?.textContent).toBe(t('close-working'));
     }
     expect(losesWork(agent({ state: 'idle' }))).toBe(false);
   });
@@ -70,16 +72,16 @@ describe('Close agent: the confirm', () => {
     const three = [agent({ id: 'n1/a-1', name: 'one' }), agent({ id: 'n2/b-2', machineId: 'n2', name: 'two' }), agent({ id: 'n1/c-3', name: 'three' })];
     act(() => root.render(withClose(close, <Rows agents={three} />)));
     openMenu('n2/b-2'); click(byText(t('close-agent')));
-    expect(host.querySelectorAll('[role=alertdialog]').length).toBe(1);
-    expect(host.querySelector('[data-agent="n2/b-2"] [role=alertdialog]')).not.toBeNull();
+    expect(document.querySelectorAll('[role=alertdialog]').length).toBe(1);
+    expect(confirmTitle()).toBe(t('close-title', { name: 'two' }));
     click(byText(t('close-agent'), confirmBox()));
     await flush();
     expect(close.mock.calls.map((c) => c[0].id)).toEqual(['n2/b-2']);
     // Asking for one agent and then another moves the confirm; it never keeps the first target.
     act(() => { closeAsk.ask('n1/a-1', 'row'); });
     act(() => { closeAsk.ask('n1/c-3', 'row'); });
-    expect(host.querySelector('[data-agent="n1/a-1"] [role=alertdialog]')).toBeNull();
-    expect(host.querySelector('[data-agent="n1/c-3"] [role=alertdialog]')).not.toBeNull();
+    expect(document.querySelectorAll('[role=alertdialog]').length).toBe(1);
+    expect(confirmTitle()).toBe(t('close-title', { name: 'three' }));
   });
 
   it('shows the localized reason when the command is refused, and keeps the agent', async () => {

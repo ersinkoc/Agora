@@ -21,7 +21,9 @@ use agora_tui::pane::ColorMode;
 use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
 use agora_tui::split::{app_details, app_rows};
-use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
+use agora_tui::split::{
+    frame, reader_frame, start_card_fit, start_card_lines_for, tree_order, View,
+};
 
 use crate::hubcli::{hub_dir, new_login_code, own_hub_addr, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
@@ -175,8 +177,35 @@ fn resume(
     }
 }
 
-/// Why a resume did not happen, in the selected language (the node's code and parameters, rendered from `errors.ftl`).
+/// ADR-0049: the hub refused `command` because of the person's role or projects (a viewer, or a member outside their projects), naming
+/// the refused command's schema name (`AgentStart`) in `action`. A machine that limits this device to other projects names its own
+/// action (`directory`, `grant.create`), so that refusal is not the person's role (#1044).
+fn refused_for_role(error: &ErrorInfo, command: &str) -> bool {
+    error.code == "auth.forbidden"
+        && matches!(
+            error.params.get("action").and_then(|v| v.value.as_ref()),
+            Some(Value::Str(s)) if s == command
+        )
+}
+
+/// Why a start (`command`: `AgentStart`, or `DirectoryInspect` for a folder) did not happen: the person's role in words when the hub
+/// refused it for that, else the code.
+fn start_refusal(say: &Say, error: &ErrorInfo, command: &str) -> String {
+    if refused_for_role(error, command) {
+        return say.text(key!("tui-start-role"), &[]);
+    }
+    say.text(
+        key!("tui-start-failed"),
+        &[("code", Arg::Str(error.code.clone()))],
+    )
+}
+
+/// Why a resume did not happen, in the selected language (the node's code and parameters, rendered from `errors.ftl`; the person's role
+/// in words when the hub refused it for that, #1044).
 fn resume_notice(say: &Say, error: &ErrorInfo) -> String {
+    if refused_for_role(error, "AgentResume") {
+        return say.text(key!("tui-resume-role"), &[]);
+    }
     let args: Vec<_> = error
         .params
         .iter()
@@ -303,23 +332,6 @@ fn approve_device(
 
 /// How long the owner has to read a card and answer it before the box closes by itself (the request stays pending on the hub).
 const PAIR_ASK_FOR: Duration = Duration::from_secs(120);
-
-/// Asks the hub whether this session is the owner's: `PairStatus` is answered to the owner only. `None` when it could not tell (the
-/// link failed): it is asked again at the next connection.
-fn pair_owner(session: &mut Session) -> Option<agora_tui::pair::Owner> {
-    use agora_tui::pair::Owner;
-    match session.command_info(
-        "",
-        WireCommand::PairStatus(agora_protocol::v1::PairStatus {}),
-        Duration::from_secs(3),
-    ) {
-        Ok(_) => Some(Owner::Yes),
-        Err(e) if e.code == "auth.forbidden" || e.code == "protocol.capability_missing" => {
-            Some(Owner::No)
-        }
-        Err(_) => None,
-    }
-}
 
 fn pair_asked_line(say: &Say, count: usize) -> String {
     if count > 1 {
@@ -537,6 +549,7 @@ fn start_unread(
         cols,
         rows,
         now_ms: now_ms(),
+        viewer: false,
     };
     match start_card_fit(&view, text) {
         Some((a, false)) if !read_whole.contains(&a.approval_id) => Some(a.clone()),
@@ -549,12 +562,16 @@ fn read_start(
     a: &agora_protocol::v1::ApprovalSnapshot,
     ask: &mut dyn Asker,
     text: agora_tui::render::Text<'_>,
+    viewer: bool,
 ) -> bool {
     let mut top = 0usize;
     let mut seen_end = false;
     loop {
         let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
-        let Some(lines) = start_card_lines(a, usize::from(cols).saturating_sub(3), text) else {
+        // ADR-0106: a viewer reads the whole request, without how to answer it.
+        let Some(lines) =
+            start_card_lines_for(a, usize::from(cols).saturating_sub(3), text, viewer)
+        else {
             return false;
         };
         let room = usize::from(rows.max(3)) - 1;
@@ -909,7 +926,7 @@ fn attach(
 }
 
 /// The conversation of an agent that has no terminal, with a line to type the next request on. Ctrl-] leaves it. Same results as
-/// [`attach`].
+/// [`attach`]. A viewer's (ADR-0106) has no line to type on: what they type is not taken, and the line says why.
 fn chat(
     say: &Say,
     session: &mut Session,
@@ -920,7 +937,7 @@ fn chat(
 ) -> Result<bool, String> {
     let (node, local) = agent.split_once('/').unwrap_or(("", agent));
     let stream = session.chat_open(node, local)?;
-    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
     let mut entries: Vec<ChatEntry> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
     let mut note = String::new();
@@ -950,9 +967,14 @@ fn chat(
             break;
         }
         while let Ok(k) = rx.try_recv() {
-            match k {
-                DETACH => break 'watch,
-                b'\r' | b'\n' => {
+            match chat_key(watching, k) {
+                ChatKey::Leave => break 'watch,
+                // ADR-0106: a viewer's keys send nothing (the hub would refuse a request or a switch, and write it down).
+                ChatKey::Watching => {
+                    note = say.text(key!("tui-viewer-watching"), &[]);
+                    dirty = true;
+                }
+                ChatKey::Send => {
                     let line = String::from_utf8_lossy(&typed).trim().to_string();
                     typed.clear();
                     let asked = chat_command(&line, snapshot.as_ref(), confirming.as_deref());
@@ -1022,37 +1044,32 @@ fn chat(
                     }
                     dirty = true;
                 }
-                0x7f | 0x08 => {
+                ChatKey::Back => {
                     // Backspace removes one character, not one byte.
                     while typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
                     dirty = true;
                 }
-                b if b >= 0x20 => {
+                ChatKey::Type(b) => {
                     typed.push(b);
                     dirty = true;
                 }
-                _ => {}
+                ChatKey::Nothing => {}
             }
         }
         if dirty {
             dirty = false;
             let size = agora_platform::terminal_size()
                 .map_or((80, 24), |(c, r)| (usize::from(c), usize::from(r)));
-            let mut lines = render_chat(
+            let lines = plain_chat_lines(
+                say,
                 &entries,
                 local,
-                &String::from_utf8_lossy(&typed),
-                size,
-                color,
-                &text,
+                &typed,
+                &note,
+                snapshot.as_ref(),
+                (size, color),
+                watching,
             );
-            if !note.is_empty() {
-                lines.insert(lines.len().saturating_sub(1), plain(&note));
-            }
-            // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
-            if let Some(s) = snapshot.as_ref().and_then(|a| session_line(a, &text)) {
-                lines.insert(0, plain(&s));
-            }
             let mut out = std::io::stdout();
             let _ = write!(out, "\x1b[H\x1b[2J{}", lines.join("\r\n"));
             let _ = out.flush();
@@ -1060,6 +1077,70 @@ fn chat(
     }
     session.terminal_close(stream);
     Ok(lost)
+}
+
+/// The plain list's full-screen chat as drawn at `size`: what the agent runs with, its conversation, the note and the line being typed.
+/// A viewer's (`watching`, ADR-0106) has no line to type on, and the note goes last.
+#[allow(clippy::too_many_arguments)]
+fn plain_chat_lines(
+    say: &Say,
+    entries: &[ChatEntry],
+    local: &str,
+    typed: &[u8],
+    note: &str,
+    snapshot: Option<&agora_protocol::v1::AgentSnapshot>,
+    (size, color): ((usize, usize), bool),
+    watching: bool,
+) -> Vec<String> {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut lines = render_chat(
+        entries,
+        local,
+        &String::from_utf8_lossy(typed),
+        size,
+        color,
+        &text,
+        watching,
+    );
+    if !note.is_empty() {
+        // Above the line being typed; a viewer's has none.
+        let at = lines.len().saturating_sub(usize::from(!watching));
+        lines.insert(at, plain(note));
+    }
+    // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
+    if let Some(s) = snapshot.and_then(|a| session_line(a, &text)) {
+        lines.insert(0, plain(&s));
+    }
+    lines
+}
+
+/// What a key typed in the plain list's full-screen chat does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatKey {
+    /// Ctrl-]: back to the list.
+    Leave,
+    /// ADR-0106: any other key of a viewer's: it only says why nothing is typed or sent.
+    Watching,
+    /// Enter: sends the line (or switches the mode or model it names).
+    Send,
+    /// Backspace.
+    Back,
+    /// A byte of the line being typed.
+    Type(u8),
+    Nothing,
+}
+
+/// The full-screen chat's keys, decided before anything is done: a viewer's (ADR-0106) chat has no line to type on, so only leaving
+/// stays theirs; the hub would refuse their request or switch and write the refusal down.
+fn chat_key(watching: bool, k: u8) -> ChatKey {
+    match k {
+        DETACH => ChatKey::Leave,
+        _ if watching => ChatKey::Watching,
+        b'\r' | b'\n' => ChatKey::Send,
+        0x7f | 0x08 => ChatKey::Back,
+        b if b >= 0x20 => ChatKey::Type(b),
+        _ => ChatKey::Nothing,
+    }
 }
 
 /// `s`: asks which agent to start on the machine the pointer is on (or the first online one with a project), then starts it in that
@@ -1090,10 +1171,18 @@ fn start(
         return say.text(key!("tui-start-nowhere"), &[]);
     };
     let machine = [("machine", Arg::Str(node.clone()))];
-    let (kinds, missing) = match session.agent_kinds_all(&node) {
-        Ok(all) => split_kinds(say, all),
+    let all = match session.agent_kinds_all(&node) {
+        Ok(all) => all,
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    // #1133: a registry kind that fetches its program starts only by a start this device signs, which `s` (an unsigned start in a
+    // project) cannot be; the folder start (`f`) signs it.
+    let signed_only: Vec<String> = all
+        .iter()
+        .filter(|k| needs_signed_start(&k.kind, &k.program))
+        .map(|k| k.kind.clone())
+        .collect();
+    let (kinds, missing) = split_kinds(say, all);
     if kinds.is_empty() {
         let none = say.text(key!("tui-start-none"), &machine);
         return missing.map_or(none.clone(), |m| format!("{none} {m}"));
@@ -1105,17 +1194,30 @@ fn start(
         &[],
         &kinds,
         missing.as_deref(),
+        window_area(),
         Duration::from_secs(30),
     );
-    let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
+    let Some((kind, name)) = pick.and_then(|i| kinds.get(i)) else {
         return String::new();
     };
+    if signed_only.contains(kind) {
+        return say.text(
+            key!("tui-start-signed-only"),
+            &[("name", Arg::Str(plain(name)))],
+        );
+    }
     let scope = format!("project:{project}");
+    // The last refusal with its parameters, so the line can tell the person's role from anything else (#1044).
+    let mut refused = ErrorInfo::default();
     match with_grant(say, session, ask, (&node, &scope, &["agent.start"]), |s| {
-        s.start_agent(&node, &project, kind)
+        s.start_agent(&node, &project, kind).map_err(|e| {
+            let code = e.code.clone();
+            refused = e;
+            code
+        })
     }) {
         Tried::Done(Ok(agent)) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
-        Tried::Done(Err(code)) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+        Tried::Done(Err(_)) => start_refusal(say, &refused, "AgentStart"),
         Tried::Declined => String::new(),
         Tried::Line(l) => l,
     }
@@ -1264,9 +1366,276 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// What the folder picker asks a machine (#1099: apart from the session, so the dialogue is tested without a hub).
+trait Folders {
+    /// The folder `path` on `node` (`""`: its home folder), signed for exactly that folder; `client.sign` when this terminal could not
+    /// sign.
+    fn list(
+        &mut self,
+        node: &str,
+        path: &str,
+    ) -> Result<agora_protocol::v1::DirectoryEntries, ErrorInfo>;
+}
+
+/// The machines' folders through the hub, each `directory.list` signed by this terminal's key (ADR-0052).
+struct SignedFolders<'a> {
+    session: &'a mut Session,
+    device: &'a Device,
+}
+
+impl Folders for SignedFolders<'_> {
+    fn list(
+        &mut self,
+        node: &str,
+        path: &str,
+    ) -> Result<agora_protocol::v1::DirectoryEntries, ErrorInfo> {
+        let Some(auth) = self
+            .device
+            .authorize(node, "list", path, "", "", false, false, now_ms())
+        else {
+            return Err(ErrorInfo {
+                code: "client.sign".into(),
+                ..ErrorInfo::default()
+            });
+        };
+        self.session.list_folder(node, path, auth)
+    }
+}
+
+/// An error that says nothing about the folder asked for: the link, the hub or the machine failed (`client.unreachable`,
+/// `node.timeout`, `node.offline`, ...). Another folder would fail the same way.
+fn says_nothing_of_the_folder(code: &str) -> bool {
+    code.starts_with("client.")
+        || code.starts_with("node.")
+        || code.starts_with("hub.")
+        || code == "internal"
+}
+
+/// How the folder picker ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Browsed {
+    /// The folder chosen on the machine.
+    Chosen { node: String, path: String },
+    /// The line to show instead (empty: the user cancelled).
+    Said(String),
+    /// The machine does not trust this terminal's key.
+    NotTrusted(String),
+}
+
+/// The folder picker of [`start_in_folder`] (ADR-0053): one machine's folders at a time, from where the person's role lets them look
+/// (#1086, #1099). `role` is what this connection knows of it; set here when a machine's answer tells more.
+#[allow(clippy::too_many_lines)] // one dialogue: where to open, what each answer means, the keys
+fn browse_folders(
+    say: &Say,
+    folders: &mut dyn Folders,
+    snapshot: &Snapshot,
+    selected: &str,
+    ask: &mut dyn Asker,
+    color: bool,
+    role: &mut agora_tui::picker::Role,
+) -> Browsed {
+    let signing_failed = || {
+        Browsed::Said(say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("client.sign".into()))],
+        ))
+    };
+    let online: Vec<&agora_protocol::v1::NodeSnapshot> =
+        snapshot.nodes.iter().filter(|n| n.online).collect();
+    if online.is_empty() {
+        return Browsed::Said(say.text(key!("tui-start-nowhere"), &[]));
+    }
+    // The selected agent's machine when it is online, else the first online one; `m` goes to the next.
+    let mut at = snapshot
+        .agents
+        .iter()
+        .find(|a| a.agent_id == selected)
+        .and_then(|a| online.iter().position(|n| n.node_id == a.node_id))
+        .unwrap_or(0);
+    // #1086: a person the hub said is not the owner may look only inside their projects (ADR-0049 Amendment A), so their picker opens
+    // at their project's folder on the machine (or offers their projects there) and never goes above one; the owner's opens at the
+    // home folder, as before. #1099: with the role not known (the plain list), it opens at the project folder too, as the window does,
+    // and goes up as the machine says, so a member is never refused a first folder.
+    use agora_tui::picker::{project_roots, At, Nav, Role};
+    let nav_for = |node: &str, role: Role| Nav::for_role(role, project_roots(snapshot, node));
+    let mut nav = nav_for(&online[at].node_id, *role);
+    let mut target = nav.start();
+    // #1099: the choice of projects is offered once the machine let this person look into one of them (a viewer is told at once);
+    // asked once per machine in one dialogue, so going round the machines with `m` does not ask again.
+    let mut probed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // #1099: the home folder tried once in place of a project folder that cannot be listed.
+    let mut home_tried = false;
+    // What was shown before the last step: a step into a folder the hub refuses for the person's role goes back to it.
+    let mut before: Option<(Nav, At, agora_protocol::v1::DirectoryEntries)> = None;
+    let mut notice = String::new();
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    'browse: loop {
+        let node = online[at];
+        let name = if node.hostname.is_empty() {
+            node.node_id.clone()
+        } else {
+            node.hostname.clone()
+        };
+        let folder = match &target {
+            At::Projects => {
+                let first = nav.probe(snapshot, &node.node_id);
+                if let Some(first) = first.filter(|_| probed.insert(node.node_id.clone())) {
+                    match folders.list(&node.node_id, &first) {
+                        Err(e) if e.code == "client.sign" => return signing_failed(),
+                        Err(e) if e.code == "approval.signature_invalid" => {
+                            return Browsed::NotTrusted(node.node_id.clone())
+                        }
+                        Err(e) if e.code == "protocol.capability_missing" => {
+                            return Browsed::Said(say.text(key!("tui-folder-unsupported"), &[]))
+                        }
+                        // Not to be taken for a viewer's: a folder a project they were not granted was also reported in is refused
+                        // to a member too, so the choice stays, with the reason.
+                        Err(e) if refused_for_role(&e, "DirectoryList") => {
+                            *role = Role::Limited;
+                            nav = nav_for(&node.node_id, Role::Limited);
+                            notice = say.text(key!("tui-folder-role"), &[]);
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
+                }
+                nav.projects_listing()
+            }
+            At::Folder(path) => {
+                match folders.list(&node.node_id, path) {
+                    Ok(f) => {
+                        // #1099: a way up from a member's project folder: the hub no longer keeps them inside their projects.
+                        if nav.answered(&f) {
+                            *role = nav.role();
+                        }
+                        f
+                    }
+                    Err(e) if e.code == "client.sign" => return signing_failed(),
+                    Err(e) if e.code == "approval.signature_invalid" => {
+                        return Browsed::NotTrusted(node.node_id.clone())
+                    }
+                    Err(e) if e.code == "protocol.capability_missing" => {
+                        return Browsed::Said(say.text(key!("tui-folder-unsupported"), &[]))
+                    }
+                    // #1044: the hub does not let this person's role look into this folder.
+                    Err(e) if refused_for_role(&e, "DirectoryList") => {
+                        let roots = project_roots(snapshot, &node.node_id);
+                        if !nav.confined() && path.is_empty() && !roots.is_empty() {
+                            // Refused the home folder: a member, who may look in their projects.
+                            *role = Role::Limited;
+                            nav = Nav::projects(roots);
+                            target = nav.start();
+                            continue;
+                        }
+                        let Some((back, at_before, shown)) = before.take() else {
+                            return Browsed::Said(say.text(key!("tui-folder-role"), &[]));
+                        };
+                        // A folder of another project inside theirs, or a link out of it: they stay where they were, told why.
+                        nav = back;
+                        target = at_before;
+                        notice = say.text(key!("tui-folder-role"), &[]);
+                        shown
+                    }
+                    Err(e) => {
+                        // A folder that cannot be listed (gone, a secret one): back to where the picker opens, saying why.
+                        // Where this picker opens: the home folder for `Nav::machine`, so a home folder that fails ends here.
+                        let mut fresh = nav_for(&node.node_id, nav.role());
+                        let mut start = fresh.start();
+                        if start == target
+                            && nav.role() == Role::Unknown
+                            && !path.is_empty()
+                            && !home_tried
+                            && !says_nothing_of_the_folder(&e.code)
+                        {
+                            // #1099: with the role not known, the project folder itself cannot be listed (gone, a secret one): the
+                            // home folder, where the owner's picker always opened (a member is refused it once and goes on in their
+                            // projects). Once per dialogue, and not when the link or the machine failed, which no folder would help.
+                            home_tried = true;
+                            fresh = Nav::machine();
+                            start = fresh.start();
+                        }
+                        if start == target {
+                            return Browsed::Said(
+                                say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]),
+                            );
+                        }
+                        notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(e.code))]);
+                        nav = fresh;
+                        target = start;
+                        before = None;
+                        continue;
+                    }
+                }
+            }
+        };
+        let projects = target == At::Projects;
+        let mut pick = 0usize;
+        loop {
+            let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
+            let view = agora_tui::picker::Picker {
+                machine: &name,
+                folder: &folder,
+                selected: pick,
+                notice: &notice,
+                projects,
+                color,
+                cols,
+                rows,
+            };
+            ask.frame(agora_tui::picker::frame(&view, &text).as_bytes());
+            // A resized window draws the picker again for its size.
+            let k = match key_or_resize(ask.rx(), Duration::from_secs(120)) {
+                Some(Some(k)) => k,
+                Some(None) => continue,
+                None => return Browsed::Said(String::new()),
+            };
+            notice.clear();
+            let count = folder.entries.len();
+            match k {
+                b'j' if count > 0 => pick = (pick + 1) % count,
+                b'k' if count > 0 => pick = (pick + count - 1) % count,
+                b'\r' | b'\n' => {
+                    let back = nav.clone();
+                    let next = if projects {
+                        nav.open_project(pick)
+                    } else {
+                        folder.entries.get(pick).map(|e| nav.open(&folder, &e.name))
+                    };
+                    if let Some(next) = next {
+                        before = Some((back, std::mem::replace(&mut target, next), folder));
+                        continue 'browse;
+                    }
+                }
+                0x7f | 0x08 | b'h' if !projects => {
+                    let back = nav.clone();
+                    if let Some(next) = nav.up(&folder) {
+                        before = Some((back, std::mem::replace(&mut target, next), folder));
+                        continue 'browse;
+                    }
+                }
+                b'm' if online.len() > 1 => {
+                    at = (at + 1) % online.len();
+                    nav = nav_for(&online[at].node_id, *role);
+                    target = nav.start();
+                    before = None;
+                    continue 'browse;
+                }
+                b' ' | b'.' if !projects => {
+                    return Browsed::Chosen {
+                        node: node.node_id.clone(),
+                        path: folder.path.clone(),
+                    }
+                }
+                0x1b | b'q' | 3 => return Browsed::Said(String::new()),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Start an agent in a folder the user picks on a machine (ADR-0053): the machine's folders through `directory.list`, then the chosen
 /// one through `directory.inspect` and `agent.launch`, each signed by this terminal's key for exactly that folder (ADR-0052). Answers
-/// the line to show; empty when the user cancelled.
+/// the line to show; empty when the user cancelled. `role`: what this connection knows of the person's role (#1086, #1099); set here
+/// when the hub refuses a folder for the role.
 #[allow(clippy::too_many_lines)] // one dialogue: browse, choose, confirm, launch
 fn start_in_folder(
     say: &Say,
@@ -1275,6 +1644,7 @@ fn start_in_folder(
     selected: &str,
     ask: &mut dyn Asker,
     color: bool,
+    role: &mut agora_tui::picker::Role,
 ) -> String {
     let Some(device) = device() else {
         return say.text(
@@ -1285,100 +1655,22 @@ fn start_in_folder(
     let not_trusted = |device: &Device, node: &str| {
         not_trusted(say, device, node_binary(snapshot, node).as_deref())
     };
-    let online: Vec<&agora_protocol::v1::NodeSnapshot> =
-        snapshot.nodes.iter().filter(|n| n.online).collect();
-    if online.is_empty() {
-        return say.text(key!("tui-start-nowhere"), &[]);
-    }
-    // The selected agent's machine when it is online, else the first online one; `m` goes to the next.
-    let mut at = snapshot
-        .agents
-        .iter()
-        .find(|a| a.agent_id == selected)
-        .and_then(|a| online.iter().position(|n| n.node_id == a.node_id))
-        .unwrap_or(0);
-    let mut path = String::new();
-    let mut notice = String::new();
-    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
-    let chosen = 'browse: loop {
-        let node = online[at];
-        let name = if node.hostname.is_empty() {
-            node.node_id.clone()
-        } else {
-            node.hostname.clone()
-        };
-        let Some(auth) =
-            device.authorize(&node.node_id, "list", &path, "", "", false, false, now_ms())
-        else {
-            return say.text(
-                key!("tui-answer-failed"),
-                &[("code", Arg::Str("client.sign".into()))],
-            );
-        };
-        let folder = match session.list_folder(&node.node_id, &path, auth) {
-            Ok(f) => f,
-            Err(code) if code == "approval.signature_invalid" => {
-                return not_trusted(&device, &node.node_id)
-            }
-            Err(code) if code == "protocol.capability_missing" => {
-                return say.text(key!("tui-folder-unsupported"), &[])
-            }
-            Err(code) if !path.is_empty() => {
-                // A folder that cannot be listed (gone, a secret one): back to the home folder, saying why.
-                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]);
-                path.clear();
-                continue;
-            }
-            Err(code) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]),
-        };
-        let mut pick = 0usize;
-        loop {
-            let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
-            let view = agora_tui::picker::Picker {
-                machine: &name,
-                folder: &folder,
-                selected: pick,
-                notice: &notice,
-                color,
-                cols,
-                rows,
-            };
-            ask.frame(agora_tui::picker::frame(&view, &text).as_bytes());
-            // A resized window draws the picker again for its size.
-            let k = match key_or_resize(ask.rx(), Duration::from_secs(120)) {
-                Some(Some(k)) => k,
-                Some(None) => continue,
-                None => return String::new(),
-            };
-            notice.clear();
-            let count = folder.entries.len();
-            match k {
-                b'j' if count > 0 => pick = (pick + 1) % count,
-                b'k' if count > 0 => pick = (pick + count - 1) % count,
-                b'\r' | b'\n' => {
-                    if let Some(e) = folder.entries.get(pick) {
-                        path = agora_tui::picker::child(&folder.path, &e.name);
-                        continue 'browse;
-                    }
-                }
-                0x7f | 0x08 | b'h' => {
-                    if !folder.parent.is_empty() {
-                        path = folder.parent.clone();
-                        continue 'browse;
-                    }
-                }
-                b'm' if online.len() > 1 => {
-                    at = (at + 1) % online.len();
-                    path.clear();
-                    continue 'browse;
-                }
-                b' ' | b'.' => break 'browse (node.node_id.clone(), folder.path.clone()),
-                0x1b | b'q' | 3 => return String::new(),
-                _ => {}
-            }
-        }
+    let (node, folder) = match browse_folders(
+        say,
+        &mut SignedFolders {
+            session,
+            device: &device,
+        },
+        snapshot,
+        selected,
+        ask,
+        color,
+        role,
+    ) {
+        Browsed::Chosen { node, path } => (node, path),
+        Browsed::Said(line) => return line,
+        Browsed::NotTrusted(node) => return not_trusted(&device, &node),
     };
-    let (node, folder) = chosen;
     let Some(auth) = device.authorize(&node, "inspect", &folder, "", "", false, false, now_ms())
     else {
         return say.text(
@@ -1388,8 +1680,8 @@ fn start_in_folder(
     };
     let info = match session.inspect_folder(&node, &folder, auth) {
         Ok(i) => i,
-        Err(code) if code == "approval.signature_invalid" => return not_trusted(&device, &node),
-        Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+        Err(e) if e.code == "approval.signature_invalid" => return not_trusted(&device, &node),
+        Err(e) => return start_refusal(say, &e, "DirectoryInspect"),
     };
     // Which agent: the machine's installed kinds by number, as `s` asks.
     let machine = [("machine", Arg::Str(node.clone()))];
@@ -1408,6 +1700,7 @@ fn start_in_folder(
         &[plain(&info.path)],
         &kinds,
         missing.as_deref(),
+        window_area(),
         Duration::from_secs(60),
     );
     let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
@@ -1612,25 +1905,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     // dropped); without one (output piped) the plain list, as before.
     let mut console_state = if keys {
         match agora_tui::backend::Screen::enter() {
-            Ok(window) => Some(Console {
+            Ok(window) => Some(Console::new(
                 window,
-                app: App::default(),
-                parser: Parser::default(),
-                snapshot: None,
-                selected: String::new(),
-                notice: String::new(),
-                armed: None,
-                read_whole: std::collections::HashSet::new(),
-                shown_request: None,
-                stale: false,
-                not_sized: std::collections::HashSet::new(),
-                drafts: std::collections::HashMap::new(),
-                open_failed_notice: None,
-                notice_at: Instant::now(),
-                links: agora_tui::termio::LinkConfirm::default(),
-                note: Note::default(),
-                pair: agora_tui::pair::Book::default(),
-                colors: if color {
+                if color {
                     ColorMode::from_env(
                         None,
                         std::env::var("COLORTERM").ok().as_deref(),
@@ -1643,13 +1920,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 } else {
                     ColorMode::Mono
                 },
-                typing_refused: None,
-                typing_notice: String::new(),
-                typing_allowed: None,
-                asked: false,
-                typing_taken: std::collections::HashMap::new(),
-                give_lacking: agora_tui::board::Lacking::default(),
-            }),
+            )),
             Err(_) => None,
         }
     } else {
@@ -1752,22 +2023,31 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         };
         first = false;
         if let Some(c) = console_state.as_mut() {
-            // Connected: "Connecting…" or "lost, trying again" no longer holds.
-            if c.notice == say.text(key!("tui-connecting"), &hub_arg)
-                || c.notice == say.text(key!("tui-lost"), &hub_arg)
-            {
-                c.notice.clear();
-                // The link was lost (a routine refresh keeps the notice): what machines said about taking tasks may be old now.
-                c.give_lacking.clear();
-            }
-            // A new connection: the cards held from the last one are stale until the hub sends the ones waiting now.
-            c.pair.reset();
+            connected_again(
+                say,
+                &hub_arg,
+                &mut c.notice,
+                &mut c.give_lacking,
+                &mut c.pair,
+                &mut c.role,
+            );
             match console(say, &mut session, &rx, &hub_arg, color, c) {
                 Next::Quit => return ExitCode::SUCCESS,
                 Next::Reconnect => continue,
             }
         }
         let mut dirty_since: Option<Instant> = None;
+        // #1086, #1099: the plain list does not ask the hub for the role; it is learnt from a folder the hub refuses for it. ADR-0106: a
+        // hub that names the role in its `Welcome` says it at once.
+        let person = session.person_role();
+        let mut role = match person {
+            agora_protocol::v1::PersonRole::Owner => agora_tui::picker::Role::Owner,
+            agora_protocol::v1::PersonRole::Member | agora_protocol::v1::PersonRole::Viewer => {
+                agora_tui::picker::Role::Limited
+            }
+            agora_protocol::v1::PersonRole::Unspecified => agora_tui::picker::Role::Unknown,
+        };
+        let viewer = person == agora_protocol::v1::PersonRole::Viewer;
         // ADR-0057: the `agent.start` requests read whole in the reader, which y may then allow even where the panel cannot show them.
         let mut read_whole: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_refresh = Instant::now();
@@ -1791,6 +2071,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         cols,
                         rows,
                         now_ms: now_ms(),
+                        viewer,
                     };
                     let _ = out.write_all(frame(&view, &text).as_bytes());
                 } else {
@@ -1881,8 +2162,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 } else {
                     k
                 };
-                match k {
-                    b'\t' | b'j' | b'k' | b'K' if keys => {
+                match plain_key(viewer, keys, k) {
+                    PlainKey::Move => {
                         if let Some(s) = &snapshot {
                             let order = tree_order(s);
                             let at = order.iter().position(|a| *a == selected);
@@ -1898,8 +2179,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             last_draw = Instant::now();
                         }
                     }
-                    3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
-                    b'y' | b'n' => {
+                    PlainKey::Quit => return ExitCode::SUCCESS,
+                    // ADR-0106: a viewer's list watches; nothing that changes something is sent (the hub would refuse it, written down).
+                    PlainKey::Watching => {
+                        notice = say.text(key!("tui-viewer-watching"), &[]);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    }
+                    PlainKey::Answer => {
                         if let Some(s) = &snapshot {
                             // A start request is allowed only once all of it was in view: in the panel, or in the reader.
                             if k == b'y'
@@ -1940,7 +2226,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'f' => {
+                    PlainKey::Folder => {
                         if let Some(sn) = &snapshot {
                             // The picker reads keys itself; the panel's terminal is let go meanwhile.
                             if let Some(p) = preview.take() {
@@ -1953,16 +2239,17 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 &selected,
                                 &mut Plain::new(&rx),
                                 color,
+                                &mut role,
                             );
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'a' => {
+                    PlainKey::Ask => {
                         notice = ask_approval(say, &mut session);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b'v' => {
+                    PlainKey::Devices => {
                         if let Some(p) = preview.take() {
                             p.close(&mut session);
                         }
@@ -1975,7 +2262,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         dirty_since.get_or_insert_with(Instant::now);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b's' => {
+                    PlainKey::Start => {
                         if let Some(sn) = &snapshot {
                             notice = start(say, &mut session, sn, &selected, &mut Plain::new(&rx));
                             dirty_since.get_or_insert_with(Instant::now);
@@ -1983,7 +2270,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         }
                     }
                     // ADR-0060: an agent that stopped with its machine comes back (u) or starts again in its folder (U).
-                    b'u' | b'U' => {
+                    PlainKey::Resume => {
                         if let Some(sn) = &snapshot {
                             let local = selected
                                 .split_once('/')
@@ -2012,7 +2299,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'd' => {
+                    PlainKey::Forget => {
                         // A closed agent leaves every client's list; a running one is stopped first (x).
                         let running = snapshot.as_ref().is_some_and(|s| {
                             s.agents.iter().any(|a| a.agent_id == selected && a.running)
@@ -2027,7 +2314,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'x' => {
+                    PlainKey::Stop => {
                         if !selected.is_empty() {
                             let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
                             let scope = format!("agent:{local}");
@@ -2064,7 +2351,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    b'\r' | b'\n'
+                    PlainKey::Open
                         if snapshot
                             .as_ref()
                             .and_then(|s| {
@@ -2090,14 +2377,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 agora_platform::terminal_size().unwrap_or((100, 30)),
                             )
                         }) {
-                            if read_start(&a, &mut Plain::new(&rx), &text) {
+                            if read_start(&a, &mut Plain::new(&rx), &text, viewer) {
                                 read_whole.insert(a.approval_id.clone());
                             }
                         }
                         notice = String::new();
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
-                    b'\r' | b'\n' => {
+                    PlainKey::Open => {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
                             // The full-screen view reads the same terminal: stop watching it here first.
                             if let Some(p) = preview.take() {
@@ -2128,7 +2415,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
-                    _ => {}
+                    PlainKey::Nothing => {}
                 }
             }
             if link_lost {
@@ -2162,6 +2449,97 @@ fn refresh_due(since_dirty: Duration, typing_unanswered: usize) -> bool {
 
 /// How much longer a refresh waits for typing replies.
 const REFRESH_PATIENCE: Duration = Duration::from_secs(3);
+
+/// What a new connection to the hub changes in the console's memory. Every one drops the pairing cards held from the last, which are
+/// stale until the hub sends the ones waiting now. After a lost link ("Connecting…" or "lost, trying again" still shown; a routine
+/// refresh keeps its own notice) that notice ends, what machines said about taking tasks may be old, and the role is asked again:
+/// the hub ends a connection when the person's role or grants change (#1099).
+fn connected_again(
+    say: &Say,
+    hub_arg: &[(&str, Arg)],
+    notice: &mut String,
+    give_lacking: &mut agora_tui::board::Lacking,
+    pair: &mut agora_tui::pair::Book,
+    role: &mut agora_tui::picker::Role,
+) {
+    if *notice == say.text(key!("tui-connecting"), hub_arg)
+        || *notice == say.text(key!("tui-lost"), hub_arg)
+    {
+        notice.clear();
+        give_lacking.clear();
+        pair.lost();
+        *role = agora_tui::picker::Role::Unknown;
+    }
+    pair.reset();
+}
+
+/// ADR-0106: what a new connection says of the person's role, kept in the console: the pairing answer and the picker's role (asking
+/// `PairStatus` only when [`agora_tui::role::learn`] says so), and whether the window only watches (a viewer).
+fn connected_role(session: &mut Session, c: &mut Console) {
+    if let Some((owner, role)) = agora_tui::role::learn_on(session, c.pair.owner, c.role) {
+        if owner != c.pair.owner {
+            c.pair.set_owner(owner);
+        }
+        c.role = role;
+    }
+    c.app.viewer = session.person_role() == agora_protocol::v1::PersonRole::Viewer;
+}
+
+/// What a key typed in the plain list (no console) does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlainKey {
+    /// Tab, j, k, arrows: the next or previous agent (only with a keyboard).
+    Move,
+    /// q or Ctrl-C (a plain byte in raw mode).
+    Quit,
+    /// ADR-0106: a key that changes something, in a viewer's list: it only says why not.
+    Watching,
+    /// y / n: answers the selected agent's request.
+    Answer,
+    /// f: starts an agent in a folder.
+    Folder,
+    /// a: asks another device to approve this one.
+    Ask,
+    /// v: approves another device.
+    Devices,
+    /// s: starts an agent.
+    Start,
+    /// u / U: resumes, or starts again.
+    Resume,
+    /// d: removes a closed agent.
+    Forget,
+    /// x: stops the agent.
+    Stop,
+    /// Enter: reads a start request whole, or opens the agent.
+    Open,
+    Nothing,
+}
+
+/// The plain list's keys, decided before anything is done: a viewer's (ADR-0106) that would change something (the hub would refuse
+/// it and write the refusal down) only says why not; moving, quitting and opening stay theirs.
+fn plain_key(viewer: bool, keys: bool, k: u8) -> PlainKey {
+    match k {
+        b'\t' | b'j' | b'k' | b'K' if keys => PlainKey::Move,
+        3 | b'q' => PlainKey::Quit,
+        _ if viewer && agora_tui::role::changes(char::from(k)) => PlainKey::Watching,
+        b'y' | b'n' => PlainKey::Answer,
+        b'f' => PlainKey::Folder,
+        b'a' => PlainKey::Ask,
+        b'v' => PlainKey::Devices,
+        b's' => PlainKey::Start,
+        b'u' | b'U' => PlainKey::Resume,
+        b'd' => PlainKey::Forget,
+        b'x' => PlainKey::Stop,
+        b'\r' | b'\n' => PlainKey::Open,
+        _ => PlainKey::Nothing,
+    }
+}
+
+/// ADR-0106: the line a viewer's window shows for a key that changes something (it sends nothing: the hub would refuse it and write the
+/// refusal down); `None` for any other key or person.
+fn watching_notice(say: &Say, viewer: bool, k: char) -> Option<String> {
+    (viewer && agora_tui::role::changes(k)).then(|| say.text(key!("tui-viewer-watching"), &[]))
+}
 
 /// What the console does after its loop ends.
 enum Next {
@@ -2209,6 +2587,9 @@ struct Console {
     note: Note,
     /// ADR-0065: the machines that ask to join, for an owner's session. Memory only.
     pair: agora_tui::pair::Book,
+    /// #1086, #1099: what the hub said of this person's role on this connection (`PairStatus`, or a folder refused for the role), for
+    /// the folder picker. Asked again after a lost link, since the hub ends a connection when the role changes.
+    role: agora_tui::picker::Role,
     colors: ColorMode,
     /// ADR-0041: typing into the agent in front was refused until its owner allows it; `g` (from the list: Ctrl-] then g) asks.
     typing_refused: Option<TypingRefused>,
@@ -2227,6 +2608,39 @@ struct Console {
     /// agents are not offered again until the machine goes offline or comes back with another build, or the link to the hub is lost
     /// (as the web window does, #885).
     give_lacking: agora_tui::board::Lacking,
+}
+
+impl Console {
+    /// A console with nothing held yet, drawn in `window`.
+    fn new(window: agora_tui::backend::Window, colors: ColorMode) -> Self {
+        Console {
+            window,
+            app: App::default(),
+            parser: Parser::default(),
+            snapshot: None,
+            selected: String::new(),
+            notice: String::new(),
+            armed: None,
+            read_whole: std::collections::HashSet::new(),
+            shown_request: None,
+            stale: false,
+            not_sized: std::collections::HashSet::new(),
+            drafts: std::collections::HashMap::new(),
+            open_failed_notice: None,
+            notice_at: Instant::now(),
+            links: agora_tui::termio::LinkConfirm::default(),
+            note: Note::default(),
+            pair: agora_tui::pair::Book::default(),
+            role: agora_tui::picker::Role::Unknown,
+            colors,
+            typing_refused: None,
+            typing_notice: String::new(),
+            typing_allowed: None,
+            asked: false,
+            typing_taken: std::collections::HashMap::new(),
+            give_lacking: agora_tui::board::Lacking::default(),
+        }
+    }
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2351,12 +2765,10 @@ fn console(
         &mut c.typing_allowed,
         &mut c.typing_taken,
     );
-    // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
-    if c.pair.owner == agora_tui::pair::Owner::Unknown {
-        if let Some(owner) = pair_owner(session) {
-            c.pair.set_owner(owner);
-        }
-    }
+    // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only). ADR-0106: a hub
+    // that says the role in its `Welcome` is asked only for the owner, whose pairing may be switched off; a member's or viewer's
+    // console asks nothing, so it leaves no refused row in the owner's Activity. An older hub is asked as before (#1099).
+    connected_role(session, c);
     let mut pair_seen = c.pair.shown().len();
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
@@ -3053,6 +3465,62 @@ fn read_keys(
     true
 }
 
+/// A chat agent's conversation as it fits its pane (`pane`): what it runs with first, then its lines, a note, a request that waits and
+/// the line being typed. A viewer's (ADR-0106) has no line to type on, and its request shows without the keys that answer it.
+fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<String> {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
+    let head = p
+        .snapshot
+        .as_ref()
+        .and_then(|a| session_line(a, &text))
+        .map(|l| plain(&l));
+    let room = usize::from(pane.height)
+        .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
+    // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
+    let watching = c.app.viewer;
+    let waiting: Vec<String> = c
+        .snapshot
+        .as_ref()
+        .and_then(|s| waiting_for(s, &p.agent))
+        .map(|a| chat_request_block(say, a, usize::from(pane.width), watching).0)
+        .unwrap_or_default();
+    let room = room.saturating_sub(waiting.len());
+    // The agent speaks under its name (as in the tree), not its id.
+    let speaker = p.snapshot.as_ref().map_or_else(
+        || local.to_string(),
+        |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
+    );
+    let mut lines = render_chat(
+        &p.entries,
+        &speaker,
+        &String::from_utf8_lossy(&p.typed),
+        (usize::from(pane.width), room.max(2)),
+        false,
+        &text,
+        watching,
+    );
+    // What goes above the line being typed; a viewer's chat has none (ADR-0106).
+    let input = usize::from(!watching);
+    if !p.note.is_empty() {
+        let at = lines.len().saturating_sub(input);
+        let width = usize::from(pane.width).max(12);
+        lines.splice(
+            at..at,
+            agora_tui::render::wrap_row(&plain(&p.note), width, width),
+        );
+    }
+    // The request goes above the line being typed, which stays in view (the draft is kept while it waits).
+    if !waiting.is_empty() {
+        let at = lines.len().saturating_sub(input);
+        lines.splice(at..at, waiting);
+    }
+    if let Some(h) = head {
+        lines.insert(0, h);
+    }
+    lines
+}
+
 fn draw_console(
     say: &Say,
     c: &mut Console,
@@ -3106,54 +3574,7 @@ fn draw_console(
     let pane = c.app.areas(area).terminal;
     let conversation = chat
         .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
-        .map(|p| {
-            let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
-            let head = p
-                .snapshot
-                .as_ref()
-                .and_then(|a| session_line(a, &text))
-                .map(|l| plain(&l));
-            let room = usize::from(pane.height)
-                .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
-            // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
-            let waiting: Vec<String> = c
-                .snapshot
-                .as_ref()
-                .and_then(|s| waiting_for(s, &p.agent))
-                .map(|a| chat_request_block(say, a, usize::from(pane.width)).0)
-                .unwrap_or_default();
-            let room = room.saturating_sub(waiting.len());
-            // The agent speaks under its name (as in the tree), not its id.
-            let speaker = p.snapshot.as_ref().map_or_else(
-                || local.to_string(),
-                |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
-            );
-            let mut lines = render_chat(
-                &p.entries,
-                &speaker,
-                &String::from_utf8_lossy(&p.typed),
-                (usize::from(pane.width), room.max(2)),
-                false,
-                &text,
-            );
-            if !p.note.is_empty() {
-                let at = lines.len().saturating_sub(1);
-                let width = usize::from(pane.width).max(12);
-                lines.splice(
-                    at..at,
-                    agora_tui::render::wrap_row(&plain(&p.note), width, width),
-                );
-            }
-            // The request goes above the line being typed, which stays in view (the draft is kept while it waits).
-            if !waiting.is_empty() {
-                let at = lines.len().saturating_sub(1);
-                lines.splice(at..at, waiting);
-            }
-            if let Some(h) = head {
-                lines.insert(0, h);
-            }
-            lines
-        });
+        .map(|p| conversation_lines(say, c, p, pane));
     // A notice too long for the footer, whole in a box while it is new.
     let note: Option<Vec<String>> =
         (c.note.open && notice.chars().count() > usize::from(area.width) * 2 / 3).then(|| {
@@ -3230,10 +3651,12 @@ fn waiting_for<'a>(
 
 /// The block a chat agent's request takes in place of its input line: what it asks (at most four rows), ADR-0101's always lines (the
 /// agent's own words and what "always" means) and the keys that answer. The flag says whether the request's own text is there whole.
+/// `watching` (a viewer's window, ADR-0106): the request without the keys that answer it (the hub would refuse the answer).
 fn chat_request_block(
     say: &Say,
     a: &agora_protocol::v1::ApprovalSnapshot,
     width: usize,
+    watching: bool,
 ) -> (Vec<String>, bool) {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let width = width.max(12);
@@ -3244,6 +3667,9 @@ fn chat_request_block(
     block.extend(rows.into_iter().take(CHAT_REQUEST_ROWS));
     for l in agora_tui::render::always_lines(a, &text) {
         block.extend(agora_tui::render::wrap_row(&l, width, width));
+    }
+    if watching {
+        return (block, whole);
     }
     block.extend(agora_tui::render::wrap_row(
         &say.text(
@@ -3275,7 +3701,7 @@ fn chat_shows_request(
     head: bool,
     note_rows: usize,
 ) -> bool {
-    let (block, whole) = chat_request_block(say, a, usize::from(width));
+    let (block, whole) = chat_request_block(say, a, usize::from(width), false);
     whole && usize::from(head) + note_rows + block.len() + 2 <= usize::from(height)
 }
 
@@ -3355,6 +3781,12 @@ fn chat_input(
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x1b) {
+        return;
+    }
+    // ADR-0106: a viewer's chat tab has no line to type on; nothing typed is kept or sent (the hub would refuse a request, a mode or a
+    // model switch, and write the refusal down). The footer says why, as for the list's keys.
+    if c.app.viewer {
+        c.notice = say.text(key!("tui-viewer-watching"), &[]);
         return;
     }
     // A paste is one chunk of several bytes: its line breaks are spaces, it is sent with Enter like typed text.
@@ -3776,7 +4208,17 @@ fn inspector_details(
     text: agora_tui::render::Text<'_>,
 ) -> agora_tui::split::Details {
     let inspector = c.app.areas(area).inspector;
-    if c.app.focus == agora_tui::app::Focus::Terminal {
+    // ADR-0106: a viewer's inspector shows the request without the keys that answer it.
+    if c.app.viewer {
+        agora_tui::split::viewer_details(
+            s,
+            &c.selected,
+            inspector.width,
+            inspector.height,
+            text,
+            c.app.focus == agora_tui::app::Focus::Terminal,
+        )
+    } else if c.app.focus == agora_tui::app::Focus::Terminal {
         agora_tui::split::app_details_in_tab(
             s,
             &c.selected,
@@ -3853,6 +4295,11 @@ fn answer_command(
     target: &Target,
     reply: Answer,
 ) -> bool {
+    // ADR-0106: a viewer answers nothing (y / n from the list, Alt+Y / Alt+N in a tab): the hub would refuse it and write it down.
+    if c.app.viewer {
+        c.notice = say.text(key!("tui-viewer-watching"), &[]);
+        return false;
+    }
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let Some(s) = c.snapshot.clone() else {
         return false;
@@ -3888,7 +4335,7 @@ fn answer_command(
         }
         if reply == Answer::Allow && !c.read_whole.contains(&id) {
             let read = over_console(say, c, session, None, rx, |_, ask| {
-                read_start(&a, ask, &text)
+                read_start(&a, ask, &text, false)
             });
             if read {
                 c.read_whole.insert(id);
@@ -3970,6 +4417,11 @@ fn command(
         return false;
     };
     let selected = c.selected.clone();
+    // ADR-0106: a viewer's window watches. The hub would refuse each of these and write the refusal down; nothing is sent.
+    if let Some(line) = watching_notice(say, c.app.viewer, k) {
+        c.notice = line;
+        return false;
+    }
     match k {
         'y' | 'n' | ALLOW_ALWAYS => {
             let reply = match k {
@@ -3999,9 +4451,11 @@ fn command(
             true
         }
         'f' => {
+            let mut role = c.role;
             c.notice = over_console(say, c, session, None, rx, |session, ask| {
-                start_in_folder(say, session, &s, &selected, ask, color)
+                start_in_folder(say, session, &s, &selected, ask, color, &mut role)
             });
+            c.role = role;
             true
         }
         's' => {
@@ -4280,6 +4734,8 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
     let mut on: Option<String> = None;
     let mut notice = String::new();
     let mut view = ViewWait::new(say, ask);
+    // ADR-0106: a viewer's board is for reading; giving a task is refused to them (and written down) at the hub.
+    let watching = ask.c.app.viewer;
     loop {
         let Some(b) = ask
             .c
@@ -4298,7 +4754,7 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
         on = cards.get(at).map(|(_, card)| card.task_id.clone());
         let banner = view.banner.clone();
         let _ = ask.c.window.draw(|f| {
-            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text);
+            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text, watching);
         });
         let wake = view.wait(say, ask, session);
         if matches!(wake, Wake::Key(_)) {
@@ -4312,6 +4768,9 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
             Wake::Key(b'k') => {
                 at = at.saturating_sub(1);
                 on = None;
+            }
+            Wake::Key(b'\r' | b'\n' | b'g') if watching => {
+                notice = say.text(key!("tui-viewer-watching"), &[]);
             }
             Wake::Key(b'\r' | b'\n' | b'g') => match cards.get(at) {
                 Some((agora_tui::board::Column::Backlog, card)) => {
@@ -4668,9 +5127,11 @@ fn clean_up_old(
     say.text(key!("tui-cleanup-done"), &[("count", Arg::Num(forgotten))])
 }
 
-/// Asks which of a machine's installed `kinds` to start (`s`, `f`), nine to a page numbered 1 to 9: one key picks, `n` turns to the
-/// next page (after the last, the first again) when there is more than one, and the question says so; any other key, or none in
-/// `wait`, cancels. `under_title` goes below the question (the folder `f` starts in). The index into `kinds`, or `None`.
+/// Asks which of a machine's installed `kinds` to start (`s`, `f`), up to nine to a page numbered from 1 (fewer when a page of nine
+/// would not fit a window of `area`, #1150): one key picks, `n` turns to the next page (after the last, the first again) when there is
+/// more than one, and the question says so; any other key, or none in `wait`, cancels, so no kind is ever chosen for the person
+/// (#1134). `under_title` goes below the question (the folder `f` starts in). The index into `kinds`, or `None`.
+#[allow(clippy::too_many_arguments)]
 fn pick_kind(
     say: &Say,
     ask: &mut dyn Asker,
@@ -4678,65 +5139,138 @@ fn pick_kind(
     under_title: &[String],
     kinds: &[(String, String)],
     missing: Option<&str>,
+    area: Area,
     wait: Duration,
 ) -> Option<usize> {
-    const PAGE: usize = 9;
-    let pages = kinds.len().div_ceil(PAGE);
+    // Sized once for the window the question opens in: a window resized meanwhile redraws the box, but keeps the page size, so the
+    // numbers already on the screen never change under the person's finger (a smaller window can cut the page again, as before).
+    let per = kind_page(say, machine, under_title, kinds, missing, area);
+    let pages = kinds.len().div_ceil(per);
     let mut page = 0;
     loop {
-        let machine = ("machine", Arg::Str(machine.to_string()));
-        let title = if pages > 1 {
-            say.text(
-                key!("tui-start-pick-page"),
-                &[
-                    machine,
-                    ("page", Arg::Num(page as i64 + 1)),
-                    ("pages", Arg::Num(pages as i64)),
-                ],
-            )
-        } else {
-            say.text(key!("tui-start-pick"), &[machine])
-        };
-        let shown = &kinds[(page * PAGE).min(kinds.len())..((page + 1) * PAGE).min(kinds.len())];
-        let mut menu = vec![title];
-        menu.extend_from_slice(under_title);
-        menu.push(String::new());
-        for (i, (_, name)) in shown.iter().enumerate() {
-            menu.push(say.text(
-                key!("tui-start-item"),
-                &[
-                    ("n", Arg::Num(i as i64 + 1)),
-                    ("name", Arg::Str(plain(name))),
-                ],
-            ));
-        }
-        if let Some(m) = missing {
-            menu.push(String::new());
-            menu.push(m.to_string());
-        }
+        let (menu, shown) = kind_menu(say, machine, under_title, kinds, missing, per, page);
         match ask.key(&menu, wait)? {
             b'n' if pages > 1 => page = (page + 1) % pages,
             k @ b'1'..=b'9' => {
                 let i = usize::from(k - b'1');
-                return (i < shown.len()).then_some(page * PAGE + i);
+                return (i < shown).then_some(page * per + i);
             }
             _ => return None,
         }
     }
 }
 
-/// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
-/// find their program in its `PATH`. Each is named with the program the machine looked for (ADR-0069), when the machine says it.
+/// How many kinds one page of [`pick_kind`] numbers at most.
+const KIND_PAGE: usize = 9;
+
+/// How many kinds a page of [`pick_kind`] numbers in a window of `area`: the most, up to [`KIND_PAGE`], for which every page's box
+/// shows all of its lines (#1150: before, a page taller than the window was cut at its bottom, the line naming the missing agents
+/// first, then the last kinds). One when even that does not fit. Pure.
+fn kind_page(
+    say: &Say,
+    machine: &str,
+    under_title: &[String],
+    kinds: &[(String, String)],
+    missing: Option<&str>,
+    area: Area,
+) -> usize {
+    (1..=KIND_PAGE)
+        .rev()
+        .find(|&per| {
+            (0..kinds.len().div_ceil(per).max(1)).all(|page| {
+                let (menu, _) = kind_menu(say, machine, under_title, kinds, missing, per, page);
+                agora_tui::app::dialog_fits(area, &menu)
+            })
+        })
+        .unwrap_or(1)
+}
+
+/// The lines of one page of [`pick_kind`], and how many kinds it numbers. `kinds` come as [`split_kinds`] orders them: the ACP
+/// registry's (untested in Agora, ADR-0092) after the hand-made ones, so an "Untested" heading stands before the first of them on a
+/// page; it takes no number. Pure: it reads nothing and draws nothing.
+fn kind_menu(
+    say: &Say,
+    machine: &str,
+    under_title: &[String],
+    kinds: &[(String, String)],
+    missing: Option<&str>,
+    per: usize,
+    page: usize,
+) -> (Vec<String>, usize) {
+    let per = per.clamp(1, KIND_PAGE);
+    let pages = kinds.len().div_ceil(per);
+    let machine = ("machine", Arg::Str(machine.to_string()));
+    let title = if pages > 1 {
+        say.text(
+            key!("tui-start-pick-page"),
+            &[
+                machine,
+                ("page", Arg::Num(page as i64 + 1)),
+                ("pages", Arg::Num(pages as i64)),
+            ],
+        )
+    } else {
+        say.text(key!("tui-start-pick"), &[machine])
+    };
+    let from = (page * per).min(kinds.len());
+    let shown = &kinds[from..((page + 1) * per).min(kinds.len())];
+    let mut menu = vec![title];
+    menu.extend_from_slice(under_title);
+    menu.push(String::new());
+    let mut marked = false;
+    for (i, (kind, name)) in shown.iter().enumerate() {
+        if !marked && agora_tui::client::is_registry_kind(kind) {
+            marked = true;
+            if i > 0 {
+                menu.push(String::new());
+            }
+            menu.push(say.text(key!("tui-start-group-untested"), &[]));
+        }
+        menu.push(say.text(
+            key!("tui-start-item"),
+            &[
+                ("n", Arg::Num(i as i64 + 1)),
+                ("name", Arg::Str(plain(name))),
+            ],
+        ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m.to_string());
+    }
+    (menu, shown.len())
+}
+
+/// #1133: whether the machine starts `kind` only on a signed start: an ACP registry kind (`registry-*`) whose program is a package
+/// runner (the node's own rule, `agora_node::manifests::needs_signed_start`, seen from what the machine reports).
+fn needs_signed_start(kind: &str, program: &str) -> bool {
+    let stem = program
+        .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .to_string();
+    agora_tui::client::is_registry_kind(kind)
+        && ["npx", "uvx", "pnpx", "bunx", "pipx"].contains(&stem.as_str())
+}
+
+/// A machine's agents split into the ones it can start (numbered in the menu: the hand-made ones, then the ACP registry's, untested
+/// in Agora, each in the machine's order, #1134) and one line naming the hand-made ones whose program the machine cannot find in its
+/// `PATH`, each with the program it looked for (ADR-0069) when the machine says it. A registry kind that is not installed is left out
+/// (the window's Settings → Agents lists them under "Add an agent").
 fn split_kinds(
     say: &Say,
     all: Vec<agora_tui::client::Kind>,
 ) -> (Vec<(String, String)>, Option<String>) {
-    let mut installed = Vec::new();
+    let groups = agora_tui::client::start_kinds(all);
+    let installed = groups
+        .installed
+        .into_iter()
+        .chain(groups.untested)
+        .map(|k| (k.kind, k.name))
+        .collect();
     let mut missing = Vec::new();
-    for k in all {
-        if k.installed {
-            installed.push((k.kind, k.name));
-        } else if k.program.is_empty() {
+    for k in groups.missing {
+        if k.program.is_empty() {
             missing.push(plain(&k.name));
         } else {
             missing.push(say.text(
@@ -5569,6 +6103,7 @@ mod adr0069_tests {
 mod skipping_start_tests {
     use super::*;
     use agora_i18n::Catalog;
+    use agora_tui::split::start_card_lines;
 
     /// Answers each question with the next key, and keeps what it was shown.
     struct Script {
@@ -5702,6 +6237,7 @@ mod forget_tests {
     use super::*;
     use agora_i18n::Catalog;
     use agora_protocol::error::{Error, ErrorCode};
+    use agora_tui::split::start_card_lines;
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -5738,6 +6274,7 @@ mod forget_tests {
             cols: 100,
             rows: 10,
             now_ms: 0,
+            viewer: false,
         };
         let frame = frame(&view, &text);
         assert!(
@@ -5967,6 +6504,68 @@ mod forget_tests {
             .with("parent_agent_id", "agent-3")
             .to_info();
         assert!(resume_notice(&en, &parent).contains("Resume that agent first"));
+    }
+
+    #[test]
+    fn a_start_or_resume_the_hub_refused_for_the_persons_role_says_the_role_not_a_device() {
+        // #1044: the hub refuses a viewer's (or a member's outside their projects) command naming the command's schema name; a machine
+        // that limits this device to other projects names its own action.
+        let refused = |action: &str| {
+            Error::new(ErrorCode::AuthForbidden)
+                .with("action", action)
+                .to_info()
+        };
+        for say in [Say(Catalog::english()), Say(Catalog::turkish())] {
+            let role = say.text(key!("tui-start-role"), &[]);
+            assert_eq!(
+                start_refusal(&say, &refused("AgentStart"), "AgentStart"),
+                role
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("DirectoryInspect"), "DirectoryInspect"),
+                role
+            );
+            let code = say.text(
+                key!("tui-start-failed"),
+                &[("code", Arg::Str("auth.forbidden".into()))],
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("directory"), "DirectoryInspect"),
+                code
+            );
+            assert_eq!(
+                start_refusal(&say, &refused("AgentStop"), "AgentStart"),
+                code
+            );
+            assert_eq!(
+                resume_notice(&say, &refused("AgentResume")),
+                say.text(key!("tui-resume-role"), &[])
+            );
+            assert_ne!(
+                resume_notice(&say, &refused("directory")),
+                say.text(key!("tui-resume-role"), &[])
+            );
+            // The folder picker's `directory.list` is the first command a folder start sends.
+            assert!(say.0.render("tui-folder-role", &[]).is_some());
+        }
+        assert!(refused_for_role(&refused("DirectoryList"), "DirectoryList"));
+        assert!(!refused_for_role(&refused("directory"), "DirectoryList"));
+        assert!(!refused_for_role(
+            &Error::new(ErrorCode::NodeOffline)
+                .with("action", "DirectoryList")
+                .to_info(),
+            "DirectoryList"
+        ));
+        let en = Say(Catalog::english());
+        for line in [
+            start_refusal(&en, &refused("AgentStart"), "AgentStart"),
+            resume_notice(&en, &refused("AgentResume")),
+        ] {
+            assert!(
+                line.starts_with("Your role") && !line.contains("device"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -6531,6 +7130,7 @@ mod start_pick_tests {
             &[],
             kinds,
             None,
+            Area::new(0, 0, 120, 40),
             Duration::from_millis(50),
         );
         (got, ask.shown)
@@ -6837,13 +7437,30 @@ mod tab_answer_tests {
         );
     }
 
+    /// ADR-0106 (#1140): a viewer's chat tab shows what the agent asks, without the keys that answer it (the hub would refuse them).
+    #[test]
+    fn a_viewers_chat_shows_a_request_without_the_keys_that_answer_it() {
+        let say = Say(Catalog::english());
+        let a = ask(2);
+        let (member, _) = chat_request_block(&say, &a, 200, false);
+        let (viewer, whole) = chat_request_block(&say, &a, 200, true);
+        assert!(whole);
+        assert!(member.iter().any(|l| l.contains("Alt+N")), "{member:?}");
+        assert!(viewer.iter().all(|l| !l.contains("Alt+")), "{viewer:?}");
+        assert_eq!(
+            viewer[..],
+            member[..viewer.len()],
+            "the same request, keys left out"
+        );
+    }
+
     /// Codex's re-review: Alt+A in a chat tab counts the request as read only when all of its block, the duration warning included,
     /// fits the pane as drawn; otherwise the box opens (and nothing is signed without a key there).
     #[test]
     fn a_chat_shows_an_always_request_only_when_all_of_it_fits() {
         let say = Say(Catalog::english());
         let a = ask(2);
-        let (block, whole) = chat_request_block(&say, &a, 40);
+        let (block, whole) = chat_request_block(&say, &a, 40, false);
         assert!(whole);
         assert!(block.iter().any(|l| l.contains("possibly")), "{block:#?}");
         let need = block.len() + 2;
@@ -6882,7 +7499,7 @@ mod tab_answer_tests {
         // A request longer than its four rows is cut in the pane: never in view there, whatever the height.
         let mut long = ask(2);
         long.detail = "x".repeat(400);
-        assert!(!chat_request_block(&say, &long, 40).1);
+        assert!(!chat_request_block(&say, &long, 40, false).1);
         assert!(!chat_shows_request(&say, &long, (40, 200), false, 0));
     }
 
@@ -6928,5 +7545,971 @@ mod tab_answer_tests {
             !all.contains("In its own words") && !all.contains("possibly longer"),
             "{all}"
         );
+    }
+}
+
+/// #1099: the folder picker's dialogue against a machine that answers as the hub would for a member, a viewer or the owner, and what a
+/// new connection does to the role the console holds.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod folder_role_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+    use agora_protocol::v1::{CheckoutSnapshot, DirectoryEntries, NodeSnapshot, ParamValue};
+    use agora_tui::picker::Role;
+    use std::collections::HashMap;
+
+    /// Answers each folder as written here (anything else: gone), and keeps what it was asked.
+    #[derive(Default)]
+    struct Machine {
+        answers: HashMap<(String, String), Result<DirectoryEntries, ErrorInfo>>,
+        asked: Vec<(String, String)>,
+        /// Every request fails with this code (the link or the machine is gone).
+        dead: Option<String>,
+    }
+
+    impl Machine {
+        fn folder(mut self, node: &str, path: &str, parent: &str) -> Self {
+            let listing = DirectoryEntries {
+                path: if path.is_empty() { "/home/me" } else { path }.into(),
+                parent: parent.into(),
+                ..DirectoryEntries::default()
+            };
+            self.answers.insert((node.into(), path.into()), Ok(listing));
+            self
+        }
+        fn refused(mut self, node: &str, path: &str) -> Self {
+            let mut e = ErrorInfo {
+                code: "auth.forbidden".into(),
+                ..ErrorInfo::default()
+            };
+            e.params.insert(
+                "action".into(),
+                ParamValue {
+                    value: Some(Value::Str("DirectoryList".into())),
+                },
+            );
+            self.answers.insert((node.into(), path.into()), Err(e));
+            self
+        }
+        fn paths(&self) -> Vec<&str> {
+            self.asked.iter().map(|(_, p)| p.as_str()).collect()
+        }
+    }
+
+    impl Folders for Machine {
+        fn list(&mut self, node: &str, path: &str) -> Result<DirectoryEntries, ErrorInfo> {
+            self.asked.push((node.into(), path.into()));
+            // A dialogue that asks again and again without reading a key never ends: stop it here instead.
+            assert!(self.asked.len() < 50, "asked without end: {:?}", self.asked);
+            if let Some(code) = &self.dead {
+                return Err(ErrorInfo {
+                    code: code.clone(),
+                    ..ErrorInfo::default()
+                });
+            }
+            self.answers
+                .get(&(node.into(), path.into()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Err(ErrorInfo {
+                        code: "directory.not_found".into(),
+                        ..ErrorInfo::default()
+                    })
+                })
+        }
+    }
+
+    /// Types the keys given, then the keyboard is gone (the picker ends as cancelled); keeps every frame drawn.
+    struct Keys {
+        rx: mpsc::Receiver<u8>,
+        frames: Vec<String>,
+    }
+
+    impl Asker for Keys {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, _: &[String]) {}
+        fn frame(&mut self, bytes: &[u8]) {
+            self.frames
+                .push(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+
+    fn keys(typed: &[u8]) -> Keys {
+        let (tx, rx) = mpsc::channel();
+        for k in typed {
+            tx.send(*k).unwrap();
+        }
+        Keys {
+            rx,
+            frames: Vec::new(),
+        }
+    }
+
+    /// ADR-0106 (#1140): the plain list's reader of a start request (Enter) shows a viewer the whole request without how to answer it.
+    #[test]
+    fn a_viewers_reader_of_a_start_request_does_not_say_how_to_answer() {
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let a = agora_protocol::v1::ApprovalSnapshot {
+            approval_id: "n1/a9".into(),
+            agent_id: "n1/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"n1","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests."}"#.into(),
+            ..Default::default()
+        };
+        let answer = say.text(key!("tui-split-answer"), &[]);
+        let mut member = keys(b"");
+        read_start(&a, &mut member, &text, false);
+        assert!(member.frames[0].contains(&answer), "{:?}", member.frames);
+        let mut viewer = keys(b"");
+        read_start(&a, &mut viewer, &text, true);
+        assert!(!viewer.frames[0].contains(&answer), "{:?}", viewer.frames);
+        assert!(
+            viewer.frames[0].contains("Fix the tests."),
+            "{:?}",
+            viewer.frames
+        );
+    }
+
+    /// Machines `n1` and `n2`, online, with project folders at the paths given.
+    fn snapshot(n1: &[&str], n2: &[&str]) -> Snapshot {
+        let node = |id: &str| NodeSnapshot {
+            node_id: id.into(),
+            hostname: id.into(),
+            online: true,
+            ..NodeSnapshot::default()
+        };
+        let checkouts = n1
+            .iter()
+            .map(|p| ("n1", p))
+            .chain(n2.iter().map(|p| ("n2", p)))
+            .enumerate()
+            .map(|(i, (n, p))| CheckoutSnapshot {
+                checkout_id: format!("c{i}"),
+                node_id: n.into(),
+                project_id: format!("p{i}"),
+                path: (*p).into(),
+            })
+            .collect();
+        Snapshot {
+            nodes: vec![node("n1"), node("n2")],
+            checkouts,
+            ..Snapshot::default()
+        }
+    }
+
+    fn browse(
+        machine: &mut Machine,
+        snapshot: &Snapshot,
+        typed: &[u8],
+        role: &mut Role,
+    ) -> (Browsed, Vec<String>) {
+        let say = Say(Catalog::english());
+        let mut k = keys(typed);
+        let out = browse_folders(&say, machine, snapshot, "", &mut k, false, role);
+        (out, k.frames)
+    }
+
+    #[test]
+    fn with_the_role_not_known_a_project_folder_that_cannot_be_listed_opens_the_home_folder() {
+        // The owner's plain list opened at the home folder before #1099; when the project folder is gone it still does, instead of
+        // ending the picker with "could not list" before anything was drawn.
+        let mut m = Machine::default().folder("n1", "", "/home");
+        let mut role = Role::Unknown;
+        let (out, frames) = browse(&mut m, &snapshot(&["/srv/gone"], &[]), b"", &mut role);
+        assert_eq!(m.paths(), ["/srv/gone", ""]);
+        assert_eq!(out, Browsed::Said(String::new()), "drawn, then cancelled");
+        assert!(frames.last().unwrap().contains("/home/me"), "{frames:?}");
+    }
+
+    #[test]
+    fn a_picker_whose_folders_all_fail_ends_once_instead_of_asking_without_end() {
+        let say = Say(Catalog::english());
+        let failed = |code: &str| {
+            Browsed::Said(say.text(
+                key!("tui-folder-failed"),
+                &[("code", Arg::Str(code.into()))],
+            ))
+        };
+        let s = snapshot(&["/srv/mine"], &[]);
+        // The link is gone: no other folder is tried.
+        let mut m = Machine {
+            dead: Some("client.unreachable".into()),
+            ..Machine::default()
+        };
+        let (out, _) = browse(&mut m, &s, b"", &mut Role::Unknown);
+        assert_eq!(out, failed("client.unreachable"));
+        assert_eq!(m.paths(), ["/srv/mine"]);
+        // Neither the project folder nor the home folder can be listed: each asked once.
+        let mut m = Machine::default();
+        let (out, _) = browse(&mut m, &s, b"", &mut Role::Unknown);
+        assert_eq!(out, failed("directory.not_found"));
+        assert_eq!(m.paths(), ["/srv/mine", ""]);
+        // A subfolder that cannot be listed: back to the project folder, drawn again, then cancelled.
+        let mut m = Machine::default();
+        m.answers.insert(
+            ("n1".into(), "/srv/mine".into()),
+            Ok(DirectoryEntries {
+                path: "/srv/mine".into(),
+                entries: vec![agora_protocol::v1::DirectoryEntry {
+                    name: "api".into(),
+                    is_git: false,
+                }],
+                ..DirectoryEntries::default()
+            }),
+        );
+        let (out, _) = browse(&mut m, &s, b"\r", &mut Role::Unknown);
+        assert_eq!(out, Browsed::Said(String::new()));
+        assert_eq!(m.paths(), ["/srv/mine", "/srv/mine/api", "/srv/mine"]);
+    }
+
+    #[test]
+    fn a_person_refused_every_folder_is_told_before_choosing_among_their_projects() {
+        // A viewer with two projects on n1: the first is asked for before the choice is offered, and the reason shows with it. Going
+        // round the machines with `m` does not ask again.
+        let s = snapshot(&["/srv/a", "/srv/b"], &["/srv/c"]);
+        let mut m = Machine::default()
+            .refused("n1", "/srv/a")
+            .refused("n1", "/srv/b")
+            .folder("n2", "/srv/c", "");
+        let mut role = Role::Unknown;
+        let (out, frames) = browse(&mut m, &s, b"mm", &mut role);
+        assert_eq!(out, Browsed::Said(String::new()));
+        assert_eq!(m.paths(), ["/srv/a", "/srv/c"]);
+        assert_eq!(role, Role::Limited);
+        let said = Say(Catalog::english()).text(key!("tui-folder-role"), &[]);
+        assert!(frames[0].contains(&said), "{frames:?}");
+    }
+
+    #[test]
+    fn a_member_made_the_owner_goes_up_from_the_project_folder_when_the_hub_names_a_way_up() {
+        // The console still holds "not the owner" (the role changed over a routine refresh); the hub's answer names a way up.
+        let s = snapshot(&["/srv/mine"], &[]);
+        let mut m = Machine::default()
+            .folder("n1", "/srv/mine", "/srv")
+            .folder("n1", "/srv", "/");
+        let mut role = Role::Limited;
+        let (out, _) = browse(&mut m, &s, &[0x7f], &mut role);
+        assert_eq!(out, Browsed::Said(String::new()));
+        assert_eq!(m.paths(), ["/srv/mine", "/srv"]);
+        assert_eq!(role, Role::Unknown);
+        // A member's answer names none: ⌫ goes nowhere and the role stands.
+        let mut m = Machine::default().folder("n1", "/srv/mine", "");
+        let mut role = Role::Limited;
+        browse(&mut m, &s, &[0x7f], &mut role);
+        assert_eq!(m.paths(), ["/srv/mine"]);
+        assert_eq!(role, Role::Limited);
+    }
+
+    #[test]
+    fn a_lost_link_asks_for_the_role_again_and_a_routine_refresh_does_not() {
+        let say = Say(Catalog::english());
+        let hub = [("hub", Arg::Str("hub:7443".into()))];
+        let mut give = agora_tui::board::Lacking::default();
+        let mut pair = agora_tui::pair::Book::default();
+        pair.set_owner(agora_tui::pair::Owner::No);
+        let mut role = Role::Limited;
+        // A refresh: the notice is the console's own.
+        let mut notice = "something else".to_string();
+        connected_again(&say, &hub, &mut notice, &mut give, &mut pair, &mut role);
+        assert_eq!(
+            (pair.owner, role, notice.as_str()),
+            (agora_tui::pair::Owner::No, Role::Limited, "something else")
+        );
+        // The link was lost (the hub ends it when the role changes): asked again.
+        let mut notice = say.text(key!("tui-lost"), &hub);
+        connected_again(&say, &hub, &mut notice, &mut give, &mut pair, &mut role);
+        assert_eq!(
+            (pair.owner, role, notice.as_str()),
+            (agora_tui::pair::Owner::Unknown, Role::Unknown, "")
+        );
+    }
+}
+
+#[cfg(test)]
+mod registry_start_tests {
+    use super::needs_signed_start;
+
+    /// #1133: the terminal client sends the person to the signed folder start for exactly the kinds the node starts only when signed.
+    #[test]
+    fn only_a_registry_kind_run_by_a_package_runner_needs_the_signed_start() {
+        assert!(needs_signed_start("registry-gemini", "npx"));
+        assert!(needs_signed_start("registry-fast-agent", "uvx"));
+        assert!(needs_signed_start("registry-x", "npx.cmd"));
+        assert!(!needs_signed_start("registry-goose", "goose"));
+        assert!(!needs_signed_start("my-gemini", "npx"));
+        assert!(!needs_signed_start("codex", "codex"));
+    }
+}
+
+/// ADR-0106: the console's viewer gates against a real hub (in this process, over TLS) that names the person's role in its first frame:
+/// a viewer's console sends nothing the hub would refuse, so the owner's Activity gets no row from it; a member's console still acts.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod viewer_console_tests {
+    use super::*;
+    use agora_hub::users::{Access, Role as PersonRoleOnHub};
+    use std::sync::Arc;
+
+    struct OneRole(PersonRoleOnHub);
+    impl agora_hub::server::ClientAuth for OneRole {
+        fn check(&self, t: &str) -> bool {
+            t == "token"
+        }
+        fn access(&self, t: &str) -> Option<Access> {
+            self.check(t).then(|| Access {
+                role: self.0,
+                user: "eda".into(),
+                projects: None,
+                session: String::new(),
+            })
+        }
+    }
+
+    struct Hubside {
+        _rt: tokio::runtime::Runtime,
+        state: Arc<agora_hub::server::ServerState>,
+        hub: agora_tui::client::Hub,
+    }
+
+    fn hub(role: PersonRoleOnHub) -> Hubside {
+        let ca = agora_hub::ca::Ca::generate("viewer test ca").unwrap();
+        let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+        let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
+        let ca_pem = ca.cert_pem().to_string();
+        let state = Arc::new(agora_hub::server::ServerState {
+            hub: Arc::new(
+                agora_hub::hub::Hub::open(agora_hub::store::SqliteStore::open_in_memory().unwrap())
+                    .unwrap(),
+            ),
+            support: agora_protocol::handshake::Support {
+                generations: vec![1],
+                capabilities: vec![],
+                required: vec![],
+            },
+            ca: None,
+            lockout: Arc::new(agora_hub::enroll::Lockout::new()),
+            auth: Box::new(OneRole(role)),
+            assets: None,
+            sessions: None,
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = l.local_addr().unwrap();
+        rt.spawn(agora_hub::server::run(
+            l,
+            Arc::clone(&state),
+            Some(acceptor),
+        ));
+        Hubside {
+            _rt: rt,
+            state,
+            hub: agora_tui::client::Hub {
+                addr: addr.to_string(),
+                ca_pem,
+            },
+        }
+    }
+
+    /// What the hub wrote down for the person, as (action, outcome).
+    fn rows(h: &Hubside) -> Vec<(String, String)> {
+        agora_hub::audit::Audit::new(h.state.hub.store())
+            .list(0, Some("eda"), 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.action, e.outcome))
+            .collect()
+    }
+
+    /// A console on a test screen with one running agent on `n1`, selected, that asks for an answer.
+    fn console() -> Console {
+        let mut c = Console::new(
+            agora_tui::backend::Window::offscreen(100, 30).unwrap(),
+            ColorMode::Mono,
+        );
+        c.snapshot = Some(Snapshot {
+            pos: 1,
+            nodes: vec![agora_protocol::v1::NodeSnapshot {
+                node_id: "n1".into(),
+                online: true,
+                ..Default::default()
+            }],
+            agents: vec![agora_protocol::v1::AgentSnapshot {
+                agent_id: "n1/agent-1".into(),
+                node_id: "n1".into(),
+                running: true,
+                ..Default::default()
+            }],
+            approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                approval_id: "n1/r1".into(),
+                agent_id: "n1/agent-1".into(),
+                action: "Edit".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        c.selected = "n1/agent-1".into();
+        c
+    }
+
+    #[test]
+    fn a_viewers_console_learns_it_on_connecting_and_sends_nothing_its_keys_or_answers_would_have_refused(
+    ) {
+        let h = hub(PersonRoleOnHub::Viewer);
+        let say = Say(agora_i18n::Catalog::english());
+        let watching = say.text(key!("tui-viewer-watching"), &[]);
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(
+            c.app.viewer,
+            "the console knows a viewer from the hub's first frame"
+        );
+        assert_eq!(c.role, agora_tui::picker::Role::Limited);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let area = Area::new(0, 0, 100, 30);
+        // A key that would stop, remove, resume, start or answer: the line says why, and nothing goes to the hub.
+        for k in ['x', 'd', 'u', 's', 'f', 'v', 'y', 'n'] {
+            c.notice.clear();
+            assert!(
+                !command(&say, &mut session, &rx, false, &mut c, area, k),
+                "{k}"
+            );
+            assert_eq!(c.notice, watching, "{k}");
+        }
+        // Alt+Y in an agent's tab answers through the same path, and is held back too.
+        c.notice.clear();
+        let tab = Target::Tab {
+            agent: "n1/agent-1".into(),
+            approval: "n1/r1".into(),
+        };
+        assert!(!answer_command(
+            &say,
+            &mut session,
+            &rx,
+            &mut c,
+            area,
+            &tab,
+            Answer::Allow
+        ));
+        assert_eq!(c.notice, watching);
+        // Anything the hub would answer has had time to arrive.
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let _ = session.next(Duration::from_millis(50));
+        }
+        assert_eq!(rows(&h), Vec::<(String, String)>::new());
+    }
+
+    /// #1140: a viewer's chat tab has no line to type on: neither a request nor a mode or model switch is sent, nothing typed is kept,
+    /// and the footer says why. The session sends neither either. The owner's Activity gets no row.
+    #[test]
+    fn a_viewers_chat_tab_takes_no_typing_and_sends_no_request_or_switch() {
+        let h = hub(PersonRoleOnHub::Viewer);
+        let say = Say(agora_i18n::Catalog::english());
+        let watching = say.text(key!("tui-viewer-watching"), &[]);
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(c.app.viewer);
+        // Nothing waits: Enter would send at once (a waiting request holds the draft whatever the role).
+        if let Some(s) = c.snapshot.as_mut() {
+            s.approvals.clear();
+        }
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let mut pane = chat_pane(&c);
+        for typed in [
+            &b"hello\r"[..],
+            b"/mode plan\r",
+            b"/model big\r",
+            b"h",
+            b"i",
+        ] {
+            c.notice.clear();
+            chat_input(&say, &mut session, &rx, &mut c, &mut pane, typed);
+            assert_eq!(c.notice, watching, "{typed:?}");
+            assert!(pane.typed.is_empty(), "{typed:?}");
+        }
+        let forbidden = Err(agora_protocol::ErrorCode::AuthForbidden
+            .as_str()
+            .to_string());
+        assert_eq!(session.prompt("n1", "agent-1", "hello"), forbidden);
+        assert_eq!(
+            session.set_option("n1", "agent-1", false, "plan"),
+            forbidden
+        );
+        assert_eq!(session.set_option("n1", "agent-1", true, "big"), forbidden);
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let _ = session.next(Duration::from_millis(50));
+        }
+        assert_eq!(rows(&h), Vec::<(String, String)>::new());
+    }
+
+    /// The same chat tab in a member's console takes what is typed (the viewer's above is not one that never does).
+    #[test]
+    fn a_members_chat_tab_takes_typing() {
+        let h = hub(PersonRoleOnHub::Member);
+        let say = Say(agora_i18n::Catalog::english());
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let mut pane = chat_pane(&c);
+        c.notice.clear();
+        chat_input(&say, &mut session, &rx, &mut c, &mut pane, b"hi");
+        assert_eq!(pane.typed, b"hi");
+        assert!(c.notice.is_empty());
+    }
+
+    /// #1140: a viewer's chat tab is drawn with no line to type on, its hint saying it watches, and the request that waits without the
+    /// keys that answer it; a member's has both.
+    #[test]
+    fn a_viewers_chat_tab_is_drawn_with_no_line_to_type_on() {
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console();
+        let p = chat_pane(&c);
+        let pane = Area::new(0, 0, 100, 24);
+        let input = say.text(key!("tui-chat-input"), &[]);
+        let member = conversation_lines(&say, &c, &p, pane);
+        assert!(
+            member.last().is_some_and(|l| l.starts_with(&input)),
+            "{member:?}"
+        );
+        assert!(member.iter().any(|l| l.contains("Alt+Y")), "{member:?}");
+        assert!(member.iter().any(|l| l.contains("Edit")), "{member:?}");
+        c.app.viewer = true;
+        let viewer = conversation_lines(&say, &c, &p, pane);
+        assert!(viewer.iter().all(|l| !l.starts_with(&input)), "{viewer:?}");
+        assert!(viewer.iter().all(|l| !l.contains("Alt+")), "{viewer:?}");
+        assert!(viewer.iter().any(|l| l.contains("Edit")), "{viewer:?}");
+        assert!(
+            viewer.iter().any(|l| l.starts_with("You can watch here.")),
+            "{viewer:?}"
+        );
+    }
+
+    /// #1140: a viewer's inspector (beside the list, or in the agent's tab) shows the request without the keys that answer it.
+    #[test]
+    fn a_viewers_inspector_does_not_say_how_to_answer() {
+        let say = Say(agora_i18n::Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let mut c = console();
+        let area = Area::new(0, 0, 120, 30);
+        let s = c.snapshot.clone().unwrap();
+        let keys = [
+            say.text(key!("tui-split-answer"), &[]),
+            say.text(key!("tui-tab-answer"), &[]),
+        ];
+        let says_keys = |lines: &[String]| lines.iter().any(|l| keys.contains(l));
+        for focus in [agora_tui::app::Focus::Tree, agora_tui::app::Focus::Terminal] {
+            c.app.focus = focus;
+            c.app.viewer = false;
+            let member = inspector_details(&c, &s, area, &text).lines;
+            assert!(says_keys(&member), "{focus:?} {member:#?}");
+            c.app.viewer = true;
+            let viewer = inspector_details(&c, &s, area, &text).lines;
+            assert!(!says_keys(&viewer), "{focus:?} {viewer:#?}");
+            assert!(
+                viewer.iter().any(|l| l.contains("Edit")),
+                "{focus:?} {viewer:#?}"
+            );
+        }
+    }
+
+    /// The chat pane of the console's agent, as [`follow_chat`] opens it.
+    fn chat_pane(c: &Console) -> ChatPane {
+        ChatPane {
+            agent: "n1/agent-1".into(),
+            stream: 0,
+            entries: Vec::new(),
+            typed: Vec::new(),
+            note: String::new(),
+            confirming: None,
+            snapshot: c.snapshot.as_ref().and_then(|s| s.agents.first().cloned()),
+        }
+    }
+
+    #[test]
+    fn a_members_console_is_not_held_back_and_asks_nothing_on_connecting() {
+        let h = hub(PersonRoleOnHub::Member);
+        let say = Say(agora_i18n::Catalog::english());
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let mut c = console();
+        connected_role(&mut session, &mut c);
+        assert!(!c.app.viewer);
+        assert_eq!(c.role, agora_tui::picker::Role::Limited);
+        let (_tx, rx) = mpsc::channel::<u8>();
+        // `d` on a running agent says to stop it first, without asking the hub: it is not the viewer's line.
+        c.notice.clear();
+        let _ = command(
+            &say,
+            &mut session,
+            &rx,
+            false,
+            &mut c,
+            Area::new(0, 0, 100, 30),
+            'd',
+        );
+        assert_eq!(c.notice, say.text(key!("tui-forget-running"), &[]));
+        assert!(rows(&h).iter().all(|(action, _)| action != "pair.status"));
+    }
+
+    /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal. The loop matches on
+    /// [`plain_key`], which decides each key first (#1140): a viewer's key that would change something only says why not, for every byte;
+    /// a member's (and an older hub's) does what it did; moving, quitting, asking and opening stay a viewer's.
+    #[test]
+    fn the_plain_lists_keys_change_nothing_for_a_viewer() {
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let t0 = src.find("\npub fn tui(").unwrap();
+        let tui = &src[t0..t0 + src[t0..].find("\n}\n").unwrap()];
+        assert!(tui.contains("let viewer = person == agora_protocol::v1::PersonRole::Viewer;"));
+        assert!(tui.contains("match plain_key(viewer, keys, k) {"));
+        // Enter's reader of a start request is the viewer's too (the whole request, without how to answer it).
+        assert!(tui.contains("read_start(&a, &mut Plain::new(&rx), &text, viewer)"));
+        let changes = |p: PlainKey| {
+            matches!(
+                p,
+                PlainKey::Answer
+                    | PlainKey::Folder
+                    | PlainKey::Devices
+                    | PlainKey::Start
+                    | PlainKey::Resume
+                    | PlainKey::Forget
+                    | PlainKey::Stop
+            )
+        };
+        for k in 0..=u8::MAX {
+            for keys in [true, false] {
+                assert!(!changes(plain_key(true, keys, k)), "{k}");
+            }
+        }
+        for (k, what) in [
+            (b'y', PlainKey::Answer),
+            (b'n', PlainKey::Answer),
+            (b'f', PlainKey::Folder),
+            (b'v', PlainKey::Devices),
+            (b's', PlainKey::Start),
+            (b'u', PlainKey::Resume),
+            (b'U', PlainKey::Resume),
+            (b'd', PlainKey::Forget),
+            (b'x', PlainKey::Stop),
+        ] {
+            assert_eq!(plain_key(true, true, k), PlainKey::Watching, "{k}");
+            assert_eq!(plain_key(false, true, k), what, "{k}");
+        }
+        for (k, what) in [
+            (b'q', PlainKey::Quit),
+            (3, PlainKey::Quit),
+            (b'j', PlainKey::Move),
+            (b'\t', PlainKey::Move),
+            (b'a', PlainKey::Ask),
+            (b'\r', PlainKey::Open),
+            (b'\n', PlainKey::Open),
+            (b'r', PlainKey::Nothing),
+        ] {
+            assert_eq!(plain_key(true, true, k), what, "{k}");
+            assert_eq!(plain_key(false, true, k), what, "{k}");
+        }
+        // Piped (no keyboard): nothing moves.
+        assert_eq!(plain_key(false, false, b'j'), PlainKey::Nothing);
+    }
+
+    /// The plain list's full-screen chat (the plain list's Enter on a chat agent) matches on [`chat_key`] (#1140): a viewer's has no
+    /// line to type on, for every byte, and can only leave; a member's types, sends and leaves as before.
+    #[test]
+    fn the_plain_chat_takes_no_typing_from_a_viewer() {
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let c0 = src.find("\nfn chat(").unwrap();
+        let chat = &src[c0..c0 + src[c0..].find("\n}\n").unwrap()];
+        assert!(chat.contains(
+            "let watching = session.person_role() == agora_protocol::v1::PersonRole::Viewer;"
+        ));
+        assert!(chat.contains("match chat_key(watching, k) {"));
+        assert!(chat.contains("(size, color),\n                watching,\n            );"));
+        assert_eq!(chat_key(true, DETACH), ChatKey::Leave);
+        for k in 0..=u8::MAX {
+            if k != DETACH {
+                assert_eq!(chat_key(true, k), ChatKey::Watching, "{k}");
+            }
+        }
+        assert_eq!(chat_key(false, DETACH), ChatKey::Leave);
+        assert_eq!(chat_key(false, b'\r'), ChatKey::Send);
+        assert_eq!(chat_key(false, b'h'), ChatKey::Type(b'h'));
+        assert_eq!(chat_key(false, 0x7f), ChatKey::Back);
+        assert_eq!(chat_key(false, 0x01), ChatKey::Nothing);
+    }
+
+    /// #1140: the plain list's full-screen chat is drawn for a viewer with no line to type on, the hint saying it watches and the note
+    /// last; a member's keeps the line, the note above it.
+    #[test]
+    fn the_plain_chat_is_drawn_with_no_line_to_type_on_for_a_viewer() {
+        let say = Say(agora_i18n::Catalog::english());
+        let input = say.text(key!("tui-chat-input"), &[]);
+        let note = say.text(key!("tui-viewer-watching"), &[]);
+        let draw = |watching| {
+            plain_chat_lines(
+                &say,
+                &[],
+                "agent-1",
+                b"hi",
+                &note,
+                None,
+                ((100, 12), false),
+                watching,
+            )
+        };
+        let member = draw(false);
+        assert_eq!(member.last(), Some(&format!("{input} hi")), "{member:#?}");
+        assert_eq!(member[member.len() - 2], note, "{member:#?}");
+        let viewer = draw(true);
+        assert!(viewer.iter().all(|l| !l.starts_with(&input)), "{viewer:#?}");
+        assert_eq!(viewer.last(), Some(&note), "{viewer:#?}");
+        assert!(
+            viewer.iter().any(|l| l.starts_with("You can watch here.")),
+            "{viewer:#?}"
+        );
+    }
+
+    #[test]
+    fn the_watching_line_is_for_a_viewer_and_a_key_that_changes_something() {
+        let say = Say(agora_i18n::Catalog::english());
+        assert!(watching_notice(&say, true, 'x').is_some());
+        assert!(watching_notice(&say, true, 'r').is_none());
+        assert!(watching_notice(&say, false, 'x').is_none());
+    }
+}
+
+/// #1134 (ADR-0092): the start pickers (`s`, `f`) list a machine's installed ACP registry kinds after the hand-made ones, under an
+/// "Untested" heading, leave out the registry kinds it cannot find, and never choose one for the person, as the window's Start does.
+#[cfg(test)]
+mod registry_picker_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    fn kind(kind: &str, name: &str, installed: bool, program: &str) -> agora_tui::client::Kind {
+        agora_tui::client::Kind {
+            kind: kind.into(),
+            name: name.into(),
+            installed,
+            program: program.into(),
+        }
+    }
+
+    struct Script {
+        rx: mpsc::Receiver<u8>,
+        shown: Vec<Vec<String>>,
+    }
+    impl Asker for Script {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.push(lines.to_vec());
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn pick(keys: &[u8], kinds: &[(String, String)]) -> (Option<usize>, Vec<Vec<String>>) {
+        let say = Say(Catalog::english());
+        let (tx, rx) = mpsc::channel();
+        for k in keys {
+            tx.send(*k).unwrap_or_else(|_| panic!("send"));
+        }
+        let mut ask = Script {
+            rx,
+            shown: Vec::new(),
+        };
+        let got = pick_kind(
+            &say,
+            &mut ask,
+            "blackview",
+            &[],
+            kinds,
+            None,
+            Area::new(0, 0, 120, 40),
+            Duration::from_millis(50),
+        );
+        (got, ask.shown)
+    }
+
+    const UNTESTED: &str = "Untested (from the ACP registry, not yet tried in Agora)";
+
+    #[test]
+    fn installed_registry_kinds_come_after_the_hand_made_ones_and_missing_ones_are_left_out() {
+        let say = Say(Catalog::english());
+        let (ok, line) = split_kinds(
+            &say,
+            vec![
+                kind("registry-gemini", "Gemini CLI", true, "npx"),
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+                kind("codex", "Codex", false, "codex"),
+                kind("registry-qwen-code", "Qwen Code", true, "npx"),
+                kind("shell", "Shell", true, "bash"),
+            ],
+        );
+        let ids: Vec<_> = ok.iter().map(|(k, _)| k.as_str()).collect();
+        // Each group keeps the machine's own order.
+        assert_eq!(
+            ids,
+            ["claude", "shell", "registry-gemini", "registry-qwen-code"]
+        );
+        let line = line.unwrap_or_default();
+        assert!(
+            line.contains("Not found on this machine: Codex (`codex`)."),
+            "{line}"
+        );
+        assert!(!line.contains("goose"), "{line}");
+        // Only registry kinds missing: no line at all (Settings → Agents lists them under "Add an agent").
+        let (ok, line) = split_kinds(
+            &say,
+            vec![
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+            ],
+        );
+        assert_eq!(ok.len(), 1);
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn the_untested_heading_stands_before_the_first_registry_kind_on_every_page() {
+        let mut kinds: Vec<(String, String)> = (1..=3)
+            .map(|i| (format!("made{i}"), format!("Made {i}")))
+            .collect();
+        kinds.extend((1..=8).map(|i| (format!("registry-r{i}"), format!("Reg {i}"))));
+        let (got, shown) = pick(b"n2", &kinds);
+        assert_eq!(got, Some(10), "{shown:#?}");
+        assert_eq!(kinds[10].1, "Reg 8");
+        let title = |p: u8| {
+            format!("Start which agent on blackview? Press its number, n for the next page ({p} of 2), any other key cancels.")
+        };
+        let mut first = vec![title(1), String::new()];
+        first.extend(["1  Made 1", "2  Made 2", "3  Made 3", "", UNTESTED].map(String::from));
+        first.extend((1..=6).map(|i| format!("{}  Reg {i}", i + 3)));
+        assert_eq!(shown[0], first);
+        // The second page holds only untested kinds: the heading opens it, so they are still marked.
+        let second = vec![
+            title(2),
+            String::new(),
+            UNTESTED.to_string(),
+            "1  Reg 7".to_string(),
+            "2  Reg 8".to_string(),
+        ];
+        assert_eq!(shown[1], second);
+        // A list with no registry kind has no heading.
+        let (_, shown) = pick(b"x", &kinds[..3]);
+        assert!(!shown[0].iter().any(|l| l == UNTESTED), "{shown:#?}");
+    }
+
+    /// The page `f` draws: its folder under the question, the hand-made kinds, the heading and the untested ones, then the line
+    /// naming the hand-made kinds the machine cannot find.
+    #[test]
+    fn the_folder_start_page_reads_top_to_bottom() {
+        let say = Say(Catalog::english());
+        let (ok, missing) = split_kinds(
+            &say,
+            vec![
+                kind("registry-gemini", "Gemini CLI", true, "npx"),
+                kind("claude", "Claude Code", true, "claude"),
+                kind("registry-goose", "goose", false, "goose"),
+                kind("codex", "Codex", false, "codex"),
+            ],
+        );
+        let (menu, count) = kind_menu(
+            &say,
+            "blackview",
+            &["/home/r/src".to_string()],
+            &ok,
+            missing.as_deref(),
+            KIND_PAGE,
+            0,
+        );
+        assert_eq!(count, 2);
+        let want = [
+            "Start which agent on blackview? Press its number, any other key cancels.",
+            "/home/r/src",
+            "",
+            "1  Claude Code",
+            "",
+            UNTESTED,
+            "2  Gemini CLI",
+            "",
+            "Not found on this machine: Codex (`codex`). The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.",
+        ];
+        assert_eq!(menu, want.map(String::from));
+    }
+
+    /// #1150: in a window too short for nine kinds a page, a page holds fewer, every page's box shows all its lines (the missing
+    /// agents' line included), and every kind can still be reached; a tall window keeps nine.
+    #[test]
+    fn a_short_window_gets_shorter_pages_that_show_every_line() {
+        let say = Say(Catalog::english());
+        let mut kinds: Vec<(String, String)> = (1..=6)
+            .map(|i| (format!("made{i}"), format!("Made {i}")))
+            .collect();
+        kinds.extend((1..=10).map(|i| (format!("registry-r{i}"), format!("Reg {i}"))));
+        let missing = Some("Not found on this machine: Codex (`codex`).");
+        let under = ["/home/r/src".to_string()];
+        let tall = Area::new(0, 0, 120, 40);
+        assert_eq!(
+            kind_page(&say, "blackview", &under, &kinds, missing, tall),
+            KIND_PAGE
+        );
+        let short = Area::new(0, 0, 120, 14);
+        let per = kind_page(&say, "blackview", &under, &kinds, missing, short);
+        assert!((1..KIND_PAGE).contains(&per), "{per}");
+        let mut reached = Vec::new();
+        for page in 0..kinds.len().div_ceil(per) {
+            let (menu, shown) = kind_menu(&say, "blackview", &under, &kinds, missing, per, page);
+            assert!(agora_tui::app::dialog_fits(short, &menu), "{menu:#?}");
+            assert!(menu.iter().any(|l| l.starts_with("Not found")), "{menu:#?}");
+            reached.extend((0..shown).map(|i| page * per + i));
+        }
+        assert_eq!(reached, (0..kinds.len()).collect::<Vec<_>>());
+        // Through the question itself: the last kind on its own page, by its number there.
+        let (tx, rx) = mpsc::channel();
+        let pages = kinds.len().div_ceil(per);
+        for _ in 1..pages {
+            tx.send(b'n').unwrap_or_else(|_| panic!("send"));
+        }
+        let last = (kinds.len() - 1) % per;
+        tx.send(b'1' + u8::try_from(last).unwrap_or(0))
+            .unwrap_or_else(|_| panic!("send"));
+        let mut ask = Script {
+            rx,
+            shown: Vec::new(),
+        };
+        let got = pick_kind(
+            &say,
+            &mut ask,
+            "blackview",
+            &under,
+            &kinds,
+            missing,
+            short,
+            Duration::from_millis(50),
+        );
+        assert_eq!(got, Some(kinds.len() - 1), "{:#?}", ask.shown);
+    }
+
+    #[test]
+    fn no_kind_is_chosen_for_the_person_not_even_when_only_untested_ones_are_installed() {
+        let kinds = vec![("registry-gemini".to_string(), "Gemini CLI".to_string())];
+        let (got, shown) = pick(b"\r", &kinds);
+        assert_eq!(got, None);
+        assert_eq!(
+            shown[0][2..],
+            [UNTESTED.to_string(), "1  Gemini CLI".to_string()]
+        );
+        assert_eq!(pick(b"", &kinds).0, None);
+        assert_eq!(pick(b" ", &kinds).0, None);
+        assert_eq!(pick(b"1", &kinds).0, Some(0));
     }
 }

@@ -102,7 +102,7 @@ try {
   // 1. The hub is killed.
   await stack.stopHub();
   const down = Date.now();
-  await step('the window says the hub cannot be reached', () => page.getByText('Hub unreachable').first().waitFor({ timeout: 20000 }));
+  await step('the window says the hub cannot be reached', () => page.getByText('Cannot reach your Agora').first().waitFor({ timeout: 20000 }));
 
   // 2. The laptop on its own.
   check(list().filter(r => r[3] === 'running').length === 3, 'the laptop still runs its three agents');
@@ -131,7 +131,7 @@ try {
   stack.startHub();
   const up = Date.now();
   // The window is watched from the same moment, on its own, so its time does not include the node's.
-  const windowBack = page.getByText('Hub unreachable').first().waitFor({ state: 'detached', timeout: 60000 }).then(() => Date.now() - up, () => 0);
+  const windowBack = page.getByText('Cannot reach your Agora').first().waitFor({ state: 'detached', timeout: 60000 }).then(() => Date.now() - up, () => 0);
   // `send_message` answers with an id at once and reports a failed delivery later, in the sender's inbox: "back" is when a message
   // sent now is in the desktop's inbox.
   let nodeBack = 0;

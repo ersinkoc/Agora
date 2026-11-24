@@ -24,6 +24,9 @@ export function columnsOf(tasks: readonly BoardTaskModel[], shown: Partial<Recor
 // eslint-disable-next-line no-control-regex
 const HIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]/g;
 
+// The text without those hidden characters, line breaks kept (a message read in full).
+export const visible = (text: string): string => text.replace(HIDDEN, '');
+
 // Plain text, one line, cut to `max` characters (by code point) with an ellipsis.
 export function plain(text: string, max: number): string {
   const clean = text.replace(HIDDEN, '').replace(/\s+/g, ' ').trim();

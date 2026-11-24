@@ -96,19 +96,48 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
-/// could open it (#320). The handle is not inheritable and the file is not shared while open.
+/// could open it (#320). The handle is not inheritable. The handle that creates the file and a lock file's handle are not shared for
+/// delete, so a lock file can be neither renamed nor removed while it is open; an append log's handle is. Both are shared for read and
+/// write, so another process creating or opening the same file at the same moment gets in beside it rather than failing with a
+/// sharing violation (two installs started together); only this user can open it at all.
 /// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write). The folder is opened as itself (never through a link) and held without letting anyone rename or
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
+    let held = hold_dir(dir)?;
+    open_private_held(&held, path, append)
+}
+
+/// [`open_private`] for `name` in a folder already held open (`dir`, #1000, [`crate::ConfinedDir::open_lock`]). The file is opened at
+/// the path the handle has now (its final path) and then must really be inside the folder the handle holds, both final paths taken
+/// after the open: a folder renamed away and another put at its path in between is refused (`InvalidInput`), never used.
+pub(crate) fn open_private_in(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    let path = PathBuf::from(final_path(dir)?).join(name);
+    open_private_held(dir, &path, append)
+}
+
+/// How [`open_private_held`] shares the handle that creates a held file: for read and write, never for delete. Another process that
+/// finds the name between that creation and its own open must still open it (a creation handle not shared made two installs started
+/// together fail with a sharing violation).
+const HELD_CREATE_SHARE: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+
+/// The part of [`open_private`] after its folder is held (`held`): `path` is created private or opened, then checked through its own
+/// handle, including that it is inside `held`.
+fn open_private_held(held: &std::fs::File, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    let held = hold_dir(dir)?;
-    match create_private_new(path) {
+    // Shared for read and write: another process that finds the name between this creation and the open below must still open it
+    // (a creation handle not shared made two installs started together fail with a sharing violation). Never shared for delete.
+    match create_private_new(path, HELD_CREATE_SHARE) {
         Ok(f) => drop(f),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
@@ -136,7 +165,7 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     if reparse || links > 1 || !file.metadata()?.is_file() {
         return Err(refuse());
     }
-    let (inside, folder) = (final_path(&file)?, final_path(&held)?);
+    let (inside, folder) = (final_path(&file)?, final_path(held)?);
     if !inside.to_lowercase().starts_with(&format!(
         "{}\\",
         folder.trim_end_matches('\\').to_lowercase()
@@ -148,7 +177,6 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     set_owner_only_handle(&file, false)?;
-    drop(held);
     Ok(file)
 }
 
@@ -323,7 +351,10 @@ pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
     ))
 }
 
-pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+/// Creates the file at `path`, which must not exist yet (`CREATE_NEW`), for writing, with the owner-only descriptor given at its
+/// creation (#320). `share` is the share mode of the new handle: `0` keeps everyone else out while it is open (a file written and then
+/// renamed), `FILE_SHARE_READ | FILE_SHARE_WRITE` lets another opener of the same file in beside it ([`open_private`]).
+pub(crate) fn create_private_new(path: &Path, share: u32) -> io::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
@@ -343,7 +374,7 @@ pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
         CreateFileW(
             name.as_ptr(),
             GENERIC_WRITE,
-            0,
+            share,
             &attrs,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
@@ -467,6 +498,16 @@ impl Drop for Descriptor {
     }
 }
 
+/// What each direction of a local pipe holds before a write waits for the reader.
+const PIPE_BUFFER: u32 = 64 * 1024;
+
+/// Most bytes one `WriteFile` is given while a write timeout is set (#1089, measured on Windows 11). A pending write that is larger than
+/// the pipe's buffer can be partly taken by the reader and still report 0 bytes written when it is cancelled, so a send that timed
+/// out and is tried again would send those bytes twice. A write no larger than the buffer is all or nothing: once the reader takes
+/// any of it, the rest fits the buffer and the write completes, so one that is cancelled moved nothing. A quarter of the buffer keeps
+/// well inside that.
+const BOUNDED_WRITE: usize = PIPE_BUFFER as usize / 4;
+
 fn create_instance(name: &[u16], sd: &Descriptor, first: bool) -> io::Result<Handle> {
     let attrs = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -485,8 +526,8 @@ fn create_instance(name: &[u16], sd: &Descriptor, first: bool) -> io::Result<Han
             open,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
-            64 * 1024,
-            64 * 1024,
+            PIPE_BUFFER,
+            PIPE_BUFFER,
             0,
             &attrs,
         )
@@ -745,6 +786,8 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
 pub struct Stream {
     handle: Arc<Handle>,
     timeout: Arc<Mutex<Option<Duration>>>,
+    /// How long a write may wait for the reader (`None`: for ever); see [`BOUNDED_WRITE`].
+    write_timeout: Arc<Mutex<Option<Duration>>>,
     closed: Arc<AtomicBool>,
     /// Set for good by `shutdown`. Every read and write also waits on it, so one submitted after `shutdown` already cancelled the
     /// handle's I/O (it passed the `closed` check just before) still cannot wait for ever on a peer that stopped reading.
@@ -756,6 +799,7 @@ impl Stream {
         Ok(Self {
             handle: Arc::new(h),
             timeout: Arc::new(Mutex::new(None)),
+            write_timeout: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(Event::new()?),
         })
@@ -780,6 +824,20 @@ impl Stream {
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         *self
             .timeout
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))? = t;
+        Ok(())
+    }
+
+    /// How long a write may wait for the reader to take it; past that the write is cancelled and fails with `TimedOut`, having sent
+    /// nothing, so it can be tried again. While a timeout is set, a write sends at most [`BOUNDED_WRITE`] bytes. A zero timeout is
+    /// refused, as std refuses it for a socket.
+    pub fn set_write_timeout(&self, t: Option<Duration>) -> io::Result<()> {
+        if t.is_some_and(|t| t.is_zero()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        *self
+            .write_timeout
             .lock()
             .map_err(|_| io::Error::other("poisoned"))? = t;
         Ok(())
@@ -893,6 +951,15 @@ impl Stream {
         if buf.is_empty() {
             return Ok(0);
         }
+        let limit = *self
+            .write_timeout
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))?;
+        // A write that can be cancelled must be one the pipe takes whole or not at all (see `BOUNDED_WRITE`).
+        let buf = match limit {
+            Some(_) => &buf[..buf.len().min(BOUNDED_WRITE)],
+            None => buf,
+        };
         let event = Event::new()?;
         let mut ov = overlapped(&event);
         // Only this pointer is used from here on, while the system may write through it.
@@ -911,7 +978,7 @@ impl Stream {
             }
             e => return Err(os_error(e)),
         }
-        match self.finish(ovp, &event, None)? {
+        match self.finish(ovp, &event, limit)? {
             Some(0) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
@@ -1001,6 +1068,57 @@ pub(crate) fn flush_input() {
     unsafe {
         FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
     }
+}
+
+/// The characters of the keys pressed on the console within `wait` (`crate::read_confirmation_until`), as UTF-8: `None` when none
+/// came. The console's input records are read directly: a key press with a character gives that character (as often as it repeats,
+/// at most 256 times), and every other record (a key release, a key with no character, the mouse, focus, a resize) is consumed and
+/// gives nothing, so a wait never ends in a read that blocks. A console has no end of input, so the result is never empty.
+pub(crate) fn terminal_key(wait: Duration) -> io::Result<Option<Vec<u8>>> {
+    use windows_sys::Win32::System::Console::{
+        GetNumberOfConsoleInputEvents, ReadConsoleInputW, INPUT_RECORD, KEY_EVENT,
+    };
+    let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
+    let mut units: Vec<u16> = Vec::new();
+    // SAFETY: plain calls on the process's standard input handle; `records` is a valid buffer of the length passed, and only the
+    // records the call says it filled are read, each as the union member its `EventType` names.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        match WaitForSingleObject(stdin, ms) {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => return Ok(None),
+            _ => return Err(os_error(GetLastError())),
+        }
+        let mut waiting = 0u32;
+        if GetNumberOfConsoleInputEvents(stdin, &mut waiting) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        if waiting == 0 {
+            return Ok(None);
+        }
+        let mut records: [INPUT_RECORD; 16] = std::mem::zeroed();
+        let mut read = 0u32;
+        // At least one record is waiting, so this returns at once.
+        if ReadConsoleInputW(stdin, records.as_mut_ptr(), records.len() as u32, &mut read) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        for r in records.iter().take(read as usize) {
+            if u32::from(r.EventType) != KEY_EVENT {
+                continue;
+            }
+            let k = r.Event.KeyEvent;
+            let c = k.uChar.UnicodeChar;
+            if k.bKeyDown != 0 && c != 0 {
+                for _ in 0..k.wRepeatCount.clamp(1, 256) {
+                    units.push(c);
+                }
+            }
+        }
+    }
+    if units.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf16_lossy(&units).into_bytes()))
 }
 
 /// Size of the console window on stdout.
@@ -1488,14 +1606,45 @@ mod tests {
         drop(f);
         // Looked at while the file is still open and empty, before anything else touches it.
         let private = dir.join("private.tmp");
-        let f = create_private_new(&private).unwrap();
+        let f = create_private_new(&private, 0).unwrap();
         let a = acl(&private);
         assert!(!a.contains("Everyone"), "{a}");
         assert!(!a.contains("(I)"), "inherited entries: {a}");
         assert!(a.contains("SYSTEM"), "{a}");
         drop(f);
         // Exclusive: an existing name is never opened.
-        assert!(create_private_new(&private).is_err());
+        assert!(create_private_new(&private, 0).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two installs started together: one process has just created the lock file and still holds its creation handle when the other
+    /// finds the name and opens it. That open must succeed (it failed with a sharing violation while the creation handle was not
+    /// shared), and the file still can be neither renamed nor removed while either handle is open.
+    #[test]
+    fn a_lock_file_opens_while_another_process_is_still_creating_it() {
+        let dir = std::env::temp_dir().join(format!("agora-private-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join(".lock");
+        // The share the production path creates with: a change to it fails here.
+        let creating = create_private_new(&lock, HELD_CREATE_SHARE).unwrap();
+        let mut held = open_private(&dir, &lock, false).unwrap();
+        assert!(std::fs::rename(&lock, dir.join(".lock.moved")).is_err());
+        assert!(std::fs::remove_file(&lock).is_err());
+        drop(creating);
+        held.write_all(b"1").unwrap();
+        assert!(std::fs::rename(&lock, dir.join(".lock.moved")).is_err());
+        assert!(std::fs::remove_file(&lock).is_err());
+        // A creation that is not shared still keeps everyone out.
+        let tmp = dir.join("key.tmp");
+        let alone = create_private_new(&tmp, 0).unwrap();
+        let refused = std::fs::OpenOptions::new().read(true).open(&tmp);
+        assert_eq!(
+            refused.err().and_then(|e| e.raw_os_error()),
+            Some(32),
+            "a sharing violation"
+        );
+        drop((alone, held));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,21 +4,31 @@
 //! Prompts (the `text` of `session/prompt`):
 //! - `ask`: goes `blocked`, sends an `approval/request`, waits for `approval/resolve`, then works and finishes.
 //! - `first:TEXT`: says TEXT, then answers the prompt 300 ms later.
-//! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
+//! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck); writes `hang.txt` in its folder once it has read the
+//!   prompt, so a test knows the prompt reached it.
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
+//! - `ask:ACTION|DETAIL`: like `ask`, with that action and detail (#1147: words of the agent's own on an approval card).
 //! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
 //!   and writes `later.txt` in its folder once the request is out.
 //! - `later-flood`: answers the prompt, waits 1.5 s, then says 3000 chat items of 1000 bytes each and `flood-end` (output that fills
 //!   what a holder keeps while no node reads, ADR-0093), then writes `later.txt` in its folder.
+//! - `later-tool`: answers the prompt, starts a tool call (`callId` `t1`, tool `read`, arguments `{"path":"a.rs"}`, `in_progress`), then
+//!   waits until a file `go.txt` appears in its folder (a test makes it once the node it wants gone is gone), then finishes the call
+//!   with only its status and output (`completed`, `done`), says `tool-done`, goes idle and writes `later.txt` (ADR-0104 C1).
+//! - `hold:TEXT`: goes working, says TEXT, and stays working until a file `go.txt` appears in its folder; then goes idle and writes
+//!   `later.txt` (review of #1103, round 3). `hold:TEXT|REST` says REST too once `go.txt` appears, before it goes idle (words that
+//!   go on across a node's stop, ADR-0104 O2).
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `mode:ID` (with `--modes`): switches itself to mode ID, as an agent may on its own (ACP `current_mode_update`), and reports its
 //!   options again with ID as the current mode.
+//! - `config:auto_approve=VALUE` (with `--modes`): sets its option `auto_approve` to VALUE on its own and reports its config options again.
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
 //!
+//! With `--turns` it declares `turns` (it reports its turns), so the node queues a prompt sent while one runs.
 //! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
 //! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
 //! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
@@ -63,6 +73,21 @@ fn all_modes() -> Value {
     ])
 }
 
+/// The config options `--modes` reports: `auto_approve` set to `auto`, and with `--mode-config` the mode as the option `approvals`.
+fn config_options(mode_config: bool, auto: &str) -> Value {
+    let mut options = vec![json!({
+        "id": "auto_approve", "name": "Auto approve", "description": "",
+        "category": "other", "type": "boolean", "current": auto,
+        "choices": [], "skipsPermissions": false})];
+    if mode_config {
+        options.push(json!({
+            "id": "approvals", "name": "Approvals", "description": "",
+            "category": "mode", "type": "select", "current": "default",
+            "choices": all_modes(), "skipsPermissions": false}));
+    }
+    Value::Array(options)
+}
+
 /// Runs until `shutdown` or end of input.
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let modes = std::env::args().any(|a| a == "--modes");
@@ -90,6 +115,10 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
         match method {
             "initialize" => {
                 let mut caps = vec!["chat", "approvals", "usage", "cancel", "resume"];
+                // `--turns`: it reports its turns, so the node queues a prompt behind the turn that runs (ADR-0090).
+                if std::env::args().any(|a| a == "--turns") {
+                    caps.push("turns");
+                }
                 if modes {
                     caps.extend(["set_mode", "config"]);
                 }
@@ -121,27 +150,16 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 )?;
                 state(out, &session, "IDLE")?;
                 if modes {
-                    let all_modes = all_modes();
                     note(
                         out,
                         "session/options",
-                        json!({"sessionId": session, "modes": all_modes.clone(),
+                        json!({"sessionId": session, "modes": all_modes(),
                                "models": [], "currentMode": "default", "currentModel": ""}),
                     )?;
-                    let mut options = vec![json!({
-                        "id": "auto_approve", "name": "Auto approve", "description": "",
-                        "category": "other", "type": "boolean", "current": "false",
-                        "choices": [], "skipsPermissions": false})];
-                    if mode_config {
-                        options.push(json!({
-                            "id": "approvals", "name": "Approvals", "description": "",
-                            "category": "mode", "type": "select", "current": "default",
-                            "choices": all_modes, "skipsPermissions": false}));
-                    }
                     note(
                         out,
                         "session/config",
-                        json!({"sessionId": session, "options": options}),
+                        json!({"sessionId": session, "options": config_options(mode_config, "false")}),
                     )?;
                 }
             }
@@ -183,6 +201,8 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(300));
                 }
                 if text == "hang" {
+                    // A marker in the agent's folder (best effort: a folder it cannot write leaves the prompt as it was).
+                    let _ = std::fs::write("hang.txt", "read");
                     std::thread::sleep(std::time::Duration::from_secs(30));
                 }
                 reply(out, json!({}))?;
@@ -233,16 +253,79 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         // A marker in the agent's folder, so a test waits for it instead of guessing how long 1.5 s took.
                         std::fs::write("later.txt", "done")?;
                     }
-                    "ask" | "ask-error" | "ask-reserved" | "later-ask" => {
+                    held if held.starts_with("hold:") => {
+                        // Review of #1103, round 3: words said in a turn that stays open until the test makes `go.txt`.
+                        state(out, &session, "WORKING")?;
+                        let (first, rest) = match held["hold:".len()..].split_once('|') {
+                            Some((first, rest)) => (first, Some(rest)),
+                            None => (&held["hold:".len()..], None),
+                        };
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "text": {"text": first}}),
+                        )?;
+                        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        while !std::path::Path::new("go.txt").exists()
+                            && std::time::Instant::now() < end
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        if let Some(rest) = rest {
+                            note(
+                                out,
+                                "chat/append",
+                                json!({"sessionId": session, "text": {"text": rest}}),
+                            )?;
+                        }
+                        state(out, &session, "IDLE")?;
+                        std::fs::write("later.txt", "done")?;
+                    }
+                    "later-tool" => {
+                        state(out, &session, "WORKING")?;
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "toolCall": {"callId": "t1", "tool": "read",
+                                   "argumentsJson": "{\"path\":\"a.rs\"}", "kind": "read", "status": "in_progress"}}),
+                        )?;
+                        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        while !std::path::Path::new("go.txt").exists()
+                            && std::time::Instant::now() < end
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "toolCall": {"callId": "t1", "status": "completed", "output": "done"}}),
+                        )?;
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "text": {"text": "tool-done"}}),
+                        )?;
+                        state(out, &session, "IDLE")?;
+                        std::fs::write("later.txt", "done")?;
+                    }
+                    asked
+                        if matches!(asked, "ask" | "ask-error" | "ask-reserved" | "later-ask")
+                            || asked.starts_with("ask:") =>
+                    {
                         if text == "later-ask" {
                             std::thread::sleep(std::time::Duration::from_millis(1500));
                         }
                         state(out, &session, "BLOCKED")?;
+                        let (action, detail) = match asked.strip_prefix("ask:") {
+                            Some(rest) => rest.split_once('|').unwrap_or((rest, "")),
+                            None if text == "ask-reserved" => ("agent.start", "ls"),
+                            None => ("run_command", "ls"),
+                        };
                         note(
                             out,
                             "approval/request",
                             json!({"sessionId": session, "approvalId": "ap-1",
-                                   "action": if text == "ask-reserved" { "agent.start" } else { "run_command" }, "detail": "ls"}),
+                                   "action": action, "detail": detail}),
                         )?;
                         if text == "later-ask" {
                             std::fs::write("later.txt", "asked")?;
@@ -289,6 +372,12 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             }
                         }
                     }
+                    switch if modes && switch.starts_with("config:auto_approve=") => note(
+                        out,
+                        "session/config",
+                        json!({"sessionId": session,
+                               "options": config_options(mode_config, &switch["config:auto_approve=".len()..])}),
+                    )?,
                     switch if modes && switch.starts_with("mode:") => note(
                         out,
                         "session/options",

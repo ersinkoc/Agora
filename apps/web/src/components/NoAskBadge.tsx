@@ -14,21 +14,24 @@ import { Icon } from './Icon';
 // `nested`: it sits inside a button or a tab, which must stay the one stop, so it is not focusable there; the tooltip then opens when that
 // control has keyboard focus, a tap on the sign shows it without pressing the control, and the meaning is part of the control's name
 // (a control with its own aria-label must say it there: AgentTile).
+// `bare`: in a dense row or a tab, the bolt alone in red, with no chip around it (redesign PR 7); the same name, tooltip and behaviour.
 // `cause`: the agent's own name for the mode or setting that makes it act so, when the window knows it (a session switch); agent text, so
 // it is shown as one plain short line.
-export function NoAskBadge({ agent, nested, session, approved, cause }: { agent: { skipsPermissions?: boolean }; nested?: boolean; session?: boolean; approved?: boolean; cause?: string }) {
+// `look="tag"`: the chat composer's sign beside Mode, a red-tinted square as tall as the menus next to it (app.css `.no-ask--tag`); the
+// same sign, name, tooltip and behaviour, only drawn on the danger tint.
+export function NoAskBadge({ agent, nested, bare, session, approved, cause, look = 'chip' }: { agent: { skipsPermissions?: boolean }; nested?: boolean; bare?: boolean; session?: boolean; approved?: boolean; cause?: string; look?: 'chip' | 'tag' }) {
   if (!agent.skipsPermissions) return null;
   // `session` (ADR-0090 Amendment A): it runs so after a switch and holds until it ends or is switched back. "With your approval" is said only when
   // this window saw that exact value approved (`approved`); after a restart, a resume or the agent's own switch it says only what is so.
   const why = t(session ? (approved ? 'agent-does-not-ask-session-explain' : 'agent-does-not-ask-session-neutral-explain') : 'agent-does-not-ask-explain');
   const shown = cause ? plain(cause, 64) : '';
   const full = `${t('agent-does-not-ask')}: ${why}${shown ? `. ${t('agent-does-not-ask-cause', { value: shown })}` : ''}`;
-  return <Badge full={full} nested={!!nested} kind={session ? (approved ? 'session-approved' : 'session') : 'started'} />;
+  return <Badge full={full} nested={!!nested} bare={!!bare} look={look} kind={session ? (approved ? 'session-approved' : 'session') : 'started'} />;
 }
 
 const CONTROL = 'button, a[href], [tabindex], [role="tab"], input, select, textarea';
 
-function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: string }) {
+function Badge({ full, nested, bare, kind, look }: { full: string; nested: boolean; bare: boolean; kind: string; look: 'chip' | 'tag' }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -77,7 +80,7 @@ function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: st
   } : {};
   const own = nested ? tap : { tabIndex: 0, onFocus: show, onBlur: hide };
   return (
-    <span ref={ref} role="img" aria-label={full} data-no-ask={kind} className="ide-chip w-fit flex-none self-center justify-self-start border-risk/60 px-1 text-risk"
+    <span ref={ref} role="img" aria-label={full} data-no-ask={kind} data-look={look} className={look === 'tag' ? 'no-ask--tag' : `${bare ? 'inline-flex items-center' : 'ide-chip border-risk/60 px-1'} w-fit flex-none self-center justify-self-start text-risk`}
       onMouseEnter={show} onMouseLeave={leave} {...own}>
       <Icon name="bolt" className="size-3.5" />
       {anchor && <Bubble anchor={anchor} text={full} onEnter={show} onLeave={leave} />}

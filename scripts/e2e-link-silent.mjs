@@ -1,8 +1,8 @@
 // ADR-0070 acceptance, in a real browser: links that go silent without ending, and a hub that is killed and started again.
 //  1. A frozen machine: its node process is stopped (SIGSTOP), so its connection stays open and says nothing, as a laptop that
-//     slept looks to the hub. The window shows it offline with "last seen" within the hub's silence deadline (25 s). When it runs
+//     slept looks to the hub. The window shows it offline with "offline · 25 sec" (the Agents list) or "last seen" within the hub's silence deadline (25 s). When it runs
 //     again (SIGCONT) it is online again by itself, and its agent is still running (nothing was reset).
-//  2. A frozen hub (SIGSTOP past the deadline): the window says "Hub unreachable"; after SIGCONT the window and the machine are back.
+//  2. A frozen hub (SIGSTOP past the deadline): the window says "Cannot reach your Agora"; after SIGCONT the window and the machine are back.
 //  3. A killed hub (SIGKILL), started again at once on the same data and port: the window and the machine are back.
 // The times are printed; the checks have generous limits (the deadline plus a backoff). Uses POSIX signals, so it runs on Linux
 // and macOS; on Windows the freezes are skipped and only the restart runs. Only a shell agent is used. See browser-harness.mjs for
@@ -52,7 +52,7 @@ try {
     const offMs = await timed(page.waitForSelector(`${machine}[data-online="false"]`, { timeout: NOTICE_MS }).then(() => true, () => false));
     check(offMs > 0, `the window shows the frozen laptop offline (after ${offMs} ms)`);
     const seen = await page.locator(`${machine} [data-last-seen]`).first().innerText().catch(() => '');
-    check(/last seen/.test(seen), `with when it was last seen ("${seen}")`);
+    check(/offline · |last seen/.test(seen), `with how long it has been away or when it was last seen ("${seen}")`);
     await wait(5000);
     process.kill(node, 'SIGCONT');
     const backMs = await timed(online('true'));
@@ -63,12 +63,12 @@ try {
     // 2. A frozen hub.
     const hub = pidOf(`hub run --listen 127.0.0.1:${port} --hub-dir ${hubDir}`);
     process.kill(hub, 'SIGSTOP');
-    const lostMs = await timed(page.getByText('Hub unreachable').first().waitFor({ timeout: NOTICE_MS }).then(() => true, () => false));
+    const lostMs = await timed(page.getByText('Cannot reach your Agora').first().waitFor({ timeout: NOTICE_MS }).then(() => true, () => false));
     check(lostMs > 0, `the window notices the frozen hub (after ${lostMs} ms)`);
     await wait(Math.max(0, 40_000 - lostMs));
     process.kill(hub, 'SIGCONT');
     const t = Date.now();
-    const windowMs = await timed(page.getByText('Hub unreachable').first().waitFor({ state: 'detached', timeout: 60_000 }).then(() => true, () => false));
+    const windowMs = await timed(page.getByText('Cannot reach your Agora').first().waitFor({ state: 'detached', timeout: 60_000 }).then(() => true, () => false));
     const nodeMs = (await online('true')) ? Date.now() - t : 0;
     check(windowMs > 0 && nodeMs > 0, `after the hub runs again the window is back in ${windowMs} ms and the laptop online in ${nodeMs} ms`);
     check(running(), 'the laptop\'s agent is still running');
@@ -79,10 +79,10 @@ try {
   // 3. A killed hub, started again at once on the same data and port.
   const hub = pidOf(`hub run --listen 127.0.0.1:${port} --hub-dir ${hubDir}`);
   process.kill(hub, 'SIGKILL');
-  await page.getByText('Hub unreachable').first().waitFor({ timeout: NOTICE_MS }).catch(() => {});
+  await page.getByText('Cannot reach your Agora').first().waitFor({ timeout: NOTICE_MS }).catch(() => {});
   hub2 = spawn(bin, ['hub', 'run', '--listen', `127.0.0.1:${port}`, '--hub-dir', hubDir, '--web', join(root, 'apps/web/dist')], { env: stack.env, stdio: 'ignore' });
   const up = Date.now();
-  const windowMs = await timed(page.getByText('Hub unreachable').first().waitFor({ state: 'detached', timeout: 60_000 }).then(() => true, () => false));
+  const windowMs = await timed(page.getByText('Cannot reach your Agora').first().waitFor({ state: 'detached', timeout: 60_000 }).then(() => true, () => false));
   const nodeMs = (await online('true')) ? Date.now() - up : 0;
   check(windowMs > 0 && nodeMs > 0, `after a hub restart the window is back in ${windowMs} ms and the laptop online in ${nodeMs} ms`);
   check(running(), 'the laptop\'s agent is still running');

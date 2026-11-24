@@ -8,7 +8,7 @@ Encoding and transport: ADR-0009, ADR-0010, ADR-0011.
 ```
 connect (WSS + mTLS for nodes, session token for clients)
   → Hello      { role, protocol_generations[], capabilities[], build, locale? }
-  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time }
+  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time, person_role }
   → Resume     { last_acked_seq? }         (nodes and clients reconnecting)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
@@ -22,6 +22,17 @@ connect (WSS + mTLS for nodes, session token for clients)
 `SnapshotRequired` (control stream 0, kind 4, empty payload) is direction-neutral (ADR-0026): the sender cannot replay from
 the requested point. From a node it means the events from the hub's `from_seq` up to its oldest retained event are gone; the
 node sends it before any further event and the hub takes the node's next new event as the new base (section 3, ADR-0054).
+
+**A window's connection** (the web window, the terminal client; ADR-0106). A window sends no `Hello`: it opens with
+`Subscribe` on the events stream ("Hub service" below). Since ADR-0106 the hub's first frame to it is an unasked `Welcome` on stream 0, before
+the snapshot or any event, whose `person_role` (`PersonRole`: `OWNER`, `MEMBER`, `VIEWER`) is the role of the person the window signed
+in as (ADR-0049), from the same access the hub checks every command against. A hub not in team mode sends `OWNER`. Nothing was
+negotiated, so `chosen_generation` is the hub's generation (1), `capabilities` is empty and `peer_id` is empty. The value holds for the
+connection: the hub ends a connection whose role or grants changed (checked once a second and on every command), and the window
+reconnects into a new `Welcome`; no event carries a role change. It is a hint for what the window shows and asks, never a permission:
+the hub still checks every command. A window that gets something else first is talking to an older hub (`PERSON_ROLE_UNSPECIFIED`) and
+keeps its earlier behaviour (learning the role from a refused `PairStatus`); an older window ignores the frame, as it ignores every
+control frame it does not use. A node's `Welcome` (the answer to its `Hello`) leaves `person_role` unspecified.
 
 Roles: `node`, `client`, `adapter`. Capability names are lowercase dotted strings (`terminal.raw`,
 `terminal.cells`, `acp`, `mesh`, `files.watch`, `debug.json`). Unknown capabilities are ignored.
@@ -107,11 +118,14 @@ hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an au
 `node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
 its waiting approvals and its terminals; a resync announcement then re-adds what still runs. A node that takes up agents its terminal
 holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline` the same way (`AgentStarted`, `AgentStateChanged`, the
-session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`).
+session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`). Both say `AgentStarted.same_process`, so the hub
+keeps the agent's counters (section "A kept agent's counters", ADR-0104).
 
-SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
-a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
-control socket; the node's agents and policy are unchanged and nothing depends on the hub.
+SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a person or a
+tool can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local control
+socket, so whoever speaks them has the owner's own authority there (the routed-command checks, grants included, apply to the
+hub's connection only). It is not the hub's path (ADR-0032: the hub reaches an SSH-only node through a tunnel to its own TLS
+port); nothing depends on the hub.
 Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
 its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
@@ -165,7 +179,10 @@ never takes `replaced` as offline, and ignores a `NodeLink` from any producer bu
 (`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
 current connection ends. A hub that starts has no connection: every node its rebuilt view shows online is recorded offline
 before it accepts connections (`NodeOffline`, then `NodeLink { up: false, reason: closed }` for the node's latest generation,
-or 0, with `last_heard_ms` the node's last time in the log). The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+or 0, with `last_heard_ms` the node's last time in the log). An end the store refuses to record (busy, I/O error) is kept in
+memory, in order, and written before any later hub fact (so a node that dials again is recorded down, then up, and its new
+connection is refused while the end still cannot be written) and by a retry that waits 100 ms, doubling up to 5 s, until the store works (#996); the
+machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
@@ -176,7 +193,7 @@ Frame kinds on streams 0 and 2 are the ADR-0026 table.
 Hub service (`agora-hub::server`, ADR-0011/0026/0027): one TLS port. A client certificate from the hub CA that is not revoked makes the
 peer a **node** (named by the certificate): `Hello`/`Welcome`, `Resume`/`ResumeOk`, then `Event` frames; the hub answers with a cumulative
 `EventAck` after each batch and when idle, and a `ResumeOk { from_seq }` on a gap. A peer **without** a certificate is a client if its first
-frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (`Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
+frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (a `Welcome` naming the person's role (ADR-0106, section 1), then the `Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
 resubscribe with the last position), or an enrolling node if its first frame is an `EnrollRequest` command (one command, nothing else).
 Enrollment answers are the same for a wrong, expired or used code (`auth.unauthenticated`), and guessing is locked out for everyone
 (`auth.forbidden`). Frame kinds are in `agora_protocol::frame::kinds`.
@@ -192,7 +209,10 @@ have 256 requests waiting. At most 1024 commands from all clients together wait 
 rules of a local command (the hub cannot widen them).
 
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
-other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
+other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`; the hub refuses it, and the node
+refuses it again on its hub connection, never relying on the hub, as it does a second subscription on a stream it still has
+open, and judges an allowed one by the grants it applies on stream 1).
+The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
 (kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
@@ -287,6 +307,13 @@ Initial event families:
 Request/response with `request_id` and `idempotency_key`. Responses are `Ok { result }` or
 `Err { code, params }` (see `error-codes.md`).
 
+Team audit (ADR-0049) includes `project_id` and `agent_id` when the command or the hub's node-qualified view
+identifies those targets. For a hub-side `AgentForget`, the audit row takes the node and local agent id from the
+qualified key and resolves the project before forgetting. `TerminalOpen`, `GrantRevoke` and `PreviewOpen` record only
+node attribution. `TaskUpdate` and `TaskDispatch` record the `project_id` sent in the request when supplied. Signed
+commands record `requested_device_id` from the request. A fresh, successful node reply establishes `signer_device_id`. Replies to requests with a caller-supplied idempotency key may be cached, so
+such replies leave the signer field empty. Earlier rows and commands without the corresponding identifier use empty strings.
+
 Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`, `agent.set_mode`,
 `terminal.open`, `terminal.input`, `terminal.resize`, `terminal.subscribe`, `files.list`, `files.read`,
 `files.write`, `files.watch`, `git.diff`, `git.status`, `worktree.create`, `worktree.remove`,
@@ -326,7 +353,7 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | --- | --- |
 | `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
 | `directory.list` / `DirectoryList` (84) | `path` (empty: the user's home folder), `authorization` → `DirectoryEntries` (Ok tag 21): canonical `path`, `parent` (empty at a root), `entries[]` of `{name, is_git}`, `truncated`. Folders only, sorted by name, at most 500 per answer; folders ADR-0052 refuses to launch in are not listed; capability `directory.list` (ADR-0053) |
-| `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053) |
+| `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053). ADR-0108: the hub then passes it on, as `AgentForget` with the node's own id (`agent-7`), to a node that offers the capability `agent.forget.local` (never to one that does not): at once when the node is connected, otherwise after its next `Welcome`. It keeps the forgets each node owes in its settings (`forget.<node>`, at most 1000 per node, oldest dropped first; a hub restart keeps them, forgetting the machine drops them). It drops one when the node answers with a decision (`ok`, `agent.running`, `protocol.invalid_message`, `approval.grant_required`, `node.policy_denied`, or any other code but the next three). ADR-0108 amendment A: an answer `node.offline` (a stopping node), `node.timeout` or `internal` keeps it, to be sent again after the node's next `Welcome`, and after `node.offline` the rest wait for that connection too; at its 5th such answer it is dropped (the count is kept in `forget.<node>` too). A connection lost before an answer keeps it, uncounted. The node refuses `protocol.invalid_message` (`field: agent_id`) for an id that is not a plain name (letters, digits, `-`, `_`), and `agent.running` while the agent runs there (also in the holder, waiting for a restart, or being resumed), touching nothing; otherwise it removes `<id>.jsonl` and `<id>.earlier.jsonl` through its transcript writer, empties the agent's ring and no longer offers it for Resume, and answers `ok` (also for an agent it does not know). Not signed; it passes the node's grant gate (ADR-0041) like any routed command. A client's `AgentForget` with a `target_node` is still refused |
 | `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` (or `NodeOnline`) of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. A client that joined while the machine was hidden holds none of its records and no event repeats them, so when it comes back the hub lets every live client go, and a client resuming from a position before that return gets a snapshot instead of a replay (`View::remembered_at`, rebuilt at start). History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
@@ -348,7 +375,10 @@ the check is refused). An owner confirms its association; metadata is not an acc
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+and HEAD for the workspace. Each agent started in a folder registers it again, also a folder other agents share; such a
+registration leaves `files_changed` at 0, and the node sends the folder's `WorkspaceStatusChanged` after it, even when the
+counts did not change, so the latest counts follow it (#1017). A registration the node restates (a resync) carries the
+counts it last sent. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
 workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
 are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
@@ -384,10 +414,13 @@ size guards and require a workspace used by a managed session. Hub members/viewe
 ### Node-local control socket
 
 A node serves the same commands on a local socket (owner-only; `agora node run`, default `$AGORA_HOME/node.sock`)
-so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
+so it can be driven with no hub. Local commands and replies are protobuf payloads in the binary frame envelope above.
+`CommandRequest` goes on stream 1 with kind 0 and
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
-opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
+opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client (`ChatSubscribe` and `PreviewConnect` too; any
+other command on a dynamic stream but `ControlAuth`, which only proves the connection, and any of these three on stream 1, is
+`protocol.invalid_message` here as well). After the response the
 node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
 or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
 that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
@@ -410,7 +443,7 @@ gets a fresh snapshot instead of the dropped output, never with history (a clien
 missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
-answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`). ADR-0069 (capability `kinds.program`): each kind also names `program`, the file name the node looks for on its `PATH` (never a path, and never the node's `PATH` itself), so a kind that is not installed can say what is missing; `NodeOnline.binary` (and `NodeSnapshot.binary`, from the node's latest start) is the node's own executable only when its folder is not on the node's `PATH`, empty otherwise, so a client can say to run `agora` from that folder. It is a full path that may contain a user name: only the owner receives it whole; the hub sends members and viewers its file name alone (snapshot, live and replayed events alike), since any folder, the one it is in included, may be the user's home; the owner's client shows the last two components unless asked for the whole path. Old nodes send both empty.
+answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests and the ACP registry's converted ones (ADR-0092, kinds `registry-<id>`), one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`). ADR-0069 (capability `kinds.program`): each kind also names `program`, the file name the node looks for on its `PATH` (never a path, and never the node's `PATH` itself), so a kind that is not installed can say what is missing; `NodeOnline.binary` (and `NodeSnapshot.binary`, from the node's latest start) is the node's own executable only when its folder is not on the node's `PATH`, empty otherwise, so a client can say to run `agora` from that folder. It is a full path that may contain a user name: only the owner receives it whole; the hub sends members and viewers its file name alone (snapshot, live and replayed events alike), since any folder, the one it is in included, may be the user's home; the owner's client shows the last two components unless asked for the whole path. Old nodes send both empty.
 
 **Control token (ADR-0082, `ControlAuth` = `CommandRequest` field 101, `message ControlAuth { string token }`, append-only).** On Linux, when the node's
 policy confines agents (`sandbox` is not `off`), the node writes 32 random bytes, hex-encoded (64 characters), to `<home>/control.token`
@@ -449,12 +482,54 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+What the stream carries is redacted (ADR-0089 Amendment A, #1147): the node replaces the values of the secrets it holds (8 bytes or
+more: its secret store and the environment variables its policy passes to agents) by `<redacted>` in every entry and every version
+it sends and in the snapshot, by the same rule and code as the file below. A field is redacted before it is first sent; never an
+unredacted version first. What it does not cover is listed in the threat model (T61): a value's first 3 bytes or fewer can go before
+the next words show the value goes on, and text sent before a value was added to the store stays as it was sent on streams already
+open (a later snapshot replaces it). The agent's words (text and thinking)
+are one stream: a value split between two entries is found whole, and words whose end is a part of a value (4 bytes or more) wait
+until the next words show it is not one, until any other entry of the agent (so ids still increase on the stream), until its turn
+ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
+part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
+brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: on an approval
+card, before it is queued (so the card and the signature over it hold the same words), an adapter's action, detail and always-option
+label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a task's title, a
+handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids are kept; paths in
+other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted (T61).
+
+The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
+`<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
+secret values of 8 bytes or more replaced: whole anywhere, also when an agent's streamed text splits one between pieces, and as a piece of 4 bytes or more at a place the node cut a text; ids are never changed; see the threat model, T61). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
+before it reads anything new, so the snapshot shows the earlier turns with their ids, and numbers on after the highest id the file
+shows (a rotated file keeps that mark even when no whole entry fits): ids never start again at 1, unless the file was purged or
+removed by retention. A tool call or a plan from before the restart is changed in place under its id. A permission entry
+still pending in the file is shown cancelled (a request still open is asked again under a new approval id), and a prompt still queued
+there is dropped with an `adapter.queue_dropped` notice (also one the old node sent in its last unwritten second: the file cannot tell).
+What the file holds is held to the shapes and bounds of live entries before it is shown. An agent that loads its session on resume
+replays its conversation (ACP `session/load`, passed on by `agora acp-bridge` as chat before it answers the session's start): the
+node shows that replay only when it holds none of the conversation, so every turn appears once. A fresh start ("Start again") that went through begins a new file (the earlier
+one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
+changes neither. A node that stops cleanly writes everything first, the words it held back included, with a secret value's start at
+their end masked (ADR-0104 O2: `agora node` on `SIGTERM`, Unix). A node killed loses at most the last batch (up to a second), and while
+it holds a secret value the agent's newest words it held back in a turn: those entries may have been shown live (redacted) and are
+not in the file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
+memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
+`chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
+at most 30; 0: as soon as the agent ended) bound it: over its size a file keeps its newest half, and a file is removed that many
+days after its agent ended (as the node's session ledger says; after its last write for an agent the ledger no longer knows), never
+while the agent runs or is offered for Resume (2 GiB per node in all, the files of agents not kept first). A failed batch is not
+written later. `agora history purge` removes every transcript. Reading older entries in pages
+(`chat.history`) is ADR-0089's later schema step.
+
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
 project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
 
-`BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
+`BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. A node that goes offline and comes back to a shared project is asked again, also when the hub records its end late, together with its next connection (#1036). Sent only to nodes that offer the capability `board.join`.
 
 `GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them. A grant covers commands only while the device that signed it is still trusted on the node, in the same term and within its limits: when that device is removed or revoked, its endorsement runs out, or its limits no longer allow the grant's scope, the grant ends and `GrantList` no longer shows it; trusting the device again does not bring it back.
 
@@ -495,6 +570,22 @@ New error codes: `mesh.folder_not_allowed` (`folder`), `mesh.helper_limit` (`rul
 
 `Snapshot.tasks` (8) and `Snapshot.leases` (9), ADR-0040: the shared boards' tasks and held paths, so a client that connects sees them before the next change.
 
+`Snapshot.recent_messages` (12), ADR-0103: the newest mesh messages the window may see, oldest first, each the stored event as it is
+(`PositionedEvent`: its log position, at or before the snapshot's `pos`, and the `Event` with its producer, time and `MessagePosted`
+body). The hub keeps, per project (`<node>/<project>`), the newest 50 `MessagePosted` events and at most 256 KiB of them encoded,
+whichever is smaller, and at most 8 MiB over all projects (the oldest goes first; one message larger than 256 KiB alone is not kept).
+A message goes to the ring of `<producer>/<from_agent_id>`'s project when that is an agent the hub knows (the sender's own copy), else
+to the ring of `<producer>/<to>`'s project when that is one (a receiver's copy, each `#channel` copy), else to a ring that only the
+owner reads; the hub never resolves an already-qualified `from` to another machine's agent. The rings are memory only, folded from the
+events the hub applies, so a hub rebuilds them from its log at start. A window is sent the newest 50 it may see, then fewer until they
+encode to at most 256 KiB together and fit in the space left in the 1 MiB snapshot frame after the other fields are encoded.
+If no message fits, the field is empty. The owner is eligible for every ring; a member or viewer sees only the copies placed by their
+sender in a granted project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
+forgotten machine recorded (they come back with the machine). Copies are sent as stored: the window pairs the two copies of a message
+between machines as it does live. A client folds them in as it folds a live `MessagePosted`, not by the position rule (their
+positions are not after the snapshot's), each position once, and ignores any other body. No capability: an older window ignores the
+field, an older hub sends none. These limits are hub constants, not policy.
+
 ### Notices, modes and models, context and cost (ADR-0058)
 
 All additions; nothing published changed.
@@ -529,7 +620,8 @@ All additions; nothing published changed.
 All additions; nothing published changed.
 
 - **Ledger.** A node keeps `<data>/sessions/ledger.json` (folder `0700`, file `0600` on Unix, an owner-only ACL on Windows; replaced
-  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
+  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read; a write that would be larger leaves out the oldest ended entries first, then the oldest
+  others, until it fits, and keeps the next id). Per agent: id, kind, project,
   folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
   and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
   ADR-0059 (recorded from `AgentStarted`, never applied by `agent.resume`: a resumed or restarted-again agent asks before acting,
@@ -538,6 +630,16 @@ All additions; nothing published changed.
   session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
   agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
   never deleted. Entries are dropped 14 days after they were last touched (an interrupted one 14 days after it was found).
+- **Ended agents in `agent.list`** (#1120). A node lists in `agent.list` the agents its ledger keeps as ended, also those an earlier
+  process of the node ran, as that process listed them: `running` false, the ledger's last state, its folder as `worktree_id`, no
+  terminal and no restarts, whatever folder they ran in (a project worktree, a directory agent's folder or its separate worktree).
+  An agent the supervisor knows is listed from the supervisor. Nothing is announced to the hub for them: the hub keeps its own closed
+  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is also listed in `AgentListResult.interrupted`
+  (ADR-0107, field 2: each entry the `AgentInterrupted` the node announces for it, built by the same code, so `resumable` and
+  `still_running` are what the window shows; oldest id first; an id the supervisor holds, one being resumed or started again, is in
+  `agents` only; old nodes send none and old readers skip it). The list is in id order. An ended agent
+  listed only from the ledger cannot be addressed: `agent.stop`, prompts and the other agent commands answer `agent.not_found`, and its
+  folder is not a `worktree_id` the node accepts.
 - **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event
   `AgentInterrupted` (`Event` field 38: `agent_id`, `kind`, `project_id`, `folder`, `parent_agent_id`, `resumable`, `started_at_ms`,
   `interrupted_at_ms`, `last_state`) says so after the node's `NodeOnline`, and again in every resync announcement, until the agent
@@ -566,8 +668,9 @@ All additions; nothing published changed.
   hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
   `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
   local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
-  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
-  command (action `AgentResume`).
+  anything by itself. The local owner-only socket needs no signature (`agora agent resume AGENT_ID` sends it there, and with
+  `--again` Start again, `new_session`; #1137). Viewers cannot send it, and the hub audits it like every routed command (action
+  `AgentResume`).
 - **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
   (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
   of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
@@ -680,6 +783,26 @@ All additions; nothing published changed. Node capability `agent.launch_options`
   `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
   before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
   agent's confinement, ADR-0047/0050, would not be active).
+- **ACP registry kinds (ADR-0092, the maintainer's answers on #1133).**
+  - *Always signed when they fetch.* A kind loaded from the registry's converted manifests (by origin, never by its `registry-` name
+    alone) whose program is a package runner (`npx`, `uvx`, or any other of `registry_convert::PACKAGE_RUNNERS`, under any extension)
+    fetches and runs code when it starts. A `registry-*` kind the node has not read yet (a manifest added after its folder was last
+    read) is held to this too. Where the hub's commands enter the node, an unsigned
+    routed `AgentStart` of one is refused with `node.policy_denied` `{node_id, rule: registry_signed_start, kind}`, whatever the
+    node's `signed_commands` says and whatever grant is live (a grant lets the hub act for a while; it is not a person signing this
+    start). It starts from a signed `AgentLaunch` (its `directory-action` signature names the kind), a helper start the person's signed
+    decision approved (ADR-0057), a signed `AgentResume`, or the node's own control socket (the owner). The window always sends a
+    signed launch; the terminal client's unsigned start in a project (`s`) sends the person to its signed folder start (`f`) for such
+    a kind. A hand-made kind is never held to this, whatever its name or program, and neither is a registry kind that runs its own program
+    (one the owner installed and the node finds on its `PATH`, with or without a SHA-256 in the registry: no code is fetched at start).
+    An automatic resume the owner's `resume = auto` and `resume.kinds` lines name is the owner's own choice and is not refused.
+  - *A policy line switches them off.* `agents.registry = on | off` (default `on`; quoted or not; any other value, or a policy file
+    that cannot be read, counts as `off` and is a policy problem) and `agents.registry.deny = registry-a, registry-b` in the node's own
+    policy file (names quoted or not; every deny line adds to the list; a name that is not one of this program's registry kinds is a
+    policy problem). They apply to kinds of registry origin only.
+    A registry kind switched off is not listed by `agent.kinds` and is not started by any path (`node.policy_denied`, rule
+    `registry_off` or `registry_denied`, with `kind`); `agora doctor` says so (`registry-off`, `registry-denied`). Hand-made kinds are
+    never affected. Read when the node starts.
 - **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
   fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
   audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).
@@ -1017,7 +1140,10 @@ forwards either to a node that did not offer it.
   `ask_for_approval` on) is never refused, and where the option's words do not say which value protects, both count as risky.
   `AgentSetMode` and `AgentSetConfig` of a choice that skips follow the node's `skip_permissions`
   policy: refused with `agent.option_forbidden` (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or
-  `confined_only`) when the policy does not allow it; when it does, the node neither applies nor refuses the choice: it raises an
+  `confined_only`) when the policy does not allow it. `confined_only` asks how the agent's own process was launched (#1009, as for
+  "always", ADR-0101 section 7 item 7), never the node's sandbox setting now: an agent the holder runs is not confined, also under a node
+  that confines now, and one with nothing recorded counts as not confined; the same holds for `AgentSetModel` below and for an
+  approved switch when it is applied. When the policy allows it, the node neither applies nor refuses the choice: it raises an
   `agent.skip_permissions` approval and answers `agent.approval_needed { approval_id }` (next item). A choice that keeps protection is
   never held to any of this. (`AgentSetModel` of a model the node judges as skipping is still refused, `agent.option_forbidden` or
   `agent.option_unconfirmed`: Amendment A covers modes and config options.) All three commands are in the team-default `signed_commands`
@@ -1057,8 +1183,8 @@ forwards either to a node that did not offer it.
     back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
     "skip_approvals", limit }`), and one agent may have at most 2 waiting and raise at most 3 per minute (`resource:
     "skip_approvals_agent"`), so one agent's flood never keeps another agent's card from being raised; a replacement counts as a new card
-    for these limits. Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
-    exists. Switching back to a value that keeps protection needs no approval.
+    for these limits. Policy `forbid` and `confined_only` (the agent's process not launched confined) refuse with
+    `agent.option_forbidden` before any request exists, and again when an approval arrives for an agent no longer launched confined. Switching back to a value that keeps protection needs no approval.
   - An adapter can never raise this card or any other node-made one: an approval request from an adapter whose action is in the `agent.`
     namespace (`agent.start`, `agent.skip_permissions`, ...) gets no card, consumes nothing and is answered "denied" at once.
   - Node capability `approval.skip_permissions`, advertised only by a node that handles the above and passed by the hub. A client that
@@ -1085,7 +1211,7 @@ forwards either to a node that did not offer it.
   fresh snapshot instead of keeping a transcript with a hole in it. Direction marks: the override and embedding controls (U+202A to
   U+202E) are always removed; in prose (thinking, output, plan steps) LRM, RLM, ALM and balanced isolates stay, as Arabic and Hebrew
   text needs them; in names, paths, labels and arguments every direction control goes. A lone carriage return is a line break (a space
-  in a one-line field); an escape sequence that is never closed swallows at most to the next line break or 4096 characters.
+  in a one-line field); an escape sequence that is never closed (CSI, OSC, DCS, ...) swallows at most to the next line break, which stays, or 4096 characters.
 - **Coalescing.** At most one version of an entry is sent per 150 ms, repeats of a final status included (the first `completed` goes at once); a version held back is stored (a new subscriber sees it) and sent by
   the node's tick once 150 ms have passed; a final tool status is never held back. A client therefore may see fewer versions than the
   agent sent, never a stale last one.
@@ -1186,6 +1312,24 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   the claim. A command sent on a node's own control socket is not counted (it never reaches the hub).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.TaskDispatch*.*`, `agora.v1.TaskDispatched.*` and `schema/fixtures/task-dispatch/`.
 
+### A kept agent's counters (ADR-0104)
+
+One appended field; nothing published changed. No capability.
+
+- `AgentStarted.same_process` (8): this `AgentStarted` re-states an agent whose current process the node has announced before under the
+  same id: one it took up from the holder after its restart (ADR-0079, ADR-0093), or one a resync announcement re-states (ADR-0054,
+  ADR-0055, `Announce::Present` and `Announce::Restart`). It is false for a new start, a resume (ADR-0060) and a restart after a crash.
+- **The hub** keeps, when it is set and the agent is already listed from that producer (the key is `<producer>/<agent>`), what it summed
+  for the agent: `input_tokens`, `output_tokens`, `model`, the context level and size, and its own reported cost and currency
+  (`AgentSnapshot` fields 18-21). Everything else starts again as for any start: the session's options, config, commands and always
+  answers (the node re-states them right after), its session id, state and interruption. Usage reported after it adds to the kept
+  totals, so `usage.report` keeps the agent's earlier usage too. A view rebuilt from the log folds the same totals.
+- **The window** folds it the same way: the agent's tokens, context level, own cost and the time it saw the agent start stay.
+- **Compatibility.** An older hub ignores the field and starts the counters again from 0, as before. An older node never sets it, so a
+  newer hub does the same. The window is served by its hub. The terminal client draws the hub's snapshot, which carries the kept totals.
+- Golden fixture: `schema/fixtures/same-process/` (`crates/agora-protocol/tests/same_process.rs`); the published `AgentStarted`
+  fixture is unchanged and reads as `same_process` false.
+
 ### Allowing a structured agent always for its session (ADR-0101)
 Schema step approved with ADR-0101 by the maintainer on 2026-11-22. Handled by every node of this build, which advertises `approval.always`;
 the hub passes it (`hubcli.rs`). The window does not branch on it: the evidence it uses is ALWAYS in a request's `scopes`, which only such a
@@ -1239,3 +1383,30 @@ node sets. The window's button and the terminal client's key come with the next 
   agent's remembered option when the agent offers no single one; under `allow` that residual is kept (named in ADR-0101), under `forbid`
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
+
+## Durable cross-node task handoffs (ADR-0109)
+
+The first slice reserves `mesh.task_handoff.v1` on the hub–node link and adds generation 1 wire types. The hub and node will
+advertise the capability once their queue and durable inbox paths are implemented. The hub must have negotiated the capability
+with the receiver before sending the new command. An older peer connects normally and uses the current best-effort handoff path.
+Until a node advertises the capability, it answers `DeliverTaskHandoff` with `protocol.capability_missing`
+(`capability = mesh.task_handoff.v1`), on the hub link before any grant or signed-command check, and on its local socket.
+
+- **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
+  A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
+  value, including when the local agent id is reused. Older peers ignore this field.
+- **Delivery.** `DeliverTaskHandoff` (`CommandRequest` arm 110) is a hub-to-node command on the command stream. It names the
+  `delivery_id` (1), `receiver_run_id` (2), node-local `agent_id` (3), `project_id` (4), `task_id` (5), `summary` (6), `refs` (7),
+  `valid_until_ms` (8), `sender_node` (9) and `sender_agent_id` (10). Both opaque identities are 16 bytes. Retries keep the delivery
+  id, run id, payload and deadline. The node checks the addressed run and project before accepting a new entry. Summary and refs
+  remain untrusted data. A window cannot issue this command.
+- **Receipt.** `TaskHandoffReceipt` (`CommandOk` arm 32) echoes the `delivery_id` (1) and `receiver_run_id` (2). It acknowledges
+  one durable inbox entry. A retry with the same delivery id gets the stored receipt, even if the inbox entry has been read.
+- **Bounds for the queue and inbox slices.** A 16 KiB UTF-8 summary and at most 20 refs totalling 16 KiB use the existing mesh
+  limits. The encoded command fits the negotiated frame limit (1 MiB by default). Per hub, keep at most 1,024 pending or unresolved
+  deliveries and 32 MiB of encoded delivery data. Per node, keep at most 1,024 durable handoff records and 32 MiB of encoded inbox
+  entries and receipts. Read entries can release their payload bytes while retaining their receipt. The hub sets `valid_until_ms`
+  to 24 hours after creating the delivery, in Unix milliseconds, and stops retries at that deadline. The node retains receipts
+  through the deadline and accepts a new entry only before it. Without a receipt, expiry leaves the outcome unresolved.
+- **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
+  fixture keeps its original bytes.

@@ -68,7 +68,7 @@ for (const [name, width, choice] of [['340', 340], ['420', 420], ['820', 820], [
   await page.waitForFunction(() => window.__ready === true);
   const rows = await page.$$eval('li.fleet-ask', (lis) => lis.map((li) => {
     const what = li.querySelector('.fleet-ask__what');
-    return { allow: !!li.querySelector('button.button--primary'), h: what.scrollHeight, ch: what.clientHeight, w: what.scrollWidth, cw: what.clientWidth, text: what.textContent.length };
+    return { allow: [...li.querySelectorAll('button')].some((b) => b.textContent === 'Allow'), h: what.scrollHeight, ch: what.clientHeight, w: what.scrollWidth, cw: what.clientWidth, text: what.textContent.length };
   }));
   rows.forEach((r, i) => {
     const c = cases[i];

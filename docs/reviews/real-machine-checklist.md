@@ -170,7 +170,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 ### RM-03 Hub with the web window, many machines
 - **OS:** Linux, macOS, Windows (the hub on each; machines of any system).
 - **Do:** S1 with `y` for other machines; add a second machine (RM-07, or S3). Open the window; start a Shell on each machine.
-- **See:** Your machines lists both as Online with their system; both agents are in Your agents, each "on <machine>"; typing in either
+- **See:** My machines lists both as Online with their system; both agents are in Your agents, each "on <machine>"; typing in either
   terminal works.
 - **Evidence so far:** LAN run 2026-11-11 (lan-test-findings): a Linux hub with Linux, macOS and Windows nodes; the Windows web window
   pass (L14 to L20). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (#944: the system shown raw).
@@ -180,7 +180,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** S1, S3. Start a Shell on `rm-two`. Freeze `rm-two`'s node process for 60 s (`kill -STOP <pid>` on Linux and macOS; on
   Windows, Resource Monitor > CPU > right-click the node's `agora.exe` > Suspend process (unverified; the Windows run used
   `NtSuspendProcess`)), then let it go (`kill -CONT`; on Windows, Resume process (unverified)). Note the times.
-- **See:** `rm-two` shows Offline with "last seen" within about 15 to 25 s of the freeze (25 s after its last frame; the node pings
+- **See:** `rm-two` shows Offline with "last seen" (the Agents list: "offline · 20 sec") within about 15 to 25 s of the freeze (25 s after its last frame; the node pings
   every 10 s); Online again within a few seconds of the
   resume, by itself; its Shell agent is still there and answers.
 - **Evidence so far:** lan-test-findings R1 and R5 measured earlier builds (the first version failed on `754a7b1`, the hub restart
@@ -218,15 +218,16 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** on the hub machine S1 with `y`, then `agora pair open` (in a terminal). On a second machine (or a second `AGORA_HOME` on the
   same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once. The hub closes itself after one approval,
   so for the second answer run `agora pair open` again and join from another disposable machine (its own `AGORA_HOME` and `--id`), then
-  answer that one in the window (A new machine wants to join > Approve > "Do the two numbers match exactly?" > Yes, the numbers match).
+  answer that one in the window (A new machine wants to join > Numbers match… > "Do the two numbers match exactly?" > Yes, the numbers match).
   Wait a second or two before each answer: a key
   typed right after a question is refused ("That key came too soon after the question to be an answer. …"). Join by a name the
   hub's certificate holds (the hub's own suggestion, `agora join <hub name>:PORT`); then join once by an address the certificate does
   not name (on the hub's own computer, `127.0.0.1:PORT` when the hub listens on all addresses).
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
-  the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
-  saved"; the hub closes itself after one approval. The join by an address the certificate does not name says at once "The hub at … could
+  the new machine says `Joined. This machine is "…"` and is Online in My machines; a denied or timed-out request ends with "Nothing was
+  saved"; the hub closes itself after one approval, from the terminal or from the window (`agora pair status` says "Closed to new machines"), and a
+  `pair open` that was asking about a machine answered in the window stops asking and says "Answered in a window: …" (#942). The join by an address the certificate does not name says at once "The hub at … could
   not be verified, so nothing was saved." with no number, the owner gets no card, and a later join with that name is not offered
   "Replace the existing machine".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): terminal answer passed; after a window approval the hub stays open (#942); the join hint on a loopback hub (#943).
@@ -363,7 +364,7 @@ not built: nothing to check.
   with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then `agora down` and start again
   with `agora --resume auto` (given while Agora already runs, `--resume auto` changes nothing and says nothing; it applies to a
   start).
-- **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume starts the same agent in
+- **See:** the agents are under "Stopped when the machine shut down" (the Agents list: "Stopped") with Resume or Start again; Resume starts the same agent in
   the same folder (the conversation comes back only for an agent that can load a session: not the fake, which says
   `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once), except an agent the node brought back by itself less than 10
   minutes ago (ADR-0062: a second restart within 10 minutes offers it with Resume instead); one still running from before says "Stop it".
@@ -426,13 +427,16 @@ not built: nothing to check.
 
 ### RM-26 Team mode: people, roles, audit
 - **OS:** Linux, macOS, Windows (the hub). Partly built (P7-09).
-- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`; then grant a project: `agora hub user grant rm-viewer
-  NODE/PROJECT --hub-dir $RM/home/hub`, where PROJECT is the hub's project id, not the name the window shows: for a git folder with
-  no `.agent-project.json` it is `#` and the root commit's full hash (`git -C "$RM/proj" rev-list --max-parents=0 HEAD`), after
-  `agora project init` it is `id:<uuid>` (a wrong name is accepted silently, #904). Sign in with its code in browser B (a second
-  person: **human**; otherwise a second browser profile). As the viewer try to start an agent. As the owner open Activity.
-- **See:** without a grant the viewer sees no machine; with it, the project's agents, and a start is refused; Activity (Person
-  column) lists both people's actions, each row with "session <id>".
+- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`. Sign in with its code in browser B (a second
+  person: **human**; otherwise a second browser profile). Then `agora hub user projects --hub-dir $RM/home/hub` and grant a project
+  by the names the window shows: `agora hub user grant rm-viewer MACHINE/proj --hub-dir $RM/home/hub` (#904); also try
+  `MACHINE/nosuch`. As the viewer try to start an agent. Then `agora hub user role rm-viewer member --hub-dir $RM/home/hub` and, in
+  browser B, open Start an agent on that machine, browse the project's folder and a folder in it, and start a shell there; type
+  another project's folder or `/` and choose it (#1049). As the member in `agora tui`, press `f` on that machine (#1086). With that `agora tui` still open, `agora hub user role rm-viewer owner --hub-dir $RM/home/hub` and press `f` again, then make them a member again (#1099). Make them a viewer, and in `agora tui` and browser B look at the footer and the start actions and press `f`, `s` and `x` (ADR-0106). As the owner open Activity.
+- **See:** without a grant the viewer sees no machine and is told no project is theirs yet (no "Connect your first machine");
+  `projects` lists `MACHINE/proj` with its folder; `MACHINE/nosuch` is refused with a reason (exit 1); with the grant, the project's
+  agents, and a start is refused; as a member the project's folders list (no way up from the project's own folder) and the start
+  works, while a folder outside the project is refused in words for the role; in `agora tui` the picker opens at the project's folder (its projects to choose from when several are granted there) and ⌫ goes no higher, and after the change to owner it opens at the home folder (the hub ends the connection when the role changes, and the next one names the owner; ADR-0106); as a viewer the terminal client's footer lists only the keys that read, `f`, `s` and `x` say the viewer can watch and send nothing, and the window offers no start, new terminal, prompt or Give; Activity (Person column) lists both people's actions in words, each row with "session <id>", and no refused `pair.status`, `UsageReport` or first-folder row from the member's or viewer's windows.
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)
@@ -711,8 +715,8 @@ not built (the window says how many files are not shown): nothing to check.
 - **OS:** Linux, macOS, Windows (Chrome, Firefox, Safari; Windows at 125 % and 150 %).
 - **Do:** Layout > each preset; Split right, Close pane; Save layout as…, reload, Saved layouts… > Use; Export and Import…; Reset
   layout; the colour scheme switch: Dark, Light, Follow the system; Edit theme > Customize a colour.
-- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text is readable (WCAG
-  AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
+- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text and controls are easy
+  to see (WCAG AA)."; before #1054 it said "All text is readable (WCAG AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
 - **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (Chrome, 125 % and 150 %).
 
 ### RM-59 Terminal client (TUI)

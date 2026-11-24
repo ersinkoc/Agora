@@ -2,6 +2,10 @@
 //! every kind of dangerous key; the agent's git sees the identity and none of the rest.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
+#[path = "short_socket/mod.rs"]
+mod short_socket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -93,9 +97,11 @@ fn two_confined_nodes_keep_generated_git_config_in_their_own_roots() {
         );
         std::fs::write(data_dir.join("policy"), policy).unwrap();
         std::fs::write(manifests_dir.join("shy.toml"), manifest).unwrap();
+        // #926: the socket's folder fits whatever the checkout's depth, and its control token is out of the agent's reach.
+        let sockets = short_socket::SocketDir::new(node_root, &format!("gitcfg-{node_id}"));
         let node = Node::start(&NodeConfig {
             node_id: node_id.into(),
-            socket: node_root.join("n.sock"),
+            socket: sockets.socket("n.sock"),
             data_dir,
             worktree_root: worktree_root.clone(),
             manifests_dir,
@@ -138,17 +144,19 @@ fn two_confined_nodes_keep_generated_git_config_in_their_own_roots() {
             config.parent(),
             Some(config_dir.canonicalize().unwrap().as_path())
         );
-        (node, config)
+        // The socket's folder goes with the node: dropped after it.
+        (node, config, sockets)
     };
 
     let one = base.join("one");
     let two = base.join("two");
-    let (node_one, config_one) = observe(&one, "one", &terminal_manifest);
-    let (node_two, config_two) = observe(&two, "two", &adapter_manifest);
+    let (node_one, config_one, sockets_one) = observe(&one, "one", &terminal_manifest);
+    let (node_two, config_two, sockets_two) = observe(&two, "two", &adapter_manifest);
     assert_ne!(config_one, config_two);
     assert!(!fixture_home.join(".agora/git-config").exists());
     drop(node_two);
     drop(node_one);
+    drop((sockets_two, sockets_one));
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -251,6 +259,8 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 fn home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
+        // First, so `short_socket` knows the real home folder before this one replaces it.
+        private_home::init();
         // Under the target folder, never under `/tmp`: the sandbox opens `/tmp`.
         let h = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("gitcfg-home-{}", std::process::id()));

@@ -30,8 +30,8 @@ export function isCloseCommand(text: string, offered: readonly CommandModel[]): 
 /** A turn is under way (or waits for an answer): closing loses it. */
 export const losesWork = (a: Pick<AgentTileModel, 'state' | 'closed'>): boolean => !a.closed && (a.state === 'working' || a.state === 'needs-you');
 
-// Which agent the inline confirm is open for, and where it is drawn: `row` under its row in the agent list, `pane` in its own pane or
-// screen. One at a time, so nothing else on the page can be closed by a click meant for this one: the id is the clicked item's.
+// Which agent the confirm (a dialog over the window, #1070) is open for, and which item asked for it: `row` its row in the agent list,
+// `pane` its own pane or screen. One at a time, so nothing else on the page can be closed by a click meant for this one: the id is the clicked item's.
 export interface CloseAsk { id: string; where: 'row' | 'pane' }
 let asking: CloseAsk | undefined;
 const listeners = new Set<() => void>();

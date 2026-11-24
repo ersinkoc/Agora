@@ -54,6 +54,9 @@ pub const CAPABILITIES: &[&str] = &[
     "task.dispatch",
     // ADR-0060
     "agent.resume",
+    // ADR-0108: the hub passes a person's forget of a closed agent on (`AgentForget` with the node's own id); the node removes the
+    // agent's saved conversation and its Resume offer, and refuses while the agent runs here.
+    "agent.forget.local",
     // ADR-0059
     "agent.launch_options",
     // ADR-0066: verifies a launch's settings (model, effort) under `directory-action-v4`, and an `agent.start` approval's under
@@ -785,6 +788,15 @@ where
                         });
                         continue;
                     }
+                    // ADR-0109: this node does not take durable handoffs yet (it does not advertise the capability), so the hub's
+                    // delivery is refused here, before grants or the signed-command policy could ask for a grant on it.
+                    if matches!(
+                        req.command,
+                        Some(command_request::Command::DeliverTaskHandoff(_))
+                    ) {
+                        let _ = answers_tx.send(handoff_not_taken(&req.request_id));
+                        continue;
+                    }
                     if let Some(command_request::Command::BoardJoin(j)) = &req.command {
                         let mesh = mesh.clone();
                         let tx = answers_tx.clone();
@@ -833,20 +845,51 @@ where
                         }
                     }
                 }
-                // A terminal subscription: a thread bridges the node's local stream to this connection.
+                // A terminal or chat subscription: a thread bridges the node's local stream to this connection.
                 (stream, 0) if stream >= FIRST_DYNAMIC_STREAM => {
                     let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
                         continue;
                     };
+                    // Only a command that opens a stream may come on one (protocol.md, terminal relay). Any other is refused here,
+                    // whatever the hub does: carried to the control socket it would skip every check `run_local_on` makes on stream 1.
+                    // So is a second one on a stream that is still open: it would take the first one's place and leave it running.
+                    let open = relays
+                        .0
+                        .get(&stream)
+                        .is_some_and(|a| a.load(Ordering::Acquire));
+                    if open
+                        || !req
+                            .command
+                            .as_ref()
+                            .is_some_and(crate::control::opens_stream)
+                    {
+                        let _ = answers_tx.send(misplaced(req.request_id));
+                        continue;
+                    }
+                    // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
+                    // a refused subscription included (the grant is judged on the relay's own thread, off this loop).
                     let alive = Arc::new(AtomicBool::new(true));
+                    // Streams whose relay ended (refused, exited, closed by the node) are not closed by the hub; drop them here so the
+                    // map stays as small as the relays that run (#1144 review).
+                    relays.0.retain(|_, a| a.load(Ordering::Acquire));
                     relays.0.insert(stream, Arc::clone(&alive));
-                    let (socket, answers, out) = (
+                    let (socket, answers, out, grants) = (
                         commands.map(std::path::Path::to_path_buf),
                         answers_tx.clone(),
                         relay_tx.clone(),
+                        grants.clone(),
                     );
                     tokio::task::spawn_blocking(move || {
-                        relay_terminal(socket.as_deref(), &req, stream, &alive, &answers, &out);
+                        relay_terminal(
+                            socket.as_deref(),
+                            &req,
+                            grants.as_deref(),
+                            stream,
+                            &alive,
+                            &answers,
+                            &out,
+                        );
+                        alive.store(false, Ordering::Release);
                     });
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
@@ -917,18 +960,28 @@ impl Drop for Relays {
 fn relay_terminal(
     socket: Option<&std::path::Path>,
     req: &CommandRequest,
+    grants: Option<&crate::grants::Grants>,
     stream: u32,
     alive: &AtomicBool,
     answers: &tokio::sync::mpsc::UnboundedSender<CommandResponse>,
     out: &tokio::sync::mpsc::Sender<Frame>,
 ) {
     use agora_protocol::{Error, ErrorCode};
+    // The stream is let go before the answer is sent, so a request the hub sends on it after reading the refusal is not
+    // taken for a second one on a stream still open (#1144 review).
     let refuse = |e: Error| {
+        alive.store(false, Ordering::Release);
         let _ = answers.send(CommandResponse {
             request_id: req.request_id.clone(),
             result: Some(command_response::Result::Err(e.to_info())),
         });
     };
+    // ADR-0041: a subscription the policy lists needs a live grant here as much as on stream 1 (`run_local_on`).
+    if let (Some(g), Some(c)) = (grants, &req.command) {
+        if let Err(e) = g.gate(c, crate::grants::now_ms()) {
+            return refuse(e);
+        }
+    }
     let Some(socket) = socket else {
         return refuse(
             Error::new(ErrorCode::NodePolicyDenied)
@@ -943,6 +996,9 @@ fn relay_terminal(
         return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
     };
     let accepted = matches!(resp.result, Some(command_response::Result::Ok(_)));
+    if !accepted {
+        alive.store(false, Ordering::Release);
+    }
     let _ = answers.send(resp);
     while accepted && alive.load(Ordering::Acquire) {
         match local.read_frame(Some(Duration::from_millis(200))) {
@@ -960,6 +1016,31 @@ fn relay_terminal(
     // The local stream ended without an exit frame (the node closed it): tell the hub so the client can resubscribe.
     if alive.load(Ordering::Acquire) && accepted {
         let _ = out.blocking_send(frame(stream, STREAM_CLOSE, Vec::new()));
+    }
+}
+
+/// The answer to a command on a stream it may not use (protocol.md, terminal relay): `protocol.invalid_message {field: stream_id}`.
+fn misplaced(request_id: String) -> CommandResponse {
+    CommandResponse {
+        request_id,
+        result: Some(command_response::Result::Err(
+            agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                .with("field", "stream_id")
+                .to_info(),
+        )),
+    }
+}
+
+/// The node's answer to the hub's `DeliverTaskHandoff` until it keeps a durable handoff inbox (ADR-0109).
+fn handoff_not_taken(request_id: &str) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    CommandResponse {
+        request_id: request_id.to_string(),
+        result: Some(command_response::Result::Err(
+            Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", agora_protocol::handshake::TASK_HANDOFF_V1)
+                .to_info(),
+        )),
     }
 }
 
@@ -1068,6 +1149,24 @@ fn run_local_on(
                 .with("policy", "signature"),
         );
     }
+    // #1133 ("startable, but always signed"): a registry kind that starts through a package runner fetches and runs code, so the hub
+    // alone never starts one: an unsigned routed `AgentStart` of it is refused whatever `signed_commands` says and whatever grant is
+    // live (a grant is the hub acting for a while, not a person signing this start). A signed `AgentLaunch` names the kind in what was
+    // signed, and is checked below.
+    if let Some(command_request::Command::AgentStart(a)) = &req.command {
+        let needs = grants.map_or_else(
+            || a.kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+            |g| g.start_needs_signature(&a.kind),
+        );
+        if needs {
+            return fail(
+                Error::new(ErrorCode::NodePolicyDenied)
+                    .with("node_id", "")
+                    .with("rule", "registry_signed_start")
+                    .with("kind", a.kind.as_str()),
+            );
+        }
+    }
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
     if grants.is_none()
@@ -1133,16 +1232,13 @@ fn run_local_on(
             None => {}
         }
     }
-    if matches!(
-        req.command,
-        Some(
-            command_request::Command::TerminalSubscribe(_)
-                | command_request::Command::ChatSubscribe(_)
-        )
-    ) {
-        return fail(
-            Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),
-        );
+    // A command that opens a stream needs a stream of its own (protocol.md, terminal relay).
+    if req
+        .command
+        .as_ref()
+        .is_some_and(crate::control::opens_stream)
+    {
+        return misplaced(req.request_id.clone());
     }
     // ADR-0082: the control token is for the local socket only; the hub neither knows nor may probe it, so the command is not
     // carried to the socket (where a wrong token would end the node's own kept connection).
@@ -1524,6 +1620,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_hub_handoff_delivery_is_refused_until_the_node_keeps_an_inbox() {
+        let answer = handoff_not_taken("r-1");
+        assert_eq!(answer.request_id, "r-1");
+        let Some(command_response::Result::Err(info)) = answer.result else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(info.code, "protocol.capability_missing");
+        assert_eq!(
+            info.params["capability"].value,
+            Some(agora_protocol::v1::param_value::Value::Str(
+                agora_protocol::handshake::TASK_HANDOFF_V1.into()
+            ))
+        );
+    }
+
+    #[test]
     fn urls_split_into_scheme_host_and_address() {
         assert_eq!(
             split_url("wss://hub.example:7443/x").unwrap(),
@@ -1840,6 +1952,90 @@ mod tests {
         let (r, took) = talk_frozen("answers", Hub::Answers, IDLE.deadline * 3, None, IDLE);
         assert!(r.is_ok(), "{r:?}");
         assert!(took >= IDLE.deadline * 3, "{took:?}");
+    }
+
+    /// #1133: a routed unsigned `AgentStart` of a registry kind that fetches its program is refused where the hub's commands enter
+    /// the node, with no `signed_commands` at all and under a live grant for `agent.start`; a hand-made kind passes this gate.
+    #[test]
+    fn a_routed_unsigned_start_of_a_fetching_registry_kind_is_refused_whatever_the_policy() {
+        struct Fake;
+        impl crate::approvals::Verifier for Fake {
+            fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+                device == "dev" && signature == message
+            }
+        }
+        let approvals = std::sync::Arc::new(crate::approvals::NodeApprovals::new(
+            "node-a",
+            Box::new(Fake),
+        ));
+        let open = crate::grants::Grants::new(
+            "node-a",
+            std::sync::Arc::clone(&approvals),
+            crate::grants::SignedCommands::default(),
+        );
+        open.set_signed_start_check(Box::new(|kind| kind == "registry-gemini"));
+        let granted = crate::grants::Grants::new(
+            "node-a",
+            approvals,
+            crate::grants::SignedCommands(vec!["agent.start".into()]),
+        );
+        granted.set_signed_start_check(Box::new(|kind| kind == "registry-gemini"));
+        let now = crate::grants::now_ms();
+        let commands = vec!["agent.start".to_string()];
+        let expires = now + 60_000;
+        let message = crate::grants::signed_message("node-a", "g", "node", &commands, expires);
+        granted
+            .create(
+                &agora_protocol::v1::GrantCreate {
+                    grant_id: "g".into(),
+                    scope: "node".into(),
+                    commands,
+                    expires_at_ms: expires,
+                    signer_device_id: "dev".into(),
+                    signature: message,
+                },
+                now,
+            )
+            .unwrap();
+        let start = |kind: &str| CommandRequest {
+            request_id: "r".into(),
+            command: Some(command_request::Command::AgentStart(
+                agora_protocol::v1::AgentStart {
+                    kind: kind.into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let rule = |resp: CommandResponse| {
+            let Some(command_response::Result::Err(e)) = resp.result else {
+                panic!("not refused: {resp:?}");
+            };
+            match e.params.get("rule").and_then(|p| p.value.clone()) {
+                Some(agora_protocol::v1::param_value::Value::Str(s)) => (e.code, s),
+                other => (e.code, format!("{other:?}")),
+            }
+        };
+        for g in [None, Some(&open), Some(&granted)] {
+            assert_eq!(
+                rule(run_local(None, start("registry-gemini"), g)),
+                (
+                    "node.policy_denied".to_string(),
+                    "registry_signed_start".to_string()
+                )
+            );
+        }
+        // A hand-made kind (and a registry kind that runs its own program) is not stopped here: it goes on to the node (no socket in
+        // this test, so the next refusal is another one).
+        for kind in ["codex", "registry-goose"] {
+            let (_, r) = rule(run_local(None, start(kind), Some(&open)));
+            assert_ne!(r, "registry_signed_start", "{kind}");
+        }
+        // Without the node's check, every registry kind is held to it: the stricter reading.
+        assert_eq!(
+            rule(run_local(None, start("registry-goose"), None)).1,
+            "registry_signed_start"
+        );
     }
 
     /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's

@@ -224,3 +224,155 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     let _ = std::fs::remove_file(tmp_socket);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// ADR-0089 decision 7, review of #1103 (N9): a confined agent cannot read the chat transcripts in the node's data folder when that
+/// folder is outside every folder the agent may read, as the node's home under the user's home is (on Linux no grant reaches it;
+/// a data folder inside one refuses to start a confined agent, #1114).
+#[test]
+fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
+    if !agora_platform::sandbox_supported() {
+        eprintln!("skipped: no confinement on this machine");
+        return;
+    }
+    // Not under the temporary folder (a confined agent may use `/tmp`): as the node's home is not.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("agora-sbx-transcripts-{}", std::process::id()));
+    let data = base.join("data");
+    let transcript = data.join("transcripts").join("agent-1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"n\":1,\"entry\":{\"entry_id\":1,\"text\":\"private-words\"}}\n",
+    )
+    .unwrap();
+    let script = format!(
+        "cat {} > copied 2>/dev/null; echo in > inside; sleep 30",
+        transcript.display()
+    );
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        protect: vec![data.clone()],
+        data_dir: Some(data.clone()),
+        ..Default::default()
+    };
+    let (mut sup, req, dir) = setup_with("transcripts", &script, policy);
+    sup.start(&req, Instant::now()).unwrap();
+    let inside = dir.join("worktrees/a/inside");
+    let end = Instant::now() + Duration::from_secs(10);
+    while !inside.exists() && Instant::now() < end {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(inside.exists(), "the agent did not run");
+    let copied = std::fs::read_to_string(dir.join("worktrees/a/copied")).unwrap_or_default();
+    assert!(
+        !copied.contains("private-words"),
+        "the agent read the transcript"
+    );
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// #1114: the node's paths as `agora node` gives them to the supervisor (`node_private_paths`), for a data folder, a control socket
+/// with its manifests beside it, and a worktree folder.
+fn protected_policy(data: &Path, socket_dir: &Path, worktrees: &Path) -> SandboxPolicy {
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "node-1".into(),
+        socket: socket_dir.join("node.sock"),
+        data_dir: data.to_path_buf(),
+        worktree_root: worktrees.to_path_buf(),
+        manifests_dir: socket_dir.join("manifests"),
+        projects: Vec::new(),
+        limits: NodeLimits::default(),
+        resume_all: false,
+    };
+    SandboxPolicy {
+        level: Level::Worktree,
+        protect: agora_node::daemon::node_private_paths(&cfg),
+        data_dir: Some(data.to_path_buf()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_data_folder_inside_a_folder_agents_may_reach_refuses_to_start_a_confined_agent() {
+    if !agora_platform::sandbox_supported() || !agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+        eprintln!("skipped: no Landlock on this machine, or the system keeps the node's paths closed itself");
+        return;
+    }
+    // `/tmp` is writable to every confined agent on Linux. The control socket (and its token) stays out of reach, so only the data
+    // folder (secrets, ledger, transcripts) would be open.
+    let data_root = PathBuf::from(format!("/tmp/agora-1114-{}", std::process::id()));
+    let data = data_root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("ledger"), "private").unwrap();
+    let socket_dir =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sbx-1114-{}", std::process::id()));
+    std::fs::create_dir_all(&socket_dir).unwrap();
+    let script = format!("cat {} > leaked; sleep 30", data.join("ledger").display());
+    let (mut sup, req, dir) = setup_with("data-in-tmp", &script, SandboxPolicy::default());
+    let worktrees = req.worktree_root.clone();
+    sup.set_sandbox(protected_policy(&data, &socket_dir, &worktrees));
+    let err = sup.start(&req, Instant::now()).unwrap_err();
+    assert_eq!(
+        err,
+        SupervisorError::SandboxRefused("shy".into(), "worktree", "protected_path_reachable")
+    );
+    let e = err.to_protocol();
+    assert_eq!(e.code, ErrorCode::AgentSandboxUnavailable);
+    assert!(
+        e.params
+            .iter()
+            .any(|(k, v)| k == "reason" && format!("{v:?}").contains("protected_path_reachable")),
+        "{e:?}"
+    );
+    assert!(!worktrees.join("a/leaked").exists());
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(data_root);
+    let _ = std::fs::remove_dir_all(socket_dir);
+}
+
+#[test]
+fn a_node_folder_outside_every_grant_still_starts_a_confined_agent_that_cannot_read_it() {
+    if !agora_platform::sandbox_supported() {
+        eprintln!("skipped: no Landlock on this machine");
+        return;
+    }
+    // The usual layout (`~/.agora`): data, socket, manifests and worktrees in one node folder, outside every folder agents are given.
+    let home =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sbx-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let data = home.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("ledger"), "private").unwrap();
+    let script = format!(
+        "echo in > inside; cat {} > leaked 2>/dev/null; sleep 30",
+        data.join("ledger").display()
+    );
+    let worktrees = home.join("worktrees");
+    let (mut sup, mut req, dir) = setup_with(
+        "home-layout",
+        &script,
+        protected_policy(&data, &home, &worktrees),
+    );
+    req.worktree_root = worktrees.clone();
+    sup.start(&req, Instant::now()).unwrap();
+    let inside = worktrees.join("a/inside");
+    let end = Instant::now() + Duration::from_secs(10);
+    while !inside.exists() && Instant::now() < end {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(inside.exists(), "the agent could not write in its worktree");
+    std::thread::sleep(Duration::from_millis(300));
+    let leaked = std::fs::read_to_string(worktrees.join("a/leaked")).unwrap_or_default();
+    assert!(
+        !leaked.contains("private"),
+        "the agent read the node's data"
+    );
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(home);
+}

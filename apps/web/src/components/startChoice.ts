@@ -9,17 +9,11 @@ export function machineFor(current: string, online: readonly string[], initialNo
   return projects.find(p => online.includes(p.node))?.node ?? online[0] ?? '';
 }
 
-/** ADR-0069: the programs a machine could not find for the agents it marked "not installed", each once, in order; `general` when one
- * of them came from an older machine that does not name its program, so the general sentence is shown for it. */
-export function missingPrograms(kinds: { installed: boolean; program?: string }[]): { programs: string[]; general: boolean } {
-  const programs: string[] = [];
-  let general = false;
-  for (const k of kinds) {
-    if (k.installed) continue;
-    if (!k.program) general = true;
-    else if (!programs.includes(k.program)) programs.push(k.program);
-  }
-  return { programs, general };
+/** ADR-0069 and finding L9: why the chosen kind cannot start, as a message id and its arguments, shown only while that kind is chosen: its
+ * program by name, or the general sentence for a kind from an older machine that does not name it. Nothing for an installed kind. */
+export function missingNote(k: { installed: boolean; program?: string } | undefined): [string, Record<string, string>?] | undefined {
+  if (!k || k.installed) return undefined;
+  return k.program ? ['start-not-installed-program', { program: k.program }] : ['start-not-installed-why'];
 }
 
 /** ADR-0069: where a machine's program runs from when its folder is not on that machine's PATH, as shown: the last two parts only

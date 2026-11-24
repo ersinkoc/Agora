@@ -51,7 +51,9 @@ pub fn command_name(req: &CommandRequest) -> String {
 pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route {
     // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let may = req.command.as_ref().is_some_and(|c| {
-        (who.role != Role::Viewer || viewer_may(c))
+        // ADR-0109: only the hub can issue a durable handoff delivery.
+        !matches!(c, C::DeliverTaskHandoff(_))
+            && (who.role != Role::Viewer || viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
     });
     if !may {
@@ -203,6 +205,17 @@ mod tests {
     }
 
     #[test]
+    fn a_window_cannot_send_a_hub_handoff_delivery() {
+        let delivery = C::DeliverTaskHandoff(v1::DeliverTaskHandoff::default());
+        assert_eq!(
+            route(&who(Role::Owner), None, &req("n1", delivery)),
+            Route::Forbidden {
+                action: "DeliverTaskHandoff".into()
+            }
+        );
+    }
+
+    #[test]
     fn a_viewer_only_reads_and_a_request_without_a_command_is_refused() {
         let viewer = who(Role::Viewer);
         assert_eq!(
@@ -269,6 +282,156 @@ mod tests {
             route(&member, None, &req("n1", forget_node(false))),
             Route::TargetNotAllowed
         );
+    }
+
+    /// #1044: clients tell the hub's refusal for a person's role from a machine's refusal for a limited device by `action`: the hub names
+    /// the refused command's schema name, a node names its own lowercase action (`directory`, `grant.create`, `approval.resolve`). The
+    /// window and the terminal client word a start, a folder, a resume and an answer for the person when it is the schema name.
+    #[test]
+    fn a_refusal_for_a_persons_role_names_the_refused_command_by_its_schema_name() {
+        let member = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Member)
+        };
+        let scope = Scope::from_view(
+            member.projects.clone().unwrap(),
+            &crate::projection::View::default(),
+        );
+        let commands = [
+            ("AgentLaunch", C::AgentLaunch(v1::AgentLaunch::default())),
+            ("AgentStart", C::AgentStart(v1::AgentStart::default())),
+            ("AgentResume", C::AgentResume(v1::AgentResume::default())),
+            (
+                "DirectoryInspect",
+                C::DirectoryInspect(v1::DirectoryInspect::default()),
+            ),
+            (
+                "DirectoryList",
+                C::DirectoryList(v1::DirectoryList::default()),
+            ),
+            (
+                "ApprovalResolve",
+                C::ApprovalResolve(v1::ApprovalResolve::default()),
+            ),
+        ];
+        for (name, command) in commands {
+            let refused = Route::Forbidden {
+                action: name.into(),
+            };
+            assert_eq!(
+                route(&who(Role::Viewer), None, &req("n1", command.clone())),
+                refused
+            );
+            assert_eq!(route(&member, Some(&scope), &req("n1", command)), refused);
+        }
+        // What the window asks for its cost is the owner's only (it stops asking when the hub says the session is not the owner's).
+        assert_eq!(
+            route(
+                &member,
+                Some(&scope),
+                &req("", C::UsageReport(v1::UsageReport::default()))
+            ),
+            Route::Forbidden {
+                action: "UsageReport".into()
+            }
+        );
+    }
+
+    /// ADR-0049 Amendment A (#1049): a member chooses folders and starts agents inside a project granted on that machine; a viewer
+    /// granted the same project stays read-only; a folder outside it is refused as #1044 words a role refusal (the schema name).
+    #[test]
+    fn a_member_works_in_folders_of_a_granted_project_and_a_viewer_with_the_same_grant_does_not() {
+        let mut view = crate::projection::View::default();
+        view.apply(&v1::Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 1,
+            body: Some(v1::event::Body::CheckoutDiscovered(
+                v1::CheckoutDiscovered {
+                    checkout_id: "c1".into(),
+                    node_id: "n1".into(),
+                    project_id: "mine".into(),
+                    path: "/srv/mine".into(),
+                },
+            )),
+        });
+        let granted = || Some(["n1/mine".to_string()].into());
+        let member = Access {
+            projects: granted(),
+            ..who(Role::Member)
+        };
+        let viewer = Access {
+            projects: granted(),
+            ..who(Role::Viewer)
+        };
+        let scope = Scope::from_view(granted().unwrap_or_default(), &view);
+        let commands = |path: &str| {
+            [
+                (
+                    "DirectoryList",
+                    C::DirectoryList(v1::DirectoryList {
+                        path: path.into(),
+                        authorization: None,
+                    }),
+                ),
+                (
+                    "DirectoryInspect",
+                    C::DirectoryInspect(v1::DirectoryInspect {
+                        path: path.into(),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "AgentLaunch",
+                    C::AgentLaunch(v1::AgentLaunch {
+                        path: path.into(),
+                        project_id: "mine".into(),
+                        kind: "shell".into(),
+                        ..Default::default()
+                    }),
+                ),
+            ]
+        };
+        for (name, command) in commands("/srv/mine/api") {
+            assert_eq!(
+                route(&member, Some(&scope), &req("n1", command.clone())),
+                Route::Forward,
+                "{name}"
+            );
+            assert_eq!(
+                route(&viewer, Some(&scope), &req("n1", command)),
+                Route::Forbidden {
+                    action: name.into()
+                }
+            );
+        }
+        for path in ["/srv", "/srv/mine/../theirs", ""] {
+            for (name, command) in commands(path) {
+                assert_eq!(
+                    route(&member, Some(&scope), &req("n1", command.clone())),
+                    Route::Forbidden {
+                        action: name.into()
+                    },
+                    "{path}"
+                );
+                assert_eq!(
+                    route(&member, Some(&scope), &req("n2", command)),
+                    Route::Forbidden {
+                        action: name.into()
+                    },
+                    "{path} on another machine"
+                );
+            }
+        }
+        for (name, command) in commands("/srv/mine") {
+            assert_eq!(
+                route(&member, Some(&scope), &req("n2", command)),
+                Route::Forbidden {
+                    action: name.into()
+                },
+                "{name} on another machine"
+            );
+        }
     }
 
     /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a person give 8 tasks a minute, no more,

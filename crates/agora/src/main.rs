@@ -328,6 +328,8 @@ pub(crate) struct Opts {
     resume: Option<String>,
     /// ADR-0066: `agora agent start KIND --setting id=value` (repeatable).
     settings: Vec<String>,
+    /// ADR-0060, #1137: `agora agent resume AGENT_ID --again`, Start again (a new session in the same folder) instead of Resume.
+    again: bool,
     save: bool,
     positional: Vec<String>,
 }
@@ -342,6 +344,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--data" => o.data = Some(it.next()?.into()),
             "--cwd" => o.cwd = Some(it.next()?.clone()),
             "--worktree" => o.separate_worktree = true,
+            "--again" => o.again = true,
             "--accept-project-id-change" => o.accept_identity_change = true,
             "--worktrees" => o.worktrees = Some(it.next()?.into()),
             "--project" => {
@@ -409,14 +412,24 @@ pub(crate) fn socket_path(o: &Opts) -> PathBuf {
     o.socket.clone().unwrap_or_else(|| home().join("node.sock"))
 }
 
-/// `agora acp-bridge -- AGENT ARGS...`: runs an ACP agent and speaks the adapter protocol on this process's stdio (L2, the node
-/// starts it; see `agora-adapters::acp`).
+/// `agora acp-bridge [--runner-cwd DIR] -- AGENT ARGS...`: runs an ACP agent and speaks the adapter protocol on this process's stdio
+/// (L2, the node starts it; see `agora-adapters::acp`). `--runner-cwd` starts the agent's command in `DIR` (#1150).
 fn acp_bridge(args: &[String]) -> ExitCode {
+    let (agent_cwd, args) = match args.split_first() {
+        Some((flag, rest)) if flag == agora_adapters::acp::RUNNER_CWD_FLAG => {
+            match rest.split_first() {
+                Some((dir, rest)) if !dir.is_empty() => (Some(std::path::Path::new(dir)), rest),
+                _ => return ExitCode::from(2),
+            }
+        }
+        _ => (None, args),
+    };
     let agent = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
     if agent.is_empty() {
         return ExitCode::from(2);
     }
-    match agora_adapters::acp::run(agent, std::io::stdin(), std::io::stdout().lock()) {
+    match agora_adapters::acp::run_in(agent, agent_cwd, std::io::stdin(), std::io::stdout().lock())
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     }
@@ -489,6 +502,7 @@ fn main() -> ExitCode {
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
         ["agent", "prompt"] => agent_prompt(&say, &opts),
+        ["agent", "resume"] => agent_resume(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["agent", "install"] => agentcmd::install(&say, &opts),
@@ -531,6 +545,7 @@ fn main() -> ExitCode {
         ["node", "trust"] => trustcli::node_trust(&say, &opts),
         ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
         ["node", "secret"] => secretcmd::secret(&say, &opts),
+        ["history", "purge"] => history_purge(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -549,6 +564,22 @@ fn main() -> ExitCode {
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// ADR-0089 decision 3: `agora history purge` removes every chat transcript this machine's node keeps (`<data>/transcripts`). Files only:
+/// a node that runs writes the turns that come after it again.
+fn history_purge(say: &Say, opts: &Opts) -> ExitCode {
+    let data = opts.data.clone().unwrap_or_else(|| home().join("data"));
+    match agora_node::transcript::purge_all(&data) {
+        Ok(()) => {
+            say.out(key!("cli-history-purged"), &[]);
+            ExitCode::SUCCESS
+        }
+        Err(_) => {
+            say.err(key!("cli-history-purge-failed"), &[]);
+            ExitCode::from(1)
         }
     }
 }
@@ -632,6 +663,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("env-passed", _) => key!("doctor-env-passed"),
             ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
             ("control-token-reachable", _) => key!("doctor-control-token-reachable"),
+            ("protected-path-reachable", _) => key!("doctor-protected-path-reachable"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),
@@ -643,6 +675,10 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("agent-broken", _) => key!("doctor-agent-broken"),
             ("agent-unsafe", _) => key!("doctor-agent-unsafe"),
+            ("registry-kinds", _) => key!("doctor-registry-kinds"),
+            ("registry-off", _) => key!("doctor-registry-off"),
+            ("registry-denied", _) => key!("doctor-registry-denied"),
+            ("runner-folders-left", _) => key!("doctor-runner-folders-left"),
             ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
@@ -691,8 +727,15 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
             (
-                "manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub"
-                | "holder-old",
+                "manifests"
+                | "devices"
+                | "policy-problems"
+                | "cert-node"
+                | "cert-hub"
+                | "holder-old"
+                | "registry-kinds"
+                | "registry-denied"
+                | "runner-folders-left",
                 Ok(n),
             ) => Arg::Num(n),
             _ => c.detail.as_str().into(),
@@ -727,6 +770,51 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
 /// again later instead of giving up.
 const LINK_UNREADABLE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// ADR-0104 O2: the longest `agora node` takes from a stop request (`SIGTERM`, `SIGINT`, `SIGHUP`; Unix) to its end. It stops cleanly
+/// within it (the node's drain waits at most `agora_node::daemon::LOCK_WAIT` and `DRAIN_WAIT`, 3 s together, for the supervisor's lock
+/// and the held adapters' readers, and `LOOP_WAIT`, 1 s, for the commands already running; the rest is local writes, and those come
+/// first when the lock is busy), and ends anyway when it passes, whatever still runs. Under every wait for it: `agora down` waits 10 s for the
+/// supervisor, which ends right after the node (`frontdoor::stop_role`, also used by `agora service remove`), and the systemd unit's
+/// `TimeoutStopSec` is 25 s. Windows ends the node with `TerminateProcess`, which cannot be caught.
+const NODE_STOP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often the stop watch looks for a caught stop request (the handler itself may only set a flag).
+const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// ADR-0104 O2: from now on a stop request does not end `agora node` at once once its node is up (`up` set): what this returns says
+/// it arrived, so the node stops cleanly, and the process ends anyway [`NODE_STOP_DEADLINE`] after it. Before the node is up there is
+/// nothing to keep, and a request ends the process at once, as a second request always does. `None` where stop requests are not
+/// caught (Windows) or the watch could not start: a request then ends the process at once, as before.
+fn node_stop_watch(up: Arc<AtomicBool>) -> Option<std::sync::mpsc::Receiver<()>> {
+    if !agora_platform::STOP_REQUESTS_CAUGHT {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The watch first: requests are caught only once something is there to act on them.
+    std::thread::Builder::new()
+        .name("agora-stop-watch".into())
+        .spawn(move || loop {
+            if agora_platform::stop_requested() {
+                if !up.load(Ordering::Acquire) {
+                    agora_platform::end_as_stopped();
+                }
+                let _ = tx.send(());
+                std::thread::sleep(NODE_STOP_DEADLINE);
+                // Operational log, not UI text. Never a panic (a closed or hung-up stderr): the end below must come.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "node: not stopped {} s after the stop request; ending now",
+                    NODE_STOP_DEADLINE.as_secs()
+                );
+                agora_platform::end_as_stopped();
+            }
+            std::thread::sleep(STOP_POLL);
+        })
+        .ok()?;
+    agora_platform::catch_stop_requests_once().ok()?;
+    Some(rx)
+}
+
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
     agora_platform::recover_sandbox_leftovers();
@@ -735,6 +823,10 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     }
     let h = home();
+    // ADR-0104 O2: a stop request from here on ends the node cleanly (its agents in the holder keep running), within the deadline, once
+    // the node is up; before, at once.
+    let up = Arc::new(AtomicBool::new(false));
+    let stop = node_stop_watch(Arc::clone(&up));
     // A machine enrolled with a hub reports under the id the hub's certificate names. A link folder another command held past every
     // working hold is not read (it may be half saved) and the node does not start with no link or half of one: it ends, and its
     // supervisor starts it again later (Codex review of F1031). A folder that cannot be read yet (a volume still being mounted) is tried
@@ -793,6 +885,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // ADR-0104 O2: from here a stop request is a clean stop.
+    up.store(true, Ordering::Release);
     // An earlier run's link state is never read as this run's; a node without a hub has none.
     agora_node::link_state::LinkState::clear(&cfg.data_dir);
     for (path, reason) in &node.manifest_problems {
@@ -846,10 +940,18 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         l.state_dir = Some(cfg.data_dir.clone());
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
-    // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
-    loop {
-        std::thread::sleep(Duration::from_secs(3600));
-    }
+    // Run until the process is stopped; the socket file is replaced on next start. ADR-0104 O2: on a stop request the node stops cleanly
+    // (it records what the held adapters said and it had not recorded, writes the conversation, the usage and the ledger, and lets the
+    // held agents go; no agent is ended) and the process then ends as the request would have ended it.
+    let Some(stop) = stop else {
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    };
+    let _ = stop.recv();
+    // Whatever happens in the stop (a panic included), the process ends as the request would have ended it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| node.stop_keeping_agents()));
+    agora_platform::end_as_stopped()
 }
 
 fn connect(say: &Say, o: &Opts) -> Result<Client, ExitCode> {
@@ -1008,7 +1110,8 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
-/// `agora agent list`: one line per agent, columns separated by tabs (id, kind, state, running or stopped).
+/// `agora agent list`: one line per agent, columns separated by tabs (id, kind, state, running or stopped), and, after a node restart,
+/// the agents it found interrupted (ADR-0107) with a fifth column; see [`agent_list_lines`].
 fn agent_list(say: &Say, o: &Opts) -> ExitCode {
     let mut c = match connect(say, o) {
         Ok(c) => c,
@@ -1018,30 +1121,76 @@ fn agent_list(say: &Say, o: &Opts) -> ExitCode {
         Ok(v1::CommandOk {
             result: Some(Ok_::AgentList(list)),
         }) => {
-            if list.agents.is_empty() {
+            let lines = agent_list_lines(&list);
+            if lines.is_empty() {
                 say.out(key!("cli-agent-list-empty"), &[]);
             }
-            for a in &list.agents {
-                let state = v1::AgentState::try_from(a.state).map_or("unknown", |s| match s {
-                    v1::AgentState::Working => "working",
-                    v1::AgentState::Blocked => "blocked",
-                    v1::AgentState::Idle => "idle",
-                    v1::AgentState::Done => "done",
-                    v1::AgentState::Unspecified => "unknown",
-                });
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    a.agent_id,
-                    a.kind,
-                    state,
-                    if a.running { "running" } else { "stopped" }
-                );
+            for line in lines {
+                println!("{line}");
             }
             ExitCode::SUCCESS
         }
         Ok(_) => ExitCode::from(1),
         Err(code) => code,
     }
+}
+
+/// The lines of `agora agent list`, one list in id order (`agent-2` before `agent-10`) across the node's agents and the ones it found
+/// interrupted. An agent's line is `id, kind, state, running|stopped`, as it always was. ADR-0107: an interrupted agent's line has its
+/// last state, `interrupted` in the fourth column and what can be done in a fifth: `still-running` (its process outlived the node;
+/// `agora agent stop` ends it, and Resume waits until then), `resume`, or `start-again` (no session to continue). Fixed tokens like
+/// `running` and `stopped`, not prose, so scripts can read them.
+fn agent_list_lines(list: &v1::AgentListResult) -> Vec<String> {
+    fn state_word(s: i32) -> &'static str {
+        v1::AgentState::try_from(s).map_or("unknown", |s| match s {
+            v1::AgentState::Working => "working",
+            v1::AgentState::Blocked => "blocked",
+            v1::AgentState::Idle => "idle",
+            v1::AgentState::Done => "done",
+            v1::AgentState::Unspecified => "unknown",
+        })
+    }
+    let mut rows: Vec<(&str, String)> = list
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.agent_id.as_str(),
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    a.agent_id,
+                    a.kind,
+                    state_word(a.state),
+                    if a.running { "running" } else { "stopped" }
+                ),
+            )
+        })
+        .chain(list.interrupted.iter().map(|i| {
+            let next = if i.still_running {
+                "still-running"
+            } else if i.resumable {
+                "resume"
+            } else {
+                "start-again"
+            };
+            (
+                i.agent_id.as_str(),
+                format!(
+                    "{}\t{}\t{}\tinterrupted\t{next}",
+                    i.agent_id,
+                    i.kind,
+                    state_word(i.last_state)
+                ),
+            )
+        }))
+        .collect();
+    // Stable: rows with the same number keep the node's order.
+    rows.sort_by_key(|(id, _)| {
+        id.strip_prefix("agent-")
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+    rows.into_iter().map(|(_, line)| line).collect()
 }
 
 /// `agora agent kinds`: the agents this node can start, and whether each is installed.
@@ -1096,6 +1245,43 @@ fn agent_stop(say: &Say, o: &Opts) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Err(code) => code,
+    }
+}
+
+/// `agora agent resume AGENT_ID [--again]` (#1137): brings back an agent `agora agent list` shows as interrupted, under the same id in
+/// the same folder: with its own session (Resume, `resume` in the list), or with `--again` a new one (Start again, `start-again`). The
+/// same `AgentResume` the window and the terminal client send (ADR-0060); unsigned, as `agora agent start` is, since the local socket is
+/// this machine's own user (ADR-0082). The node answers why it cannot (`agent.not_interrupted`, `agent.session_missing`, ...).
+fn agent_resume(say: &Say, o: &Opts) -> ExitCode {
+    let Some(id) = o.positional.first() else {
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let cmd = Cmd::AgentResume(v1::AgentResume {
+        agent_id: id.clone(),
+        new_session: o.again,
+        authorization: None,
+    });
+    match call(say, &mut c, cmd) {
+        Ok(v1::CommandOk {
+            result: Some(Ok_::AgentLaunch(r)),
+        }) => {
+            say.out(
+                if o.again {
+                    key!("cli-agent-started-again")
+                } else {
+                    key!("cli-agent-resumed")
+                },
+                &[("agent_id", r.agent_id.into()), ("worktree", r.path.into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::from(1),
         Err(code) => code,
     }
 }
@@ -1383,5 +1569,96 @@ mod remote_error_tests {
             .to_info();
         let en = Say(Catalog::english()).remote_error_text(&other);
         assert!(en.contains("field: directory.project_id"), "{en}");
+    }
+}
+
+#[cfg(test)]
+mod agent_list_tests {
+    use super::*;
+
+    fn summary(id: &str, state: v1::AgentState, running: bool) -> v1::AgentSummary {
+        v1::AgentSummary {
+            agent_id: id.into(),
+            kind: "shell".into(),
+            state: state as i32,
+            worktree_id: "/w".into(),
+            terminal_id: String::new(),
+            running,
+            restarts: 0,
+        }
+    }
+
+    fn interrupted(id: &str, resumable: bool, still_running: bool) -> v1::AgentInterrupted {
+        v1::AgentInterrupted {
+            agent_id: id.into(),
+            kind: "claude-code".into(),
+            project_id: "p".into(),
+            folder: "/w".into(),
+            parent_agent_id: String::new(),
+            resumable,
+            started_at_ms: 1,
+            interrupted_at_ms: 2,
+            last_state: v1::AgentState::Working as i32,
+            still_running,
+        }
+    }
+
+    #[test]
+    fn interrupted_agents_get_a_fifth_column_and_one_id_order_across_both_lists() {
+        let list = v1::AgentListResult {
+            agents: vec![
+                summary("agent-2", v1::AgentState::Done, false),
+                summary("agent-10", v1::AgentState::Idle, true),
+            ],
+            interrupted: vec![
+                interrupted("agent-3", true, false),
+                interrupted("agent-4", false, false),
+                // A survivor can be resumable too: Resume waits until it is stopped, so it says still-running.
+                interrupted("agent-11", true, true),
+            ],
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            [
+                "agent-2\tshell\tdone\tstopped",
+                "agent-3\tclaude-code\tworking\tinterrupted\tresume",
+                "agent-4\tclaude-code\tworking\tinterrupted\tstart-again",
+                "agent-10\tshell\tidle\trunning",
+                "agent-11\tclaude-code\tworking\tinterrupted\tstill-running",
+            ]
+        );
+    }
+
+    /// An old node sends no interrupted agents: the lines are exactly the ones `agora agent list` printed before ADR-0107.
+    #[test]
+    fn without_interrupted_agents_the_lines_are_unchanged() {
+        let list = v1::AgentListResult {
+            agents: vec![
+                summary("agent-1", v1::AgentState::Working, true),
+                summary("agent-2", v1::AgentState::Unspecified, false),
+            ],
+            interrupted: Vec::new(),
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            [
+                "agent-1\tshell\tworking\trunning",
+                "agent-2\tshell\tunknown\tstopped"
+            ]
+        );
+        assert!(agent_list_lines(&v1::AgentListResult::default()).is_empty());
+    }
+
+    /// Only interrupted agents: listed, and the "no agents" sentence is not said (the caller says it for no lines at all).
+    #[test]
+    fn a_node_with_only_interrupted_agents_has_lines() {
+        let list = v1::AgentListResult {
+            agents: Vec::new(),
+            interrupted: vec![interrupted("agent-1", true, false)],
+        };
+        assert_eq!(
+            agent_list_lines(&list),
+            ["agent-1\tclaude-code\tworking\tinterrupted\tresume"]
+        );
     }
 }

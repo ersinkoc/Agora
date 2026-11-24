@@ -34,7 +34,8 @@ describe('a request for a helper that acts without asking', () => {
     expect(text).toContain("Don't ask");
     expect(text).toContain('runs commands and changes files without asking you first');
     expect(text).toContain('your answer covers this start with exactly the launch options shown');
-    expect(host.querySelector('input[type=radio]')).toBeNull();
+    expect(host.querySelector('[role=radiogroup]')).toBeNull();
+    expect(host.querySelector('[data-grant-choice]')).toBeNull();
   });
 
   it('is allowed only after the confirmation, and "Keep asking" goes back to the card', () => {

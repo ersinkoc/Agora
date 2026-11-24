@@ -188,12 +188,59 @@ impl ConfinedDir {
         imp::remove_owned(&self.dir, file, name)
     }
 
+    /// The regular file `name`, opened for reading without following a link and without waiting on it (Unix `O_NONBLOCK`, so a FIFO
+    /// does not hold the open). A link (also one to nothing), a folder or anything else that is not a regular file is refused
+    /// ([`not_confined`] or another error, never `NotFound`); `NotFound` only when there is nothing by that name.
+    pub fn open_read(&self, name: &OsStr) -> io::Result<File> {
+        if !valid_component(name) {
+            return Err(refused());
+        }
+        imp::open_read(&self.dir, name)
+    }
+
+    /// Opens (creating it) the lock file `name` in this folder with the file checks of [`crate::open_lock_private`] (created private,
+    /// or an existing regular file with one name and this user's; not shared for delete on Windows), relative to this handle instead
+    /// of a folder path. The folder itself is not checked again: it is whatever [`Self::open_root`] opened. Unix `openat` on the held
+    /// descriptor; Windows opens it at the folder's present final path and then requires the file to be inside the folder this handle
+    /// holds (both final paths read after the open), so a folder put at the path meanwhile is refused (`InvalidInput`), though an
+    /// empty file may be left in it. Refusals as there.
+    pub fn open_lock(&self, name: &OsStr) -> io::Result<File> {
+        if !valid_component(name) {
+            return Err(refused());
+        }
+        imp::open_lock(&self.dir, name)
+    }
+
+    /// Makes a rename inside this folder durable: Unix `fsync` on the folder. Windows does this at the rename itself (nothing to do).
+    pub fn sync(&self) -> io::Result<()> {
+        imp::sync(&self.dir)
+    }
+
     /// Removes the file (or link, as itself) `name`. Close any handle to it first.
     pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         if !valid_component(name) {
             return Err(refused());
         }
         imp::remove_file(&self.dir, name)
+    }
+
+    /// Removes the empty folder `name` as itself, never what a link there points at: on Unix a link in its place is refused
+    /// (`ENOTDIR`; [`Self::remove_file`] removes a link), on Windows a junction or folder link is removed as itself. A folder that is
+    /// not empty is not removed. Close any handle to it first.
+    pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        if !valid_component(name) {
+            return Err(refused());
+        }
+        imp::remove_dir(&self.dir, name)
+    }
+
+    /// Visits this folder's entries through its handle ([`crate::visit_dir`]: `.` and `..` left out, links described as themselves,
+    /// stopping at the first [`std::ops::ControlFlow::Break`] without reading further entries).
+    pub fn visit(
+        &self,
+        visitor: impl FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+    ) -> io::Result<()> {
+        crate::visit_dir(&self.dir, visitor)
     }
 }
 
@@ -324,6 +371,29 @@ mod imp {
         Ok(Some(Entry { kind, mode }))
     }
 
+    pub(super) fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
+        let c = cname(name)?;
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        let file = match open_at(dir, &c, flags, 0) {
+            Ok(f) => f,
+            // A link at the name (ELOOP), refused rather than followed.
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),
+            Err(e) => return Err(e),
+        };
+        if !file.metadata()?.is_file() {
+            return Err(refused());
+        }
+        Ok(file)
+    }
+
+    pub(super) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
+        crate::unix::open_private_at(dir, name, false)
+    }
+
+    pub(super) fn sync(dir: &File) -> io::Result<()> {
+        dir.sync_all()
+    }
+
     pub(super) fn create_new(dir: &File, name: &OsStr, mode: u32) -> io::Result<File> {
         let c = cname(name)?;
         // O_NONBLOCK: never waits on a FIFO (O_EXCL already refuses one that exists); regular files ignore it.
@@ -398,6 +468,17 @@ mod imp {
         }
         Ok(())
     }
+
+    pub(super) fn remove_dir(dir: &File, name: &OsStr) -> io::Result<()> {
+        let c = cname(name)?;
+        // SAFETY: a live directory descriptor and a NUL-terminated name; `AT_REMOVEDIR` removes an empty folder entry itself and
+        // refuses a link (`ENOTDIR`) instead of following it.
+        let r = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -424,8 +505,9 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::{
         FileAttributeTagInfo, GetFileInformationByHandleEx, GetFileType, DELETE,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, SYNCHRONIZE,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK,
+        SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -570,6 +652,33 @@ mod imp {
         Ok(Some(Entry { kind, mode: 0 }))
     }
 
+    pub(super) fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
+        let file = nt_open(
+            dir,
+            name,
+            FILE_GENERIC_READ,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )?;
+        // Opened as itself: a link shows its reparse attribute here and is refused, never read through.
+        let attrs = attributes(&file)?;
+        // SAFETY: a live handle.
+        let disk = unsafe { GetFileType(file.as_raw_handle()) } == FILE_TYPE_DISK;
+        if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 || !disk {
+            return Err(refused());
+        }
+        Ok(file)
+    }
+
+    pub(super) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
+        crate::windows::open_private_in(dir, name, false)
+    }
+
+    pub(super) fn sync(_dir: &File) -> io::Result<()> {
+        Ok(())
+    }
+
     pub(super) fn create_new(dir: &File, name: &OsStr, _mode: u32) -> io::Result<File> {
         // Not shared: nobody else can open the temporary file while it is written. DELETE lets it be renamed through this handle.
         nt_open(
@@ -620,6 +729,20 @@ mod imp {
         set_delete(&file)
     }
 
+    pub(super) fn remove_dir(dir: &File, name: &OsStr) -> io::Result<()> {
+        // Opened as itself (`FILE_OPEN_REPARSE_POINT`): a junction or folder link is deleted as itself, never its target. A folder
+        // that is not empty refuses the delete.
+        let folder = nt_open(
+            dir,
+            name,
+            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )?;
+        set_delete(&folder)
+    }
+
     /// Deletes through the handle this process made (opened with DELETE, not shared): no name is looked up, so nothing else can
     /// be removed.
     pub(super) fn remove_owned(_dir: &File, file: &File, _name: &OsStr) -> io::Result<()> {
@@ -662,6 +785,15 @@ mod imp {
     pub(super) fn entry(_: &File, _: &OsStr) -> io::Result<Option<Entry>> {
         unsupported()
     }
+    pub(super) fn open_read(_: &File, _: &OsStr) -> io::Result<File> {
+        unsupported()
+    }
+    pub(super) fn open_lock(_: &File, _: &OsStr) -> io::Result<File> {
+        unsupported()
+    }
+    pub(super) fn sync(_: &File) -> io::Result<()> {
+        unsupported()
+    }
     pub(super) fn create_new(_: &File, _: &OsStr, _: u32) -> io::Result<File> {
         unsupported()
     }
@@ -672,6 +804,9 @@ mod imp {
         unsupported()
     }
     pub(super) fn remove_owned(_: &File, _: &File, _: &OsStr) -> io::Result<()> {
+        unsupported()
+    }
+    pub(super) fn remove_dir(_: &File, _: &OsStr) -> io::Result<()> {
         unsupported()
     }
 }

@@ -228,6 +228,11 @@ pub enum HostError {
     Timeout,
     /// The adapter exited (or its output ended) before answering.
     Exited,
+    /// ADR-0104 O2: the node let the adapter go (it is stopping; the holder keeps the process) while this call waited, after its line
+    /// was written (#1119 item 1: a line never written is answered [`Self::Exited`], and is not written after). The answer is not read
+    /// here. Callers count the request as given, never as failed (no prompt taken back, no queued one dropped, no decision recorded as
+    /// not delivered).
+    Detached,
     /// The adapter answered with a JSON-RPC error; `data` is its `{code, params}` if it sent one.
     Rpc {
         code: i64,
@@ -243,6 +248,7 @@ impl std::fmt::Display for HostError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Timeout => write!(f, "the adapter did not answer in time"),
             Self::Exited => write!(f, "the adapter exited"),
+            Self::Detached => write!(f, "the node let the adapter go before it answered"),
             Self::Rpc { code, .. } => match self.reason() {
                 Some((reason, _)) => write!(f, "the adapter returned error {code} ({reason})"),
                 None => write!(f, "the adapter returned error {code}"),
@@ -288,8 +294,41 @@ pub struct Initialized {
 /// Calls waiting for an answer. `closed` stops admitting new calls after output ends or a write fails.
 #[derive(Default)]
 struct PendingState {
-    map: HashMap<u64, Sender<Result<Value, HostError>>>,
+    map: HashMap<u64, Waiter>,
     closed: bool,
+    /// ADR-0104 O2: set by [`Adapter::let_go`] before the reader is stopped, so the end of output that follows is the node's own
+    /// stop. No call is admitted from then on. When the reader ends, a waiting call whose line was written is answered
+    /// [`HostError::Detached`]; one whose line is still queued is answered [`HostError::Exited`] and its line is never written; one whose
+    /// line is being written is answered by the writer when that write returns (#1119 item 1).
+    detached: bool,
+    /// Lines the writer has written to the adapter's input (for a process the holder runs: that the holder took), counted under the lock
+    /// the writer already takes after each write (#1150: so a test that knows which line comes next can tell that it was given, and a
+    /// let-go answers it [`HostError::Detached`]).
+    written: usize,
+}
+
+/// A call waiting for its answer, and how far its line got.
+struct Waiter {
+    answer: Sender<Result<Value, HostError>>,
+    line: LineState,
+}
+
+/// ADR-0104 O2 (#1119 item 1): how far a waiting call's line got to the adapter's input (for a process the holder runs: to the holder,
+/// which passes it on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineState {
+    Queued,
+    Writing,
+    Written,
+}
+
+impl From<Sender<Result<Value, HostError>>> for Waiter {
+    fn from(answer: Sender<Result<Value, HostError>>) -> Self {
+        Self {
+            answer,
+            line: LineState::Queued,
+        }
+    }
 }
 
 type Pending = Arc<Mutex<PendingState>>;
@@ -335,6 +374,10 @@ pub struct HeldIo {
     pub exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
 }
 
+/// How long [`Adapter::detach`] waits for the reader of a held adapter's output to end. A read of the holder waits up to the link's frame
+/// time (5 s) when the holder does not answer; a node that stops must not wait that long for each adapter (ADR-0104 O2).
+pub const DETACH_WAIT: Duration = Duration::from_secs(2);
+
 pub struct Adapter {
     proc: Proc,
     /// Lines for the adapter's stdin with the id of the call each one belongs to. A thread of its own writes them, so a
@@ -344,6 +387,8 @@ pub struct Adapter {
     events: Receiver<AdapterEvent>,
     next_id: Arc<AtomicU64>,
     ignored: Arc<AtomicUsize>,
+    /// Events the reader has put in `events` (ADR-0104 O2: so a test can tell that a line was read and is waiting to be taken).
+    read: Arc<AtomicUsize>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -370,12 +415,13 @@ impl Caller {
             // Check admission and enqueue under one lock so the writer cannot miss a send
             // while it closes and drains the queue. The send is nonblocking.
             let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed) else {
+            // ADR-0104 O2: nothing new is sent to an adapter the node is letting go.
+            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed && !p.detached) else {
                 return Err(HostError::Exited);
             };
             match writer.try_send((id, line)) {
                 Ok(()) => {
-                    p.map.insert(id, tx);
+                    p.map.insert(id, tx.into());
                 }
                 Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
                 Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
@@ -887,18 +933,67 @@ impl Adapter {
 
     /// ADR-0093: lets go of a process the holder runs: it keeps running, for the next node. The node stops reading and writing
     /// (what it had asked for and not yet had is the holder's to keep). `false` for a process the node runs itself, which is left as
-    /// it was (it ends with this value, as before).
+    /// it was (it ends with this value, as before). The reader is waited for at most [`DETACH_WAIT`] ([`Self::let_go`] and
+    /// [`Self::reader_ended_by`]); what it read before it ended stays to be taken with [`Self::poll`].
     pub fn detach(&mut self) -> bool {
+        if !self.let_go() {
+            return false;
+        }
+        self.reader_ended_by(std::time::Instant::now() + DETACH_WAIT);
+        true
+    }
+
+    /// ADR-0104 O2: the first half of [`Self::detach`], so that a node letting go of many adapters waits for all their readers within one
+    /// time: the reader is told to stop and nothing more is written. It still hands over the lines it already had from the holder
+    /// (which the holder counts as given), then ends; their events stay to be taken with [`Self::poll`]. `false` for a process the
+    /// node runs itself, which is left as it was.
+    pub fn let_go(&mut self) -> bool {
         let Proc::Held { stop, detached, .. } = &mut self.proc else {
             return false;
         };
         *detached = true;
+        // Before the reader stops: the end of output it then reaches is this let-go, not the adapter's (the waiting calls are
+        // answered `Detached`).
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .detached = true;
         stop.store(true, Ordering::Release);
         self.writer = None;
-        if let Some(t) = self.reader.take() {
-            let _ = t.join();
-        }
         true
+    }
+
+    /// ADR-0104 O2: waits until `until` at most for the reader to end. `true` when it ended (or there was none). A reader still
+    /// running then (a holder that does not answer: a read waits up to the link's frame time) is left to end on its own, never
+    /// waited for again: a hung read must not keep a node from stopping.
+    pub fn reader_ended_by(&mut self, until: std::time::Instant) -> bool {
+        let Some(t) = self.reader.take() else {
+            return true;
+        };
+        while !t.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if t.is_finished() {
+            let _ = t.join();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// ADR-0104 O2: how many events the reader has handed over so far (taken or not), so that a test can tell a line was read.
+    pub fn events_read(&self) -> usize {
+        self.read.load(Ordering::Acquire)
+    }
+
+    /// #1150: how many lines the writer has written to the adapter's input so far (for a process the holder runs: that the holder took),
+    /// so that a test that knows which line comes next can tell it was given (a let-go then answers it [`HostError::Detached`], never
+    /// [`HostError::Exited`]). Every line counts, the start's included.
+    pub fn lines_written(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .written
     }
 
     /// ADR-0093: an adapter whose process the holder runs, over the link the node has to it. `replay` are events the node rebuilt from
@@ -923,6 +1018,7 @@ impl Adapter {
             events,
             next_id: Arc::new(AtomicU64::new(1)),
             ignored: Arc::new(AtomicUsize::new(0)),
+            read: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
         let (writer, lines) = sync_channel(WRITE_QUEUE);
@@ -932,15 +1028,16 @@ impl Adapter {
             .name("agora-adapter-write".into())
             .spawn(move || write_loop(input, &lines, &pending))?;
         adapter.writer = Some(writer);
-        let (pending, ignored, output) = (
+        let (pending, ignored, read, output) = (
             Arc::clone(&adapter.pending),
             Arc::clone(&adapter.ignored),
+            Arc::clone(&adapter.read),
             io.output,
         );
         adapter.reader = Some(
             std::thread::Builder::new()
                 .name("agora-adapter-read".into())
-                .spawn(move || read_loop(output, &pending, &ignored, &tx))?,
+                .spawn(move || read_loop(output, &pending, &ignored, &read, &tx))?,
         );
         Ok(adapter)
     }
@@ -988,6 +1085,8 @@ impl Adapter {
         // The node has no console: on Windows the adapter (and the agent it starts, which shares its console) would otherwise keep a
         // window of its own open for the agent's whole life.
         agora_platform::no_console_window(&mut cmd);
+        // It runs as long as the agent: it must not keep a pipe another thread of the node was making as it started (#1011).
+        agora_platform::keep_only_standard_streams(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.
@@ -1011,10 +1110,10 @@ impl Adapter {
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
         }
-        Self::attach_child(cmd.spawn()?, |stdout, pending, ignored, tx| {
+        Self::attach_child(cmd.spawn()?, |stdout, pending, ignored, read, tx| {
             std::thread::Builder::new()
                 .name("agora-adapter-read".into())
-                .spawn(move || read_loop(stdout, &pending, &ignored, &tx))
+                .spawn(move || read_loop(stdout, &pending, &ignored, &read, &tx))
         })
     }
 
@@ -1023,6 +1122,7 @@ impl Adapter {
         start_reader: impl FnOnce(
             ChildStdout,
             Pending,
+            Arc<AtomicUsize>,
             Arc<AtomicUsize>,
             Sender<AdapterEvent>,
         ) -> io::Result<std::thread::JoinHandle<()>>,
@@ -1036,6 +1136,7 @@ impl Adapter {
             events,
             next_id: Arc::new(AtomicU64::new(1)),
             ignored: Arc::new(AtomicUsize::new(0)),
+            read: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
         let Proc::Child(child) = &mut adapter.proc else {
@@ -1056,6 +1157,7 @@ impl Adapter {
             stdout,
             Arc::clone(&adapter.pending),
             Arc::clone(&adapter.ignored),
+            Arc::clone(&adapter.read),
             tx,
         )?);
         Ok(adapter)
@@ -1222,9 +1324,16 @@ impl Adapter {
         .map(drop)
     }
 
-    /// Everything the adapter said since the last call, oldest first. Never blocks.
+    /// Everything the adapter said since the last call, oldest first. Never blocks. After [`Self::detach`] or [`Self::let_go`], the end
+    /// of the output that the node's own stop caused is not an `Exited`: the process runs on in the holder. A real end read just before
+    /// the let-go is dropped too (a stopping node would only schedule a restart it never makes): the holder still has the ended process,
+    /// so the next node does not take it up, the holder lets it go, and the agent is offered for Resume (#1119 item 5, tested in
+    /// `hold_node_pipes`).
     pub fn poll(&self) -> Vec<AdapterEvent> {
-        std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+        let detached = matches!(self.proc, Proc::Held { detached: true, .. });
+        std::iter::from_fn(|| self.events.try_recv().ok())
+            .filter(|e| !(detached && *e == AdapterEvent::Exited))
+            .collect()
     }
 
     /// Waits up to `timeout` for the next event.
@@ -1284,10 +1393,31 @@ impl Drop for Adapter {
 }
 
 /// ADR-0093 decision 3: what a holder kept of an adapter's output that an earlier node had already taken tells what was still waiting on
-/// the person: the approval requests with no sign after them that the agent went on (a state other than `blocked`). Nothing else is
-/// taken from those lines (the earlier node showed the rest), so a request is asked again, never answered, and nothing shows twice.
+/// the person: the approval requests with no sign after them that the agent went on (a state other than `blocked`). Of the rest, only
+/// the reports that replace the last are taken ([`replay`], ADR-0104), so a request is asked again, never answered, and nothing shows
+/// twice.
 pub fn pending_approvals(lines: &[Vec<u8>]) -> Vec<AdapterEvent> {
-    let mut pending: Vec<AdapterEvent> = Vec::new();
+    replay(lines, "").approvals
+}
+
+/// What a node taking up a held adapter reads from the lines an earlier node had already been given (the holder's `seen`), in one pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replay {
+    /// ADR-0093 decision 3: the requests still waiting on the person (see [`pending_approvals`]).
+    pub approvals: Vec<AdapterEvent>,
+    /// ADR-0104 decision 1: the newest `session/options`, `session/config` and `session/commands` of the session, as the adapter wrote
+    /// them (not yet bounded or judged). `None` when the lines hold no report of that kind. Each report replaces the last, so the newest
+    /// one is the agent's whatever the earlier node made of it; chat, usage and state append and are not taken.
+    pub options: Option<SessionOptions>,
+    pub config: Option<Vec<ConfigOption>>,
+    pub commands: Option<Vec<AdapterCommand>>,
+}
+
+/// Reads `lines` once for [`Replay`]. A report is the session's when it names `session_id` or no session (as an update without one is
+/// read live); one that names another session is not taken.
+pub fn replay(lines: &[Vec<u8>], session_id: &str) -> Replay {
+    let mut out = Replay::default();
+    let ours = |sid: &str| sid.is_empty() || sid == session_id;
     for raw in lines {
         let Ok(text) = std::str::from_utf8(raw) else {
             continue;
@@ -1298,22 +1428,40 @@ pub fn pending_approvals(lines: &[Vec<u8>]) -> Vec<AdapterEvent> {
         match method.as_str() {
             "approval/request" => {
                 if let Some(e @ AdapterEvent::ApprovalRequest { .. }) = to_event(&method, &params) {
-                    pending.push(e);
+                    out.approvals.push(e);
                 }
             }
             "state/update" if agent_state(params.get("state")) != AgentState::Blocked => {
-                pending.clear();
+                out.approvals.clear();
+            }
+            "session/options" | "session/config" | "session/commands" => {
+                match to_event(&method, &params) {
+                    Some(AdapterEvent::Options {
+                        session_id,
+                        options,
+                    }) if ours(&session_id) => out.options = Some(options),
+                    Some(AdapterEvent::Config {
+                        session_id,
+                        options,
+                    }) if ours(&session_id) => out.config = Some(options),
+                    Some(AdapterEvent::Commands {
+                        session_id,
+                        commands,
+                    }) if ours(&session_id) => out.commands = Some(commands),
+                    _ => {}
+                }
             }
             _ => {}
         }
     }
-    pending
+    out
 }
 
 fn read_loop<R: Read>(
     stdout: R,
     pending: &Pending,
     ignored: &AtomicUsize,
+    read: &AtomicUsize,
     events: &Sender<AdapterEvent>,
 ) {
     let mut r = BufReader::new(stdout);
@@ -1335,6 +1483,7 @@ fn read_loop<R: Read>(
                     if events.send(e).is_err() {
                         break;
                     }
+                    read.fetch_add(1, Ordering::Release);
                 }
                 None => {
                     ignored.fetch_add(1, Ordering::Relaxed);
@@ -1347,11 +1496,27 @@ fn read_loop<R: Read>(
             }
         }
     }
-    // Output ended: fail everyone still waiting, then say so.
+    // Output ended: fail everyone still waiting, then say so. When the node let the adapter go (ADR-0104 O2), a call whose line was
+    // written was given and only its answer will not be read; one whose line was not is not delivered, and the writer now skips it; one
+    // whose line is being written is the writer's to answer (#1119 item 1).
     {
         let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
         p.closed = true;
-        p.map.clear();
+        if p.detached {
+            p.map.retain(|_, w| match w.line {
+                LineState::Writing => true,
+                LineState::Written => {
+                    let _ = w.answer.send(Err(HostError::Detached));
+                    false
+                }
+                LineState::Queued => {
+                    let _ = w.answer.send(Err(HostError::Exited));
+                    false
+                }
+            });
+        } else {
+            p.map.clear();
+        }
     }
     let _ = events.send(AdapterEvent::Exited);
 }
@@ -1360,19 +1525,34 @@ fn read_loop<R: Read>(
 /// it fail at once (as the old in-line write did) instead of waiting for their timeouts.
 fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: &Pending) {
     while let Ok((id, line)) = lines.recv() {
-        // A caller can time out while its line is still queued. Never hold this lock during I/O.
-        let active = pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map
-            .contains_key(&id);
+        // A caller can time out while its line is still queued, and a line still queued when the reader of an adapter the node let go
+        // ended was answered as not delivered (ADR-0104 O2, #1119 item 1): neither is written. Never hold this lock during I/O.
+        let active = {
+            let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.map
+                .get_mut(&id)
+                .map(|w| w.line = LineState::Writing)
+                .is_some()
+        };
         if !active {
             continue;
         }
-        if let Err(e) = stdin
+        let wrote = stdin
             .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-        {
+            .and_then(|()| stdin.flush());
+        if wrote.is_ok() {
+            let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.written += 1;
+            if p.closed && p.detached {
+                // The reader of an adapter the node let go ended while this line was written: given, its answer is not read.
+                if let Some(w) = p.map.remove(&id) {
+                    let _ = w.answer.send(Err(HostError::Detached));
+                }
+            } else if let Some(w) = p.map.get_mut(&id) {
+                w.line = LineState::Written;
+            }
+        }
+        if let Err(e) = wrote {
             pending.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
             let err = if e.kind() == io::ErrorKind::BrokenPipe {
                 HostError::Exited
@@ -1389,25 +1569,25 @@ fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: 
 }
 
 fn fail(pending: &Pending, id: u64, e: HostError) {
-    let tx = pending
+    let w = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .map
         .remove(&id);
-    if let Some(tx) = tx {
-        let _ = tx.send(Err(e));
+    if let Some(w) = w {
+        let _ = w.answer.send(Err(e));
     }
 }
 
 fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
     let Some(id) = id.as_u64() else { return };
-    let tx = pending
+    let w = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .map
         .remove(&id);
-    if let Some(tx) = tx {
-        let _ = tx.send(r);
+    if let Some(w) = w {
+        let _ = w.answer.send(r);
     }
 }
 
@@ -1511,6 +1691,264 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// A holder's control for tests: the process runs, and nothing is asked of it.
+    struct Running;
+
+    impl agora_platform::HeldControl for Running {
+        fn signal(&self, _: agora_platform::HeldSignal) -> io::Result<()> {
+            Ok(())
+        }
+        fn exit_status(&self) -> io::Result<Option<agora_platform::ExitStatus>> {
+            Ok(None)
+        }
+    }
+
+    fn held(output: Box<dyn Read + Send>, stop: Arc<AtomicBool>) -> Adapter {
+        Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(io::sink()),
+                output,
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    /// A held adapter's output as the node's link reads it: `lines` first, then nothing until the stop (then its end).
+    struct Lines(Cursor<Vec<u8>>, Arc<AtomicBool>);
+
+    impl Read for Lines {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            loop {
+                let n = self.0.read(out)?;
+                if n > 0 || self.1.load(Ordering::Acquire) {
+                    return Ok(n);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// ADR-0104 O2: what the reader handed over before a detach stays to be taken, and the end of the output that the detach caused is
+    /// not an `Exited` (the process runs on in the holder).
+    #[test]
+    fn a_detached_held_adapter_keeps_what_it_read_and_is_not_said_to_have_exited() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let lines = b"{\"jsonrpc\":\"2.0\",\"method\":\"chat/append\",\"params\":{\"sessionId\":\"s\",\"text\":{\"text\":\"hi\"}}}\n\
+                      {\"jsonrpc\":\"2.0\",\"method\":\"state/update\",\"params\":{\"sessionId\":\"s\",\"state\":\"AGENT_STATE_IDLE\"}}\n";
+        let mut a = held(
+            Box::new(Lines(Cursor::new(lines.to_vec()), Arc::clone(&stop))),
+            stop,
+        );
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while a.events_read() < 2 {
+            assert!(std::time::Instant::now() < end, "the lines were not read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.detach());
+        let events = a.poll();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(events[0], AdapterEvent::Chat { .. }), "{events:?}");
+        assert!(matches!(
+            events[1],
+            AdapterEvent::State {
+                state: AgentState::Idle,
+                ..
+            }
+        ));
+        assert!(a.poll().is_empty());
+    }
+
+    /// ADR-0104 O2: a call still waiting for its answer when the node lets the adapter go was given (its line is written) and is
+    /// answered `Detached`, never `Exited`, which callers read as not delivered.
+    #[test]
+    fn a_call_waiting_when_the_node_lets_go_is_answered_detached_and_its_line_is_written() {
+        #[derive(Clone, Default)]
+        struct Input(Arc<Mutex<Vec<u8>>>);
+        impl Write for Input {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let input = Input::default();
+        let mut a = Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(input.clone()),
+                output: Box::new(Lines(Cursor::new(Vec::new()), Arc::clone(&stop))),
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let caller = a.caller();
+        let waiting = std::thread::spawn(move || {
+            caller.call(
+                "session/prompt",
+                json!({"text": "x"}),
+                Duration::from_secs(10),
+            )
+        });
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !String::from_utf8_lossy(&input.0.lock().unwrap()).contains("session/prompt") {
+            assert!(std::time::Instant::now() < end, "the line was not written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.detach());
+        assert!(matches!(waiting.join().unwrap(), Err(HostError::Detached)));
+        // A call made after the let-go is not given.
+        assert!(matches!(
+            a.caller()
+                .call("session/cancel", json!({}), Duration::from_secs(1)),
+            Err(HostError::Exited)
+        ));
+    }
+
+    /// The input of a held adapter whose first write waits until the test says how it ends (`true`: written, `false`: the link broke).
+    #[derive(Clone)]
+    struct Gated {
+        written: Arc<Mutex<Vec<u8>>>,
+        entered: Arc<Mutex<Option<Sender<()>>>>,
+        outcome: Arc<Mutex<Receiver<bool>>>,
+    }
+
+    impl Write for Gated {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+                if !self.outcome.lock().unwrap().recv().unwrap_or(false) {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            self.written.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A held adapter on a [`Gated`] input: a prompt whose write waits, and a cancel queued behind it. Then the node lets it go and its
+    /// reader ends. The adapter, the input's bytes, how to end the waiting write, and the two calls' answers.
+    #[allow(clippy::type_complexity)]
+    fn let_go_while_writing() -> (
+        Adapter,
+        Arc<Mutex<Vec<u8>>>,
+        Sender<bool>,
+        std::thread::JoinHandle<Result<Value, HostError>>,
+        std::thread::JoinHandle<Result<Value, HostError>>,
+    ) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (entered, is_writing) = channel();
+        let (end_write, outcome) = channel();
+        let input = Gated {
+            written: Arc::default(),
+            entered: Arc::new(Mutex::new(Some(entered))),
+            outcome: Arc::new(Mutex::new(outcome)),
+        };
+        let mut a = Adapter::attach_held(
+            HeldIo {
+                pid: 1,
+                input: Box::new(input.clone()),
+                output: Box::new(Lines(Cursor::new(Vec::new()), Arc::clone(&stop))),
+                control: Arc::new(Running),
+                stop,
+                dropped: Arc::default(),
+                ready: Arc::default(),
+                exit: Arc::default(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let call = |method: &'static str| {
+            let caller = a.caller();
+            std::thread::spawn(move || caller.call(method, json!({}), Duration::from_secs(10)))
+        };
+        let prompt = call("session/prompt");
+        is_writing.recv_timeout(Duration::from_secs(10)).unwrap();
+        let cancel = call("session/cancel");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while a.pending.lock().unwrap().map.len() < 2 {
+            assert!(std::time::Instant::now() < end, "the cancel was not queued");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(a.let_go());
+        assert!(a.reader_ended_by(std::time::Instant::now() + DETACH_WAIT));
+        (a, input.written, end_write, prompt, cancel)
+    }
+
+    /// #1119 item 1: when the reader of an adapter the node let go ends, a call whose line is still queued is answered `Exited` (not
+    /// delivered) at once and its line is never written; one whose line is being written is answered when that write returns:
+    /// `Detached` (given) once written.
+    #[test]
+    fn a_line_still_queued_at_the_let_go_is_not_delivered_and_never_written() {
+        let (a, written, end_write, prompt, cancel) = let_go_while_writing();
+        assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
+        assert_eq!(a.lines_written(), 0, "nothing written yet");
+        end_write.send(true).unwrap();
+        assert!(matches!(prompt.join().unwrap(), Err(HostError::Detached)));
+        // #1150: the line answered as given is counted; the skipped one never is.
+        assert_eq!(a.lines_written(), 1);
+        // The writer goes on to the queued cancel, and skips it.
+        std::thread::sleep(Duration::from_millis(100));
+        let text = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert!(text.contains("session/prompt"), "{text}");
+        assert!(!text.contains("session/cancel"), "{text}");
+    }
+
+    /// #1119 item 1: a call whose line was being written when the reader of an adapter the node let go ended, and whose write then
+    /// failed, was not delivered: `Exited`, never `Detached` (which callers record as sent).
+    #[test]
+    fn a_line_whose_write_fails_after_the_let_go_is_not_delivered() {
+        let (a, written, end_write, prompt, cancel) = let_go_while_writing();
+        assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
+        end_write.send(false).unwrap();
+        assert!(matches!(prompt.join().unwrap(), Err(HostError::Exited)));
+        assert!(written.lock().unwrap().is_empty());
+        // #1150: a failed write is not counted.
+        assert_eq!(a.lines_written(), 0);
+    }
+
+    /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a
+    /// node's stop, waiting longer than [`DETACH_WAIT`].
+    #[test]
+    fn a_detach_whose_read_hangs_returns_in_bounded_time() {
+        struct Hung(std::sync::mpsc::Receiver<()>);
+        impl Read for Hung {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+        let (release, hung) = std::sync::mpsc::channel();
+        let mut a = held(Box::new(Hung(hung)), Arc::new(AtomicBool::new(false)));
+        let began = std::time::Instant::now();
+        assert!(a.detach());
+        let took = began.elapsed();
+        assert!(
+            took >= DETACH_WAIT && took < DETACH_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        assert!(a.poll().is_empty());
+        drop(a);
+        drop(release);
+    }
+
     #[test]
     fn startup_cleanup_child() {
         if std::env::var_os("AGORA_TEST_STARTUP_CLEANUP_CHILD").is_some() {
@@ -1535,7 +1973,7 @@ mod tests {
             .spawn()
             .unwrap();
         let identity = agora_platform::process_identity(child.id()).unwrap();
-        let result = Adapter::attach_child(child, |_, _, _, _| {
+        let result = Adapter::attach_child(child, |_, _, _, _, _| {
             assert!(agora_platform::process_still_running(&identity));
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         });
@@ -1554,7 +1992,7 @@ mod tests {
     }
 
     /// ADR-0093 decision 3: of the lines an earlier node had, only a request with no sign after it that the agent went on is asked
-    /// again; nothing else is taken from them, and what is not a message is ignored.
+    /// again; no other line makes a request, and what is not a message is ignored.
     #[test]
     fn only_a_request_the_agent_has_not_moved_past_is_rebuilt_from_the_lines_an_earlier_node_had() {
         let blocked = || {
@@ -1608,6 +2046,78 @@ mod tests {
         assert!(ids(&[]).is_empty());
     }
 
+    /// ADR-0104 decision 1: of the lines an earlier node had, the newest report of each kind that replaces the last is taken, for the
+    /// agent's session only; a kind with no report is left as `None`, and nothing that appends is taken.
+    #[test]
+    fn the_newest_options_config_and_commands_of_the_session_are_read_from_the_lines_an_earlier_node_had(
+    ) {
+        let options = |sid: &str, mode: &str| {
+            line(
+                "session/options",
+                json!({"sessionId": sid, "modes": [{"id": "default", "name": "Ask"}, {"id": "yolo", "name": "Yolo"}],
+                       "models": [], "currentMode": mode, "currentModel": ""}),
+            )
+        };
+        let config = |sid: &str, current: &str| {
+            line(
+                "session/config",
+                json!({"sessionId": sid, "options": [{"id": "auto_approve", "name": "Auto approve", "type": "boolean",
+                       "current": current}]}),
+            )
+        };
+        let chat = line(
+            "chat/append",
+            json!({"sessionId": "s", "text": {"text": "hello"}}),
+        );
+        let r = replay(
+            &[
+                options("s", "default"),
+                config("s", "false"),
+                chat.clone(),
+                b"not json".to_vec(),
+                vec![0xff, 0xfe],
+                options("s", "yolo"),
+                config("s", "true"),
+                // Another session's report is not this agent's.
+                options("other", "default"),
+                config("other", "false"),
+            ],
+            "s",
+        );
+        assert_eq!(
+            r.options.as_ref().map(|o| o.current_mode.as_str()),
+            Some("yolo")
+        );
+        assert_eq!(r.options.as_ref().map(|o| o.modes.len()), Some(2));
+        assert_eq!(
+            r.config.as_ref().and_then(|c| c.first()).map(|o| (
+                o.id.as_str(),
+                o.current.as_str(),
+                o.boolean
+            )),
+            Some(("auto_approve", "true", true))
+        );
+        // No report of the commands: left to what the node kept.
+        assert_eq!(r.commands, None);
+        assert!(r.approvals.is_empty());
+        // The newest report replaces, even when it is empty; one with no session id is the session's.
+        let r = replay(
+            &[
+                line(
+                    "session/commands",
+                    json!({"sessionId": "s", "commands": [{"name": "review"}]}),
+                ),
+                line("session/commands", json!({"commands": []})),
+            ],
+            "s",
+        );
+        assert_eq!(r.commands, Some(Vec::new()));
+        assert_eq!(r.options, None);
+        assert_eq!(r.config, None);
+        // Nothing to read, nothing taken.
+        assert_eq!(replay(&[chat], "s"), Replay::default());
+    }
+
     #[test]
     fn a_queued_request_is_skipped_after_its_caller_times_out() {
         struct GatedWriter {
@@ -1637,7 +2147,7 @@ mod tests {
         let mut responses = Vec::new();
         for (id, line) in [(1, "first\n"), (2, "expired\n"), (3, "last\n")] {
             let (reply, response) = channel();
-            pending.lock().unwrap().map.insert(id, reply);
+            pending.lock().unwrap().map.insert(id, reply.into());
             responses.push(response);
             requests.send((id, line.into())).unwrap();
         }
@@ -1686,7 +2196,7 @@ mod tests {
         let (resume, release) = channel();
         let responses = [1, 2, 3].map(|id| {
             let (reply, response) = channel();
-            pending.lock().unwrap().map.insert(id, reply);
+            pending.lock().unwrap().map.insert(id, reply.into());
             if id > 1 {
                 requests.try_send((id, format!("{id}\n"))).unwrap();
             }
@@ -1742,12 +2252,18 @@ mod tests {
 
         let pending: Pending = Arc::default();
         let (reply, response) = channel();
-        pending.lock().unwrap().map.insert(1, reply);
+        pending.lock().unwrap().map.insert(1, reply.into());
         let (events, output) = channel();
         let head = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":";
         let tail = b"\"done\"}";
         let input = Cursor::new(head).chain(InterruptOnce(false, Cursor::new(tail)));
-        read_loop(input, &pending, &AtomicUsize::new(0), &events);
+        read_loop(
+            input,
+            &pending,
+            &AtomicUsize::new(0),
+            &AtomicUsize::new(0),
+            &events,
+        );
         assert_eq!(response.try_recv().unwrap().unwrap(), json!("done"));
         assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);
         assert!(output.try_recv().is_err());
@@ -1769,12 +2285,18 @@ mod tests {
     fn invalid_utf8_is_ignored_without_settling_a_request_or_ending_the_stream() {
         let pending: Pending = Arc::default();
         let (answer, response) = channel();
-        pending.lock().unwrap().map.insert(1, answer);
+        pending.lock().unwrap().map.insert(1, answer.into());
         let ignored = AtomicUsize::new(0);
         let (events, output) = channel();
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"\xff\"}}\n\
                       {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"valid\"}}\n";
-        read_loop(Cursor::new(input), &pending, &ignored, &events);
+        read_loop(
+            Cursor::new(input),
+            &pending,
+            &ignored,
+            &AtomicUsize::new(0),
+            &events,
+        );
         assert_eq!(response.recv().unwrap().unwrap(), json!({"text": "valid"}));
         assert_eq!(ignored.load(Ordering::Relaxed), 1);
         assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);
