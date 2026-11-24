@@ -261,7 +261,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div ref={log} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-4 max-md:pt-4" aria-live="polite" aria-label={t('chat-log')} role="log" tabIndex={0}>
           <div className="mx-auto flex max-w-195 flex-col gap-5 [&>*]:shrink-0">
-            {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
+            {lines.length === 0 && <p className="muted m-0">{t(source ? (send ? 'chat-empty' : 'chat-empty-watching') : (send ? 'prompt-intro' : 'prompt-intro-watching'))}</p>}
             {held.trimmed > 0 && <p role="note" className="muted m-0 self-center text-xs" data-trimmed>{t('chat-trimmed', { count: held.trimmed })}</p>}
             {view.hidden > 0 && <button type="button" className="button justify-self-center self-center px-3 py-1 text-xs" onClick={earlier}>{t('chat-earlier-items', { count: view.hidden })}</button>}
             {rows.map(({ row, paired }) => {

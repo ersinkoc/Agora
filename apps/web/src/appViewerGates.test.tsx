@@ -140,7 +140,9 @@ function again() {
 const asked = () => (HubSocket.last?.sent ?? []).map((b) => decodeFrame(b)).filter((f) => f && f.streamId === STREAM_COMMANDS && f.kind === 0)
   .map((f) => v1.CommandRequest.decode(f?.payload as Uint8Array).command ?? 'other');
 const buttons = (within: ParentNode | null) => [...(within?.querySelectorAll('button') ?? [])].map((b) => b.textContent?.trim() ?? '');
-const answers = (within: ParentNode | null) => buttons(within).filter((b) => b === t('approval-allow') || b === t('approval-deny'));
+// Allow, Deny and "Allow always" in both its words (ADR-0101).
+const ANSWERS = [t('approval-allow'), t('approval-deny'), t('approval-allow-always'), t('approval-allow-always-kept')];
+const answers = (within: ParentNode | null) => buttons(within).filter((b) => ANSWERS.includes(b));
 const click = async (el: Element | null) => {
   if (!el) throw new Error('nothing to click');
   await act(async () => { (el as HTMLElement).click(); });
@@ -240,6 +242,7 @@ describe('a viewer\'s window has nothing to type to a chat agent, and its settin
       if (open) await click(document.querySelector('[data-agent-row="n1/c1"]'));
       await until(() => expect(box()).not.toBeNull());
       expect(buttons(document.body)).toContain(t('prompt-send'));
+      expect(document.body.textContent).toMatch(new RegExp(`${t('prompt-intro')}|${t('chat-empty')}`.replace(/[.?]/g, '\\$&')));
       expect(await modeOff()).toBe(false);
       again();
       await windowAs(VIEWER, hash);
@@ -247,6 +250,9 @@ describe('a viewer\'s window has nothing to type to a chat agent, and its settin
       expect(box()).toBeNull();
       expect(buttons(document.body)).not.toContain(t('prompt-send'));
       expect(document.querySelector('[data-watching]')?.textContent).toBe(t('prompt-watching'));
+      // Nothing above it tells a viewer to give the agent something to do.
+      expect(document.body.textContent).not.toContain(t('prompt-intro'));
+      expect(document.body.textContent).not.toContain(t('chat-empty'));
       expect(await modeOff()).toBe(true);
     });
   }

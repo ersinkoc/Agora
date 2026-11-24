@@ -486,6 +486,8 @@ filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
 prompt-intro = This agent works through requests, not a terminal. Tell it what to do.
+# ADR-0106 (#1140): the same, in a window that cannot send it anything (a viewer's).
+prompt-intro-watching = This agent works through requests, not a terminal.
 prompt-label = What should it do?
 prompt-send = Send
 prompt-sent = Sent.
@@ -496,6 +498,7 @@ history-none = Nothing has been committed here yet.
 history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
+chat-empty-watching = Nothing said yet.
 chat-log = Conversation
 chat-plan = Plan
 chat-plan-steps =
