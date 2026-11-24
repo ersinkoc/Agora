@@ -1700,6 +1700,17 @@ impl Supervisor {
         );
     }
 
+    /// ADR-0108: whether the agent runs (in this node or in the holder) or waits for a restart: what a forget must not touch.
+    pub fn live(&self, id: &AgentId) -> bool {
+        self.agents
+            .get(id)
+            .is_some_and(|e| e.terminal.is_some() || e.restart_at.is_some())
+            || self
+                .adapters
+                .get(id)
+                .is_some_and(|a| a.running || a.restart_at.is_some())
+    }
+
     /// Agents that are running or waiting for a restart.
     fn active(&self) -> usize {
         self.agents

@@ -356,8 +356,9 @@ references are at main `9760e901`.
     unaffected), a tool call that finishes after the restart (one entry, updated in place) and an ACP agent that replays its session on
     two resumes (each turn once, on screen and on disk), in `hold_node_pipes`; a confined agent that cannot read a transcript
     (`sandboxed_agent`); node unit tests and `agora-bench transcript`.
-  - Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
-    file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
+  - A forget at the hub (`agent.forget`, ADR-0053) reaches a node that offers `agent.forget.local` and removes the file (ADR-0108,
+    #1104; an older node leaves it to retention).
+  - Not built: the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
     did not flush the last batch until step 5, now built; a kill loses the last batch and, while the node holds a secret value, the words
     held back (less than the longest value's length).
 - Step 5 (O2) is built, and with it the ADR: `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` on Unix (`agora_platform::catch_stop_requests`,

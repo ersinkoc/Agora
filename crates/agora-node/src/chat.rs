@@ -19,7 +19,7 @@
 //! one clone per follower per version, one binary search of the ring (at most 500) per update; no per-byte work on terminals.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -181,6 +181,10 @@ pub struct ChatBoard {
     /// ADR-0089, ADR-0104 C1: where the transcripts are saved, and what wakes their writer; `None` on a board that keeps memory only.
     store: Option<Arc<Store>>,
     wake: Option<Arc<Wake>>,
+    /// ADR-0108: the agents whose files are to be removed, each with where to say it was done (`true`) or failed, in the order forgotten.
+    forgets: Mutex<Vec<(AgentId, SyncSender<bool>)>>,
+    /// ADR-0108: the transcript writer runs ([`crate::transcript::spawn_writer`]); when it does not, a forget removes the files itself.
+    writer: AtomicBool,
 }
 
 /// A live chat subscription. Dropping it unregisters its follower even if the transcript stays quiet.
@@ -918,6 +922,57 @@ impl ChatBoard {
 
     pub fn wake(&self) -> Option<Arc<Wake>> {
         self.wake.clone()
+    }
+
+    /// ADR-0108: whether the transcript writer runs; set by the writer as it starts and ends.
+    pub fn set_writer_running(&self, running: bool) {
+        self.writer.store(running, Ordering::Release);
+    }
+
+    /// ADR-0108: the person forgot the agent: its ring and what of it was not written yet go now (so a take-up or a resume seeds
+    /// nothing from it, and no later batch carries it), and its files are removed by the writer after the batches it already took.
+    /// The answer comes on the returned channel: `true` once the files are gone (also when there were none), `false` when they could
+    /// not be removed. A board that saves nothing answers at once.
+    pub fn forget(&self, agent: &AgentId) -> Receiver<bool> {
+        let (done, answer) = sync_channel(1);
+        {
+            let mut g = self.lock();
+            g.remove(agent);
+            if self.store.is_none() {
+                let _ = done.send(true);
+                return answer;
+            }
+            self.forgets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((agent.clone(), done));
+        }
+        match (&self.wake, self.writer.load(Ordering::Acquire)) {
+            (Some(wake), true) => wake.notify(),
+            // No writer: nothing else touches the files, and the ring is already gone, so no batch can carry the agent.
+            _ => self.run_forgets(),
+        }
+        answer
+    }
+
+    /// ADR-0108: removes the files of every agent forgotten so far, oldest first. Run by the writer after the batches it took, by
+    /// [`crate::transcript::flush`], and by [`Self::forget`] when no writer runs.
+    pub fn run_forgets(&self) {
+        let jobs = std::mem::take(&mut *self.forgets.lock().unwrap_or_else(|e| e.into_inner()));
+        for (agent, done) in jobs {
+            let removed = self
+                .store
+                .as_ref()
+                .is_none_or(|s| match s.delete(agent.as_str()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        // Operational log, not UI text: the node answers the forget with a code.
+                        eprintln!("transcripts: {}: not removed: {e}", agent.as_str());
+                        false
+                    }
+                });
+            let _ = done.send(removed);
+        }
     }
 
     /// ADR-0104 C1: fills the agent's transcript from `seed` when it has given no id yet (see `Transcript::seed`).
