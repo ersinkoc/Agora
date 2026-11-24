@@ -1324,35 +1324,40 @@ impl Supervisor {
     /// through one (`npx`, `uvx`: [`crate::manifests::fetches_at_start`]); `None` for every other kind, which starts in its worktree
     /// as before. A runner reads package-manager configuration from the folder it starts in and the folders above it (a project's
     /// `.npmrc`, `package.json` and `node_modules`; uv's `uv.toml`, `pyproject.toml` and `.python-version`), which could change what
-    /// the pinned package resolves to; from this folder (`<runner_root>/<agent id>`, inside the node's data folder) it reads only the
-    /// owner's own user and global configuration. The agent still works in its worktree: ACP gives it the session's folder (`cwd`),
-    /// which an agent must use wherever its process was started. Emptied at every start (made again), so nothing an agent left in it
-    /// is read by the next start; the folder of an agent that is no longer known stays, empty of anything Agora put there.
+    /// the pinned package resolves to; from this folder (inside the node's data folder) it reads only the owner's own user and global
+    /// configuration. The agent still works in its worktree: ACP gives it the session's folder (`cwd`), which an agent must use
+    /// wherever its process was started. Every start gets a new folder ([`crate::runner_folders::new_folder`]); the agent's earlier
+    /// ones are removed on another thread, bounded, outside this lock ([`crate::runner_folders::remove_in_background`]). Only a kind
+    /// run behind the ACP bridge (no `[adapter]` of its own) and an agent with a plain id are started this way; anything else is
+    /// refused.
     fn runner_folder(&self, kind: &str, id: &AgentId) -> Result<Option<PathBuf>, SupervisorError> {
-        let fetches = self.registry_kinds.contains(kind)
-            && self
-                .kinds
-                .get(kind)
-                .is_some_and(|k| crate::manifests::fetches_at_start(&k.manifest));
-        if !fetches {
+        let Some(k) = self.kinds.get(kind) else {
             return Ok(None);
+        };
+        if !(self.registry_kinds.contains(kind) && crate::manifests::fetches_at_start(&k.manifest))
+        {
+            return Ok(None);
+        }
+        if k.manifest.adapter.is_some() {
+            return Err(SupervisorError::Spawn(
+                "a package runner of a registry kind runs only behind the ACP bridge".into(),
+            ));
+        }
+        if !crate::transcript::plain_id(id.as_str()) {
+            return Err(SupervisorError::Spawn(
+                "package runner folder: not a plain agent id".into(),
+            ));
         }
         let root = self
             .runner_root
             .as_ref()
             .ok_or_else(|| SupervisorError::Spawn("no folder for package runners".into()))?;
-        let dir = root.join(id.as_str());
-        let fresh = || -> std::io::Result<()> {
-            match std::fs::symlink_metadata(&dir) {
-                Ok(m) if m.is_dir() => std::fs::remove_dir_all(&dir)?,
-                Ok(_) => std::fs::remove_file(&dir)?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-            std::fs::create_dir_all(root)?;
-            std::fs::create_dir(&dir)
-        };
-        fresh().map_err(|e| SupervisorError::Spawn(format!("package runner folder: {e}")))?;
+        let dir = crate::runner_folders::new_folder(root, id.as_str())
+            .map_err(|e| SupervisorError::Spawn(format!("package runner folder: {e}")))?;
+        if let Some(name) = dir.file_name() {
+            let earlier = crate::runner_folders::earlier_folders(root, id.as_str(), name);
+            crate::runner_folders::remove_in_background(root.clone(), earlier);
+        }
         Ok(Some(dir))
     }
 
@@ -2635,7 +2640,7 @@ impl Supervisor {
             .get(id)
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
-        // #1150: made empty again for this start, as at the first.
+        // #1150: a new folder for this start, as at the first (the one the process that ended used is removed off this thread).
         let runner = self
             .adapters
             .get(id)
@@ -4917,7 +4922,9 @@ fn launch_adapter(
         let dir_text = dir
             .to_str()
             .ok_or_else(|| SupervisorError::Spawn("package runner folder is not UTF-8".into()))?;
-        if args.first().map(String::as_str) != Some("acp-bridge") {
+        if Path::new(program) != bridge_program()
+            || args.first().map(String::as_str) != Some("acp-bridge")
+        {
             return Err(SupervisorError::Spawn(
                 "a package runner of a registry kind runs only behind the ACP bridge".into(),
             ));

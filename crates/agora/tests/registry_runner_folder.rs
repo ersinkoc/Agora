@@ -2,7 +2,7 @@
 //! its own in the node's data folder, never in the project: a project's `.npmrc`, `package.json`, `node_modules`, `uv.toml`,
 //! `pyproject.toml` or `.python-version` is not where the runner starts or above it, so it cannot change what the pinned package
 //! resolves to. The owner's own configuration (`HOME`, `XDG_CONFIG_HOME`) still reaches the runner, and the agent is still told the
-//! project's folder (ACP `session/new` `cwd`). The folder is emptied again at the next start. The runners here are local stubs that
+//! project's folder (ACP `session/new` `cwd`). Every start gets a new folder; the earlier one is removed off the start path, bounded. The runners here are local stubs that
 //! record what they were given and run the fake ACP agent: no network, no real `npx` or `uvx`.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -238,10 +238,21 @@ fn a_registry_package_runner_starts_outside_the_project_and_keeps_the_owners_con
             .map(|v| v.worktree)
             .expect("the agent's worktree");
         let worktree = std::fs::canonicalize(worktree).unwrap();
-        let folder = dir.join("data/runner").join(id.as_str());
-
         let first = record(&log, 0);
-        assert_eq!(get(&first, "cwd"), folder.to_str().unwrap(), "{first:?}");
+        let folder = PathBuf::from(get(&first, "cwd"));
+        // `<data>/runner/<agent id>.<random>`: the node's folder for this start of this agent.
+        assert_eq!(
+            folder.parent(),
+            Some(dir.join("data/runner").as_path()),
+            "{first:?}"
+        );
+        let name = folder.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.strip_prefix(id.as_str())
+                .and_then(|r| r.strip_prefix('.'))
+                .is_some_and(|r| r.len() == 16),
+            "{name}"
+        );
         assert_eq!(get(&first, "args"), args, "{first:?}");
         // Nothing of the project where it starts (empty when it started) or above it (up to the test's own folder).
         assert_eq!(get(&first, "entries"), "", "{first:?}");
@@ -281,18 +292,36 @@ fn a_registry_package_runner_starts_outside_the_project_and_keeps_the_owners_con
             worktree
         );
 
-        // What the runner left in its folder is gone at the next start of the same agent.
+        // The next start of the same agent gets a new, empty folder; the earlier one, with whatever was left in it (here a deep
+        // chain and a wide folder, as an agent could leave), is removed off the start path: the start does not wait for it.
         assert!(folder.join(".npmrc").exists());
+        let mut deep = folder.join("deep");
+        for _ in 0..100 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(folder.join("wide")).unwrap();
+        for i in 0..3000 {
+            std::fs::write(folder.join(format!("wide/f{i}")), "").unwrap();
+        }
         node.supervisor.lock().unwrap().stop(&id).unwrap();
+        let resumed = Instant::now();
         node.supervisor
             .lock()
             .unwrap()
             .resume(&id, Instant::now())
             .unwrap();
         idle(id.as_str());
+        assert!(resumed.elapsed() < Duration::from_secs(30));
         let second = record(&log, 1);
-        assert_eq!(get(&second, "cwd"), folder.to_str().unwrap(), "{second:?}");
+        let again = PathBuf::from(get(&second, "cwd"));
+        assert_ne!(again, folder, "{second:?}");
+        assert_eq!(again.parent(), folder.parent(), "{second:?}");
         assert_eq!(get(&second, "entries"), "", "{second:?}");
+        // Removed in the background up to its depth limit: the wide folder goes, the chain's part below the limit stays.
+        wait("the earlier folder's wide part to be removed", || {
+            (!folder.join("wide").exists()).then_some(())
+        });
         node.supervisor.lock().unwrap().stop(&id).unwrap();
     }
     drop(node);
@@ -336,11 +365,12 @@ fn a_registry_package_runner_starts_outside_the_project_and_keeps_the_owners_con
             )
             .expect("a confined start");
         let confined = record(&rec.join("npx.log"), 2);
-        assert_eq!(
-            get(&confined, "cwd"),
-            runners.join(id.as_str()).to_str().unwrap(),
-            "{confined:?}"
-        );
+        let started_in = PathBuf::from(get(&confined, "cwd"));
+        assert_eq!(started_in.parent(), Some(runners.as_path()), "{confined:?}");
+        assert!(started_in
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&format!("{}.", id.as_str()))));
         assert_eq!(get(&confined, "entries"), "", "{confined:?}");
         assert_eq!(get(&confined, "listed"), "yes", "{confined:?}");
         sup.stop(&id).unwrap();
