@@ -76,7 +76,7 @@ const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', tasks: 'boar
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest, watching }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -115,6 +115,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   pairing?: PairingUi;
   // The hub said this session is not the owner's: an empty window says no project is theirs yet (#904).
   guest?: boolean;
+  // ADR-0106: the hub said this person is a viewer; the window only watches.
+  watching?: boolean;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -388,7 +390,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   const home = (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} guest={guest} />
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} guest={guest} watching={watching} />
     </div>
   );
   const welcome = home;
@@ -416,7 +418,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: `calc(${rightWidth}px + ${RAIL_WIDTH})` }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
-        {showAgents && <Explorer by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
+        {showAgents && <Explorer watching={watching} by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-[55dvh] min-w-0 flex-1 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}

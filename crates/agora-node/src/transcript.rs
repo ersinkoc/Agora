@@ -50,14 +50,17 @@
 //! (replacing an older one), which follows its agent. Over 2 GiB in all, the files of agents that are not kept go, oldest first.
 //! Leftovers of a rewrite go. Checked when the node starts and every hour. `agora history purge` removes the folder.
 //!
-//! **Secrets** (ADR-0089 decision 7; review of #1103, rounds 1 to 3). The values of the secrets this node holds (`<data>/secrets`,
+//! **Secrets** (ADR-0089 decision 7; review of #1103, rounds 1 to 4). The values of the secrets this node holds (`<data>/secrets`,
 //! and the environment variables its policy passes to agents, ADR-0084), of 8 bytes or more, are kept out of the file by two
 //! mechanisms only:
 //! - **(a) whole values**, raw and as `serde_json` escapes them, every occurrence (overlapping ones too): in every text of a line, and
 //!   in the agent's words (its text and thinking) as one stream across the pieces they came in, joined with the words held back
 //!   after them and with the last words written before them (the carry, in memory);
-//! - **(b) fragments** (4 bytes or more) at every place a value may have been cut (an edge): a value's start just before an edge,
-//!   its end just after one, and a part of a value between any two edges (pieces of under 4 bytes beside several edges add up).
+//! - **(b) fragments** at every place a value may have been cut (an edge): every part of a value (4 bytes or more) that touches or
+//!   crosses an edge. That covers a value's start or end cut off there, a part cut on both sides, pieces of under 4 bytes beside
+//!   several edges that add up, and a part whose bytes sit on both sides of an edge by chance (a value's first letters before words
+//!   that were lost, its last letters after them). Found with a suffix automaton of each value, in time linear in the text however
+//!   many edges it has.
 //!
 //! Every place agent text is cut, split, spliced, partly redacted or written before it is final, and what covers it:
 //!
@@ -67,28 +70,33 @@
 //! | bridge: tool output, cut to 64 KiB | head and tail kept | cleaned as the node cleans it and redacted before the cut, so its length does not change after it; the node keeps 8 + 8 KiB of it and never this place |
 //! | bridge: arguments (64 KiB), plan step (4 KiB), location path (4 KiB) | head and tail kept | cleaned as the node cleans that field first; the node keeps less of each (8 + 8 KiB, 256 + 256 bytes, 512 + 512 bytes), never this place |
 //! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place |
-//! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges |
-//! | bridge: stderr tail (400 bytes, cut at the front) | into a notice's parameters | (b): both ends of every notice parameter are edges |
+//! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges, also of a mark a later cut (the stderr tail's, the node's) went through. Only tool output and stderr are shape-checked, never the agent's words |
+//! | bridge: stderr tail (400 bytes, cut at its front and marked `…`) | into a notice's parameters | (b): both ends of every notice parameter are edges, and the place just after a leading `…` (just before a trailing one) |
+//! | bridge: the stderr tail's home path (`/home/<name>` written `~`) | spliced | **not covered** across the splice |
 //! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) |
-//! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step and permission label 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
-//! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB | end dropped | recorded (`cap_end`): (b); a parameter's ends always are edges |
+//! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step, permission label and refused action 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
+//! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB (also one of digits) | end dropped | recorded (`cap_end`): (b) |
 //! | node: a tool call's text, a plan's text | made of the call's arguments, the plan's steps | made again by the writer from the redacted parts |
 //! | node: a tool call still running | its output and arguments are written as they are, then replaced | (b): the end of a version not final is an edge |
 //! | node: a prompt, a queued prompt or a notice between the agent's words | entries between pieces of one value | not a break: the stream is the agent's words only |
-//! | node: the ring drops words not written yet (a flood) | written before what follows | the carry keeps the value's start; their end is an edge (b) |
+//! | node: the ring drops words not written yet (a flood) | kept aside (up to 1 MiB) and written at the next batch | the carry joins them; past 1 MiB the oldest are dropped unwritten: the carry is kept and its end is an edge, so what follows the gap starts at one |
 //! | writer: any release of held words with less than a value's length after them (the turn ends, words said outside a turn, a stop's flush `take_unsaved`) | written without what may follow | the end is an edge (b), even at a turn's end (an adapter may say it is idle before its last words); the carry (raw, in memory) joins what follows in this node |
-//! | take-up and resume (seeding) | this node does not have the earlier node's raw words | the earlier node's last words as written become the carry (up to 16 KiB, its `<redacted>` marks are edges), with an edge at their end and at the file's first word; fragments under 4 bytes on each side then add up to no more than 3 |
+//! | take-up and resume (seeding) | this node does not have the earlier node's raw words | the earlier node's last words as written become the carry (up to 16 KiB): every boundary between them, their end and their `<redacted>` marks are edges. With no file at all (never written, purged, killed before the first batch), the next words start with an edge |
 //! | Start again | the earlier session's words flushed to its file, the new session starts | as a stop's flush; the new session's first word is an edge |
 //! | rotation | the newest whole lines kept | nothing split |
 //!
-//! Every cut in the node's chat code and the bridge goes through those helpers or is listed with why it needs no record
-//! (`chat::every_cut`), and a seeded random test drives the whole path (`chat::property`, 600 cases by default). Not covered: a value
-//! shorter than 8 bytes; a fragment shorter than 4 bytes; a word that only begins (or ends) like a value is replaced too when it
-//! stands at an edge (at a stop's flush, the end of words said outside a turn and a turn's end, too); cuts another adapter makes on
-//! its own (#1123) and the bridge's `fit_line` halving; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`)
-//! in arguments; words the ring dropped and that the carry no longer reaches; and a secret the node does not hold. The bridge cleans
-//! and redacts a tool's whole output before cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed. What the window is sent live is not redacted (#1147). The file is
-//! as sensitive as the terminal, and its mode is what protects it.
+//! Every cut in the node's chat code, the transcript writer, the bridge and the cut helpers goes through those helpers or is listed
+//! with why it needs no record (`chat::every_cut`, which looks for truncations, drains and splits, range slices with or without brackets, and cut helpers named or passed), and
+//! a seeded random test drives the whole path (`chat::property`, 600 cases by default, `AGORA_PROPERTY_CASES` and
+//! `AGORA_PROPERTY_BASE` for more). Not covered: a value shorter than 8 bytes; a fragment shorter than 4 bytes; a part of 4 bytes or
+//! more of a value that stands at an edge only by chance is replaced too (a stop's flush, words said outside a turn, a turn's end, a
+//! take-up's boundaries); a value whose characters cleaning changes (`\r\n` written `\n`; line breaks and tabs as spaces in one-line
+//! fields) is not found; cuts another adapter makes on its own (#1123), the bridge's `fit_line` halving and the stderr tail's home
+//! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
+//! hold. The bridge cleans and redacts a tool's whole output before
+//! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
+//! the agent chose and is written as it is. What the window is sent live is not redacted (#1147). The file is as sensitive as the
+//! terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
 //! remove the file; retention does.
@@ -270,6 +278,8 @@ pub struct Store {
     env_values: Vec<String>,
     /// The secret values last read, longest first, and when their folder last changed.
     known: Mutex<(Option<SystemTime>, Vec<String>)>,
+    /// What finding pieces of those values needs, made again only when they change.
+    pieces: Mutex<(Vec<String>, Arc<Vec<Needle>>)>,
 }
 
 /// The file name of an agent: its id when that is a plain name (letters, digits, `-` and `_`), never a path. Without dots, so no id
@@ -549,122 +559,156 @@ fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
     }
 }
 
-/// The prefix function of `k` (KMP): for each length, the longest proper prefix of `k[..len]` that is also its suffix.
-fn prefix_function(k: &[u8]) -> Vec<usize> {
-    let mut f = vec![0; k.len()];
-    let mut q = 0;
-    for i in 1..k.len() {
-        while q > 0 && k[i] != k[q] {
-            q = f[q - 1];
-        }
-        if k[i] == k[q] {
-            q += 1;
-        }
-        f[i] = q;
-    }
-    f
-}
-
-/// A value to look for, with what finding its pieces needs, made once per write: its bytes and prefix function, forwards and
-/// reversed.
-struct Needle {
-    k: Vec<u8>,
-    f: Vec<usize>,
-    rk: Vec<u8>,
-    rf: Vec<usize>,
+/// A value to look for, with what finding its pieces needs: a suffix automaton of it (made when the store's values change, not per
+/// write).
+pub(crate) struct Needle {
+    sam: Sam,
 }
 
 fn needles(known: &[String]) -> Vec<Needle> {
     known
         .iter()
-        .map(|v| {
-            let k = v.as_bytes().to_vec();
-            let rk: Vec<u8> = k.iter().rev().copied().collect();
-            Needle {
-                f: prefix_function(&k),
-                rf: prefix_function(&rk),
-                k,
-                rk,
-            }
+        .map(|v| Needle {
+            sam: Sam::of(v.as_bytes()),
         })
         .collect()
 }
 
-/// The longest `n` (at least [`MIN_PIECE`], shorter than `k`) with `a` ending in `k[..n]`, where `ok(n)` (a character boundary)
-/// holds; 0 for none. Linear in `k`'s length (KMP), however `a` and `k` repeat. `f` is `k`'s prefix function.
-fn overlap(a: &[u8], k: &[u8], f: &[usize], ok: impl Fn(usize) -> bool) -> usize {
-    if k.len() <= MIN_PIECE {
-        return 0;
+/// A suffix automaton of one value: it recognises every part of it, so the longest part of the value ending at each place of a
+/// text is found in one pass over the text (review of #1103, round 4: the earlier pairwise comparison of places was quadratic).
+struct Sam {
+    len: Vec<usize>,
+    link: Vec<usize>,
+    next: Vec<Vec<(u8, usize)>>,
+}
+
+impl Sam {
+    fn get(&self, p: usize, c: u8) -> Option<usize> {
+        let n = &self.next[p];
+        n.binary_search_by_key(&c, |x| x.0).ok().map(|i| n[i].1)
     }
-    let mut q = 0;
-    for &c in &a[a.len().saturating_sub(k.len() - 1)..] {
-        while q > 0 && (q == k.len() || c != k[q]) {
-            q = f[q - 1];
+
+    fn set(&mut self, p: usize, c: u8, to: usize) {
+        let n = &mut self.next[p];
+        match n.binary_search_by_key(&c, |x| x.0) {
+            Ok(i) => n[i].1 = to,
+            Err(i) => n.insert(i, (c, to)),
         }
-        if c == k[q] {
-            q += 1;
+    }
+
+    fn of(k: &[u8]) -> Self {
+        const NONE: usize = usize::MAX;
+        let mut sam = Sam {
+            len: vec![0],
+            link: vec![NONE],
+            next: vec![Vec::new()],
+        };
+        let mut last = 0;
+        for &c in k {
+            let cur = sam.len.len();
+            sam.len.push(sam.len[last] + 1);
+            sam.link.push(0);
+            sam.next.push(Vec::new());
+            let mut p = last;
+            while p != NONE && sam.get(p, c).is_none() {
+                sam.set(p, c, cur);
+                p = sam.link[p];
+            }
+            if p != NONE {
+                let q = sam.get(p, c).unwrap_or(0);
+                if sam.len[p] + 1 == sam.len[q] {
+                    sam.link[cur] = q;
+                } else {
+                    let clone = sam.len.len();
+                    sam.len.push(sam.len[p] + 1);
+                    sam.link.push(sam.link[q]);
+                    sam.next.push(sam.next[q].clone());
+                    while p != NONE && sam.get(p, c) == Some(q) {
+                        sam.set(p, c, clone);
+                        p = sam.link[p];
+                    }
+                    sam.link[q] = clone;
+                    sam.link[cur] = clone;
+                }
+            }
+            last = cur;
         }
+        sam
     }
-    if q == k.len() {
-        q = f[q - 1];
-    }
-    while q >= MIN_PIECE && !ok(q) {
-        q = f[q - 1];
-    }
-    if q >= MIN_PIECE {
-        q
-    } else {
-        0
+
+    /// For each place `i` in `text` (0 to its length), raises `out[i]` to the length of the longest part of the value ending there.
+    fn ending(&self, text: &[u8], out: &mut [usize]) {
+        let (mut v, mut l) = (0usize, 0usize);
+        for (i, &c) in text.iter().enumerate() {
+            while v != 0 && self.get(v, c).is_none() {
+                v = self.link[v];
+                l = self.len[v];
+            }
+            match self.get(v, c) {
+                Some(n) => {
+                    v = n;
+                    l += 1;
+                }
+                None => (v, l) = (0, 0),
+            }
+            out[i + 1] = out[i + 1].max(l);
+        }
     }
 }
 
-/// Mechanism (b), fragments: at each place in `edges`, the longest start of a known value (4 bytes or more) that ends there and the
-/// longest end of one that begins there; and between two neighbouring places, a span that is part of a known value (a piece cut on
-/// both sides, such as one between the bridge's mark and the end of a version not final yet).
+/// Mechanism (b), fragments: every part (4 bytes or more) of a known value that touches or crosses a place in `edges`. That covers
+/// a value's start cut off at a place, its end, a part cut on both sides, pieces of under 4 bytes beside several places that add
+/// up, and a part whose bytes happen to sit on both sides of a place (review of #1103, round 4: words lost between two writes can
+/// leave a value's last letters right after its first ones). Linear in the text for each value, however many places there are: the
+/// longest part ending at each byte is found in one pass, and a part touches a place when the last place at or before its end is at
+/// or after its start (the earlier pairwise comparison of places was quadratic).
 fn fragments(s: &str, edges: &[usize], known: &[Needle], out: &mut Vec<Range<usize>>) {
-    let mut edges: Vec<usize> = edges
-        .iter()
-        .copied()
-        .filter(|&e| e <= s.len() && s.is_char_boundary(e))
-        .collect();
-    edges.sort_unstable();
-    edges.dedup();
-    let b = s.as_bytes();
-    for &e in &edges {
-        for n in known {
-            let before = overlap(&b[..e], &n.k, &n.f, |q| s.is_char_boundary(e - q));
-            if before > 0 {
-                out.push(e - before..e);
-            }
-            // The end of a value beginning at `e`: reversed, the start of the reversed value ending there.
-            let head = &b[e..(e + n.k.len().saturating_sub(1)).min(b.len())];
-            let rev_head: Vec<u8> = head.iter().rev().copied().collect();
-            let after = overlap(&rev_head, &n.rk, &n.rf, |q| s.is_char_boundary(e + q));
-            if after > 0 {
-                out.push(e..e + after);
-            }
-        }
+    if edges.is_empty() || known.is_empty() {
+        return;
     }
-    // Between any two places (not only neighbours: pieces of under 4 bytes on each side of several places add up), a span that is
-    // part of a known value.
-    let longest = known.iter().map(|n| n.k.len()).max().unwrap_or(0);
-    for (i, &a) in edges.iter().enumerate() {
-        for &z in &edges[i + 1..] {
-            if z - a >= longest {
-                break;
-            }
-            if z - a < MIN_PIECE {
-                continue;
-            }
-            let span = &b[a..z];
-            if known
-                .iter()
-                .any(|n| n.k.len() > z - a && n.k.windows(span.len()).any(|w| w == span))
-            {
-                out.push(a..z);
-            }
-        }
+    let n = s.len();
+    let mut ending = vec![0usize; n + 1];
+    for k in known {
+        k.sam.ending(s.as_bytes(), &mut ending);
     }
+    // `last[i]`: the last place at or before `i`, plus one (0: none).
+    let mut last = vec![0usize; n + 1];
+    for &e in edges.iter().filter(|&&e| e <= n && s.is_char_boundary(e)) {
+        last[e] = e + 1;
+    }
+    for i in 1..=n {
+        last[i] = last[i].max(last[i - 1]);
+    }
+    let floor = |mut i: usize| {
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let ceil = |mut i: usize| {
+        while !s.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
+    // The starts of the longest parts never move back as their ends move on, so touching parts are joined as they come.
+    let mut cur: Option<Range<usize>> = None;
+    for end in MIN_PIECE..=n {
+        let len = ending[end];
+        if len < MIN_PIECE || last[end] == 0 || last[end] - 1 < end - len {
+            continue;
+        }
+        let part = floor(end - len)..ceil(end);
+        cur = match cur {
+            Some(c) if part.start <= c.end => Some(c.start.min(part.start)..c.end.max(part.end)),
+            Some(c) => {
+                out.push(c);
+                Some(part)
+            }
+            None => Some(part),
+        };
+    }
+    out.extend(cur);
 }
 
 /// The places on either side of every mark the bridge left.
@@ -674,7 +718,30 @@ fn bridge_marks(s: &str) -> Vec<usize> {
         .collect()
 }
 
-/// A field redacted: its whole values, and fragments at `edges` (with the bridge's marks).
+/// The far side of each part of a bridge mark that a cut at one of `edges` left (review of #1103, round 4, property seed 1003545:
+/// the bridge's stderr tail cut through a `[redacted]` that had replaced the start of a value, so `…]` stood before the rest of it):
+/// the mark's start before an edge that ends with its first bytes, and its end after an edge that starts with its last ones.
+fn cut_marks(s: &str, edges: &[usize]) -> Vec<usize> {
+    let (b, m) = (s.as_bytes(), BRIDGE_MARK.as_bytes());
+    let mut out = Vec::new();
+    for &e in edges.iter().filter(|&&e| e <= b.len()) {
+        if let Some(k) = (1..m.len())
+            .rev()
+            .find(|&k| e >= k && b.get(e - k..e) == m.get(..k))
+        {
+            out.push(e - k);
+        }
+        if let Some(k) = (1..m.len())
+            .rev()
+            .find(|&k| b.get(e..e + k) == m.get(m.len() - k..))
+        {
+            out.push(e + k);
+        }
+    }
+    out
+}
+
+/// A field redacted: its whole values, and fragments at `edges` (with the bridge's marks, whole or cut).
 fn redact_field(
     s: &mut String,
     known: &[String],
@@ -684,6 +751,8 @@ fn redact_field(
 ) {
     whole(s, known, &mut ranges);
     edges.extend(bridge_marks(s));
+    let torn = cut_marks(s, &edges);
+    edges.extend(torn);
     fragments(s, &edges, pieces, &mut ranges);
     mask(s, ranges);
 }
@@ -783,6 +852,14 @@ fn redacted(
             } else {
                 vec![0, v.len()]
             };
+            // The bridge marks the front cut of a stderr tail (and the end of a shortened detail) with `…`: just beside it is
+            // where it cut (review of #1103, round 4).
+            if v.starts_with('…') {
+                edges.push('…'.len_utf8());
+            }
+            if v.ends_with('…') {
+                edges.push(v.len() - '…'.len_utf8());
+            }
             if let Some((_, cuts)) = c.params.iter().find(|(key, _)| key == k) {
                 edges.extend(cuts);
             }
@@ -820,6 +897,7 @@ impl Store {
             secrets,
             env_values: Vec::new(),
             known: Mutex::new((None, Vec::new())),
+            pieces: Mutex::new((Vec::new(), Arc::new(Vec::new()))),
         }
     }
 
@@ -913,7 +991,13 @@ impl Store {
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         agora_platform::ensure_private_dir(&self.dir)?;
         let known = self.known_secrets();
-        let pieces = needles(&known);
+        let pieces = {
+            let mut g = self.pieces.lock().unwrap_or_else(|e| e.into_inner());
+            if g.0 != known {
+                *g = (known.clone(), Arc::new(needles(&known)));
+            }
+            Arc::clone(&g.1)
+        };
         let masks = run_masks(batch, &known, &pieces);
         let mut out = Vec::new();
         for (line, m) in batch.lines.iter().zip(masks) {
@@ -985,7 +1069,10 @@ impl Store {
         if high > 0 && self.limits.max_bytes > 0 {
             let mut out = header(false);
             out.extend(mark(high));
-            if let Err(e) = agora_platform::write_private(&path, &out) {
+            // Nothing may have been written yet (a take-up with no file, then Start again): the folder is made first.
+            if let Err(e) = agora_platform::ensure_private_dir(&self.dir)
+                .and_then(|()| agora_platform::write_private(&path, &out))
+            {
                 // Operational log, not UI text. The ids still go on in this node's memory; the first batch writes them.
                 eprintln!("transcripts: {agent}: the new session's file was not started: {e}");
             }
@@ -1550,6 +1637,16 @@ mod tests {
         // A new entry is appended after the mark, and the file stays private.
         store.write(&batch("a", 10, vec![text(10, "y")])).unwrap();
         assert_eq!(store.read("a").entries.len(), 1);
+    }
+
+    /// Found by the property test (round 4): Start again before anything was written left no file with the highest id, because the
+    /// transcripts folder did not exist yet.
+    #[test]
+    fn start_again_before_any_write_still_leaves_the_highest_id() {
+        let dir = temp("aside-nofolder");
+        let store = Store::new(&dir, Limits::default(), None);
+        store.move_aside("a", 7);
+        assert_eq!(store.read("a").high, 7);
     }
 
     #[test]

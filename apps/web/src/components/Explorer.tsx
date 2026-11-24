@@ -15,7 +15,7 @@ import { ProjectChip, ProjectHint } from './ProjectMark';
 import { groupFleet, sharedAcross, sortByUrgency, type GroupBy, type ProjectSpread } from '../net/fleet';
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
-export function Explorer({ by, onBy, spread, fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError }: {
+export function Explorer({ by, onBy, spread, fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError, watching }: {
   // How the list is grouped (one choice with the fleet console) and where each project is open (net/fleet.ts `projectSpread`).
   by: GroupBy;
   onBy: (by: GroupBy) => void;
@@ -38,6 +38,8 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   onResume?: (agent: AgentTileModel, action: ResumeAction) => void;
   resuming?: string;
   resumeError?: { id: string; code: string };
+  // ADR-0106: a viewer's window watches: no Start button, and the empty list does not ask them to start one.
+  watching?: boolean;
 }) {
   const [filter, setFilter] = useState('');
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
@@ -128,7 +130,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 max-lg:max-h-[max(35dvh,16rem)] max-lg:flex-none max-lg:border-b lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
       <h2 className="m-0 flex-1 text-xs">{t('console-agents')}</h2>
-      <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>
+      {!watching && <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>}
       <button type="button" className="ide-iconbtn" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelLeft" /></button>
     </div>
     <div className="flex-none p-2">
@@ -222,7 +224,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
         </ul>}
       </section>}
       {fleet.length > 0 && (by === 'machine' ? tree.size === 0 : flat.length === 0) && closed.length === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
-      {fleet.length === 0 && machines.length > 0 && <p className="muted px-3 py-2">{t('fleet-empty')}</p>}
+      {fleet.length === 0 && machines.length > 0 && <p className="muted px-3 py-2">{t(watching ? 'fleet-watch-empty' : 'fleet-empty')}</p>}
     </nav>
   </aside>;
 }

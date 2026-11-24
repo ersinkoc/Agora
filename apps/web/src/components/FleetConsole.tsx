@@ -264,7 +264,8 @@ function JoinSteps({ pairing }: { pairing?: PairingUi }) {
 // What the page shows when there is no fleet yet, centred: where things stand and the next step. Commands are shown as they are typed.
 // `guest`: the hub said this session is not the owner's (ADR-0049). A person sees only the projects the owner gave them, so an empty
 // window means no project is theirs yet, and the owner's setup (join codes, enrollment) is not theirs to do (#904).
-export function FleetEmpty({ kind, machines, onStart, onRetry, pairing, guest }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi; guest?: boolean }) {
+// `watching`: the hub said this person is a viewer (ADR-0106): nothing to start, so the first run says what they will see instead.
+export function FleetEmpty({ kind, machines, onStart, onRetry, pairing, guest, watching }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi; guest?: boolean; watching?: boolean }) {
   const [adding, setAdding] = useState(false);
   const joinId = useId();
   const online = machines.filter((m) => m.online);
@@ -278,6 +279,15 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing, guest }:
         <h2 className="fleet-empty__title">{t('fleet-offline-title')}</h2>
         <p className="fleet-empty__text">{t('fleet-offline-text')}</p>
         {onRetry && <div className="fleet-empty__actions"><Button variant="primary" onClick={onRetry}>{t('link-retry')}</Button></div>}
+      </div>
+    );
+  }
+  if (kind === 'first-run' && watching) {
+    return (
+      <div className="fleet-empty kit-tone-accent">
+        <span aria-hidden className="kit-chip"><Icon name="terminal" className="size-5" /></span>
+        <h2 className="fleet-empty__title">{t('fleet-watch-title')}</h2>
+        <p className="fleet-empty__text">{t('fleet-watch-text')}</p>
       </div>
     );
   }
@@ -320,7 +330,7 @@ export function FleetEmpty({ kind, machines, onStart, onRetry, pairing, guest }:
 
 // Home: the fleet as a console (docs/ux/visual-language.md, "Glance"). Everything is derived from the props (render is pure): the counts,
 // the queue of what needs you and the tiles are one memoised pass over the list; the clock only moves the times.
-export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry, pairing, guest }: {
+export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry, pairing, guest, watching }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   approvals: readonly ApprovalModel[];
@@ -336,6 +346,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   pairing?: PairingUi;
   // The hub said this session is not the owner's (see FleetEmpty).
   guest?: boolean;
+  watching?: boolean;
 }) {
   const view = useMemo(() => fleetView(fleet, approvals, machines, pairing?.cards), [fleet, approvals, machines, pairing?.cards]);
   const [filter, setFilter] = useState<FleetFilter | undefined>();
@@ -353,7 +364,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     <>
       {view.attention.length > 0 && <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />}
       {pairing && <PairRecentList recent={pairing.recent} />}
-      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} guest={guest} />
+      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} guest={guest} watching={watching} />
     </>
   ) : (
     <>
