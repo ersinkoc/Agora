@@ -80,14 +80,24 @@ impl RegionText {
         }
     }
 
+    /// The region's words with every run of whitespace as one space, and one space at each end: the region's edges are boundaries
+    /// too (rows are read without their trailing blanks, so a phrase padded at its end still matches at the end of the last row).
     fn collapsed(&self) -> &str {
-        self.collapsed
-            .get_or_init(|| collapse_whitespace(&self.raw, self.raw.split_whitespace()))
+        self.collapsed.get_or_init(|| {
+            let mut out = String::with_capacity(self.raw.len() + 2);
+            out.push(' ');
+            for word in self.raw.split_whitespace() {
+                out.push_str(word);
+                out.push(' ');
+            }
+            out
+        })
     }
 }
 
-// Keep one space for a run at either end as well. A manifest can use that space to require a
-// boundary around a phrase, even when the terminal wraps the phrase over several rows.
+// A phrase's whitespace collapsed, keeping one space for a run at either end as well. A manifest can
+// use that space to require a boundary around a phrase, even when the terminal wraps the phrase over
+// several rows.
 fn collapse_whitespace<'a>(text: &str, words: impl IntoIterator<Item = &'a str>) -> String {
     let mut normalized = String::with_capacity(text.len());
     let mut space = text.starts_with(char::is_whitespace);
@@ -105,7 +115,7 @@ fn collapse_whitespace<'a>(text: &str, words: impl IntoIterator<Item = &'a str>)
 }
 
 enum Matcher {
-    /// The phrase, and the same phrase with its whitespace collapsed when it holds more than one word.
+    /// The phrase, and the same phrase with its whitespace collapsed when it holds more than one word or has whitespace at an end.
     Contains(String, Option<String>),
     Regex(Regex),
 }
@@ -119,7 +129,8 @@ impl Matcher {
         match (contains, regex) {
             (Some(s), None) => {
                 let words: Vec<&str> = s.split_whitespace().collect();
-                let collapsed = (words.len() > 1).then(|| collapse_whitespace(s, words));
+                let padded = s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace);
+                let collapsed = (words.len() > 1 || padded).then(|| collapse_whitespace(s, words));
                 Some(Self::Contains(s.to_string(), collapsed))
             }
             (None, Some(r)) => compile(r).ok().map(Self::Regex),

@@ -149,7 +149,9 @@ Engine details (`agora-adapters`):
   `bottom_non_empty_lines(n)` is the last `n` rows that contain text. Neither ever includes scrollback.
 - A `contains` phrase of more than one word also matches when the region wraps it: runs of whitespace, line breaks included, count as one
   space (so "Yes, I trust this folder" is found when a narrow terminal puts "folder" on the next row). Only whitespace is collapsed;
-  regexes still see the rows as they are.
+  regexes still see the rows as they are. Whitespace at either end of a phrase is kept as one space and asks for a boundary there
+  (`" build done "` is not found in "prebuild done"); a line break and the region's first and last character count as one, so a
+  padded phrase, one word included, is still found when it wraps or stands at the start or end of the region.
 - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
   and are size-limited.
 - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.

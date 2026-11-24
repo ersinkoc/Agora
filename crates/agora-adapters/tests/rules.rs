@@ -258,7 +258,55 @@ contains = " build done "
             "{text:?}"
         );
     }
+    // The region's edges are boundaries too: rows are read without their trailing blanks.
+    for text in ["note build done", "build done next"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
     for text in ["note prebuild done next", "note build done-ish next"] {
+        assert_eq!(
+            detector.detect(&term_with(text.as_bytes())),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_padded_single_word_is_found_wrapped_and_only_as_a_whole_word() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "finished"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " done "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    for text in ["build\r\ndone next", "build done", "done"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    for text in ["undone next", "build doneish"] {
         assert_eq!(
             detector.detect(&term_with(text.as_bytes())),
             None,
