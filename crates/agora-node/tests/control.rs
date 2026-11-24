@@ -2225,9 +2225,15 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
         helpers_may_start: false,
         ..Default::default()
     }));
-    assert!(
-        r_is_err(r),
-        "the user is told the decision did not reach the agent"
+    // #1150: the user is told the decision did not reach the agent, as a failed approval answer (never as a failed start, reference
+    // `unassigned`).
+    let info = r
+        .expect("io")
+        .expect_err("the decision did not reach the agent");
+    assert_eq!(info.code, "internal");
+    assert_eq!(
+        info.params["incident_id"].value,
+        Some(v1::param_value::Value::Str("approval.resolve".into()))
     );
     assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
     // Codex review of #794: the request is over, so the hub is told as for a cancelled turn (unsigned, not approved), or it would

@@ -972,7 +972,14 @@ impl Spawner {
                     // The adapter's answer is waited for after the lock is let go.
                     let call = sup.prepare_prompt(&agent, &text, false);
                     drop(sup);
-                    call.and_then(crate::supervisor::AdapterCall::run).is_ok()
+                    match call.and_then(crate::supervisor::AdapterCall::run) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            // #1150: nobody is answered with this error, so the node's log says it (never the prompt's text).
+                            crate::supervisor::log_call_failure("prompt", &agent, &e);
+                            false
+                        }
+                    }
                 } =>
                 {
                     self.chat.push(
