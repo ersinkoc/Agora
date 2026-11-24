@@ -1218,8 +1218,9 @@ impl Fetcher for HoldUntilStdinCloses {
 }
 
 /// Not a test by itself (it returns at once unless [`HOLDER_HOME`] is set): the test below runs it as other processes, each one
-/// install contending for the lock. It writes `<home>/done-<pid>` with its outcome (`ok` or the error code); one that gets the lock
-/// holds it until its stdin closes or it is killed.
+/// install contending for the lock. It writes `<home>/done-<pid>` with its outcome (`ok` or the error code) on the first line and the
+/// error's detail on the second, so a failure says which error it was; one that gets the lock holds it until its stdin closes or it
+/// is killed.
 #[test]
 fn lock_holder_child() {
     let Some(home) = std::env::var_os(HOLDER_HOME).map(PathBuf::from) else {
@@ -1238,8 +1239,8 @@ fn lock_holder_child() {
         &home,
         &Tools::new(&net, &hold, &Sig(true)),
     ) {
-        Ok(_) => "ok".to_string(),
-        Err(e) => e.code.code().to_string(),
+        Ok(_) => "ok\n".to_string(),
+        Err(e) => format!("{}\n{}", e.code.code(), e.detail),
     };
     // Written aside and renamed, so `done-<pid>` is never seen half written.
     let aside = home.join(format!("out-{}", std::process::id()));
@@ -1256,6 +1257,12 @@ impl Drop for Children {
             let _ = c.wait();
         }
     }
+}
+
+/// The outcome a [`lock_holder_child`] wrote to `done` (its first line), and the whole file for a failure message.
+fn outcome(done: &Path) -> (String, String) {
+    let all = std::fs::read_to_string(done).unwrap();
+    (all.lines().next().unwrap_or("").to_string(), all)
 }
 
 /// The pids in the names of `<dir>/<prefix><pid>` files.
@@ -1314,9 +1321,10 @@ fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_fre
     assert_eq!(held.len(), 1, "two processes held the lock at once");
     assert_eq!(done.len(), 1);
     assert_ne!(held[0], done[0]);
+    let (code, all) = outcome(&home.0.join(format!("done-{}", done[0])));
     assert_eq!(
-        std::fs::read_to_string(home.0.join(format!("done-{}", done[0]))).unwrap(),
-        "agent.install.in_progress"
+        code, "agent.install.in_progress",
+        "the refused install: {all:?}"
     );
     let holder = held[0];
     let lock = home.agents().join(".lock");
@@ -1351,9 +1359,10 @@ fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_fre
         [holder],
         "two processes held the lock at once"
     );
+    let (code, all) = outcome(&third_done);
     assert_eq!(
-        std::fs::read_to_string(&third_done).unwrap(),
-        "agent.install.in_progress"
+        code, "agent.install.in_progress",
+        "the third install: {all:?}"
     );
     // The holder ends without letting go.
     let c = kids.0.iter_mut().find(|c| c.id() == holder).unwrap();
