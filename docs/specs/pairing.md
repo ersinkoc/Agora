@@ -327,7 +327,7 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
 - **The number is shown once.** `join` prints one line on standard output (`Number 482-193. Approve this machine on the hub...`) as soon as the reveal is sent.
   `Number`'s `Debug` prints `Number(..)`; the nonces and the exchange have no `Debug`. A test greps the captured output and every file of the machine (and the node's
   logs) after the flow: the number is in that one line and nowhere else.
-- **Timeouts.** Connect and handshake 10 s each; the challenge 15 s; the owner's decision 5 minutes 30 seconds (the hub's session is 5 minutes from the reveal).
+- **Timeouts.** Connect and handshake 10 s each; the challenge 15 s, and the same 15 s for the answer to the WebSocket upgrade (a peer that completes the handshake and then says nothing ends the pairing in time, audit F1440); the owner's decision 5 minutes 30 seconds (the hub's session is 5 minutes from the reveal).
 - **`agora pair open` is the owner's screen at a terminal (the window's cards are section 14), and only a person at a terminal can answer it.** It opens the switch (the
   hub's 10 minutes; `--minutes N` with N from 1 to 10 makes this command close it earlier, which only works while the command runs, because `PairOpen` carries no
   duration and the schema is append-only), stays in the foreground, and for each machine card prints the name, system, address and number and asks `y/N`.
