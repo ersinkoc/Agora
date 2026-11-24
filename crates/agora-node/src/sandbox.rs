@@ -511,6 +511,21 @@ impl SandboxPolicy {
         self.first_protected_reachable(profile)
     }
 
+    /// #1150: the paths [`Self::token_reachable`] and [`Self::protected_reachable`] keep out of every grant, for the platform to check
+    /// again on what it opens (`agora_platform::Sandbox::closed`): the control token file, and where only a refusal keeps them closed
+    /// (Linux) the node's own paths and its data folder. Empty elsewhere and when agents are not confined.
+    pub fn closed_paths(&self) -> Vec<PathBuf> {
+        if !agora_platform::PROTECTED_PATHS_BY_REFUSAL || self.level == Level::Off {
+            return Vec::new();
+        }
+        self.control_token
+            .iter()
+            .chain(self.protect.iter())
+            .chain(self.data_dir.iter())
+            .cloned()
+            .collect()
+    }
+
     /// [`Self::protected_reachable`] on every system (the unit tests' entry). Only a grant at or above a protected path counts: one below
     /// it (the agent's own worktree in the node's folder, a program `agora agent install` keeps there) is the opening the node meant.
     fn first_protected_reachable(&self, profile: &agora_platform::Sandbox) -> Option<&Path> {
