@@ -1094,7 +1094,12 @@ mod tests {
                     .unwrap();
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 addr_tx.send(l.local_addr().unwrap().to_string()).unwrap();
-                let (tcp, _) = l.accept().await.unwrap();
+                // Bounded too: a client that never dials (a broken environment) fails the test instead of leaving it waiting here.
+                let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(20), l.accept()).await
+                else {
+                    return;
+                };
                 let mut tls = tokio_rustls::TlsAcceptor::from(Arc::new(cfg))
                     .accept(tcp)
                     .await
