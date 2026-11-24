@@ -880,7 +880,11 @@ impl Stream {
             // SAFETY: cancel, then wait for the cancellation so the buffer is free again.
             unsafe {
                 CancelIoEx(self.handle.0, ov);
-                if GetOverlappedResult(self.handle.0, ov, &mut n, 1) != 0 && n > 0 {
+                // A count is taken also from a call that failed (the cancellation): bytes a read took are in its buffer, and bytes a
+                // write moved must not be sent again. On Windows 11 a cancelled pipe read or write never failed with a count (18,000
+                // races, #1150): it either completed whole or moved nothing. So this only guards a system that reports one.
+                GetOverlappedResult(self.handle.0, ov, &mut n, 1);
+                if n > 0 {
                     return Ok(Some(n));
                 }
             }
