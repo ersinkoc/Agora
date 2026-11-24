@@ -315,6 +315,27 @@ describe('after Stop turn (#908, RM-44)', () => {
   });
 });
 
+describe('a prompt that did not go through (ADR-0110)', () => {
+  it('says to wait and try again when the agent did not take it in time, to start it again when it stopped, and the general words otherwise', async () => {
+    const said = async (code: string | undefined) => {
+      const send = vi.fn(async () => ({ ok: false, code }));
+      act(() => root.render(<PromptBox agent={agent({ state: 'idle' })} source={{ connect(on) { on([], true); return { close() {} }; } }} send={send} />));
+      const box = host.querySelector('textarea') as HTMLTextAreaElement;
+      act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, 'go'); box.dispatchEvent(new Event('input', { bubbles: true })); });
+      await act(async () => { (host.querySelector('form') as HTMLFormElement).requestSubmit(); });
+      expect(send).toHaveBeenCalled();
+      return host.querySelector('[role=status]')?.textContent;
+    };
+    expect(await said('adapter.no_answer')).toBe(t('prompt-no-answer'));
+    expect(t('prompt-no-answer')).toContain('Wait');
+    expect(await said('adapter.agent_exited')).toBe(t('prompt-agent-exited'));
+    expect(t('prompt-agent-exited')).toContain('Start the agent again');
+    expect(await said('agent.queue_full')).toBe(t('prompt-queue-full'));
+    expect(await said('internal')).toBe(t('prompt-failed'));
+    expect(await said(undefined)).toBe(t('prompt-failed'));
+  });
+});
+
 describe('updates in place on the screen', () => {
   it('one row for a call however often it is updated, and the tail is followed without a jump pill', () => {
     const s = mount(rich(), agent({ state: 'working' }));
@@ -622,7 +643,7 @@ describe('words', () => {
       const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
       const ids = new Set([...src.matchAll(/^([a-z0-9-]+) =/gm)].map((m) => m[1]));
       for (const k of ['tool-status-pending', 'tool-status-running', 'tool-status-done', 'tool-status-failed', 'tool-status-stopped', 'permission-pending', 'permission-approved', 'permission-denied', 'permission-cancelled',
-        'prompt-sent', 'prompt-queued', 'prompt-queue-full', 'prompt-failed', 'session-effort', 'session-mode', 'session-model', 'chat-steps-call-failed']) expect(ids.has(k), `${lang} ${k}`).toBe(true);
+        'prompt-sent', 'prompt-queued', 'prompt-queue-full', 'prompt-failed', 'prompt-no-answer', 'prompt-agent-exited', 'session-effort', 'session-mode', 'session-model', 'chat-steps-call-failed']) expect(ids.has(k), `${lang} ${k}`).toBe(true);
     }
     setLanguage('tr');
     expect(t('turn-stop')).toBe('Turu durdur');

@@ -1,0 +1,17 @@
+{
+  "requestId": "r2",
+  "err": {
+    "code": "adapter.agent_exited",
+    "params": {
+      "stage": {
+        "str": "turn"
+      },
+      "exit_code": {
+        "str": "3"
+      },
+      "stderr_tail": {
+        "str": "Error: the provider refused the request"
+      }
+    }
+  }
+}

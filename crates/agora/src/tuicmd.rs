@@ -493,7 +493,18 @@ fn answer_request(
             let node = a.agent_id.split_once('/').map_or("", |(n, _)| n);
             not_trusted(say, &device, node_binary(snapshot, node).as_deref())
         }
-        Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
+        Err(code) => not_taken(say, &code)
+            .unwrap_or_else(|| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))])),
+    }
+}
+
+/// ADR-0110: a prompt or an approval answer the agent did not take, in words with the next step: wait and try again (it did not
+/// answer in time), or start the agent again (it stopped). `None` for any other code (the caller says its general sentence).
+fn not_taken(say: &Say, code: &str) -> Option<String> {
+    match code {
+        "adapter.no_answer" => Some(say.text(key!("tui-agent-no-answer"), &[])),
+        "adapter.agent_exited" => Some(say.text(key!("tui-agent-exited"), &[])),
+        _ => None,
     }
 }
 
@@ -1036,9 +1047,9 @@ fn chat(
                             |s| s.prompt(node, local, &line),
                         ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
-                            Tried::Done(Err(code)) => {
+                            Tried::Done(Err(code)) => not_taken(say, &code).unwrap_or_else(|| {
                                 say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
-                            }
+                            }),
                             Tried::Line(l) => l,
                         };
                     }
@@ -3877,9 +3888,9 @@ fn chat_send(
             });
             match tried {
                 Tried::Done(Ok(())) | Tried::Declined => String::new(),
-                Tried::Done(Err(code)) => {
+                Tried::Done(Err(code)) => not_taken(say, &code).unwrap_or_else(|| {
                     say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
-                }
+                }),
                 Tried::Line(l) => l,
             }
         }
@@ -5384,6 +5395,62 @@ mod typing_grant_tests {
         let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(code.matches(".commands()").count(), 7);
+    }
+
+    /// ADR-0110: a prompt or an answer the agent did not take is said with its next step, in both languages; any other code keeps the
+    /// general sentence. The codes' own sentences in `errors.ftl` choose their words by `call` and `stage`.
+    #[test]
+    fn a_prompt_or_answer_the_agent_did_not_take_says_what_to_do() {
+        for (say, wait, again) in [
+            (
+                Say(agora_i18n::Catalog::english()),
+                "try again",
+                "Start the agent again",
+            ),
+            (
+                Say(agora_i18n::Catalog::turkish()),
+                "yeniden deneyin",
+                "yeniden başlatın",
+            ),
+        ] {
+            let late = not_taken(&say, "adapter.no_answer").unwrap_or_default();
+            assert!(late.contains(wait), "{late}");
+            let gone = not_taken(&say, "adapter.agent_exited").unwrap_or_default();
+            assert!(gone.contains(again), "{gone}");
+            assert_eq!(not_taken(&say, "internal"), None);
+            let no_answer = |call: &str| {
+                say.text(
+                    "adapter-no_answer",
+                    &[
+                        ("kind", Arg::Str("claude".into())),
+                        ("call", Arg::Str(call.into())),
+                        ("waited_ms", Arg::Num(10_000)),
+                    ],
+                )
+            };
+            let (prompt, approval) = (no_answer("prompt"), no_answer("approval"));
+            assert_ne!(prompt, approval);
+            assert!(
+                prompt.contains("claude") && prompt.contains("10") && prompt.contains(wait),
+                "{prompt}"
+            );
+            let exited = |stage: &str| {
+                say.text(
+                    "adapter-agent_exited",
+                    &[
+                        ("stage", Arg::Str(stage.into())),
+                        ("exit_code", Arg::Str("3".into())),
+                        ("stderr_tail", Arg::Str("boom".into())),
+                    ],
+                )
+            };
+            let (turn, start) = (exited("turn"), exited("session"));
+            assert_ne!(turn, start);
+            assert!(
+                turn.contains("boom") && start.contains("session"),
+                "{turn} / {start}"
+            );
+        }
     }
 
     /// An agent's id is written to the terminal: no control character of it gets there.

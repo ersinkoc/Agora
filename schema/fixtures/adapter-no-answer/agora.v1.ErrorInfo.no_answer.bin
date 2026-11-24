@@ -1,0 +1,7 @@
+
+adapter.no_answer
+call
+prompt
+	waited_msN
+kind
+fake-adapter

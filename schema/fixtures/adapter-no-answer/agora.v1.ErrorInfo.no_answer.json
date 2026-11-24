@@ -1,0 +1,14 @@
+{
+  "code": "adapter.no_answer",
+  "params": {
+    "kind": {
+      "str": "fake-adapter"
+    },
+    "call": {
+      "str": "prompt"
+    },
+    "waited_ms": {
+      "int": "10000"
+    }
+  }
+}

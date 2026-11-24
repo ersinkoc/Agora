@@ -91,8 +91,13 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 - **Start failures.** When `initialize` or `session/start` fails with an error whose `data.code` is `adapter.agent_exited`,
   `adapter.agent_refused` or `adapter.option_refused`, the node answers the client with that code and only that code's parameters
   (`docs/specs/error-codes.md`), as strings cut at 600 bytes (`exit_code` is `?` when the adapter sent none). Any other failure is
-  still `internal`. A prompt or the answer to an approval request that the adapter does not take (no answer in time, it exited, or it
-  answered with an error) is `internal` too, with `incident_id` `agent.prompt` or `approval.resolve` (#1150).
+  still `internal`. ADR-0110 widens this rule to a prompt (`session/prompt`) and the answer to an approval request
+  (`approval/resolve`): an error whose `data.code` is `adapter.agent_exited` is passed on in the same way, with the stage the adapter
+  sent (for example `turn`); no answer within the node's 10 s wait is `adapter.no_answer` (`kind`, `call` `prompt` or `approval`,
+  `waited_ms`); any other failure of these two calls (the adapter exited without a reason, or answered with an error that carries
+  none or another code) is `internal`, with `incident_id` `agent.prompt` or `approval.resolve` (#1150). The bridge answers a node's
+  `session/prompt` as soon as it has passed it to the agent, so an ACP agent that exits during its turn is reported by the notice and
+  the `log` line, not as the prompt's error.
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
 

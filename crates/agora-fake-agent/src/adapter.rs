@@ -7,6 +7,12 @@
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck); writes `hang.txt` in its folder once it has read the
 //!   prompt, so a test knows the prompt reached it.
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
+//! - `ask-hang`: like `ask`, but never answers the decision (an adapter that is stuck while the node waits for it to take an answer,
+//!   ADR-0110).
+//! - `ask-exited`: like `ask`, but answers the decision with an error whose `data` is `adapter.agent_exited` (stage `turn`, exit code
+//!   `3`, a 2000-byte stderr tail and a parameter the code does not have), as an adapter whose agent ended does (ADR-0110).
+//! - `prompt-error`: answers the prompt with a JSON-RPC error that carries no stable reason (ADR-0110).
+//! - `prompt-exited`: answers the prompt with the error `data` of `ask-exited` (ADR-0110).
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
 //! - `ask:ACTION|DETAIL`: like `ask`, with that action and detail (#1147: words of the agent's own on an approval card).
 //! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
@@ -86,6 +92,13 @@ fn config_options(mode_config: bool, auto: &str) -> Value {
             "choices": all_modes(), "skipsPermissions": false}));
     }
     Value::Array(options)
+}
+
+/// ADR-0110: the error `data` of an adapter whose agent ended during a turn, with a stderr tail longer than the node passes on and a
+/// parameter `adapter.agent_exited` does not have.
+fn exited_reason() -> Value {
+    json!({"code": "adapter.agent_exited",
+           "params": {"stage": "turn", "exit_code": "3", "stderr_tail": "x".repeat(2000), "extra": "no"}})
 }
 
 /// Runs until `shutdown` or end of input.
@@ -205,6 +218,16 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     let _ = std::fs::write("hang.txt", "read");
                     std::thread::sleep(std::time::Duration::from_secs(30));
                 }
+                // ADR-0110: the prompt is not taken, with or without one of the stable reasons the node passes on.
+                if let (Some(id), "prompt-error" | "prompt-exited") = (&id, text) {
+                    let error = if text == "prompt-exited" {
+                        json!({"code": -32000, "message": "the agent exited", "data": exited_reason()})
+                    } else {
+                        json!({"code": -32000, "message": "no"})
+                    };
+                    send(out, &json!({"jsonrpc": "2.0", "id": id, "error": error}))?;
+                    continue;
+                }
                 reply(out, json!({}))?;
                 match text {
                     "cwd" => note(
@@ -309,8 +332,15 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         std::fs::write("later.txt", "done")?;
                     }
                     asked
-                        if matches!(asked, "ask" | "ask-error" | "ask-reserved" | "later-ask")
-                            || asked.starts_with("ask:") =>
+                        if matches!(
+                            asked,
+                            "ask"
+                                | "ask-error"
+                                | "ask-hang"
+                                | "ask-exited"
+                                | "ask-reserved"
+                                | "later-ask"
+                        ) || asked.starts_with("ask:") =>
                     {
                         if text == "later-ask" {
                             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -344,6 +374,18 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                             out,
                                             &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": "no"}}),
                                         )?;
+                                        break;
+                                    }
+                                    if text == "ask-exited" {
+                                        send(
+                                            out,
+                                            &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000,
+                                                    "message": "the agent exited", "data": exited_reason()}}),
+                                        )?;
+                                        break;
+                                    }
+                                    if text == "ask-hang" {
+                                        // The decision is never answered; everything after it still is.
                                         break;
                                     }
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;

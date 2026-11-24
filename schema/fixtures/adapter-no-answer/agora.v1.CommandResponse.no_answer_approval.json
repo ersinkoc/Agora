@@ -1,0 +1,17 @@
+{
+  "requestId": "r1",
+  "err": {
+    "code": "adapter.no_answer",
+    "params": {
+      "kind": {
+        "str": "fake-adapter"
+      },
+      "call": {
+        "str": "approval"
+      },
+      "waited_ms": {
+        "int": "10000"
+      }
+    }
+  }
+}

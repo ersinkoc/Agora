@@ -256,11 +256,17 @@ pub const MAX_QUEUED_PROMPT_BYTES: usize = 64 * 1024;
 /// ignores `session/cancel` must not hold the agent, and what waits behind its turn, for good).
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// How long [`AdapterCall::run`] waits for an adapter's answer. A prompt or an approval answer that runs it out is answered
+/// `adapter.no_answer` with this wait (ADR-0110).
+const ADAPTER_CALL_WAIT: Duration = Duration::from_secs(10);
+
 /// A request to an adapter that is made AFTER the supervisor's lock is let go: [`AdapterCall::run`] waits for the adapter's answer
 /// (up to ten seconds), so an adapter that does not answer stalls only its own caller, never the node's tick or another agent's
 /// command. Taken under the lock (which checks everything that can be checked without the adapter), run without it.
 pub struct AdapterCall {
     caller: Caller,
+    /// ADR-0110: the agent's kind, named in `adapter.no_answer`.
+    kind: String,
     session: String,
     op: CallOp,
     generation: u64,
@@ -314,8 +320,11 @@ impl AdapterCall {
     /// Makes the request and waits for the answer. A request whose answer the node will not read because it let the adapter go while
     /// waiting (it is stopping, ADR-0104 O2: [`HostError::Detached`]) was given to the adapter and counts as made: the caller records
     /// it as sent, as it would after an answer, and never as failed.
+    ///
+    /// ADR-0110: a prompt or an approval answer the adapter did not answer within the wait is [`SupervisorError::NoAnswer`]; one it
+    /// refused with `adapter.agent_exited` passes that reason on; any other failure of them is internal with the call's reference.
     pub fn run(self) -> Result<(), SupervisorError> {
-        const WAIT: Duration = Duration::from_secs(10);
+        const WAIT: Duration = ADAPTER_CALL_WAIT;
         let given = |r: Result<(), HostError>| match r {
             Err(HostError::Detached) => Ok(()),
             other => other,
@@ -324,7 +333,7 @@ impl AdapterCall {
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
                 given(self.caller.prompt(session, text, *from_mesh, WAIT))
-                    .map_err(|e| SupervisorError::Prompt(e.to_string()))
+                    .map_err(client_call_error(&self.kind, "prompt", WAIT))
             }
             CallOp::Cancel => {
                 given(self.caller.cancel(session, WAIT)).map_err(call_error("cancel"))
@@ -345,7 +354,7 @@ impl AdapterCall {
                 self.caller
                     .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
             )
-            .map_err(|e| SupervisorError::Approval(e.to_string())),
+            .map_err(client_call_error(&self.kind, "approval", WAIT)),
         }
     }
 }
@@ -383,13 +392,20 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
-    /// #1150: an adapter was not given a prompt (it did not answer in time, it exited, or it answered with an error); the text is for
-    /// logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the reference
-    /// `agent.prompt` (no stable code says this yet).
+    /// #1150: an adapter was not given a prompt (it exited, or it answered with an error without a reason the node passes on); the
+    /// text is for logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the
+    /// reference `agent.prompt`. ADR-0110: no answer in time is [`Self::NoAnswer`], `adapter.agent_exited` is [`Self::Adapter`].
     Prompt(String),
-    /// #1150: an adapter was not given the answer to one of its approval requests (it did not answer in time, it exited, or it
-    /// answered with an error); the text is for logs only. The caller gets `internal` with the reference `approval.resolve`.
+    /// #1150: an adapter was not given the answer to one of its approval requests (as for [`Self::Prompt`]); the text is for logs
+    /// only. The caller gets `internal` with the reference `approval.resolve`.
     Approval(String),
+    /// ADR-0110: the adapter of an agent of `kind` did not answer a call made for a client (`call`: `prompt` or `approval`) within
+    /// `waited_ms`. The caller gets `adapter.no_answer`.
+    NoAnswer {
+        kind: String,
+        call: &'static str,
+        waited_ms: u64,
+    },
     /// #1150: a cancel or a switch (`call`: `cancel`, `set_config`, `set_option`) failed without one of the adapter's stable reasons;
     /// the text is for logs only. The node's log names the call; the caller gets `internal`, as before.
     AdapterCall(&'static str, String),
@@ -483,6 +499,21 @@ impl SupervisorError {
             Self::Approval(text) => {
                 eprintln!("agent approval answer failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "approval.resolve")
+            }
+            Self::NoAnswer {
+                kind,
+                call,
+                waited_ms,
+            } => {
+                // The node's log names the call, as for the failures above.
+                eprintln!(
+                    "agent {} failed: the adapter did not answer in {waited_ms} ms",
+                    call_name(call)
+                );
+                Error::new(ErrorCode::AdapterNoAnswer)
+                    .with("kind", kind.as_str())
+                    .with("call", *call)
+                    .with("waited_ms", i64::try_from(*waited_ms).unwrap_or(i64::MAX))
             }
             Self::AdapterCall(call, text) => {
                 eprintln!("agent {call} failed: {text:?}");
@@ -2657,6 +2688,7 @@ impl Supervisor {
                 .as_ref()
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?
                 .caller(),
+            kind: e.agent.kind.clone(),
             session: e.session_id.clone(),
             op,
             generation: e.rich.generation,
@@ -4575,6 +4607,7 @@ fn begin_send(
     };
     let call = AdapterCall {
         caller,
+        kind: e.agent.kind.clone(),
         session: e.session_id.clone(),
         op: CallOp::Prompt {
             text: next.text.clone(),
@@ -4614,6 +4647,10 @@ pub(crate) fn log_call_failure(what: &str, agent: &AgentId, e: &SupervisorError)
         | SupervisorError::AdapterCall(_, cause) => {
             eprintln!("agent {what} failed: {}: {cause:?}", agent.as_str())
         }
+        SupervisorError::NoAnswer { waited_ms, .. } => eprintln!(
+            "agent {what} failed: {}: the adapter did not answer in {waited_ms} ms",
+            agent.as_str()
+        ),
         other => eprintln!("agent {what} failed: {}: {other:?}", agent.as_str()),
     }
 }
@@ -4719,14 +4756,60 @@ fn call_error(call: &'static str) -> impl Fn(HostError) -> SupervisorError {
     move |e| adapter_reason(e).unwrap_or_else(|e| SupervisorError::AdapterCall(call, e.to_string()))
 }
 
+/// ADR-0110: the error of a call made for a client (`call`: `prompt` or `approval`) that the adapter did not take. No answer within
+/// `wait` is [`SupervisorError::NoAnswer`]; `adapter.agent_exited` is passed on with its parameters, as for a start; anything else
+/// is internal with the call's reference (#1150).
+fn client_call_error<'a>(
+    kind: &'a str,
+    call: &'static str,
+    wait: Duration,
+) -> impl Fn(HostError) -> SupervisorError + 'a {
+    move |e| match e {
+        HostError::Timeout => SupervisorError::NoAnswer {
+            kind: kind.to_string(),
+            call,
+            waited_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+        },
+        e => {
+            reason_among(e, &[agora_protocol::ErrorCode::AdapterAgentExited]).unwrap_or_else(|e| {
+                if call == "prompt" {
+                    SupervisorError::Prompt(e.to_string())
+                } else {
+                    SupervisorError::Approval(e.to_string())
+                }
+            })
+        }
+    }
+}
+
+/// The node's log name of a client call ([`SupervisorError::NoAnswer`]), as its other lines about these calls say it.
+fn call_name(call: &str) -> &'static str {
+    if call == "prompt" {
+        "prompt"
+    } else {
+        "approval answer"
+    }
+}
+
 /// One of the stable reasons the node passes on, or the error itself when it has none.
 fn adapter_reason(e: HostError) -> Result<SupervisorError, HostError> {
-    if let Some((code, params)) = e.reason() {
-        let known = [
+    reason_among(
+        e,
+        &[
             agora_protocol::ErrorCode::AdapterAgentExited,
             agora_protocol::ErrorCode::AdapterAgentRefused,
             agora_protocol::ErrorCode::AdapterOptionRefused,
-        ];
+        ],
+    )
+}
+
+/// The adapter's reason when it is one of `known` (with only that code's parameters, as strings cut at [`REASON_PARAM_MAX`]), or
+/// the error itself.
+fn reason_among(
+    e: HostError,
+    known: &[agora_protocol::ErrorCode],
+) -> Result<SupervisorError, HostError> {
+    if let Some((code, params)) = e.reason() {
         if let Some(c) = known.iter().find(|c| c.as_str() == code) {
             let code = match c {
                 agora_protocol::ErrorCode::AdapterAgentExited => "adapter.agent_exited",
@@ -6494,6 +6577,66 @@ mod adapter_option_tests {
             adapter_error(HostError::Timeout).to_protocol().code,
             ErrorCode::Internal
         );
+    }
+
+    /// ADR-0110: a prompt or an approval answer the adapter did not answer in time is `adapter.no_answer`; `adapter.agent_exited` is
+    /// passed on (any stage, bounded as for a start); every other failure, a known reason of a start or a switch included, stays
+    /// internal with the call's reference.
+    #[test]
+    fn a_client_call_the_adapter_did_not_take_is_no_answer_an_exit_or_internal() {
+        let wait = Duration::from_millis(1500);
+        let e = client_call_error("k", "approval", wait)(HostError::Timeout).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterNoAnswer);
+        let want: std::collections::BTreeMap<String, agora_protocol::ParamValue> = [
+            ("call", agora_protocol::ParamValue::Str("approval".into())),
+            ("kind", agora_protocol::ParamValue::Str("k".into())),
+            ("waited_ms", agora_protocol::ParamValue::Int(1500)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(e.params, want);
+        let exited = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "adapter.agent_exited",
+                "params": {"stage": "turn", "stderr_tail": "é".repeat(400), "extra": "no"}})),
+        };
+        let e = client_call_error("k", "prompt", wait)(exited).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterAgentExited);
+        let s = |k: &str| match e.params.get(k) {
+            Some(agora_protocol::ParamValue::Str(s)) => s.clone(),
+            other => panic!("{k}: {other:?}"),
+        };
+        assert_eq!(
+            (s("stage").as_str(), s("exit_code").as_str()),
+            ("turn", "?")
+        );
+        // Cut at a character boundary at most 600 bytes in.
+        assert_eq!(s("stderr_tail").len(), REASON_PARAM_MAX);
+        assert_eq!(e.params.len(), 3);
+        for (call, incident) in [("prompt", "agent.prompt"), ("approval", "approval.resolve")] {
+            let refused = HostError::Rpc {
+                code: -32000,
+                data: Some(
+                    serde_json::json!({"code": "adapter.agent_refused", "params": {"stage": "session"}}),
+                ),
+            };
+            for failure in [
+                HostError::Exited,
+                HostError::Rpc {
+                    code: -32000,
+                    data: None,
+                },
+                refused,
+            ] {
+                let e = client_call_error("k", call, wait)(failure).to_protocol();
+                assert_eq!(e.code, ErrorCode::Internal);
+                assert_eq!(
+                    e.params.get("incident_id"),
+                    Some(&agora_protocol::ParamValue::Str(incident.into()))
+                );
+            }
+        }
     }
 
     /// #1150: a cancel or a switch that fails without a stable reason is a failed call of that name, never a failed start (whose

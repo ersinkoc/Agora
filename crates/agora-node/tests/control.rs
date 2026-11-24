@@ -2168,6 +2168,48 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
     outcome_is(&second, v1::PermissionOutcome::Denied);
 }
 
+/// ADR-0110: a prompt the adapter refused because its agent exited reaches the client as `adapter.agent_exited` with the adapter's
+/// stage (`turn`), not as `internal`, and the prompt is taken back from the conversation as for any prompt that did not go out.
+#[test]
+fn a_prompt_refused_because_the_agent_exited_reaches_the_client_with_its_reason() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("prompt-exited");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let info = c
+        .call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: "prompt-exited".into(),
+        }))
+        .expect("io")
+        .expect_err("the adapter refused the prompt");
+    assert_eq!(info.code, "adapter.agent_exited");
+    let str_param = |k: &str| match &info.params[k].value {
+        Some(v1::param_value::Value::Str(s)) => s.clone(),
+        other => panic!("{k}: {other:?}"),
+    };
+    assert_eq!(str_param("stage"), "turn");
+    assert_eq!(str_param("exit_code"), "3");
+    assert_eq!(str_param("stderr_tail").len(), 600);
+    assert_eq!(info.params.len(), 3, "{:?}", info.params);
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    assert!(
+        !n.chat
+            .snapshot(&agent)
+            .iter()
+            .any(|e| e.role == v1::ChatRole::User as i32),
+        "the prompt that did not go out is taken back"
+    );
+}
+
 /// ADR-0090: a verified decision that cannot be delivered (the adapter answers with an error) does not leave the entry in the
 /// conversation pending for good: it is shown as cancelled, and the user gets the error.
 #[test]
