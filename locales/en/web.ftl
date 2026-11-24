@@ -264,6 +264,7 @@ start-not-installed-why = This machine cannot find this agent's program in its P
 start-not-installed-program = This machine cannot find { $program } in its PATH. Install it there, or start Agora on that machine from a terminal where { $program } runs.
 start-group-installed = Installed
 start-group-missing = Not installed
+start-group-untested = Untested
 start-runs-terminal = Terminal
 start-runs-chat = Chat
 # The name a new agent will have on Home and in the tabs: its kind, then a colour picked when it starts ($name is "codex · …").
@@ -1592,6 +1593,18 @@ agents-setting-any = any value the agent accepts
 agents-setting-default = default { $value }
 agents-options = Options
 agents-option-skips = skips permission questions
+agents-group-here = On this machine
+agents-group-add = Add an agent
+agents-group-add-desc = Not installed on this machine. Install the program there and it can start; nothing here runs or downloads anything.
+agents-untested = Untested
+agents-untested-desc = From the ACP registry. Nobody has tried it in Agora yet: it may not start, or may lack features.
+agents-runs-fetch = Starting it runs { $program }, which downloads this exact version the first time.
+agents-version = Version
+agents-license = License
+agents-repository = Repository
+agents-website = Website
+agents-source = Listed by
+agents-source-registry = ACP registry
 
 # The widget kit in the component gallery (visual-language.md §3). Sample text for the gallery only.
 kit-title = Widget kit

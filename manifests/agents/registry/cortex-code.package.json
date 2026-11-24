@@ -1,0 +1,66 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Cortex Code",
+  "installers": [
+    {
+      "args": [
+        "acp",
+        "serve"
+      ],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-darwin-arm64/cortex",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-darwin-arm64.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-darwin-amd64/cortex",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-darwin-amd64.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-linux-arm64/cortex",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-linux-arm64.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-linux-amd64/cortex",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-linux-amd64.tar.gz"
+        },
+        "windows-aarch64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-windows-arm64/cortex.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-windows-arm64.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./coco-1.0.73+180523.e6179a031de9-windows-amd64/cortex.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-windows-amd64.tar.gz"
+        }
+      },
+      "provides": [
+        "cortex"
+      ]
+    }
+  ],
+  "name": "registry-cortex-code",
+  "skipped": [],
+  "source": {
+    "id": "cortex-code",
+    "license": "proprietary",
+    "license_url": "https://www.snowflake.com/en/legal/terms-of-service/",
+    "repository": "https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code",
+    "version": "1.0.73"
+  },
+  "tested": false
+}

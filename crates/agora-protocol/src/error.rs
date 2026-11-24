@@ -539,9 +539,16 @@ mod tests {
     const SPEC: &str = include_str!("../../../docs/specs/error-codes.md");
     const EN: &str = include_str!("../../../locales/en/errors.ftl");
 
-    fn message(key: &str) -> Option<&'static str> {
-        EN.lines()
-            .find_map(|l| l.strip_prefix(&format!("{key} = ")))
+    /// The whole message of `key`: its first line and the indented lines that continue it (a Fluent select spans several).
+    fn message(key: &str) -> Option<String> {
+        let mut lines = EN.lines();
+        let first = lines.find_map(|l| l.strip_prefix(&format!("{key} = ")))?;
+        let mut msg = first.to_string();
+        for l in lines.take_while(|l| l.starts_with(' ')) {
+            msg.push('\n');
+            msg.push_str(l);
+        }
+        Some(msg)
     }
 
     #[test]

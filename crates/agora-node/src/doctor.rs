@@ -222,7 +222,11 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     });
 
     out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
-    out.extend(manifests(&inputs.manifests_dir, &inputs.agora_home));
+    out.extend(manifests(
+        &inputs.manifests_dir,
+        &inputs.agora_home,
+        &policy.registry,
+    ));
     out.extend(credential_checks(
         &inputs.manifests_dir,
         &crate::credentials::SecretStore::in_data(&inputs.data_dir),
@@ -605,11 +609,27 @@ fn writable(dir: &Path) -> bool {
 /// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
 /// or `folder`), the program looked for (`$program`) and whether it is found (`agent-installed`), not found (`agent-missing`) or found
 /// without the right to run it (`agent-broken`). The agent's own version is not shown: no manifest has a version command yet. A folder file that cannot be read is named; its
-/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
-fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
+/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load. The ACP registry's kinds (ADR-0092) are one
+/// line, `registry-kinds` (`$detail`: how many, `$ready`: how many find their program), not one per kind: there are dozens, most are
+/// not installed, and a missing one is not a problem. A registry kind whose program is broken or unsafe still gets its own line.
+/// #1133: the owner's `agents.registry` policy is said too: `registry-off` (all switched off) or `registry-denied` (`$detail`: how many
+/// the deny list switches off); a kind switched off is not counted or checked.
+fn manifests(
+    dir: &Path,
+    home: &Path,
+    registry_policy: &crate::manifests::RegistryPolicy,
+) -> Vec<Check> {
     let (loaded, problems) = crate::manifests::load(dir);
     let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
+    let (mut registry, mut registry_ready, mut denied) = (0usize, 0usize, 0usize);
     for l in loaded {
+        // By origin: a hand-made kind is never switched off by the registry policy, whatever its name.
+        if l.source == crate::manifests::Source::Registry
+            && registry_policy.refusal(&l.manifest.kind).is_some()
+        {
+            denied += 1;
+            continue;
+        }
         let program = crate::manifests::program(&l.manifest)
             .unwrap_or_default()
             .to_string();
@@ -622,6 +642,12 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
         // find out, so a program that starts and then fails its own checks is not caught here.
         let broken = found.as_ref().is_some_and(|f| !runnable(f.path()));
         let installed = found.is_some() && !broken;
+        // A registry kind is counted, not listed, unless its program is there and cannot run, or is Agora's and not safe.
+        let from_registry = l.source == crate::manifests::Source::Registry;
+        if from_registry {
+            registry += 1;
+            registry_ready += usize::from(installed);
+        }
         let mut c = check(
             if installed {
                 "agent-installed"
@@ -646,12 +672,24 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
             c.args.push(("by", by.to_string()));
             c.args.push(("version", version));
         }
-        out.push(c);
+        if !from_registry || broken {
+            out.push(c);
+        }
         if !program.is_empty() && install_unsafe(home, &program) {
             let mut u = check("agent-unsafe", Status::Warn, l.manifest.kind);
             u.args = vec![("program", program)];
             out.push(u);
         }
+    }
+    if registry > 0 {
+        let mut c = check("registry-kinds", Status::Ok, registry.to_string());
+        c.args = vec![("ready", registry_ready.to_string())];
+        out.push(c);
+    }
+    if registry_policy.off {
+        out.push(check("registry-off", Status::Ok, ""));
+    } else if denied > 0 {
+        out.push(check("registry-denied", Status::Ok, denied.to_string()));
     }
     for (p, _) in problems {
         let name = p
@@ -818,8 +856,41 @@ mod tests {
         assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
         assert_eq!(
             find(&checks, "manifests")[0].detail,
-            (crate::manifests::BUILT_IN.len() + 1).to_string()
+            crate::manifests::load(Path::new("")).0.len().to_string()
         );
+        // #1133: the owner's policy switches them off, all or some; doctor says so and counts what is left.
+        let off = crate::manifests::RegistryPolicy {
+            off: true,
+            ..Default::default()
+        };
+        let checks_off = manifests(&d.join("manifests"), &none_home(), &off);
+        assert_eq!(find(&checks_off, "registry-off").len(), 1);
+        assert!(find(&checks_off, "registry-kinds").is_empty());
+        let deny = crate::manifests::RegistryPolicy {
+            off: false,
+            deny: ["registry-gemini".to_string(), "registry-goose".to_string()].into(),
+        };
+        let checks_deny = manifests(&d.join("manifests"), &none_home(), &deny);
+        assert_eq!(find(&checks_deny, "registry-denied")[0].detail, "2");
+        assert_eq!(
+            find(&checks_deny, "registry-kinds")[0]
+                .detail
+                .parse::<usize>()
+                .unwrap()
+                + 2,
+            find(&checks, "registry-kinds")[0]
+                .detail
+                .parse::<usize>()
+                .unwrap()
+        );
+        // The registry's kinds are one line, not a warning per kind that is not installed.
+        let registry = find(&checks, "registry-kinds");
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry[0].status, Status::Ok);
+        assert!(registry[0].detail.parse::<usize>().unwrap() >= 40);
+        assert!(!checks
+            .iter()
+            .any(|c| c.detail.starts_with(crate::manifests::REGISTRY_PREFIX)));
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
@@ -1003,7 +1074,7 @@ mod tests {
             "kind = \"mine\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"mine\"]\n",
         )
         .unwrap();
-        let checks = manifests(&dir, &none_home());
+        let checks = manifests(&dir, &none_home(), &Default::default());
         let older = find(&checks, "manifest-older");
         assert_eq!(older.len(), 1, "{checks:?}");
         assert_eq!(older[0].detail, "claude-code");
@@ -1017,7 +1088,11 @@ mod tests {
             .any(|(k, v)| *k == "from" && v == "2026.01.01.1"));
         // A newer folder copy is not warned about.
         std::fs::write(dir.join("claude-code.toml"), with("2099.01.01.1")).unwrap();
-        assert!(find(&manifests(&dir, &none_home()), "manifest-older").is_empty());
+        assert!(find(
+            &manifests(&dir, &none_home(), &Default::default()),
+            "manifest-older"
+        )
+        .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1049,11 +1124,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(m.join("c.toml"), "not = [valid").unwrap();
-        let checks = manifests(&m, &none_home());
+        let checks = manifests(&m, &none_home(), &Default::default());
         assert_eq!(checks[0].id, "manifests");
         assert_eq!(
             checks[0].detail,
-            (crate::manifests::BUILT_IN.len() + 3).to_string()
+            (crate::manifests::load(Path::new("")).0.len() + 2).to_string()
         );
         let of = |kind: &str| checks.iter().find(|c| c.detail == kind).unwrap();
         assert_eq!(of("demo").id, "agent-installed");
@@ -1088,11 +1163,20 @@ mod tests {
         let text = MANIFEST.replace("LAUNCH", &prog.display().to_string());
         std::fs::write(m.join("a.toml"), &text).unwrap();
         let of = |checks: &[Check]| checks.iter().find(|c| c.detail == "demo").unwrap().id;
-        assert_eq!(of(&manifests(&m, &none_home())), "agent-broken");
+        assert_eq!(
+            of(&manifests(&m, &none_home(), &Default::default())),
+            "agent-broken"
+        );
         agora_platform::set_executable(&prog, true).unwrap();
-        assert_eq!(of(&manifests(&m, &none_home())), "agent-installed");
+        assert_eq!(
+            of(&manifests(&m, &none_home(), &Default::default())),
+            "agent-installed"
+        );
         std::fs::remove_file(&prog).unwrap();
-        assert_eq!(of(&manifests(&m, &none_home())), "agent-missing");
+        assert_eq!(
+            of(&manifests(&m, &none_home(), &Default::default())),
+            "agent-missing"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1109,9 +1193,12 @@ mod tests {
         .unwrap();
         let of = |checks: Vec<Check>| checks.into_iter().find(|c| c.detail == "demo").unwrap();
         // Nothing installed and nothing on PATH.
-        assert_eq!(of(manifests(&m, &home)).id, "agent-missing");
+        assert_eq!(
+            of(manifests(&m, &home, &Default::default())).id,
+            "agent-missing"
+        );
         installed_layout(&home, "1.2.3", "installed-by-agora-xyz");
-        let c = of(manifests(&m, &home));
+        let c = of(manifests(&m, &home, &Default::default()));
         assert_eq!(c.id, "agent-installed");
         assert!(c.args.contains(&("by", "agora".to_string())));
         assert!(c.args.contains(&("version", "1.2.3".to_string())));
@@ -1132,7 +1219,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let dir = home.join("agents");
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-            let checks = manifests(&m, &home);
+            let checks = manifests(&m, &home, &Default::default());
             assert_eq!(of(checks.clone()).id, "agent-missing");
             assert_eq!(find(&checks, "agent-unsafe").len(), 1);
             assert_eq!(
@@ -1151,7 +1238,7 @@ mod tests {
             MANIFEST.replace("LAUNCH", &own.display().to_string().replace('\\', "/")),
         )
         .unwrap();
-        let c = of(manifests(&m, &home));
+        let c = of(manifests(&m, &home, &Default::default()));
         assert_eq!(c.id, "agent-installed");
         assert!(c.args.contains(&("by", "you".to_string())));
         let _ = std::fs::remove_dir_all(&d);

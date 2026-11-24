@@ -672,7 +672,9 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     assert_eq!(code, expected, "{out}{err}");
     assert!(out.contains("Git is available"), "{out}");
     // The built-in kinds and the folder's `shell`.
-    let loaded = agora_node::manifests::BUILT_IN.len() + 1;
+    let loaded = agora_node::manifests::load(std::path::Path::new(""))
+        .0
+        .len();
     assert!(
         out.contains(&format!("{loaded} agent descriptions loaded.")),
         "{out}"

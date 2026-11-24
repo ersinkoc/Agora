@@ -1,0 +1,30 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Auggie CLI",
+  "installers": [
+    {
+      "args": [
+        "--acp"
+      ],
+      "env_names_not_copied": [
+        "AUGMENT_DISABLE_AUTO_UPDATE"
+      ],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@augmentcode/auggie",
+      "version": "0.37.0"
+    }
+  ],
+  "name": "registry-auggie",
+  "skipped": [],
+  "source": {
+    "id": "auggie",
+    "license": "proprietary",
+    "license_url": "https://github.com/augmentcode/auggie/blob/main/LICENSE.md",
+    "repository": "https://github.com/augmentcode/auggie",
+    "version": "0.37.0",
+    "website": "https://www.augmentcode.com/"
+  },
+  "tested": false
+}
