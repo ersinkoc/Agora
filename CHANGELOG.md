@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- `agora join` (and Join in the front door) no longer waits forever when the address answers the secure connection but then stays silent: it gives up after the usual wait for the hub's answer and says the hub did not answer in time (#1150).
 - A prompt, or your answer to a request, that a structured agent's adapter does not take in time (or at all) is now reported with the reference `agent.prompt` or `approval.resolve`, and the machine's log says which failed; before, both said `unassigned` and the log called them a failed start. A queued prompt, or a helper's first prompt, that fails is now logged too (#1150).
 - An agent type whose rule looks for a phrase with a space at its start or end (to match whole words only) no longer matches that phrase inside a longer word when the agent's screen wraps it over two lines; before, the wrapped text could show the agent as done or waiting when it was not (#708).
 - On Linux, a confined agent is no longer started when a folder or file it is given leads, by the time it is opened for confinement, to Agora's own folder (its data, its secrets or its control token) or to a folder above it, also when it was changed into a link after the start's check: the start is refused, as it already was when the grant led there at the check (#1150).
