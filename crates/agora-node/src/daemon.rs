@@ -545,6 +545,7 @@ impl EventSink {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
         record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.into(),
             project_id: view.project.clone(),
             node_id: self.producer.clone(),
@@ -724,6 +725,7 @@ impl EventSink {
         launch: &crate::launch_options::LaunchChoice,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
+            run_id: Vec::new(),
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
             node_id: node.to_string(),

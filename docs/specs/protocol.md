@@ -1364,3 +1364,28 @@ node sets. The window's button and the terminal client's key come with the next 
   agent's remembered option when the agent offers no single one; under `allow` that residual is kept (named in ADR-0101), under `forbid`
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
+
+## Durable cross-node task handoffs (ADR-0109)
+
+The first slice reserves `mesh.task_handoff.v1` on the hub–node link and adds generation 1 wire types. The hub and node will
+advertise the capability once their queue and durable inbox paths are implemented. The hub must have negotiated the capability
+with the receiver before sending the new command. An older peer connects normally and uses the current best-effort handoff path.
+
+- **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
+  A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
+  value, including when the local agent id is reused. Older peers ignore this field.
+- **Delivery.** `DeliverTaskHandoff` (`CommandRequest` arm 110) is a hub-to-node command on the command stream. It names the
+  `delivery_id` (1), `receiver_run_id` (2), node-local `agent_id` (3), `project_id` (4), `task_id` (5), `summary` (6), `refs` (7),
+  `valid_until_ms` (8), `sender_node` (9) and `sender_agent_id` (10). Both opaque identities are 16 bytes. Retries keep the delivery
+  id, run id, payload and deadline. The node checks the addressed run and project before accepting a new entry. Summary and refs
+  remain untrusted data. A window cannot issue this command.
+- **Receipt.** `TaskHandoffReceipt` (`CommandOk` arm 32) echoes the `delivery_id` (1) and `receiver_run_id` (2). It acknowledges
+  one durable inbox entry. A retry with the same delivery id gets the stored receipt, even if the inbox entry has been read.
+- **Bounds for the queue and inbox slices.** A 16 KiB UTF-8 summary and at most 20 refs totalling 16 KiB use the existing mesh
+  limits. The encoded command fits the negotiated frame limit (1 MiB by default). Per hub, keep at most 1,024 pending or unresolved
+  deliveries and 32 MiB of encoded delivery data. Per node, keep at most 1,024 durable handoff records and 32 MiB of encoded inbox
+  entries and receipts. Read entries can release their payload bytes while retaining their receipt. The hub sets `valid_until_ms`
+  to 24 hours after creating the delivery, in Unix milliseconds, and stops retries at that deadline. The node retains receipts
+  through the deadline and accepts a new entry only before it. Without a receipt, expiry leaves the outcome unresolved.
+- **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
+  fixture keeps its original bytes.

@@ -41,7 +41,8 @@ may also be reused by another run. Recovering work for an old run must not deliv
    without a task, ordinary messages and channel fanout keep their current contracts.
 6. Keep bounds for pending deliveries, bytes and receipts. When the hub cannot reserve space for a tracked delivery, it refuses
    before changing the board. At the node, a full inbox that cannot accept the entry returns a definitive refusal without a receipt.
-   Pick byte, count and retry window limits before shipping the schema slice. A hub outage does not stop an agent or its local tools.
+   A hub outage does not stop an agent or its local tools. The schema slice specifies the retry window and the bounds for the hub
+   queue and node inbox records in [the protocol spec](../specs/protocol.md#durable-cross-node-task-handoffs-adr-0109).
 
 ## Alternatives considered
 
@@ -70,4 +71,4 @@ original deterministic #1125 proof checks the pre-send boundary without timing a
 
 - Confirm legacy fallback during rollout versus requiring the capability for cross-node handoffs of a named task.
 - Confirm what a still-connected giver sees when the outcome remains unresolved beyond its tool timeout.
-- Set the retention and retry limits and decide where a person reads and reconciles an unresolved handoff.
+- Decide where a person reads and reconciles an unresolved handoff.

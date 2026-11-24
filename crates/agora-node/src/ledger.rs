@@ -2044,6 +2044,7 @@ mod carry_on_tests {
     fn agent(l: &Ledger, id: &str, now: u64) {
         l.observe(
             &Body::AgentStarted(v1::AgentStarted {
+                run_id: Vec::new(),
                 agent_id: id.into(),
                 project_id: "p".into(),
                 node_id: "n".into(),

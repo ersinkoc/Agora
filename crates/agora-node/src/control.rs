@@ -1903,6 +1903,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
+        Cmd::DeliverTaskHandoff(_) => agora_protocol::handshake::TASK_HANDOFF_V1,
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",
