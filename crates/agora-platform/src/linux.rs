@@ -276,11 +276,13 @@ pub(crate) fn ruleset(
     })
 }
 
-/// #1150: the places no grant may be, as (device, inode): each of `closed` where it leads now, and every folder above it up to `/`,
-/// also every folder above its name (a link in its place). A path that does not exist yet counts from its nearest existing folder.
-/// The node checked the grants by name before the start; [`ruleset`] compares the descriptor each rule is made from with these, so a
-/// grant swapped for a link in between (into the node's folder) refuses the start instead of granting where the link leads. Folders
-/// are climbed with `..` from the opened folder, never looked up by name again. A place that cannot be looked at refuses the start.
+/// #1150: the places no grant may be, as (device, inode): each of `closed`, and every folder above it as it is spelled (a link on the
+/// way included), each where it leads now; then every folder above where it really is and above its name's folder (a link in its
+/// place), up to `/`. A path that does not exist yet counts from its nearest existing folder. The node checked the grants by name
+/// before the start; [`ruleset`] compares the descriptor each rule is made from with these, so a grant swapped for a link in between
+/// (into the node's folder) refuses the start instead of granting where the link leads. Folders are climbed with `..` from an opened
+/// folder; only a file's own folder is opened again, by the path its descriptor names (`/proc/self/fd`). Anything but a missing
+/// component (no access, a loop of links, a file on the way, a climb that does not end) refuses the start: it fails closed.
 fn closed_places(closed: &[PathBuf]) -> io::Result<Vec<(u64, u64)>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let unresolved = || {
@@ -289,42 +291,71 @@ fn closed_places(closed: &[PathBuf]) -> io::Result<Vec<(u64, u64)>> {
             crate::SandboxRefusal::ProtectedPathUnresolved,
         )
     };
-    let open = |p: &std::path::Path| {
-        std::fs::OpenOptions::new()
+    // `None`: the path does not exist (only that); any other failure is an error.
+    let open = |p: &std::path::Path| -> io::Result<Option<std::fs::File>> {
+        match std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
             .open(p)
+        {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(unresolved()),
+        }
+    };
+    let id = |f: &std::fs::File| -> io::Result<(u64, u64, bool)> {
+        let m = f.metadata().map_err(|_| unresolved())?;
+        Ok((m.dev(), m.ino(), m.is_dir()))
     };
     let mut out: Vec<(u64, u64)> = Vec::new();
+    let record = |out: &mut Vec<(u64, u64)>, place: (u64, u64)| {
+        if !out.contains(&place) {
+            out.push(place);
+        }
+    };
     for p in closed {
         // A relative path (a `--data` given so) is taken from the node's folder, as everything else the node opens by it.
         let p = std::path::absolute(p).map_err(|_| unresolved())?;
+        // By name: the path and every folder above it as spelled (the node's check compares names too).
+        for a in p.ancestors() {
+            if let Some(f) = open(a)? {
+                let (dev, ino, _) = id(&f)?;
+                record(&mut out, (dev, ino));
+            }
+        }
+        // Where it leads: from the path, and from its name's folder, climbed to `/`.
         for start in std::iter::once(p.as_path()).chain(p.parent()) {
-            // The path where it leads now, or its nearest existing folder.
-            let Some(mut at) = start.ancestors().find_map(|a| open(a).ok()) else {
-                return Err(unresolved());
-            };
-            let meta = at.metadata().map_err(|_| unresolved())?;
-            if !meta.is_dir() {
+            let mut found = None;
+            for a in start.ancestors() {
+                if let Some(f) = open(a)? {
+                    found = Some(f);
+                    break;
+                }
+            }
+            let mut at = found.ok_or_else(unresolved)?;
+            let (dev, ino, dir) = id(&at)?;
+            if !dir {
                 // A file (the control token): itself, then the folder it really is in.
-                out.push((meta.dev(), meta.ino()));
+                record(&mut out, (dev, ino));
                 let real = opened_path(&at).map_err(|_| unresolved())?;
                 let parent = real.parent().ok_or_else(unresolved)?;
-                at = open(parent).map_err(|_| unresolved())?;
+                at = open(parent)?.ok_or_else(unresolved)?;
             }
-            // Bounded: a path of at most PATH_MAX bytes has fewer folders than that.
+            // Bounded: a path of at most PATH_MAX bytes has fewer folders than that. A climb that does not reach `/` refuses.
+            let mut top = false;
             for _ in 0..libc::PATH_MAX {
-                let meta = at.metadata().map_err(|_| unresolved())?;
-                let id = (meta.dev(), meta.ino());
-                if !out.contains(&id) {
-                    out.push(id);
-                }
+                let (dev, ino, _) = id(&at)?;
+                record(&mut out, (dev, ino));
                 let up = open_dotdot(&at).map_err(|_| unresolved())?;
-                let up_meta = up.metadata().map_err(|_| unresolved())?;
-                if (up_meta.dev(), up_meta.ino()) == id {
+                let (up_dev, up_ino, _) = id(&up)?;
+                if (up_dev, up_ino) == (dev, ino) {
+                    top = true;
                     break;
                 }
                 at = up;
+            }
+            if !top {
+                return Err(unresolved());
             }
         }
     }
@@ -2049,13 +2080,32 @@ mod closed_grant_tests {
             refused,
             "a missing relative path counts from the current folder"
         );
-        point(&home);
         // Nothing closed: nothing is compared.
         point(&home);
         assert_eq!(refusal(&grant(&link, &[]), None), None);
         // An entry below the held folder is opened through its handle (F1022) and compared the same way.
         let held = crate::HeldFolder::open(&shared).unwrap();
         assert_eq!(refusal(&grant(&link, &closed), Some(&held)), refused);
+        // A closed path spelled through a link on the way (`spelled/via/data`, `via` a link to `elsewhere`): the folder above it by
+        // name (`spelled`) is refused too, as the node's own check compares names, and so is where it leads.
+        let spelled = base.join("spelled");
+        std::fs::create_dir_all(&spelled).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, spelled.join("via")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("data")).unwrap();
+        let through = vec![spelled.join("via/data")];
+        for to in [&spelled, &elsewhere] {
+            point(to);
+            assert_eq!(refusal(&grant(&link, &through), None), refused, "{to:?}");
+        }
+        // A closed path that cannot be looked at (a loop of links on the way, not a missing name) refuses the start: it never
+        // counts from a folder further up.
+        let ring = base.join("ring");
+        std::os::unix::fs::symlink(&ring, &ring).unwrap();
+        point(&elsewhere);
+        assert_eq!(
+            refusal(&grant(&link, &[ring.join("data")]), None),
+            Some("protected_path_unresolved".to_string())
+        );
         // The node's generated Git file (an exact file below its data folder) is still read.
         let git = data.join("gitconfig");
         std::fs::write(&git, "").unwrap();
