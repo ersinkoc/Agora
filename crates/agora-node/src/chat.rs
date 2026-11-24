@@ -6716,6 +6716,9 @@ mod live {
                 let (live, file) = (leak(&mut f, CUT_VALUE), saved_leak(&store, "a", CUT_VALUE));
                 if report {
                     assert_eq!((&live, &file), (&None, &None), "{name}");
+                    // A window that follows only now gets a snapshot redacted again from the places kept beside the ring.
+                    let mut late = Follower::of(&b, &a);
+                    assert_eq!(leak(&mut late, CUT_VALUE), None, "{name}: snapshot");
                 } else {
                     assert!(
                         live.is_some() && file.is_some(),
@@ -6724,6 +6727,45 @@ mod live {
                 }
             }
         }
+    }
+
+    /// ADR-0111: a cut reported on an update of a running call (how an adapter mostly sends output): the update's places replace
+    /// the earlier version's, in the live stream, a late snapshot and the file.
+    #[test]
+    fn a_cut_reported_on_an_update_of_a_call_is_kept_with_that_version() {
+        let (_d, store, b) = board("adr0111-update", &[CUT_VALUE], Limits::default());
+        let a = AgentId::new("a");
+        let mut f = Follower::of(&b, &a);
+        let call = |status: &str, output: Option<String>| {
+            ChatItem::Tool(ToolItem {
+                call_id: "c1".into(),
+                tool: Some("sh".into()),
+                status: status.into(),
+                output,
+                ..ToolItem::default()
+            })
+        };
+        b.push_item(&a, &call("in_progress", Some("starting".into())), 1);
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+        let (kept, at) = cut_value(&format!("the key is {CUT_VALUE} and more words"));
+        let cut = ReportedCut {
+            field: CutField::Output,
+            at,
+        };
+        b.push_item_cut(&a, &call("completed", Some(kept)), &[cut], 2);
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+        assert_eq!(leak(&mut f, CUT_VALUE), None);
+        assert_eq!(saved_leak(&store, "a", CUT_VALUE), None);
+        let mut late = Follower::of(&b, &a);
+        assert_eq!(leak(&mut late, CUT_VALUE), None);
+        assert!(late
+            .drain()
+            .iter()
+            .any(|e| e.output.ends_with("more words")));
     }
 
     /// ADR-0111: a reported cut in the agent's words is a place in their stream too: the next piece, which goes on with the value,
@@ -6778,7 +6820,7 @@ mod live {
         assert_eq!((out.as_str(), places), ("aé", Vec::new()));
     }
 
-    /// ADR-0111 (ADR-0022): the cost of reported places on the chat path: a 64 KiB tool output cleaned and capped with none and with
+    /// ADR-0111 (ADR-0022): the cost of reported places on the chat path: a 128 KiB tool output cleaned and capped with none and with
     /// 64, and a board taking the item and writing it with the value held.
     #[test]
     #[ignore = "a measurement (ADR-0111): cargo test -p agora-node --lib -- --ignored adr0111_perf"]
@@ -6789,6 +6831,8 @@ mod live {
             .chars()
             .take(64 * 1024)
             .collect();
+        // Twice that: over the node's first bound (`PRE_BOUND`), so its own seam is split and cleaned apart too.
+        let raw = raw.repeat(2);
         let none: Vec<usize> = Vec::new();
         let many: Vec<usize> = (1..=64)
             .map(|i| i * raw.len() / 65)
@@ -6806,7 +6850,7 @@ mod live {
                 ));
             }
             eprintln!(
-                "tidy 64 KiB output, {label}: {:?} each",
+                "tidy 128 KiB output, {label}: {:?} each",
                 start.elapsed() / n
             );
         }

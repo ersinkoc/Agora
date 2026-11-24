@@ -109,9 +109,11 @@ carry `cuts`, a list of `{field, at}`:
 - `field` is a JSON pointer into the item's params naming the string the cut is in, one of `/text/text`, `/thought/text`,
   `/toolCall/tool`, `/toolCall/argumentsJson`, `/toolCall/output` (a call with a `callId`), `/toolCall/locations/N/path`,
   `/plan/steps/N`, `/plan/entries/N/text`, `/diff/path`, `/diff/unifiedDiff` and `/notice/params/KEY` (`~1` for a `/` in a key, `~0`
-  for a `~`), always within the item the params carry;
-- `at` is a byte offset in that string as sent where text was removed: `0` (its start was dropped), its length (its end was
-  dropped), or a place between two characters inside it (a middle was dropped).
+  for a `~`), always within the item the params carry (a plan with `entries` is read from its entries, so a cut in `/plan/steps/N`
+  of such an item is ignored: report it in `/plan/entries/N/text`);
+- `at` is a byte offset in that string as sent where text was removed (a JSON number, or a decimal string as proto3 JSON writes a
+  64-bit integer): `0` (its start was dropped), its length (its end was dropped), or a place between two characters inside it (a
+  middle was dropped).
 
 At most 64 entries are read per item. Each entry past the 64th, and each one whose `field` is not one of the above for this item or
 does not name a string, or whose `at` is past the string's end or inside a character, is ignored on its own: never the item, which is

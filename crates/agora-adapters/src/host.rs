@@ -719,7 +719,13 @@ fn reported_cuts(p: &Value, item: &ChatItem) -> (Vec<ReportedCut>, usize) {
 /// boundary in it (its end included).
 fn reported_cut(p: &Value, item: &ChatItem, c: &Value) -> Option<ReportedCut> {
     let pointer = c.get("field")?.as_str()?;
-    let at = usize::try_from(c.get("at")?.as_u64()?).ok()?;
+    // A JSON number, or a decimal string as proto3 JSON writes a 64-bit integer.
+    let at = match c.get("at")? {
+        Value::Number(n) => n.as_u64()?,
+        Value::String(x) => x.parse().ok()?,
+        _ => return None,
+    };
+    let at = usize::try_from(at).ok()?;
     let target = p.pointer(pointer)?.as_str()?;
     if !target.is_char_boundary(at) {
         return None;
@@ -2626,7 +2632,8 @@ mod tests {
             json!({"field": "/toolCall/output", "at": 2}),
             json!({"field": "/toolCall/output", "at": 7}),
             json!({"field": "/toolCall/output", "at": -1}),
-            json!({"field": "/toolCall/output", "at": "1"}),
+            json!({"field": "/toolCall/output", "at": "x"}),
+            json!({"field": "/toolCall/output", "at": 1.5}),
             json!({"field": "/toolCall/output"}),
             json!({"at": 1}),
             json!(3),
@@ -2643,8 +2650,10 @@ mod tests {
             );
         }
         // The end of the string is a place in it; `cuts` that is not a list is one ignored entry, and `null` none.
-        let (_, c, _) = with(json!([{"field": "/toolCall/output", "at": 5}]));
-        assert_eq!(c, vec![cut(CutField::Output, 5)]);
+        let (_, c, _) = with(
+            json!([{"field": "/toolCall/output", "at": 5}, {"field": "/toolCall/output", "at": "1"}]),
+        );
+        assert_eq!(c, vec![cut(CutField::Output, 5), cut(CutField::Output, 1)]);
         assert_eq!(with(json!({"a": 1})), (plain.clone(), Vec::new(), 1));
         assert_eq!(with(Value::Null), (plain, Vec::new(), 0));
     }
