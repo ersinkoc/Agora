@@ -41,7 +41,7 @@ or a local response timeout has a localized retry message.
 | `agent.setting_invalid` | `kind`, `setting` | ADR-0066: the value given for `setting` is not one it takes: not in the manifest's `values`, or not a plain value (letters, digits, `. _ : / @ + -`, at most 128, not starting with `-`). Nothing was started |
 | `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053). ADR-0108: also the node's answer to the forget the hub passes on, while the agent runs there (in the holder, waiting for a restart, or being resumed); the node then removes nothing |
 | `agent.not_interrupted` | `agent_id` | ADR-0060: `agent.resume` names an agent the node does not hold as interrupted (never seen, running, resumed already, forgotten (ADR-0108), or no longer kept after 14 days) |
-| `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |
+| `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`; `agora agent resume AGENT_ID --again`) is possible |
 | `agent.folder_changed` | `agent_id`, `path` | ADR-0060: the agent's folder is gone or now has another project identity (ADR-0052); nothing was started |
 | `agent.parent_not_running` | `agent_id`, `parent_agent_id` | ADR-0060: a helper (ADR-0057) is resumed only while the agent that started it runs |
 | `agent.still_running` | `agent_id` | ADR-0060: the agent's process from before the node's restart still runs (a node killed without stopping its agents); stop it first (`agent.stop` ends exactly that process), then resume |
