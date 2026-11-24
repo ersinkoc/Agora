@@ -46,8 +46,10 @@
 //!   pieces, held pieces) as a batch's.
 //! - **Not covered**: what the file does not cover; where a part of a value stands at an edge by chance, the live view and the file
 //!   may differ (each masks it at its own edges); a value's first 3 bytes or fewer, sent before the next words show it goes on (the
-//!   rest is replaced; the file, which holds back more, masks them); text sent before a value was added to the store stays as sent,
-//!   and a value added is replaced live from the writer's next tick (at most a second); a value over 16 KiB can show in part when
+//!   rest is replaced; the file, which holds back more, masks them); text sent before a value was added to the store stays as sent on
+//!   streams already open (a later snapshot redacts the words again, as one stream, with the values held then: `shown_entries`), and
+//!   a value added is replaced from the next read of the values (the writer's, or the node's tick in `flush_due`, at most a second);
+//!   a value over 16 KiB can show in part when
 //!   its words are sent without what follows.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -64,8 +66,8 @@ use agora_protocol::v1::{
 };
 
 use crate::transcript::{
-    redact_entry, redact_lines, AtEnd, Batch, Cuts, Line, Run, RunPart, Secrets, Seed, Side, Store,
-    Wake, MIN_PART,
+    redact_entry, redact_lines, redact_text, redact_words_again, AtEnd, Batch, Cuts, Line, Run,
+    RunPart, Secrets, Seed, Side, Store, Wake, MIN_PART,
 };
 use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};
 
@@ -168,6 +170,9 @@ struct Live {
     /// Where each value's automaton stands at the end of the stream (the carry and the words held), moved on by each new piece; made
     /// again from the stream's end when the values change or the carry is replaced (seeding).
     at_end: AtEnd,
+    /// The set of values every word shown so far was redacted with (`None`: none shown yet; `Some(0)`: several, or words shown with
+    /// none held or seeded from the file). A snapshot taken with another set redacts the words again (`shown_entries`).
+    words_gen: Option<u64>,
     /// What the operation under way changed, sent when it ends (each entry once, in the order it was first changed).
     outbox: Vec<(u64, Out)>,
     /// Send every word held when the operation ends, their end an edge (a turn ended, Start again, the hold's deadline).
@@ -909,6 +914,12 @@ impl Transcript {
         let outbox = std::mem::take(&mut self.live.outbox);
         let force = std::mem::take(&mut self.live.force);
         let Some(sec) = sec.filter(|s| !s.is_empty()) else {
+            if outbox
+                .iter()
+                .any(|(id, _)| self.index(*id).is_some_and(|i| in_run(&self.entries[i])))
+            {
+                self.live.words_gen = Some(0);
+            }
             // No value held (or none any more): words held while one was go first, as they are.
             let held: Vec<u64> = std::mem::take(&mut self.live.unsent).into_keys().collect();
             for id in held.into_iter().chain(outbox.into_iter().map(|(id, _)| id)) {
@@ -943,6 +954,7 @@ impl Transcript {
                     sec.feed(&mut self.live.at_end, &self.entries[i].text);
                 }
                 Out::Seeded if words => {
+                    self.live.words_gen = Some(0);
                     let e = &self.entries[i];
                     let view = redact_entry(e, self.side(e), sec);
                     self.show(view);
@@ -1078,6 +1090,11 @@ impl Transcript {
         for id in ids.iter().take(n) {
             self.live.unsent.remove(id);
         }
+        self.live.words_gen = match self.live.words_gen {
+            None => Some(sec.generation()),
+            Some(g) if g == sec.generation() => Some(g),
+            _ => Some(0),
+        };
         for view in views {
             if let Line::Entry(v, _) = view {
                 self.show(*v);
@@ -1101,7 +1118,8 @@ impl Transcript {
     /// on the stream when they go). The agent's words as they were sent; any other entry redacted as it is now (its newest version).
     fn shown_entries(&self, sec: Option<&Secrets>) -> Vec<ChatEntry> {
         let sec = sec.filter(|s| !s.is_empty());
-        self.entries
+        let mut out: Vec<ChatEntry> = self
+            .entries
             .iter()
             .filter(|e| !self.live.unsent.contains_key(&e.entry_id))
             .map(|e| match (self.live.shown.get(&e.entry_id), sec) {
@@ -1109,7 +1127,20 @@ impl Transcript {
                 (None, Some(sec)) if !in_run(e) => redact_entry(e, self.side(e), sec),
                 (None, _) => e.clone(),
             })
-            .collect()
+            .collect();
+        // Audit of #1157: words shown before a value was added to the store (or seeded from the file) are redacted again as one stream
+        // with the values held now, so no later snapshot shows it. Masks are only added to what was sent.
+        if let Some(sec) = sec {
+            if self.live.words_gen.is_some_and(|g| g != sec.generation()) {
+                let at: Vec<usize> = (0..out.len()).filter(|&i| in_run(&out[i])).collect();
+                let mut words: Vec<ChatEntry> = at.iter().map(|&i| out[i].clone()).collect();
+                redact_words_again(&mut words, sec);
+                for (i, w) in at.into_iter().zip(words) {
+                    out[i] = w;
+                }
+            }
+        }
+        out
     }
 
     /// Changes an entry in place. With `coalesce`, a version is sent only when the last one went out at least [`COALESCE_MS`] ago;
@@ -1273,6 +1304,15 @@ impl ChatBoard {
     /// #1147: the secret values the live path replaces, as the writer last read them (`None` on a board that keeps memory only).
     fn secrets(&self) -> Option<Arc<Secrets>> {
         self.store.as_deref().map(Store::current)
+    }
+
+    /// #1147 (audit of #1157): `text` the agent chose, with the node's secret values replaced as in a chat entry, for what the node
+    /// records as a hub event (an approval's action and detail, a mesh message, a task's title, an option's words).
+    pub fn redact_text(&self, text: &str) -> String {
+        match self.secrets() {
+            Some(sec) => redact_text(text, &sec),
+            None => text.to_string(),
+        }
     }
 
     /// ADR-0104 C1: fills the agent's transcript from `seed` when it has given no id yet (see `Transcript::seed`).
@@ -1894,6 +1934,11 @@ impl ChatBoard {
     /// ADR-0090: sends the changes of entries that were held back to keep to one version per [`COALESCE_MS`], once that time is
     /// over. Called by the node's tick; an entry whose last change is final was never held back.
     pub fn flush_due(&self, now_ms: u64) {
+        // Audit of #1157: the values are read again at most once a second here too (the node's tick, before the board's lock), so the
+        // live path follows a change even without the writer thread.
+        if let Some(store) = &self.store {
+            store.refresh_if_older(Duration::from_secs(1));
+        }
         let mut g = self.lock();
         for t in g.values_mut() {
             // #1147: words that waited [`LIVE_HOLD_MS`] go now, the part of a value they end in replaced.
@@ -6154,6 +6199,33 @@ mod live {
             .got
             .iter()
             .all(|e| !e.text.chars().any(|c| c.is_ascii_uppercase())));
+    }
+
+    /// Audit of #1157: words shown before a value was added to the store (with another value held, or with none) are redacted again
+    /// in every later snapshot, also when the value lies across two of them; only masks are added.
+    #[test]
+    fn a_value_added_after_words_were_shown_is_out_of_every_later_snapshot() {
+        let added = "ADDED-VALUE-0123456789-XYZ";
+        for held in [vec![SECRET], vec![]] {
+            let (dir, store, b) = board("added", &held, Limits::default());
+            let a = AgentId::new("a");
+            b.push_item(&a, &text(&format!("first {added} then ")), 1);
+            b.push_item(&a, &text(&format!("split {}", &added[..10])), 2);
+            b.push_item(&a, &text(&format!("{} end", &added[10..])), 3);
+            assert!(
+                b.snapshot(&a).iter().any(|e| e.text.contains(added)),
+                "shown before it was a secret"
+            );
+            SecretStore::in_data(&dir)
+                .set("ADDED", &Secret::new(added).unwrap())
+                .unwrap();
+            // The node's tick (or the writer) reads the values again.
+            store.refresh_if_older(std::time::Duration::ZERO);
+            let mut late = Follower::of(&b, &a);
+            assert_eq!(leak(&mut late, added), None, "{held:?}");
+            assert!(late.words().starts_with("first <redacted> then "));
+            assert!(b.snapshot(&a).iter().all(|e| !e.text.contains(&added[..8])));
+        }
     }
 
     /// A follower's snapshot never holds the words still held, and gets them on its stream once they go.

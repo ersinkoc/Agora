@@ -7,6 +7,7 @@
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
+//! - `ask:ACTION|DETAIL`: like `ask`, with that action and detail (#1147: words of the agent's own on an approval card).
 //! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
 //!   and writes `later.txt` in its folder once the request is out.
 //! - `later-flood`: answers the prompt, waits 1.5 s, then says 3000 chat items of 1000 bytes each and `flood-end` (output that fills
@@ -304,16 +305,24 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         state(out, &session, "IDLE")?;
                         std::fs::write("later.txt", "done")?;
                     }
-                    "ask" | "ask-error" | "ask-reserved" | "later-ask" => {
+                    asked
+                        if matches!(asked, "ask" | "ask-error" | "ask-reserved" | "later-ask")
+                            || asked.starts_with("ask:") =>
+                    {
                         if text == "later-ask" {
                             std::thread::sleep(std::time::Duration::from_millis(1500));
                         }
                         state(out, &session, "BLOCKED")?;
+                        let (action, detail) = match asked.strip_prefix("ask:") {
+                            Some(rest) => rest.split_once('|').unwrap_or((rest, "")),
+                            None if text == "ask-reserved" => ("agent.start", "ls"),
+                            None => ("run_command", "ls"),
+                        };
                         note(
                             out,
                             "approval/request",
                             json!({"sessionId": session, "approvalId": "ap-1",
-                                   "action": if text == "ask-reserved" { "agent.start" } else { "run_command" }, "detail": "ls"}),
+                                   "action": action, "detail": detail}),
                         )?;
                         if text == "later-ask" {
                             std::fs::write("later.txt", "asked")?;

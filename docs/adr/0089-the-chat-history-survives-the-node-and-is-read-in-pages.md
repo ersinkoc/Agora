@@ -104,5 +104,11 @@ same redacted entries. No schema change: a follower gets the same messages, with
    `serde_json`'s, a secret it does not hold), and these of the live path: the live view and the file may differ where a part of a
    value stands at an edge by chance (each masks it at its own edges); a value's first 3 bytes or fewer can be sent before the next
    words show the value goes on (the rest is replaced; the file, which holds back more, masks them); text sent before a value was
-   added to the store stays as sent, and a value added is replaced live from the writer's next tick (at most a second later); a value
-   over 16 KiB (only one from the node's environment can be) can show in part when its words are sent without what follows.
+   added to the store stays as sent on streams already open (every later snapshot has it replaced), and a value added is replaced
+   from the node's next read of its values (at most a second later); a value over 16 KiB (only one from the node's environment can
+   be) can show in part when its words are sent without what follows.
+5. The same values are replaced in the agent's own words the node records as hub events (audit of #1157): an approval card's action
+   and detail (before the request is queued, so the queue, the event and the always signature hold the same words), a mesh message's
+   body, a task's title, a handoff's summary, and the names, descriptions and hints of the agent's modes, options and commands. Ids
+   are kept. Not covered: the body of a mesh message an agent sends to an agent on another machine, which the hub relays as written
+   (a question for the maintainer: replacing it changes what the other agent is told).

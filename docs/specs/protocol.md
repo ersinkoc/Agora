@@ -484,13 +484,19 @@ no text, ADR-0058). Entry ids increase per agent; a client ignores an id it alre
 
 What the stream carries is redacted (ADR-0089 Amendment A, #1147): the node replaces the values of the secrets it holds (8 bytes or
 more: its secret store and the environment variables its policy passes to agents) by `<redacted>` in every entry and every version
-it sends and in the snapshot, by the same rule and code as the file below, so a value never reaches the hub or the window, not even
-for a moment. A field is redacted before it is first sent; never an unredacted version first. The agent's words (text and thinking)
+it sends and in the snapshot, by the same rule and code as the file below. A field is redacted before it is first sent; never an
+unredacted version first. What it does not cover is listed in the threat model (T61): a value's first 3 bytes or fewer can go before
+the next words show the value goes on, and text sent before a value was added to the store stays as it was sent on streams already
+open (a later snapshot replaces it). The agent's words (text and thinking)
 are one stream: a value split between two entries is found whole, and words whose end is a part of a value (4 bytes or more) wait
 until the next words show it is not one, until any other entry of the agent (so ids still increase on the stream), until its turn
 ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
 part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
-brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the writer's next tick.
+brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: an approval
+card's action and detail (before the request is queued, so the card and the always signature hold the same words), a mesh message's
+body, a task's title, a handoff's summary, and the names, descriptions and hints of the agent's modes, options and commands; ids are
+kept.
 
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own

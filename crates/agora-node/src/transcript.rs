@@ -103,8 +103,10 @@
 //! by the same functions ([`redact_lines`], [`redact_entry`]) with the same values ([`Secrets`], shared with the writer), as
 //! `crate::chat` describes (**Live redaction**). The writer and the live path each keep their own stream of the agent's words (their
 //! carry, edges and hold), so the file and the window may differ where a part of a value stands at an edge only by chance. The live
-//! path reads the values the writer last read ([`Store::current`]): a value added to the store is replaced live from the writer's next
-//! tick, and text sent before it was added stays as it was sent. The matcher of fragments costs
+//! path reads the values last read ([`Store::current`]; the writer and the node's tick read them again, at most a second apart): a
+//! value added to the store is replaced live from then, text sent before stays as it was sent on streams already open, and a later
+//! snapshot redacts the words again with it ([`redact_words_again`]). The node's hub events that carry the agent's own words are
+//! redacted with the same values ([`redact_text`]; see `crate::daemon::EventSink`). The matcher of fragments costs
 //! about 27 bytes of memory per byte of the values held (13 MiB for 64 values of 8,000 bytes, built in about 70 ms when the values
 //! change), kept while the node runs; a value over 16 KiB (only one from the node's environment can be) gets none and is only
 //! replaced whole. The values are read again when the secrets folder or a file in it changes (name, size or time), and at every
@@ -294,6 +296,8 @@ pub struct Store {
     /// #1147: those values with what finding their pieces needs, made again only when they change. The writer refreshes it
     /// ([`Self::secrets`]); the chat path only reads it ([`Self::current`]), so no folder is read on an agent's path.
     live: Mutex<Option<Arc<Secrets>>>,
+    /// When the values were last read for it.
+    read_at: Mutex<Option<std::time::Instant>>,
 }
 
 /// #1147: the secret values the node replaces, as one snapshot the writer and the live chat path share: each value raw and as JSON
@@ -352,6 +356,11 @@ impl Secrets {
     /// No value is held: nothing is replaced and nothing waits.
     pub(crate) fn is_empty(&self) -> bool {
         self.known.is_empty()
+    }
+
+    /// Which set of values this is.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The longest value (0: none).
@@ -1128,6 +1137,50 @@ pub(crate) fn redact_lines(lines: &[Line], runs: &[Run], sec: &Secrets) -> Vec<L
         .collect()
 }
 
+/// #1147 (audit of #1157): a free text the agent chose that the node records as a hub event (an approval's action and detail, a mesh
+/// message's body, a task's title, an option's name): its whole values, and fragments at both its ends and beside a `…` the bridge put
+/// where it cut it (as a notice parameter's), and at the bridge's marks.
+pub(crate) fn redact_text(s: &str, sec: &Secrets) -> String {
+    if sec.is_empty() || s.is_empty() {
+        return s.to_string();
+    }
+    let mut edges = vec![0, s.len()];
+    if s.starts_with('…') {
+        edges.push('…'.len_utf8());
+    }
+    if s.ends_with('…') {
+        edges.push(s.len() - '…'.len_utf8());
+    }
+    let mut out = s.to_string();
+    redact_field(&mut out, &sec.known, &sec.pieces, edges, Vec::new());
+    out
+}
+
+/// #1147 (audit of #1157): the agent's words a new follower is shown, as they were sent (`views`, in order), redacted again as one
+/// stream with the values held now: a value added to the store after they were sent is replaced in them too (masks are only added).
+pub(crate) fn redact_words_again(views: &mut [ChatEntry], sec: &Secrets) {
+    if sec.is_empty() || views.is_empty() {
+        return;
+    }
+    let mut run = Run::default();
+    let mut lines = Vec::with_capacity(views.len());
+    for (i, v) in views.iter().enumerate() {
+        let at = run.text.len();
+        run.text.push_str(&v.text);
+        run.parts.push(RunPart {
+            line: Some(i),
+            start: at,
+            end: run.text.len(),
+        });
+        lines.push(Line::Entry(Box::new(v.clone()), Side::default()));
+    }
+    for (v, line) in views.iter_mut().zip(redact_lines(&lines, &[run], sec)) {
+        if let Line::Entry(e, _) = line {
+            *v = *e;
+        }
+    }
+}
+
 /// #1147: one entry that is not the agent's words (or words seeded from the file), redacted as the writer redacts its line: what a
 /// follower is sent of it.
 pub(crate) fn redact_entry(e: &ChatEntry, side: Side, sec: &Secrets) -> ChatEntry {
@@ -1155,6 +1208,7 @@ impl Store {
             env_values: Vec::new(),
             known: Mutex::new((None, Vec::new())),
             live: Mutex::new(None),
+            read_at: Mutex::new(None),
         }
     }
 
@@ -1244,6 +1298,7 @@ impl Store {
     /// writes), never on an agent's path.
     pub(crate) fn secrets(&self) -> Arc<Secrets> {
         let known = self.known_secrets();
+        *self.read_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         if let Some(s) = &*self.live.lock().unwrap_or_else(|e| e.into_inner()) {
             if s.known == known {
                 return Arc::clone(s);
@@ -1253,6 +1308,19 @@ impl Store {
         let s = Arc::new(Secrets::of(known));
         *self.live.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&s));
         s
+    }
+
+    /// #1147 (audit of #1157): [`Self::secrets`] when the values were last read `age` ago or more: the node's tick calls it (off every
+    /// agent's path), so the live path follows a change even when the writer thread is not running.
+    pub(crate) fn refresh_if_older(&self, age: Duration) {
+        let due = self
+            .read_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|t| t.elapsed() >= age);
+        if due {
+            self.secrets();
+        }
     }
 
     /// #1147: the values the writer last read, for the live chat path: no folder is read here, except once when nothing was read yet
