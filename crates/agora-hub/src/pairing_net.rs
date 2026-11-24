@@ -278,20 +278,32 @@ where
     )
     .await?;
 
-    // 3. The reveal, inside its 30 seconds.
+    // 3. The reveal, inside its 30 seconds. The session can end before it (its time, the switch closing, an approval of another
+    // machine): the state is looked at on every turn, at least once a second, so the machine is told at once and with what ended it
+    // (`pair.closed` for a closing, F1460), and pings cannot hold a connection whose session is over (F1461).
     let reveal_id: String;
+    let mut ended = hub.pairing().subscribe();
     loop {
-        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn)));
-        match tokio::time::timeout(wait, conn.recv()).await {
-            Err(_) => {
-                // Nothing came in time: the state decides (and counts it).
-                if let Verdict::Expired | Verdict::Closed =
-                    hub.pairing().with(|p| p.verdict(me.conn, mono()))
-                {
-                    audit(hub, &who, "pair.reveal", &r.node_name, "pair.expired");
-                    return refuse(&mut conn, &req.request_id, &Refusal::Expired.to_error()).await;
-                }
-            }
+        let over = match hub.pairing().with(|p| p.verdict(me.conn, mono())) {
+            Verdict::Waiting => None,
+            Verdict::Expired => Some(Refusal::Expired),
+            _ => Some(Refusal::Closed),
+        };
+        if let Some(refusal) = over {
+            let e = refusal.to_error();
+            audit(hub, &who, "pair.reveal", &r.node_name, e.code.as_str());
+            return refuse(&mut conn, &req.request_id, &e).await;
+        }
+        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn))).min(RECHECK);
+        let got = tokio::select! {
+            // A frame already here comes first: a reveal that arrived is answered as a reveal (under its own id).
+            biased;
+            got = tokio::time::timeout(wait, conn.recv()) => got,
+            _ = ended.changed() => continue,
+        };
+        match got {
+            // Nothing came in time: the state decides at the top of the loop (and counts it).
+            Err(_) => {}
             Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) => {
                 conn.send(&Frame {
                     stream_id: STREAM_CONTROL,
@@ -806,6 +818,149 @@ mod tests {
             &req(command_request::Command::PairStatus(v1::PairStatus {}), ""),
         ));
         assert!(!s.open && s.closes_at_ms == 0);
+    }
+
+    /// A machine on an in-memory pairing connection that has its challenge and has not revealed yet.
+    async fn challenged(hub: &std::sync::Arc<Hub>, last: u8) -> Conn<tokio::io::DuplexStream> {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let h = std::sync::Arc::clone(hub);
+        tokio::spawn(async move {
+            let mut conn = agora_protocol::ws::accept(b).await.unwrap();
+            let first = conn.recv().await.unwrap().unwrap();
+            let peer = PairPeer {
+                addr: IpAddr::from([10, 0, 0, last]),
+                exporter: [last; 32],
+                leaf_hash: None,
+            };
+            let _ = serve_pairing(conn, &h, None, first, peer).await;
+        });
+        let mut m = agora_protocol::ws::connect(a, "ws://localhost/")
+            .await
+            .unwrap();
+        let r = req(
+            command_request::Command::PairRequest(v1::PairRequest {
+                commitment: vec![last; 32],
+                node_name: format!("m{last}"),
+                os: "linux".into(),
+                version: "0.0".into(),
+            }),
+            "",
+        );
+        m.send(&Frame {
+            stream_id: STREAM_COMMANDS,
+            kind: 0,
+            seq: None,
+            payload: r.encode_to_vec(),
+        })
+        .await
+        .unwrap();
+        let f = m.recv().await.unwrap().unwrap();
+        let ok = v1::CommandResponse::decode(f.payload.as_slice()).unwrap();
+        assert!(matches!(
+            ok.result,
+            Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::PairChallenge(_))
+            }))
+        ));
+        m
+    }
+
+    /// The code of the next answer that is not a pong; the machine pings every 200 ms while it waits (at most `within`).
+    async fn answer_while_pinging(
+        m: &mut Conn<tokio::io::DuplexStream>,
+        within: Duration,
+    ) -> Option<ErrorCode> {
+        let until = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < until {
+            m.send(&Frame {
+                stream_id: STREAM_CONTROL,
+                kind: kinds::PING,
+                seq: None,
+                payload: Vec::new(),
+            })
+            .await
+            .ok()?;
+            let Ok(got) = tokio::time::timeout(Duration::from_millis(200), m.recv()).await else {
+                continue;
+            };
+            let f = got.ok()??;
+            if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PONG) {
+                continue;
+            }
+            return Some(code(Some(
+                v1::CommandResponse::decode(f.payload.as_slice()).unwrap(),
+            )));
+        }
+        None
+    }
+
+    /// An open hub with one machine that has its challenge and has not revealed, after the switch closed: by the owner's
+    /// `PairClose` (`wake`), or in the state with nothing to wake the connection, as its timeout or a fifth failure closes it.
+    async fn closed_before_the_reveal(wake: bool) -> Conn<tokio::io::DuplexStream> {
+        let h = std::sync::Arc::new(hub(true));
+        let o = who(Role::Owner);
+        owner_command(
+            &h,
+            &o,
+            &req(command_request::Command::PairOpen(v1::PairOpen {}), ""),
+        );
+        let m = challenged(&h, 1).await;
+        if wake {
+            owner_command(
+                &h,
+                &o,
+                &req(command_request::Command::PairClose(v1::PairClose {}), ""),
+            );
+        } else {
+            h.pairing().with(|p| p.close(mono()));
+        }
+        m
+    }
+
+    /// The connection ends soon after the answer (a bounded wait: a regression fails here instead of hanging).
+    async fn ends(m: &mut Conn<tokio::io::DuplexStream>) -> bool {
+        matches!(
+            tokio::time::timeout(Duration::from_secs(4), m.recv()).await,
+            Ok(Ok(None) | Err(_))
+        )
+    }
+
+    /// F1460 (spec sections 2 and 12): a machine that has its challenge but has not revealed when the switch closes is told
+    /// `pair.closed`, at once, not `pair.expired` at its 30-second reveal deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_machine_that_has_not_revealed_when_the_switch_closes_is_told_closed_at_once() {
+        // Woken by the owner's command, and (within the one-second recheck) with nothing to wake it.
+        for wake in [true, false] {
+            let mut m = closed_before_the_reveal(wake).await;
+            let told = tokio::time::timeout(Duration::from_secs(4), m.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("not told within 4 s that the switch closed (wake: {wake})")
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                code(Some(
+                    v1::CommandResponse::decode(told.payload.as_slice()).unwrap()
+                )),
+                ErrorCode::PairClosed
+            );
+            // The hub ended the connection after the answer.
+            assert!(ends(&mut m).await);
+        }
+    }
+
+    /// F1461 (spec sections 7 and 12, "Idle"): a machine whose session ended before its reveal cannot hold its connection open by
+    /// pinging; it is answered and the connection ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinging_does_not_hold_open_a_machine_whose_session_ended_before_its_reveal() {
+        let mut m = closed_before_the_reveal(true).await;
+        assert_eq!(
+            answer_while_pinging(&mut m, Duration::from_secs(4)).await,
+            Some(ErrorCode::PairClosed),
+            "a pinging machine was held open without an answer"
+        );
+        assert!(ends(&mut m).await);
     }
 
     #[test]
