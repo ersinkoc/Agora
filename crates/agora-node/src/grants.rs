@@ -749,6 +749,31 @@ mod tests {
         assert!(refused(g.gate(&typing("a-1"), NOW + HOUR)), "expired");
     }
 
+    /// ADR-0108: the forget the hub passes on goes through the gate like any routed command: free unless the policy lists
+    /// `agent.forget`, and then covered by a live grant for that agent (the gate names the agent the forget names) or its project.
+    #[test]
+    fn a_forget_the_hub_passes_on_needs_a_grant_for_its_agent_only_when_the_policy_lists_it() {
+        let forget = |a: &str| Cmd::AgentForget(v1::AgentForget { agent_id: a.into() });
+        assert!(
+            grants(&[]).gate(&forget("a-1"), NOW).is_ok(),
+            "unlisted: free"
+        );
+        let g = grants(&["agent.forget"]);
+        assert!(refused(g.gate(&forget("a-1"), NOW)), "listed, no grant");
+        g.create(
+            &grant("g1", "agent:a-1", &["agent.forget"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&forget("a-1"), NOW).is_ok());
+        assert!(refused(g.gate(&forget("a-2"), NOW)), "another agent");
+        g.set_project_resolver(Box::new(|a| (a == "a-3").then(|| "p-3".to_string())));
+        g.create(&grant("g2", "project:p-3", &["agent.*"], NOW + HOUR), NOW)
+            .unwrap();
+        assert!(g.gate(&forget("a-3"), NOW).is_ok(), "its project's grant");
+        assert!(refused(g.gate(&forget("a-4"), NOW)));
+    }
+
     #[test]
     fn watching_a_terminal_or_a_chat_is_covered_by_a_grant_for_that_agent() {
         let g = grants(&["terminal.*", "chat.subscribe"]);

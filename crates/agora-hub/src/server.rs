@@ -1240,8 +1240,11 @@ where
             Some(match hub.forget_agent(&agent_id, now_ms()) {
                 Ok((node, local)) => {
                     audit(hub, who, "agent.forget", &node, "ok");
-                    // ADR-0108: passed on to its node now when it is connected and able; otherwise when it next connects.
-                    give_forgets(hub, &node, vec![local]);
+                    // ADR-0108: passed on to its node now when it is connected and able; otherwise when it next connects. A key with
+                    // no node's own id (no `/`) names nothing a node keeps.
+                    if !local.is_empty() {
+                        give_forgets(hub, &node, vec![local]);
+                    }
                     ok_empty(client_request_id.clone())
                 }
                 Err(e) => {
@@ -1647,9 +1650,12 @@ fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
 /// ADR-0108: passes the person's forgets of `agents` (the node's own ids) on to `node`, one after another in one task, each after the
 /// node answered the one before: the node's queue is never filled with them. An answer, whatever it says, settles that forget (the
 /// node decided: removed, unknown, refused while the agent runs there, or refused by its grants); a node that is not connected, does
-/// not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Each answer is audited
-/// under the hub's own id.
-fn give_forgets(hub: &Hub, node: &str, agents: Vec<String>) {
+/// not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Transient codes
+/// (`node.offline`, `node.timeout`, `internal`) settle it too, as ADR-0108 says: the person forgets the agent again to retry. Each
+/// answer is audited under the hub's own id with its code as the outcome; the audit trail has no column for the agent yet (#1151
+/// adds one).
+fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
+    agents.retain(|a| !a.is_empty());
     if agents.is_empty() || !hub.router().is_connected(node) {
         return;
     }
@@ -1681,12 +1687,13 @@ fn give_forgets(hub: &Hub, node: &str, agents: Vec<String>) {
                 _ => "ok".to_string(),
             };
             let _ = forgets.answered(&node, &agent);
+            // The outcome column holds the code alone, as every other row's does.
             let _ = crate::audit::Audit::new(&store).record(
                 now_ms(),
                 crate::ca::RESERVED_HUB_ID,
                 "agent.forget.local",
                 &node,
-                &format!("{agent} {outcome}"),
+                &outcome,
             );
         }
     });

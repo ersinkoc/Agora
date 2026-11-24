@@ -2224,14 +2224,7 @@ async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_a
         .await;
     }
     let mut client = dial(addr, Some("good-token")).await;
-    client
-        .send(&f(
-            STREAM_EVENTS,
-            kinds::SUBSCRIBE,
-            v1::Subscribe::default().encode_to_vec(),
-        ))
-        .await
-        .unwrap();
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
     assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
     for id in ["n1/agent-3", "n2/agent-3"] {
         let r = forget_answer(&mut client, id).await;
@@ -2317,6 +2310,21 @@ async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_a
         .await
         .is_none());
     assert!(st.hub.forgets().pending("n3").is_empty());
+    // Each answer is in the audit trail under the hub's own id, its outcome the bare code.
+    let rows: Vec<(String, String)> = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some(agora_hub::ca::RESERVED_HUB_ID), 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "agent.forget.local")
+        .map(|e| (e.node, e.outcome))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("n1".to_string(), "agent.running".to_string()),
+            ("n1".to_string(), "ok".to_string())
+        ]
+    );
 
     // n2 does not offer the capability: it is never sent the forget, which stays owed.
     let (mut n2, _t2) = node_conn(&st, "n2").await;
