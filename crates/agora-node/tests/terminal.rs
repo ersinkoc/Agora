@@ -433,12 +433,11 @@ fn a_subscriber_joining_mid_stream_gets_the_programs_style_and_input_modes() {
     h.kill().unwrap();
 }
 
-/// F1480: a program that left a descendant outside the terminal's process group (its own session) writing to the terminal every
-/// 0.1 s, in `dir`; the descendant ends when `STOP` appears there or `dir` is removed (at most 30 s). `None` without `sh` and `setsid`.
-#[cfg(unix)]
 /// Removes a test's folder when the test ends, also when it panics: the descendant stops once its `STARTED` file is gone.
+#[cfg(unix)]
 struct RemoveOnDrop(std::path::PathBuf);
 
+#[cfg(unix)]
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::write(self.0.join("STOP"), b"");
@@ -446,6 +445,9 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+/// F1480: a program that left a descendant outside the terminal's process group (its own session) writing to the terminal every
+/// 0.1 s, in `dir`; the descendant ends when `STOP` appears there or `dir` is removed (at most 30 s). `None` without `sh` and `setsid`.
+#[cfg(unix)]
 fn with_busy_descendant(dir: &std::path::Path, tail: &str) -> Option<TerminalHandle> {
     let setsid = std::env::var_os("PATH")
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("setsid").is_file()));
