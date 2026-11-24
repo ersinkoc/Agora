@@ -914,12 +914,8 @@ impl Transcript {
         let outbox = std::mem::take(&mut self.live.outbox);
         let force = std::mem::take(&mut self.live.force);
         let Some(sec) = sec.filter(|s| !s.is_empty()) else {
-            if outbox
-                .iter()
-                .any(|(id, _)| self.index(*id).is_some_and(|i| in_run(&self.entries[i])))
-            {
-                self.live.words_gen = Some(0);
-            }
+            // Whatever went now went with no value held: a later snapshot with one redacts the words again.
+            self.live.words_gen = Some(0);
             // No value held (or none any more): words held while one was go first, as they are.
             let held: Vec<u64> = std::mem::take(&mut self.live.unsent).into_keys().collect();
             for id in held.into_iter().chain(outbox.into_iter().map(|(id, _)| id)) {
