@@ -63,6 +63,18 @@ try {
   await page.fill('input', code);
   await page.click('button:has-text("Sign in")');
   await waitForRows();
+  const counts = await page.evaluate(() => {
+    const nav = document.querySelector('aside nav');
+    return {
+      machines: nav.querySelectorAll('[data-machine-id]').length,
+      projects: nav.closest('aside').querySelectorAll('select option:not([value=""])').length,
+    };
+  });
+  const expectedMachines = Number(fleet[0]);
+  const expectedProjects = expectedMachines * Number(fleet[1]);
+  if (counts.machines !== expectedMachines || counts.projects !== expectedProjects) {
+    throw new Error(`After loading ${total} agents, expected ${expectedMachines} machines and ${expectedProjects} projects, got ${counts.machines} machines and ${counts.projects} projects`);
+  }
   const t0 = Date.now();
   await page.reload();
   await waitForRows();
@@ -102,12 +114,21 @@ try {
     }
     phases.scroll.end = performance.now();
     const pick = [];
+    let delayedPickSamples = 0;
     phases.pick.start = performance.now();
     for (let i = 1; i <= 12; i++) {
       nav.scrollTop = i * (nav.scrollHeight - nav.clientHeight) / 13;
       await frame();
       await frame();
-      const inView = visible();
+      let inView = visible();
+      if (inView.length === 0) {
+        delayedPickSamples++;
+        const deadline = performance.now() + 250;
+        do {
+          await frame();
+          inView = visible();
+        } while (inView.length === 0 && performance.now() < deadline);
+      }
       const row = inView[Math.floor(inView.length / 2)];
       if (!row) throw new Error(`No agent visible at scroll sample ${i}`);
       const t = performance.now();
@@ -137,7 +158,7 @@ try {
     return { ...size, scrollFrameMs: { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), max: pct(gaps, 1) },
       longTasksWhileScrolling: counts.scroll, longTasksWhilePicking: counts.pick, longTasksWhileFiltering: counts.filter,
       longTasksOutsidePhases: long.length - counts.scroll - counts.pick - counts.filter, longTasksTotal: long.length,
-      pickToFrameMs: { p50: pct(pick, 0.5), p95: pct(pick, 0.95) }, filterToFrameMs: { p50: pct(filter, 0.5), p95: pct(filter, 0.95) } };
+      delayedPickSamples, pickToFrameMs: { p50: pct(pick, 0.5), p95: pct(pick, 0.95) }, filterToFrameMs: { p50: pct(filter, 0.5), p95: pct(filter, 0.95) } };
   }, rows);
   const explorerNav = page.locator('aside nav').first();
   const agents = explorerNav.locator('[data-agent-row]');
@@ -171,7 +192,7 @@ try {
       await explorer.screenshot({ path: join(screenshots, `explorer-windowing-${colorScheme}.png`) });
     }
   }
-  console.log(JSON.stringify({ fleet: fleet.join('x'), agents: total, fixture: 'static-fleet-no-live-nodes-or-terminal-streams', domRowsReadyMs, keyboardRowsVisited: visited.size, ...result }, null, 1));
+  console.log(JSON.stringify({ fleet: fleet.join('x'), agents: total, fixture: 'static-fleet-no-live-nodes-or-terminal-streams', domRowsReadyMs, ...counts, keyboardRowsVisited: visited.size, ...result }, null, 1));
 } finally {
   try {
     await browser?.close();

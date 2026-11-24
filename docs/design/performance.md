@@ -237,7 +237,10 @@ The warm reload timing (`domRowsReadyMs`) ends when the fleet is loaded and its 
 it waits for every row. Picking measures from a programmatic click on a visible row to the next frame after scrolling to it.
 Filtering measures Explorer's local state (`filterToFrameMs`).
 
-Re-measured after #557 separated the Long Tasks observer by phase. Each entry belongs to the phase in which its task started;
+The historical measurements after #557 used fixture input counts for projects. The fixture needed worktree events to associate
+those projects with agents in the client. The corrected benchmark below checks the projected counts in Chromium.
+
+After #557, the Long Tasks observer reports results by phase. Each entry belongs to the phase in which its task started;
 the original scroll phase included returning to the top and a settling frame. The current phase checks that scrolling reaches
 rows at the bottom. Pending observer records are drained after the final phase. The script reports scroll, pick, filter and
 outside-phase counts separately, with their total. Evidence and the original post-scroll control:
@@ -255,16 +258,18 @@ The old scroll long-task count included later picks and filters and is supersede
 
 **Explorer windowing (#1126).** At 120 agents, Explorer renders agent rows in batches near its scroll area. Group headings remain
 available, and the focused and selected batches stay mounted. Browsers without the visibility or size observers render the
-whole list. The table records two paired Chromium runs with the same 500-agent fixture and benchmark script.
+whole list. The table records two paired Chromium runs with the corrected fixture and the same benchmark script.
+Both builds showed 500 agents, 50 projects and 10 machines. Picking waits for a visible row after moving the scrollbar. The
+click-to-frame timer starts when the row is ready. The runner counts samples that need more than two settling frames.
 
 | Metric | Before windowing | With windowing |
 | --- | --- | --- |
-| Initially mounted agent rows | 500 | 36 |
-| Explorer DOM nodes | 7 960 | 773 |
-| Scroll frame gap, p50 | 36.4–38.4 ms | 16.6 ms |
-| Scroll frame gap, p95 | 44.4–49.0 ms | 17.1–17.2 ms |
-| Pick → frame, p95 | 62.5–62.9 ms | 19.0–20.4 ms |
-| Long tasks while scrolling | 0–1 | 0 |
+| Initially mounted agent rows | 500 | 30 |
+| Explorer DOM nodes | 8 200 | 871 |
+| Scroll frame gap, p50 | 40.6–40.8 ms | 16.6–16.7 ms |
+| Scroll frame gap, p95 | 51.3 ms | 17.0–17.5 ms |
+| Pick → frame, p95 | 63.2–64.7 ms | 21.2–22.3 ms |
+| Long tasks while scrolling | 5–7 | 0 |
 
 The median reaches one 60 Hz interval in this fixture. The p95 remains just above 16.7 ms. Both builds reached the end of the
 tree and visited 20 agent rows with 40 consecutive Tab presses.
