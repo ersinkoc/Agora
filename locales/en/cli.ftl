@@ -145,6 +145,10 @@ doctor-registry-kinds = { $detail ->
         [one] 1 agent
        *[other] { $detail } agents
     } of the ACP registry are known here, untested in Agora; { $ready } of them find their program on this machine. Settings → Agents in the window lists them all.
+doctor-runner-folders-left = { $detail ->
+        [one] 1 folder
+       *[other] { $detail } folders
+    } that agents of the ACP registry started in could not be removed in full (deeper or larger than the node removes, or with names it does not use); they stay in the data folder's `runner` folder, named `….left`, and can be deleted by hand.
 doctor-registry-off = The ACP registry's agents are switched off on this machine (policy line `agents.registry = off`): it neither offers nor starts them. Your own agent descriptions are not affected.
 doctor-registry-denied = { $detail ->
         [one] 1 agent of the ACP registry is

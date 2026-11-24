@@ -33,6 +33,13 @@ retains copies in legacy locations for agents still using them. `agora doctor` w
 [git-config]: ../adr/0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md
 [git-config-location]: ../adr/0098-generated-git-configuration-belongs-to-the-node.md
 
+## ACP registry agents that start through `npx` or `uvx` (#1150)
+
+Such an agent's package runner starts in a folder of its own for each start, `<data>/runner/<agent id>.<random>`, not in the
+project. A confined agent gets a write grant to that folder, as to its worktree (on macOS it is opened again below the node's closed
+home); nothing else of the data folder. To run confined, `npx` and `uvx` will usually also need their caches and your own configuration (`~/.npm`, `~/.npmrc`,
+`~/.cache/uv`, `~/.config/uv`) in `sandbox.read` or `sandbox.write`. See `threat-model.md`, T52.
+
 ## Unix sockets, the ssh-agent and `git push` over ssh (ADR-0083)
 
 A confined agent does not get `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE` from the

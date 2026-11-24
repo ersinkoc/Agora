@@ -1025,6 +1025,9 @@ pub struct Supervisor {
     registry: crate::manifests::RegistryPolicy,
     /// The kinds registered from the ACP registry's converted manifests (by origin, not by name).
     registry_kinds: BTreeSet<String>,
+    /// #1150: the folder below which a registry kind that starts through a package runner gets an empty working folder of its own
+    /// (`runner_folder`); set by the node (`<data>/runner`). `None` refuses such a start.
+    runner_root: Option<PathBuf>,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
     /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
@@ -1050,6 +1053,7 @@ impl Supervisor {
             skip_permissions: SkipPermissions::default(),
             registry: crate::manifests::RegistryPolicy::default(),
             registry_kinds: BTreeSet::new(),
+            runner_root: None,
             holder: None,
             kept_launch: BTreeSet::new(),
         }
@@ -1309,6 +1313,52 @@ impl Supervisor {
     /// ADR-0092 (#1133): the owner's `agents.registry` policy (from the node's policy file; the default offers them all).
     pub fn set_registry_policy(&mut self, policy: crate::manifests::RegistryPolicy) {
         self.registry = policy;
+    }
+
+    /// #1150: where registry kinds that start through a package runner get their empty working folders (the node's `<data>/runner`).
+    pub fn set_runner_root(&mut self, root: PathBuf) {
+        self.runner_root = Some(std::path::absolute(&root).unwrap_or(root));
+    }
+
+    /// #1150 (ADR-0092): the folder the package runner of `kind` is started in, for an ACP registry kind (by origin) that starts
+    /// through one (`npx`, `uvx`: [`crate::manifests::fetches_at_start`]); `None` for every other kind, which starts in its worktree
+    /// as before. A runner reads package-manager configuration from the folder it starts in and the folders above it (a project's
+    /// `.npmrc`, `package.json` and `node_modules`; uv's `uv.toml`, `pyproject.toml` and `.python-version`), which could change what
+    /// the pinned package resolves to; from this folder (inside the node's data folder) it reads only the owner's own user and global
+    /// configuration. The agent still works in its worktree: ACP gives it the session's folder (`cwd`), which an agent must use
+    /// wherever its process was started. Every start gets a new folder ([`crate::runner_folders::new_folder`]); the agent's earlier
+    /// ones are removed on another thread, bounded, outside this lock ([`crate::runner_folders::remove_in_background`]). Only a kind
+    /// run behind the ACP bridge (no `[adapter]` of its own) and an agent with a plain id are started this way; anything else is
+    /// refused.
+    fn runner_folder(&self, kind: &str, id: &AgentId) -> Result<Option<PathBuf>, SupervisorError> {
+        let Some(k) = self.kinds.get(kind) else {
+            return Ok(None);
+        };
+        if !(self.registry_kinds.contains(kind) && crate::manifests::fetches_at_start(&k.manifest))
+        {
+            return Ok(None);
+        }
+        if k.manifest.adapter.is_some() {
+            return Err(SupervisorError::Spawn(
+                "a package runner of a registry kind runs only behind the ACP bridge".into(),
+            ));
+        }
+        if !crate::transcript::plain_id(id.as_str()) {
+            return Err(SupervisorError::Spawn(
+                "package runner folder: not a plain agent id".into(),
+            ));
+        }
+        let root = self
+            .runner_root
+            .as_ref()
+            .ok_or_else(|| SupervisorError::Spawn("no folder for package runners".into()))?;
+        let dir = crate::runner_folders::new_folder(root, id.as_str())
+            .map_err(|e| SupervisorError::Spawn(format!("package runner folder: {e}")))?;
+        if let Some(name) = dir.file_name() {
+            let earlier = crate::runner_folders::earlier_folders(root, id.as_str(), name);
+            crate::runner_folders::remove_in_background(root.clone(), earlier);
+        }
+        Ok(Some(dir))
     }
 
     /// #1133: whether a start of `kind` must be signed by a person's device: a kind from the ACP registry started through a package
@@ -2045,6 +2095,7 @@ impl Supervisor {
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|(profile, file)| {
+                    let runner = self.runner_folder(&req.kind, &id)?;
                     launch_adapter(
                         &id,
                         self.holder.as_ref(),
@@ -2057,6 +2108,7 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                         file,
+                        runner.as_deref(),
                         self.sandbox.enforceable(),
                     )
                 })
@@ -2308,6 +2360,7 @@ impl Supervisor {
         let result = self
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
             .and_then(|(profile, file)| {
+                let runner = self.runner_folder(&req.kind, &id)?;
                 launch_adapter(
                     &id,
                     self.holder.as_ref(),
@@ -2320,6 +2373,7 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                     file,
+                    runner.as_deref(),
                     self.sandbox.enforceable(),
                 )
             })
@@ -2586,6 +2640,13 @@ impl Supervisor {
             .get(id)
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
+        // #1150: a new folder for this start, as at the first (the one the process that ended used is removed off this thread).
+        let runner = self
+            .adapters
+            .get(id)
+            .map(|e| self.runner_folder(&e.agent.kind, id))
+            .transpose()
+            .map(Option::flatten);
         let holder = self.holder.clone();
         let kept_launch = self.kept_launch.contains(id);
         let enforceable = self.sandbox.enforceable();
@@ -2600,6 +2661,7 @@ impl Supervisor {
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
             let (profile, file) = profile?;
+            let runner = runner?;
             launch_adapter(
                 id,
                 holder.as_ref(),
@@ -2612,6 +2674,7 @@ impl Supervisor {
                 creds,
                 held.as_ref(),
                 file,
+                runner.as_deref(),
                 enforceable,
             )
         });
@@ -3989,6 +4052,7 @@ impl Supervisor {
                 Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
                 None => (None, None),
             };
+            let runner = self.runner_folder(&entry.agent.kind, id)?;
             let native = entry.agent.session.is_some();
             // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
             let mesh = self.adapter_mesh(
@@ -4009,6 +4073,7 @@ impl Supervisor {
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
                 git_config,
+                runner.as_deref(),
                 self.sandbox.enforceable(),
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
@@ -4842,12 +4907,41 @@ fn launch_adapter(
     credentials: Vec<(String, String)>,
     folder: Option<&agora_platform::HeldFolder>,
     git_config: Option<crate::gitconfig::LaunchFile>,
+    runner: Option<&Path>,
     enforceable: bool,
 ) -> Result<Launched, SupervisorError> {
     let (program, args) = spec
         .command
         .split_first()
         .ok_or_else(|| SupervisorError::Spawn("empty adapter command".into()))?;
+    let mut args = args.to_vec();
+    // #1150: a registry kind's package runner starts in its own empty folder (`Supervisor::runner_folder`), never in the worktree;
+    // the bridge stays in the worktree and tells the agent its session's folder. Only the ACP bridge can do that: a registry kind
+    // whose runner is its own adapter command (the conversion never writes one) is not started.
+    if let Some(dir) = runner {
+        let dir_text = dir
+            .to_str()
+            .ok_or_else(|| SupervisorError::Spawn("package runner folder is not UTF-8".into()))?;
+        if Path::new(program) != bridge_program()
+            || args.first().map(String::as_str) != Some("acp-bridge")
+        {
+            return Err(SupervisorError::Spawn(
+                "a package runner of a registry kind runs only behind the ACP bridge".into(),
+            ));
+        }
+        args.splice(
+            1..1,
+            [
+                agora_adapters::acp::RUNNER_CWD_FLAG.to_string(),
+                dir_text.to_string(),
+            ],
+        );
+        // Confined: the folder is opened as the worktree is (on macOS it lies below the node's closed home, `reopen`).
+        if let Some(profile) = &mut sandbox {
+            profile.write.push(dir.to_path_buf());
+            profile.reopen.push(dir.to_path_buf());
+        }
+    }
     let mut env: Vec<(String, String)> = spec
         .env
         .iter()
@@ -4874,7 +4968,7 @@ fn launch_adapter(
     }
     let config = AdapterConfig {
         program: program.into(),
-        args: args.to_vec(),
+        args,
         env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,

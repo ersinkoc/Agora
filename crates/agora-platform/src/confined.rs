@@ -223,6 +223,25 @@ impl ConfinedDir {
         }
         imp::remove_file(&self.dir, name)
     }
+
+    /// Removes the empty folder `name` as itself, never what a link there points at: on Unix a link in its place is refused
+    /// (`ENOTDIR`; [`Self::remove_file`] removes a link), on Windows a junction or folder link is removed as itself. A folder that is
+    /// not empty is not removed. Close any handle to it first.
+    pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        if !valid_component(name) {
+            return Err(refused());
+        }
+        imp::remove_dir(&self.dir, name)
+    }
+
+    /// Visits this folder's entries through its handle ([`crate::visit_dir`]: `.` and `..` left out, links described as themselves,
+    /// stopping at the first [`std::ops::ControlFlow::Break`] without reading further entries).
+    pub fn visit(
+        &self,
+        visitor: impl FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+    ) -> io::Result<()> {
+        crate::visit_dir(&self.dir, visitor)
+    }
 }
 
 /// The fixed part of `FILE_RENAME_INFORMATION` (the layout the system documents, with a pointer-sized `RootDirectory`).
@@ -444,6 +463,17 @@ mod imp {
         let c = cname(name)?;
         // SAFETY: a live directory descriptor and a NUL-terminated name; flags 0 removes a non-directory entry itself.
         let r = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_dir(dir: &File, name: &OsStr) -> io::Result<()> {
+        let c = cname(name)?;
+        // SAFETY: a live directory descriptor and a NUL-terminated name; `AT_REMOVEDIR` removes an empty folder entry itself and
+        // refuses a link (`ENOTDIR`) instead of following it.
+        let r = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
         if r < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -699,6 +729,20 @@ mod imp {
         set_delete(&file)
     }
 
+    pub(super) fn remove_dir(dir: &File, name: &OsStr) -> io::Result<()> {
+        // Opened as itself (`FILE_OPEN_REPARSE_POINT`): a junction or folder link is deleted as itself, never its target. A folder
+        // that is not empty refuses the delete.
+        let folder = nt_open(
+            dir,
+            name,
+            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )?;
+        set_delete(&folder)
+    }
+
     /// Deletes through the handle this process made (opened with DELETE, not shared): no name is looked up, so nothing else can
     /// be removed.
     pub(super) fn remove_owned(_dir: &File, file: &File, _name: &OsStr) -> io::Result<()> {
@@ -760,6 +804,9 @@ mod imp {
         unsupported()
     }
     pub(super) fn remove_owned(_: &File, _: &File, _: &OsStr) -> io::Result<()> {
+        unsupported()
+    }
+    pub(super) fn remove_dir(_: &File, _: &OsStr) -> io::Result<()> {
         unsupported()
     }
 }
