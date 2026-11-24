@@ -1,6 +1,6 @@
 # Changelog
 
-Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
+Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`. Changes since the last release not listed under Next yet are in `changelog.d/`, one file each; the release folds them in.
 
 ## Next
 
