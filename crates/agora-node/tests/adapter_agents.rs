@@ -222,6 +222,7 @@ fn a_hung_adapter_stalls_only_its_own_call_not_the_supervisor() {
         .unwrap()
         .prepare_prompt(&hung, "hang", false)
         .unwrap();
+    let asked = Instant::now();
     let stuck = std::thread::spawn(move || call.run());
     std::thread::sleep(Duration::from_millis(300));
     assert!(
@@ -250,9 +251,28 @@ fn a_hung_adapter_stalls_only_its_own_call_not_the_supervisor() {
         begun.elapsed()
     );
     assert!(!stuck.is_finished());
-    // The hung call ends by its own timeout (10 s), with an error, and nothing else was waiting on it.
+    // The hung call ends by its own timeout (10 s), with an error, and nothing else was waiting on it. #1150: a prompt that was not
+    // answered in time is a failed prompt, never a failed start (`agent start failed`, reference `unassigned`).
+    let failed = stuck.join().expect("the call's thread");
+    assert!(
+        asked.elapsed() >= Duration::from_secs(9),
+        "the call ended before its timeout: {:?}",
+        asked.elapsed()
+    );
     drop(sup);
-    let _ = stuck.join();
+    let Err(e) = failed else {
+        panic!("the hung prompt was answered: {failed:?}")
+    };
+    assert!(
+        matches!(e, agora_node::supervisor::SupervisorError::Prompt(_)),
+        "{e:?}"
+    );
+    let answer = e.to_protocol();
+    assert_eq!(answer.code, agora_protocol::ErrorCode::Internal);
+    assert_eq!(
+        answer.params.get("incident_id"),
+        Some(&agora_protocol::ParamValue::Str("agent.prompt".into()))
+    );
 }
 
 #[test]
