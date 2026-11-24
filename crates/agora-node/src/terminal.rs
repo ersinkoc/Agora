@@ -521,7 +521,8 @@ impl TerminalHandle {
 
     /// Subscribe to live output. Returns the current screen and a subscription that delivers everything
     /// the process writes after exactly that screen: registration and snapshot happen under one lock, so
-    /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order.
+    /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order. A subscriber of a terminal
+    /// whose program already ended finds [`Output::Exited`] waiting first (F1481).
     pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
         let (_, snapshot, sub) = self.subscribe_with_history(0);
         (snapshot, sub)
@@ -604,7 +605,8 @@ impl TerminalWatch {
     /// [`TerminalHandle::subscribe`] that also returns the kind 4 frames putting the newest `lines` scrollback lines into the
     /// window's own scrollback (ADR-0100 decision 2), sent before the snapshot: none for 0, while the program is on the alternate
     /// screen, or when nothing is kept. History, screen and registration are captured under one lock, so the history ends where the
-    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released.
+    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released. When the program
+    /// already ended, [`Output::Exited`] is queued on the new subscription first (F1481).
     pub fn subscribe_with_history(
         &self,
         lines: usize,
@@ -615,6 +617,11 @@ impl TerminalWatch {
             let mut g = self.inner.lock();
             let history = (lines > 0).then(|| HistoryCapture::capture(g.term.as_ref(), lines));
             let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
+            // F1481: the process already ended, so its `Exited` went out before this subscriber was there. It gets it first (an
+            // empty queue has room), and the window hears the code rather than an unknown end once the terminal is let go.
+            if let Some(st) = g.exit {
+                let _ = tx.try_send(Output::Exited(st));
+            }
             g.subscribers.push(Subscriber {
                 tx,
                 lagged: Arc::clone(&lagged),
@@ -649,19 +656,33 @@ fn bump(inner: &Inner, f: impl FnOnce(&mut Shared)) {
     inner.advance(g);
 }
 
-/// How often an idle actor checks that the child still exists. Normally the output channel closing ends the
+/// How often the actor checks that the child still exists, idle or not (F1480). Normally the output channel closing ends the
 /// loop at once; this only matters when a descendant that escaped the process group keeps the PTY open.
 const IDLE_CHECK: Duration = Duration::from_secs(1);
 
 fn run(mut pty: Box<dyn Pty>, inner: &Inner) {
+    // F1480: a descendant outside the process group that keeps the terminal open and writes more often than `IDLE_CHECK` never lets
+    // the channel go quiet, so the child is also looked for at that pace while output flows (one clock read per chunk). Once it is
+    // gone, what it printed last still has one more `IDLE_CHECK` to reach the screen before the loop ends.
+    let mut next_check = Instant::now() + IDLE_CHECK;
+    let mut ended = false;
     loop {
         match pty.output().recv_timeout(IDLE_CHECK) {
-            Ok(chunk) => bump(inner, |s| {
-                s.term.feed(&chunk);
-                if !s.subscribers.is_empty() {
-                    broadcast(s, &Output::Data(Arc::from(chunk)));
+            Ok(chunk) => {
+                bump(inner, |s| {
+                    s.term.feed(&chunk);
+                    if !s.subscribers.is_empty() {
+                        broadcast(s, &Output::Data(Arc::from(chunk)));
+                    }
+                });
+                if Instant::now() >= next_check {
+                    if ended {
+                        break;
+                    }
+                    ended = matches!(pty.try_wait(), Ok(Some(_)));
+                    next_check = Instant::now() + IDLE_CHECK;
                 }
-            }),
+            }
             // Closed: the process side of the terminal is gone (killed or exited).
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
