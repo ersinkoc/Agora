@@ -71,7 +71,7 @@ use crate::transcript::{
     redact_entry, redact_lines, redact_text, redact_words_again, AtEnd, Batch, Cuts, Line, Run,
     RunPart, Secrets, Seed, Side, Store, Wake, MIN_PART,
 };
-use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};
+use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core_at, Style};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
 pub const MAX_ENTRIES: usize = 500;
@@ -480,17 +480,85 @@ fn reported(cuts: &[ReportedCut], field: &CutField) -> Vec<usize> {
         .collect()
 }
 
-/// ADR-0111: where a place an adapter reported in a call's tool name or arguments lands in the text [`describe`] makes of the call
-/// (`{"tool":<the name as JSON>,"arguments":<the arguments>}`).
-fn call_text_cut(tool: &str, arguments_json: &str, c: &ReportedCut) -> Option<usize> {
+/// ADR-0111: where the places an adapter reported in a call's tool name or arguments, or in a plan's steps, land in the text
+/// [`describe`] makes of the item (`{"tool":<the name as JSON>,"arguments":<the arguments>}`; the steps joined by line breaks). One
+/// pass over the name or the steps, however many places there are; a place past the longest entry is left out (the text is cut
+/// before it, and its end is a place then).
+fn composed_text_cuts(item: &ChatItem, cuts: &[ReportedCut]) -> Vec<usize> {
     const HEAD: usize = "{\"tool\":".len();
-    match c.field {
-        // The name's characters before the place, escaped as JSON, after its opening quote.
-        CutField::Tool => Some(HEAD + json_string(tool.get(..c.at)?).len() - 1),
-        CutField::Arguments if !arguments_json.is_empty() => {
-            Some(HEAD + json_string(tool).len() + ",\"arguments\":".len() + c.at)
+    const ARGS: usize = ",\"arguments\":".len();
+    let mut out = Vec::new();
+    match item {
+        ChatItem::ToolCall {
+            tool,
+            arguments_json,
+        } => {
+            let mut name: Vec<usize> = cuts
+                .iter()
+                .filter(|c| c.field == CutField::Tool && c.at <= MAX_ENTRY_BYTES)
+                .map(|c| c.at)
+                .collect();
+            name.sort_unstable();
+            let args: Vec<usize> = cuts
+                .iter()
+                .filter(|c| c.field == CutField::Arguments && c.at <= MAX_ENTRY_BYTES)
+                .map(|c| c.at)
+                .collect();
+            if name.is_empty() && (args.is_empty() || arguments_json.is_empty()) {
+                return out;
+            }
+            // The name's characters before each place, escaped as JSON, after its opening quote; the whole name only when a place
+            // in the arguments needs its length.
+            let mut escaped = 0;
+            let mut k = 0;
+            for (i, ch) in tool.char_indices() {
+                while k < name.len() && name[k] <= i {
+                    out.push(HEAD + 1 + escaped);
+                    k += 1;
+                }
+                if k == name.len() && (args.is_empty() || arguments_json.is_empty()) {
+                    break;
+                }
+                escaped += json_len(ch);
+            }
+            out.extend(name[k..].iter().map(|_| HEAD + 1 + escaped));
+            if !arguments_json.is_empty() {
+                out.extend(args.iter().map(|a| HEAD + escaped + 2 + ARGS + a));
+            }
         }
-        _ => None,
+        ChatItem::Plan(lines) => {
+            let mut steps: Vec<(usize, usize)> = cuts
+                .iter()
+                .filter_map(|c| match c.field {
+                    CutField::Step(i) if c.at <= MAX_ENTRY_BYTES => Some((i, c.at)),
+                    _ => None,
+                })
+                .collect();
+            steps.sort_unstable();
+            let mut k = 0;
+            let mut start = 0;
+            for (i, line) in lines.iter().enumerate() {
+                if k == steps.len() || start > MAX_ENTRY_BYTES {
+                    break;
+                }
+                while k < steps.len() && steps[k].0 == i {
+                    out.push(start + steps[k].1);
+                    k += 1;
+                }
+                start += line.len() + 1;
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The length of a character as [`json_string`] writes it.
+fn json_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
     }
 }
 
@@ -527,9 +595,10 @@ fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>)
 }
 
 /// [`tidy_cuts`], with the places an adapter reported it cut `text` (ADR-0111: byte offsets in `text` as sent, character boundaries,
-/// its end included). Each is a seam as the `PRE_BOUND` cut is: the text is cleaned apart on each side of it, so where it lands in the
-/// result is known, and it is recorded like the node's own places (also at the very end of the result, where the node's are not). One
-/// in the middle a cut dropped is gone with it (that cut is a place itself). The `bool` says only whether the node cut something.
+/// its end included). The text is cleaned as without them; each lands where cleaning puts the text around it
+/// (`agora_adapters::text::strip_core_at`) and is recorded like the node's own places (also at the very end of the result, where the
+/// node's are not). One in the middle a cut dropped is gone with it (that cut is a place itself). The `bool` says only whether the
+/// node cut something.
 fn tidy_cuts_at(
     text: &str,
     max: usize,
@@ -537,8 +606,8 @@ fn tidy_cuts_at(
     reported: &[usize],
 ) -> (String, bool, Vec<usize>) {
     let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);
-    // Where the text is cleaned apart, in `bounded`, and whether an adapter reported the place.
-    let mut parts: Vec<(usize, bool)> = reported
+    // The reported places in `bounded`, in order. One in the middle the first cut dropped is gone (that cut is a place itself).
+    let mut places: Vec<usize> = reported
         .iter()
         .filter_map(|&r| match first {
             Some((h, tail)) if r > h && r < tail => None,
@@ -546,35 +615,30 @@ fn tidy_cuts_at(
             _ => Some(r),
         })
         .filter(|&r| bounded.is_char_boundary(r))
-        .map(|r| (r, true))
-        .chain(first.map(|(h, _)| (h, false)))
         .collect();
-    let mut seams = Vec::with_capacity(parts.len());
-    let cleaned = if parts.is_empty() {
-        strip_core(&bounded, style)
-    } else {
-        parts.sort_unstable();
-        parts.dedup_by(|b, a| {
-            a.0 == b.0 && {
-                a.1 |= b.1;
-                true
-            }
-        });
-        // The first part's own string grows into the whole, as the head of the `PRE_BOUND` cut always did (no copy of it).
-        let mut cleaned = String::new();
-        let mut from = 0;
-        for &(to, reported) in &parts {
-            let part = strip_core(&bounded[from..to], style);
-            if from == 0 {
-                cleaned = part;
-            } else {
-                cleaned.push_str(&part);
-            }
-            seams.push((cleaned.len(), reported));
-            from = to;
+    places.sort_unstable();
+    places.dedup();
+    // Where each place is in the cleaned text, and whether an adapter reported it. The text is cleaned apart only at the node's own
+    // first cut; a reported place never splits the cleaning (inside an escape sequence or a `\r\n` it lands where cleaning the whole
+    // puts it), so it never changes what is kept.
+    let mut seams: Vec<(usize, bool)> = Vec::with_capacity(places.len() + 2);
+    let cleaned = match first {
+        Some((h, _)) => {
+            let split = places.partition_point(|&p| p <= h);
+            let (head, at) = strip_core_at(&bounded[..h], style, &places[..split]);
+            seams.extend(at.into_iter().map(|a| (a, true)));
+            let seam = head.len();
+            seams.push((seam, false));
+            let tail_places: Vec<usize> = places[split..].iter().map(|p| p - h).collect();
+            let (tail, at) = strip_core_at(&bounded[h..], style, &tail_places);
+            seams.extend(at.into_iter().map(|a| (a + seam, true)));
+            head + &tail
         }
-        cleaned.push_str(&strip_core(&bounded[from..], style));
-        cleaned
+        None => {
+            let (cleaned, at) = strip_core_at(&bounded, style, &places);
+            seams.extend(at.into_iter().map(|a| (a, true)));
+            cleaned
+        }
     };
     let (out, last) = cap_middle(cleaned, max);
     if let Some((h, dropped)) = last {
@@ -1891,22 +1955,9 @@ impl ChatBoard {
                 let at: Vec<usize> = match other {
                     ChatItem::Text(_) => reported(cuts, &CutField::Text),
                     ChatItem::Diff { .. } if !text.is_empty() => reported(cuts, &CutField::Text),
-                    ChatItem::ToolCall {
-                        tool,
-                        arguments_json,
-                    } => cuts
-                        .iter()
-                        .filter_map(|c| call_text_cut(tool, arguments_json, c))
-                        .collect(),
-                    ChatItem::Plan(lines) => cuts
-                        .iter()
-                        .filter_map(|c| match c.field {
-                            CutField::Step(i) if i < lines.len() => Some(
-                                lines.iter().take(i).map(|l| l.len() + 1).sum::<usize>() + c.at,
-                            ),
-                            _ => None,
-                        })
-                        .collect(),
+                    ChatItem::ToolCall { .. } | ChatItem::Plan(_) => {
+                        composed_text_cuts(other, cuts)
+                    }
                     _ => Vec::new(),
                 };
                 let path_at: Vec<usize> = reported(cuts, &CutField::DiffPath)
@@ -5623,7 +5674,7 @@ mod every_cut {
             "chat.rs",
             include_str!("chat.rs"),
             &[
-                ("use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};", "an import"),
+                ("use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core_at, Style};", "an import"),
                 ("let params: Vec<(String, String)> = e.params.drain().collect();", "a map's whole items moved out: nothing of a text is dropped"),
                 ("fn cut(text: String) -> String {", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
                 ("cap_end(text, MAX_ENTRY_BYTES).0", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
@@ -5635,9 +5686,10 @@ mod every_cut {
                 ("let (out, cut, _) = tidy_cuts(text, max, style);", "the place is recorded"),
                 ("(out, cut)", "the seeding helper"),
                 ("let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);", "the place is recorded"),
-                ("let part = strip_core(&bounded[from..to], style);", "the place is recorded"),
-                ("cleaned.push_str(&strip_core(&bounded[from..], style));", "the place is recorded"),
-                ("CutField::Tool => Some(HEAD + json_string(tool.get(..c.at)?).len() - 1),", "ADR-0111: a place measured; nothing of a text is dropped"),
+                ("let (head, at) = strip_core_at(&bounded[..h], style, &places[..split]);", "the place is recorded"),
+                ("let tail_places: Vec<usize> = places[split..].iter().map(|p| p - h).collect();", "ADR-0111: a list of places, not a text"),
+                ("out.extend(name[k..].iter().map(|_| HEAD + 1 + escaped));", "ADR-0111: a list of places, not a text"),
+                ("let (tail, at) = strip_core_at(&bounded[h..], style, &tail_places);", "the place is recorded"),
                 ("let (out, last) = cap_middle(cleaned, max);", "the place is recorded"),
                 ("joined.push_str(&balanced(out[at..seam].to_string(), style));", "the place is recorded"),
                 ("self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);", "the carry: kept in memory, never written"),
@@ -6818,6 +6870,167 @@ mod live {
         // A place inside a character (never from the host, which checks) is left out rather than cut through.
         let (out, _, places) = tidy_cuts_at("aé", 100, Style::Prose, &[2]);
         assert_eq!((out.as_str(), places), ("aé", Vec::new()));
+    }
+
+    /// ADR-0111 (review of #1187): a place reported inside an escape sequence, or between `\r` and `\n`, never splits the cleaning:
+    /// a value the escape sat in is whole once cleaned, and is replaced whole, exactly as without the place. (Cleaning apart at the
+    /// place left `31m` in the text, so the value's second half stood away from every edge.)
+    #[test]
+    fn a_place_inside_an_escape_sequence_masks_no_less_than_none() {
+        let half = CUT_VALUE.len() / 2;
+        for (tag, mid) in [
+            ("esc", "\u{1b}[31m"),
+            ("osc", "\u{1b}]0;t\u{7}"),
+            ("crlf", ""),
+        ] {
+            let (out, at) = if mid.is_empty() {
+                // The place between `\r` and `\n`, the value after them.
+                let out = format!("the key is\r\n{CUT_VALUE} and more words");
+                let at = out.find('\n').unwrap();
+                (out, at)
+            } else {
+                let out = format!(
+                    "the key is {}{mid}{} and more words",
+                    &CUT_VALUE[..half],
+                    &CUT_VALUE[half..]
+                );
+                // Just after the sequence's first two characters.
+                let at = out.find('\u{1b}').unwrap() + 2;
+                (out, at)
+            };
+            let mut outputs = Vec::new();
+            for report in [false, true] {
+                let (_d, store, b) = board(
+                    &format!("adr0111-inside-{tag}-{report}"),
+                    &[CUT_VALUE],
+                    Limits::default(),
+                );
+                let a = AgentId::new("a");
+                let mut f = Follower::of(&b, &a);
+                let item = ChatItem::Tool(ToolItem {
+                    call_id: "c1".into(),
+                    tool: Some("sh".into()),
+                    status: "completed".into(),
+                    output: Some(out.clone()),
+                    ..ToolItem::default()
+                });
+                let cut = ReportedCut {
+                    field: CutField::Output,
+                    at,
+                };
+                let cuts = if report {
+                    std::slice::from_ref(&cut)
+                } else {
+                    &[]
+                };
+                b.push_item_cut(&a, &item, cuts, 1);
+                for batch in b.take_unsaved() {
+                    store.write(&batch).unwrap();
+                }
+                assert_eq!(leak(&mut f, CUT_VALUE), None, "{tag} {report}");
+                assert_eq!(saved_leak(&store, "a", CUT_VALUE), None, "{tag} {report}");
+                outputs.push(store.read("a").entries[0].0.output.clone());
+            }
+            assert_eq!(
+                outputs[0], outputs[1],
+                "{tag}: the place changed what is kept"
+            );
+        }
+        // Where such places land: where the sequence was, and before the line break `\r\n` makes.
+        let (out, at) = strip_core_at("ab\u{1b}[31mcd", Style::Prose, &[4, 6]);
+        assert_eq!((out.as_str(), at), ("abcd", vec![2, 2]));
+        let (out, at) = strip_core_at("a\r\nb", Style::Prose, &[2, 4]);
+        assert_eq!((out.as_str(), at), ("a\nb", vec![1, 3]));
+    }
+
+    /// ADR-0111: places that never come from the host (past the end, inside a character, an index past the list) go straight to the
+    /// board: nothing panics and every item is kept as without them.
+    #[test]
+    fn hostile_places_on_the_board_change_nothing_and_never_panic() {
+        for (name, item, _) in cut_items() {
+            let hostile: Vec<ReportedCut> = [
+                CutField::Text,
+                CutField::Tool,
+                CutField::Arguments,
+                CutField::Output,
+                CutField::Path(usize::MAX),
+                CutField::Step(usize::MAX),
+                CutField::Step(1),
+                CutField::DiffPath,
+                CutField::Param("detail".into()),
+            ]
+            .into_iter()
+            .flat_map(|field| {
+                [usize::MAX, MAX_ENTRY_BYTES + 1, 1_000_000].map(|at| ReportedCut {
+                    field: field.clone(),
+                    at,
+                })
+            })
+            .collect();
+            let a = AgentId::new("a");
+            let (_d, _s, plain) = board(
+                &format!("adr0111-plain-{name}"),
+                &[CUT_VALUE],
+                Limits::default(),
+            );
+            plain.push_item(&a, &item, 1);
+            let (_d, store, b) = board(
+                &format!("adr0111-hostile-{name}"),
+                &[CUT_VALUE],
+                Limits::default(),
+            );
+            b.push_item_cut(&a, &item, &hostile, 1);
+            for batch in b.take_unsaved() {
+                store.write(&batch).unwrap();
+            }
+            let shown = |b: &ChatBoard| -> Vec<Vec<String>> {
+                b.snapshot(&a)
+                    .iter()
+                    .map(|e| fields(e).into_iter().map(str::to_string).collect())
+                    .collect()
+            };
+            assert_eq!(shown(&b), shown(&plain), "{name}");
+        }
+    }
+
+    /// ADR-0111: a resumed session's replay keeps its reported places.
+    #[test]
+    fn a_replayed_item_keeps_its_reported_places() {
+        let (_d, store, b) = board("adr0111-replay", &[CUT_VALUE], Limits::default());
+        let a = AgentId::new("a");
+        let (_, item, cut) = cut_items()
+            .into_iter()
+            .find(|(n, _, _)| *n == "output")
+            .unwrap();
+        assert!(b.replayed(&a, &[(item, vec![cut])], 1));
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+        let mut late = Follower::of(&b, &a);
+        assert_eq!(leak(&mut late, CUT_VALUE), None);
+        assert_eq!(saved_leak(&store, "a", CUT_VALUE), None);
+    }
+
+    /// ADR-0111 (review of #1187): places in a plan of very many steps cost one pass, however many there are.
+    #[test]
+    #[ignore = "a measurement (ADR-0111): cargo test -p agora-node --lib -- --ignored adr0111_many_steps"]
+    fn adr0111_many_steps() {
+        let lines = vec![String::new(); 1_400_000];
+        let cuts: Vec<ReportedCut> = (0..64)
+            .map(|k| ReportedCut {
+                field: CutField::Step(lines.len() - 1 - k),
+                at: 0,
+            })
+            .collect();
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let item = ChatItem::Plan(lines);
+        let start = std::time::Instant::now();
+        b.push_item_cut(&a, &item, &cuts, 1);
+        eprintln!("plan of 1.4M steps, 64 places: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        b.push_item(&a, &item, 2);
+        eprintln!("the same without places: {:?}", start.elapsed());
     }
 
     /// ADR-0111 (ADR-0022): the cost of reported places on the chat path: a 128 KiB tool output cleaned and capped with none and with

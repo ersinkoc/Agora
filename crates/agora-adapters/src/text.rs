@@ -7,6 +7,9 @@
 //! leaves a piece on each side, which the node's transcript writer looks for (`agora_node::transcript`). A test reads the node's chat
 //! code and the bridge for any other cut.
 
+use std::iter::Peekable;
+use std::str::Chars;
+
 /// The longest secret value the node looks for in what it writes (a value is at most 8 KiB, ADR-0084), with room for JSON's escapes:
 /// how much of an agent's earlier words the node keeps beside new ones.
 pub const MAX_SECRET_SPAN: usize = 16 * 1024;
@@ -82,14 +85,56 @@ pub fn strip_controls(s: &str, style: Style) -> String {
 
 /// [`strip_controls`] without the isolates' balance (done once over a whole text that was stripped in parts).
 pub fn strip_core(s: &str, style: Style) -> String {
+    strip::<false>(s, style, &[]).0
+}
+
+/// [`strip_core`], and where each of `places` (byte offsets in `s`, ascending, at most its length) lands in the result (ADR-0111).
+/// The text is cleaned as one, exactly as [`strip_core`] cleans it (the same code): a place inside an escape sequence lands where the
+/// sequence was (it is removed whole), one between `\r` and `\n` before the line break they make. So a place never changes what is
+/// kept.
+pub fn strip_core_at(s: &str, style: Style, places: &[usize]) -> (String, Vec<usize>) {
+    if places.is_empty() {
+        return (strip_core(s, style), Vec::new());
+    }
+    strip::<true>(s, style, places)
+}
+
+/// The next character, counting its bytes into `pos` when places are followed (`AT`; nothing more is done otherwise).
+#[inline(always)]
+fn take<const AT: bool>(chars: &mut Peekable<Chars<'_>>, pos: &mut usize) -> Option<char> {
+    let c = chars.next();
+    if AT {
+        *pos += c.map_or(0, char::len_utf8);
+    }
+    c
+}
+
+/// [`strip_core`]; with `AT`, also where each of `places` lands.
+fn strip<const AT: bool>(s: &str, style: Style, places: &[usize]) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(s.len());
+    let mut landed = Vec::with_capacity(places.len());
+    // The bytes of `s` taken so far (kept only with `AT`).
+    let mut pos = 0;
     let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
+    loop {
+        // Each turn takes one unit (a character, or an escape sequence with its payload) from the plain state: a place at or before
+        // its start lands here. A unit with places inside it (only an escape sequence) adds nothing to `out`.
+        if AT {
+            while landed.len() < places.len() && places[landed.len()] <= pos {
+                landed.push(out.len());
+            }
+        }
+        let Some(c) = take::<AT>(&mut chars, &mut pos) else {
+            break;
+        };
         match c {
             '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
                 let kind = match c {
                     // A line break right after an ESC is left for the text.
-                    '\u{1b}' => chars.next_if(|&c| !line_break(c)),
+                    '\u{1b}' => match chars.peek() {
+                        Some(&c) if !line_break(c) => take::<AT>(&mut chars, &mut pos),
+                        _ => None,
+                    },
                     '\u{9b}' => Some('['),
                     '\u{9d}' => Some(']'),
                     _ => Some('P'),
@@ -102,7 +147,7 @@ pub fn strip_core(s: &str, style: Style) -> String {
                             if line_break(c) || taken >= ESCAPE_PAYLOAD_MAX {
                                 break;
                             }
-                            chars.next();
+                            take::<AT>(&mut chars, &mut pos);
                             taken += 1;
                             // The final byte ends a CSI sequence.
                             if ('@'..='~').contains(&c) {
@@ -117,14 +162,14 @@ pub fn strip_core(s: &str, style: Style) -> String {
                             if line_break(c) || taken >= ESCAPE_PAYLOAD_MAX {
                                 break;
                             }
-                            chars.next();
+                            take::<AT>(&mut chars, &mut pos);
                             taken += 1;
                             if c == '\u{7}' || c == '\u{9c}' {
                                 break;
                             }
                             if c == '\u{1b}' {
                                 if chars.peek() == Some(&'\\') {
-                                    chars.next();
+                                    take::<AT>(&mut chars, &mut pos);
                                 }
                                 break;
                             }
@@ -150,7 +195,9 @@ pub fn strip_core(s: &str, style: Style) -> String {
             c => out.push(c),
         }
     }
-    out
+    // Places past the end (never from the node, which checks them) land at the end.
+    landed.resize(places.len(), out.len());
+    (out, landed)
 }
 
 /// `\n` or `\r` (a bare carriage return is a line break too): where an escape sequence that was never closed ends.

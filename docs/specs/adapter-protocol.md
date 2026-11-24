@@ -120,7 +120,7 @@ does not name a string, or whose `at` is past the string's end or inside a chara
 kept as if the entry were not there. The node logs that it ignored entries once per agent (`adapter.cuts_ignored`, with the agent and
 the count, never the text). The node treats each valid place as a place it cut itself: it carries it through its own cleaning and
 caps, and masks a fragment (4 bytes or more) of a held secret value that touches or crosses it, in the live stream and in the saved
-transcript alike. A place in the agent's words (`/text/text`) is a place in their stream too. Nothing else changes: an item from an
+transcript alike. A place in the agent's words or thinking (`/text/text`, `/thought/text`) is a place in their stream too, which joins both. A place never changes how the node cleans the string: one inside an escape sequence, or between `\r` and `\n`, is taken where cleaning the whole string puts the text around it. Nothing else changes: an item from an
 adapter without `chat.cuts`, or without `cuts`, is read as before ADR-0111.
 
 ## Rules

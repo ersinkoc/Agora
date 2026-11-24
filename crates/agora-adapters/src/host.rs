@@ -712,7 +712,68 @@ fn reported_cuts(p: &Value, item: &ChatItem) -> (Vec<ReportedCut>, usize) {
             None => ignored += 1,
         }
     }
+    kept_indices(p, item, &mut cuts);
     (cuts, ignored)
+}
+
+/// Which elements of a list an item keeps.
+type Keeps = fn(&Value) -> bool;
+
+/// ADR-0111: the list of an item whose elements a cut may name by index (`/toolCall/locations`, `/plan/entries`, `/plan/steps`), and
+/// which of its elements the item keeps.
+fn indexed_list(item: &ChatItem) -> Option<(&'static str, Keeps)> {
+    match item {
+        ChatItem::Tool(_) => Some(("/toolCall/locations", |l| {
+            l.get("path").is_some_and(Value::is_string)
+        })),
+        ChatItem::PlanSteps(_) => Some(("/plan/entries", Value::is_object)),
+        ChatItem::Plan(_) => Some(("/plan/steps", Value::is_string)),
+        _ => None,
+    }
+}
+
+/// ADR-0111: each index in `cuts` (as sent, of an element the item keeps: its pointer named a string there) made the index among the
+/// elements the item keeps, in one pass over the list up to the last index named, however many cuts name one.
+fn kept_indices(p: &Value, item: &ChatItem, cuts: &mut [ReportedCut]) {
+    let index = |c: &ReportedCut| match c.field {
+        CutField::Path(n) | CutField::Step(n) => Some(n),
+        _ => None,
+    };
+    let mut sent: Vec<usize> = cuts.iter().filter_map(index).collect();
+    let Some((list, keeps)) = indexed_list(item).filter(|_| !sent.is_empty()) else {
+        return;
+    };
+    sent.sort_unstable();
+    sent.dedup();
+    let mut kept = Vec::with_capacity(sent.len());
+    let mut before = 0;
+    for (i, v) in p
+        .pointer(list)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if kept.len() == sent.len() {
+            break;
+        }
+        while kept.len() < sent.len() && sent[kept.len()] <= i {
+            kept.push(before);
+        }
+        if keeps(v) {
+            before += 1;
+        }
+    }
+    for c in cuts.iter_mut() {
+        if let CutField::Path(n) | CutField::Step(n) = &mut c.field {
+            if let Ok(j) = sent.binary_search(n) {
+                // Every index named was checked against the list, so each is found; one that is not stays as sent.
+                if let Some(&k) = kept.get(j) {
+                    *n = k;
+                }
+            }
+        }
+    }
 }
 
 /// ADR-0111: one `cuts` entry `{field, at}`, when `field` points at a string of the item this host reads and `at` is a character
@@ -742,11 +803,12 @@ fn cut_field(p: &Value, item: &ChatItem, pointer: &str) -> Option<CutField> {
         .map(|t| t.replace("~1", "/").replace("~0", "~"))
         .collect();
     let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
-    // An array index as a JSON pointer writes it (no sign, no leading zero), as the index among the elements the item keeps.
-    let kept = |list: &str, i: &str, keeps: fn(&Value) -> bool| -> Option<usize> {
+    // An array index as a JSON pointer writes it (no sign, no leading zero), of an element the item keeps (`kept_indices` makes it
+    // the index among those).
+    let index = |list: &str, i: &str| -> Option<usize> {
         let n: usize = i.parse().ok().filter(|n: &usize| n.to_string() == i)?;
-        let a = p.pointer(list)?.as_array()?;
-        keeps(a.get(n)?).then(|| a.iter().take(n).filter(|v| keeps(v)).count())
+        let (_, keeps) = indexed_list(item)?;
+        keeps(p.pointer(list)?.as_array()?.get(n)?).then_some(n)
     };
     Some(match (item, tokens.as_slice()) {
         (ChatItem::Text(_), ["text", "text"])
@@ -758,16 +820,12 @@ fn cut_field(p: &Value, item: &ChatItem, pointer: &str) -> Option<CutField> {
         }
         (ChatItem::Tool(_), ["toolCall", "output"]) => CutField::Output,
         (ChatItem::Tool(_), ["toolCall", "locations", i, "path"]) => {
-            CutField::Path(kept("/toolCall/locations", i, |l| {
-                l.get("path").is_some_and(Value::is_string)
-            })?)
+            CutField::Path(index("/toolCall/locations", i)?)
         }
         (ChatItem::PlanSteps(_), ["plan", "entries", i, "text"]) => {
-            CutField::Step(kept("/plan/entries", i, Value::is_object)?)
+            CutField::Step(index("/plan/entries", i)?)
         }
-        (ChatItem::Plan(_), ["plan", "steps", i]) => {
-            CutField::Step(kept("/plan/steps", i, Value::is_string)?)
-        }
+        (ChatItem::Plan(_), ["plan", "steps", i]) => CutField::Step(index("/plan/steps", i)?),
         (ChatItem::Diff { .. }, ["diff", "path"]) => CutField::DiffPath,
         (ChatItem::Notice { .. }, ["notice", "params", key]) => CutField::Param((*key).to_string()),
         _ => return None,
@@ -2605,6 +2663,28 @@ mod tests {
             "cuts": [{"field": "/notice/params/x~1y", "at": 1}, {"field": "/notice/params/n", "at": 0}]}),
         );
         assert_eq!((c, n), (vec![cut(CutField::Param("x/y".into()), 1)], 1));
+    }
+
+    /// ADR-0111 (review of #1187): indices into a list of very many elements cost one pass, however many cuts name one.
+    #[test]
+    #[ignore = "a measurement (ADR-0111): cargo test -p agora-adapters --lib -- --ignored adr0111_many_steps"]
+    fn adr0111_many_steps() {
+        let n = 1_400_000;
+        let cuts: Vec<Value> = (0..64)
+            .map(|k| json!({"field": format!("/plan/steps/{}", n - 1 - k), "at": 0}))
+            .collect();
+        let mut p = json!({"sessionId": "s", "plan": {"steps": vec![""; n]}});
+        let start = std::time::Instant::now();
+        chat_cuts(p.clone());
+        eprintln!("1.4M steps, no cuts: {:?}", start.elapsed());
+        p["cuts"] = Value::Array(cuts);
+        let start = std::time::Instant::now();
+        let (_, c, ignored) = chat_cuts(p);
+        eprintln!("1.4M steps, 64 cuts: {:?}", start.elapsed());
+        assert_eq!((c.len(), ignored), (64, 0));
+        assert!(c
+            .iter()
+            .all(|c| matches!(c.field, CutField::Step(i) if i >= n - 64)));
     }
 
     /// ADR-0111 bounds: a list longer than 64, an unknown field, a target that is not a string, an offset past the end or inside a
