@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agora_protocol::frame::{
-    kinds, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS,
+    kinds, DEFAULT_MAX_PAYLOAD, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS,
+    STREAM_CONTROL, STREAM_EVENTS,
 };
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::{self, command_ok, command_request, command_response};
@@ -729,21 +730,17 @@ pub(crate) fn client_welcome(access: &crate::users::Access, now_ms: u64) -> v1::
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
-    // ADR-0103: chosen before the forgotten machines are cut, which needs their agents to know what to leave out. Copied here, outside
-    // the hub lock: the view holds the messages shared.
-    let recent_messages = view
-        .recent_messages()
-        .iter()
-        .map(|m| v1::PositionedEvent {
-            pos: m.pos,
-            event: Some(m.event.clone()),
-        })
-        .collect();
+    snapshot_for_client(view, pos, true)
+}
+
+fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
+    // ADR-0103: keep the original view for the history filter, which needs to see forgotten machines and agents.
+    let recent_messages = view.recent_messages();
     // ADR-0073: forgotten machines and what they ran are not shown.
     let shown = view.shown();
     let view: &View = &shown;
-    v1::Snapshot {
-        recent_messages,
+    let mut snapshot = v1::Snapshot {
+        recent_messages: Vec::new(),
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
             .agent_workspaces
@@ -768,7 +765,11 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
                 trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
-                binary: n.binary.clone(),
+                binary: if owner {
+                    n.binary.clone()
+                } else {
+                    crate::scope::short_binary(&n.binary)
+                },
             })
             .collect(),
         checkouts: view
@@ -883,7 +884,23 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 expires_at_ms: *exp,
             })
             .collect(),
+    };
+    if !recent_messages.is_empty() {
+        let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
+        // Each size includes the repeated field's tag and length. Keep the newest messages that fit, then send them oldest first.
+        for message in recent_messages.iter().rev() {
+            if message.size > remaining {
+                break;
+            }
+            remaining -= message.size;
+            snapshot.recent_messages.push(v1::PositionedEvent {
+                pos: message.pos,
+                event: Some(message.event.clone()),
+            });
+        }
+        snapshot.recent_messages.reverse();
     }
+    snapshot
 }
 
 /// A signed-in client: waits for `Subscribe`, answers with a snapshot or the backlog, then pushes live events until
@@ -1003,15 +1020,7 @@ where
                 scope = Some(s);
                 snapshot_of(&cut, *pos)
             }
-            None => {
-                let mut snap = snapshot_of(view, *pos);
-                if !owner {
-                    for n in &mut snap.nodes {
-                        n.binary = crate::scope::short_binary(&n.binary);
-                    }
-                }
-                snap
-            }
+            None => snapshot_for_client(view, *pos, owner),
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
@@ -2507,6 +2516,192 @@ async fn run_with(
         tokio::spawn(async move {
             let _ = handle(&state, tcp, acceptor, leaf_hash).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod snapshot_budget_tests {
+    use super::*;
+    use crate::scope::Scope;
+    use v1::event::Body;
+
+    const SNAPSHOT_POS: u64 = 500;
+
+    fn record(view: &mut View, pos: u64, node: &str, body: Body) -> v1::PositionedEvent {
+        let event = v1::Event {
+            producer_id: node.into(),
+            body: Some(body),
+            ..Default::default()
+        };
+        view.apply_at(pos, &event);
+        v1::PositionedEvent {
+            pos,
+            event: Some(event),
+        }
+    }
+
+    fn fixture(binary: &str) -> View {
+        let mut view = View::default();
+        record(
+            &mut view,
+            1,
+            "n1",
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                binary: binary.into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            2,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "sender".into(),
+                project_id: "p".into(),
+                ..Default::default()
+            }),
+        );
+        record(
+            &mut view,
+            3,
+            "n1",
+            Body::ApprovalRequested(v1::ApprovalRequested {
+                approval_id: "pad".into(),
+                agent_id: "sender".into(),
+                // Keep the padding in the same protobuf length-varint range through the 1 MiB boundary.
+                detail: "x".repeat(512 * 1024),
+                ..Default::default()
+            }),
+        );
+        view
+    }
+
+    fn say(view: &mut View, pos: u64, node: &str, from: &str, body: &str) -> v1::PositionedEvent {
+        record(
+            view,
+            pos,
+            node,
+            Body::MessagePosted(v1::MessagePosted {
+                message_id: format!("m-{pos}"),
+                from_agent_id: from.into(),
+                to: "sender".into(),
+                body: body.into(),
+            }),
+        )
+    }
+
+    fn wire_size(message: &v1::PositionedEvent) -> usize {
+        v1::Snapshot {
+            recent_messages: vec![message.clone()],
+            ..Default::default()
+        }
+        .encoded_len()
+    }
+
+    fn padding(view: &mut View) -> &mut String {
+        let Some(approval) = view.approvals.get_mut("n1/pad") else {
+            panic!("fixture approval is missing");
+        };
+        &mut approval.detail
+    }
+
+    fn leave_space(view: &mut View, bytes: usize, snapshot: impl Fn(&View) -> v1::Snapshot) {
+        let mut base = View {
+            messages: Arc::default(),
+            ..view.clone()
+        };
+        let additional = DEFAULT_MAX_PAYLOAD - bytes - snapshot(&base).encoded_len();
+        let detail = "x".repeat(additional);
+        padding(view).push_str(&detail);
+        padding(&mut base).push_str(&detail);
+        assert_eq!(snapshot(&base).encoded_len(), DEFAULT_MAX_PAYLOAD - bytes);
+    }
+
+    #[test]
+    fn snapshot_history_counts_the_complete_protobuf_element_at_the_boundary() {
+        let mut view = fixture("");
+        let message = say(&mut view, 128, "n1", "sender", &"a".repeat(256));
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&message), snapshot);
+
+        let exact = snapshot(&view);
+        assert_eq!(exact.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(exact.recent_messages, [message]);
+
+        padding(&mut view).push('x');
+        let short = snapshot(&view);
+        assert!(short.recent_messages.is_empty());
+        assert!(short.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn snapshot_history_stops_at_the_first_message_that_does_not_fit() {
+        let mut view = fixture("");
+        let old = say(&mut view, 128, "n1", "sender", "older");
+        say(&mut view, 129, "n1", "sender", &"x".repeat(16 * 1024));
+        let newest = say(&mut view, 130, "n1", "sender", "newest");
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, wire_size(&old) + wire_size(&newest), snapshot);
+
+        let result = snapshot(&view);
+        assert!(result.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [newest]);
+    }
+
+    #[test]
+    fn a_member_budgets_only_its_project_and_sender_copies() {
+        let mut view = fixture("/opt/releases/agora");
+        record(
+            &mut view,
+            4,
+            "n1",
+            Body::AgentStarted(v1::AgentStarted {
+                node_id: "n1".into(),
+                agent_id: "other".into(),
+                project_id: "private".into(),
+                ..Default::default()
+            }),
+        );
+        let visible = say(
+            &mut view,
+            128,
+            "n1",
+            "sender",
+            &"shared project ".repeat(10),
+        );
+        say(&mut view, 129, "n1", "other", &"p".repeat(1024));
+        say(&mut view, 130, "n1", "n2/remote", &"r".repeat(1024));
+        let member = |view: &View| {
+            let scope = Scope::from_view(["n1/p".into()].into(), view);
+            snapshot_of(&scope.filter_view(view), SNAPSHOT_POS)
+        };
+        leave_space(&mut view, wire_size(&visible), member);
+        assert!(snapshot_of(&view, SNAPSHOT_POS).recent_messages.is_empty());
+
+        let result = member(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.recent_messages, [visible]);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.agents.len(), 1);
+        assert_eq!(result.agents[0].agent_id, "n1/sender");
+    }
+
+    #[test]
+    fn the_shortened_binary_path_frees_budget_for_a_non_owner() {
+        let mut view = fixture("/opt/a-machine-specific-installation-directory/agora");
+        let message = say(&mut view, 128, "n1", "sender", &"hello ".repeat(40));
+        let non_owner = |view: &View| snapshot_for_client(view, SNAPSHOT_POS, false);
+        leave_space(&mut view, wire_size(&message), non_owner);
+
+        let result = non_owner(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert_eq!(result.nodes[0].binary, "agora");
+        assert_eq!(result.recent_messages, [message]);
+        let owner = snapshot_of(&view, SNAPSHOT_POS);
+        assert!(owner.encoded_len() <= DEFAULT_MAX_PAYLOAD);
+        assert!(owner.recent_messages.is_empty());
     }
 }
 

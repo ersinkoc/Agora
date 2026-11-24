@@ -552,8 +552,9 @@ A message goes to the ring of `<producer>/<from_agent_id>`'s project when that i
 to the ring of `<producer>/<to>`'s project when that is one (a receiver's copy, each `#channel` copy), else to a ring that only the
 owner reads; the hub never resolves an already-qualified `from` to another machine's agent. The rings are memory only, folded from the
 events the hub applies, so a hub rebuilds them from its log at start. A window is sent the newest 50 it may see, then fewer until they
-encode to at most 256 KiB together: the owner every ring, a member or viewer only the copies placed by their sender in a granted
-project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
+encode to at most 256 KiB together and fit in the space left in the 1 MiB snapshot frame after the other fields are encoded.
+If no message fits, the field is empty. The owner is eligible for every ring; a member or viewer sees only the copies placed by their
+sender in a granted project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
 forgotten machine recorded (they come back with the machine). Copies are sent as stored: the window pairs the two copies of a message
 between machines as it does live. A client folds them in as it folds a live `MessagePosted`, not by the position rule (their
 positions are not after the snapshot's), each position once, and ignores any other body. No capability: an older window ignores the
