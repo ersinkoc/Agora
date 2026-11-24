@@ -880,8 +880,10 @@ impl Drop for DownAgents {
 
 /// The agent kind `slow`, an adapter that never answers (it would wait 60 s), in `home`. Dropped, it ends the adapter that was started
 /// (the holder runs it in a session of its own, so it outlives the node and the holder): it writes its pid where this finds it.
+#[cfg(unix)]
 struct SlowKind(PathBuf);
 
+#[cfg(unix)]
 impl SlowKind {
     fn add(home: &Path) -> SlowKind {
         let pid_file = home.join("slow.pid");
@@ -897,6 +899,7 @@ impl SlowKind {
     }
 }
 
+#[cfg(unix)]
 impl Drop for SlowKind {
     fn drop(&mut self) {
         if let Some(pid) = std::fs::read_to_string(&self.0)
