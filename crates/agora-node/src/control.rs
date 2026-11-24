@@ -2043,6 +2043,15 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
+/// Whether `cmd` may arrive on a dynamic stream (3+): the commands that open one (protocol.md, "Terminal relay", "Chat transcript
+/// stream", `PreviewConnect`). Every other command belongs on stream 1, where the hub's commands pass the node's routed checks.
+pub(crate) fn opens_stream(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_) | Cmd::PreviewConnect(_)
+    )
+}
+
 fn handle_request(
     frame: &Frame,
     ctx: &Arc<ControlContext>,
@@ -2076,6 +2085,19 @@ fn handle_request(
             &req.request_id,
             Err(Error::new(ErrorCode::AuthUnauthenticated)),
         );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
+    // relay). Before the idempotency claim, so a refused request stores nothing.
+    let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+    let misplaced = match &req.command {
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
+        None => dynamic,
+    };
+    if misplaced {
+        let resp = response(&req.request_id, Err(invalid("stream_id")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
