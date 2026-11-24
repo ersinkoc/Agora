@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
     Adapter, AdapterCommand, AdapterConfig, AdapterEvent, Caller, ConfigOption, HostError,
-    McpServer, OptionKind, SessionOption, SessionOptions,
+    McpServer, OptionKind, ReportedCut, SessionOption, SessionOptions, CHAT_CUTS,
 };
 use agora_adapters::perm::{self, Category};
 use agora_adapters::{Detector, Manifest, Pacer};
@@ -154,7 +154,11 @@ pub enum SupervisorEvent {
     /// The node keeps them only for an agent whose transcript is empty (it holds the conversation already otherwise).
     ReplayedChat {
         agent: AgentId,
-        items: Vec<agora_adapters::host::ChatItem>,
+        /// Each item with the places its adapter reported it cut it (ADR-0111; empty from an adapter without `chat.cuts`).
+        items: Vec<(
+            agora_adapters::host::ChatItem,
+            Vec<agora_adapters::host::ReportedCut>,
+        )>,
     },
     /// Native session retained across a resumed/restarted process; copied only on a lifecycle transition.
     SessionReported {
@@ -928,6 +932,28 @@ impl AdapterEntry {
         self.capabilities.iter().any(|c| c == "approval_scopes")
     }
 
+    /// ADR-0111: the places the adapter reported it cut an item's text, kept only when it declared `chat.cuts` (an adapter without
+    /// it is read as before ADR-0111). Ignored entries are logged once per agent: a stable code and the count, never the text.
+    /// Takes the fields it reads (`capabilities`, `cuts_logged`) apart, so it can run while the adapter is borrowed.
+    fn reported_cuts(
+        capabilities: &[String],
+        cuts_logged: &mut bool,
+        id: &AgentId,
+        cuts: Vec<ReportedCut>,
+        ignored: usize,
+    ) -> Vec<ReportedCut> {
+        if !capabilities.iter().any(|c| c == CHAT_CUTS) {
+            return Vec::new();
+        }
+        if ignored > 0 && !std::mem::replace(cuts_logged, true) {
+            eprintln!(
+                "adapter.cuts_ignored: agent={} ignored={ignored}",
+                id.as_str()
+            );
+        }
+        cuts
+    }
+
     /// ADR-0101: the process runs the node's ACP bridge (`<agora> acp-bridge -- <agent>`, [`Manifest::driver`]). Read from the command
     /// it was started with, since every adapter agent's `agent.level` is `L3Adapter`.
     fn behind_acp_bridge(&self) -> bool {
@@ -955,6 +981,8 @@ struct AdapterEntry {
     options: SessionOptions,
     /// ADR-0090: what the adapter reports beyond modes and models, and the prompts waiting behind its turn.
     rich: AdapterRich,
+    /// ADR-0111: the node's log already says this agent's adapter sent `cuts` entries that were ignored (said once per agent).
+    cuts_logged: bool,
     /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
     /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
     mesh: Option<agora_adapters::inject::Endpoint>,
@@ -2147,6 +2175,7 @@ impl Supervisor {
                     capabilities,
                     options: SessionOptions::default(),
                     rich: AdapterRich::default(),
+                    cuts_logged: false,
                     mesh,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
@@ -2410,6 +2439,7 @@ impl Supervisor {
                 capabilities,
                 options: SessionOptions::default(),
                 rich: AdapterRich::default(),
+                cuts_logged: false,
                 mesh,
                 launch,
                 folder: None,
@@ -2486,7 +2516,21 @@ impl Supervisor {
                     let mut rest = Vec::new();
                     for ev in early {
                         match ev {
-                            AdapterEvent::Chat { item, .. } => items.push(item),
+                            AdapterEvent::Chat {
+                                item,
+                                cuts,
+                                cuts_ignored,
+                                ..
+                            } => items.push((
+                                item,
+                                AdapterEntry::reported_cuts(
+                                    &e.capabilities,
+                                    &mut e.cuts_logged,
+                                    id,
+                                    cuts,
+                                    cuts_ignored,
+                                ),
+                            )),
                             other => rest.push(other),
                         }
                     }
@@ -2600,6 +2644,29 @@ impl Supervisor {
                         }
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
                         schedule_adapter_restart(id, e, now, &policy, status, events);
+                    }
+                    AdapterEvent::Chat {
+                        session_id,
+                        item,
+                        cuts,
+                        cuts_ignored,
+                    } => {
+                        let cuts = AdapterEntry::reported_cuts(
+                            &e.capabilities,
+                            &mut e.cuts_logged,
+                            id,
+                            cuts,
+                            cuts_ignored,
+                        );
+                        events.push(SupervisorEvent::Adapter {
+                            agent: id.clone(),
+                            event: AdapterEvent::Chat {
+                                session_id,
+                                item,
+                                cuts,
+                                cuts_ignored,
+                            },
+                        });
                     }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
@@ -3911,6 +3978,7 @@ impl Supervisor {
                     capabilities: Vec::new(),
                     options: SessionOptions::default(),
                     rich: AdapterRich::default(),
+                    cuts_logged: false,
                     mesh: None,
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),

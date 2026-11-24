@@ -79,7 +79,9 @@ export function findMatches(lines: string[], query: string, limit = 10_000): Mat
   return out;
 }
 
-const escapeRe = (c: string) => c.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+// With the `u` flag an escape of anything but a syntax character or `/` is an error, so `-` is left as is: outside a class it is
+// plain, and a case class never holds it (`-` has no other case form, so it never gets a class).
+const escapeRe = (c: string) => c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 function caseClass(c: string): string {
   const forms = new Set([c, c.toLowerCase(), c.toUpperCase(), c.toLocaleLowerCase('tr'), c.toLocaleUpperCase('tr')]
     .filter((f) => [...f].length === 1));
