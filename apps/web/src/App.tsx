@@ -268,6 +268,9 @@ export function App() {
       return false;
     }
   }, [api, device]);
+  // ADR-0106: a viewer's window shows every request read-only (no Allow, Deny or Allow always): the hub would refuse the answer and write
+  // the refusal down in the owner's Activity.
+  const answerRequest = changes ? resolve : undefined;
   // ADR-0057: an agent's live helper grants, as its machine lists them, and revoking one (no signature: ending access is always allowed).
   const helperGrants = useCallback(async (agent: AgentTileModel): Promise<HelperGrant[]> => {
     if (!api || !agent.machineId) return [];
@@ -596,17 +599,17 @@ export function App() {
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
-        ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
+        ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={answerRequest} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
-        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
+        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={answerRequest} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
-        ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
+        ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={answerRequest} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes}
           onStart={hub && api && live && changes ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
-          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api && changes ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
+          onResolve={answerRequest} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api && changes ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live && changes ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api && changes ? forgetAgent : undefined} onResume={hub && api && changes ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} />}
@@ -615,7 +618,7 @@ export function App() {
           shows every request in full itself, so nothing floats there. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && !isMachinesHash(hash) && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       {/* The demo Settings page shows Settings only: no demo requests over it. */}
-      <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
+      <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={answerRequest} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
       {hub && live && changes && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}

@@ -36,7 +36,8 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // Left out in a viewer's window (ADR-0106): the requests are shown read-only.
+  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   // The link is not live: no request can be answered here (T44: the dwell starts again when it is back).
   stale?: boolean;
   onReview?: (id: string) => void;
@@ -130,7 +131,8 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
+  // Left out in a viewer's window (ADR-0106): the requests are shown read-only.
+  onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   // The link is not live: no request can be answered here (T44: the dwell starts again when it is back).
   stale?: boolean;
   onReview?: (id: string) => void;
@@ -158,7 +160,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         {attention.filter((a) => !carded(a.id)).map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-danger">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
-        {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} guard={guard} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />; })}
+        {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} guard={guard} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={onResolve ? (ok, choice, always) => onResolve(a, ok, choice, always) : undefined} />; })}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid grid-cols-1 list-none gap-1 p-0">
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">

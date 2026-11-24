@@ -140,8 +140,31 @@ describe('a long start request is a summary with Review', () => {
     press(card(), 'Review');
     dwell(ATTENTION_DWELL_MS * 2);
     expect(dialog()!.querySelector('pre')!.textContent).toBe(long.start!.prompt);
-    expect(get(dialog()!, 'Allow').disabled).toBe(true);
-    expect(get(dialog()!, 'Deny').disabled).toBe(true);
+    // ADR-0106 (#1140): read-only, as in a viewer's window: no answer and no grant to choose, only Close.
+    expect(names(dialog()!)).not.toContain('Allow');
+    expect(names(dialog()!)).not.toContain('Deny');
+    expect(dialog()!.querySelector('[data-grant-choice]')).toBeNull();
+  });
+  it('a switch that cannot be answered (a viewer\'s window, #1140) shows it whole in Review with no answer, and no Deny on its card', () => {
+    const skip = demoSkipApproval as ApprovalModel;
+    markSkipCapable(skip.node);
+    act(() => root.render(<ApprovalBanner approval={skip} agent={agent} />));
+    expect(names(card())).toEqual(['Review']);
+    press(card(), 'Review');
+    dwell(ATTENTION_DWELL_MS * 2);
+    expect(dialog()!.textContent).toContain(skip.skip!.folder);
+    expect(names(dialog()!)).not.toContain('Allow');
+    expect(names(dialog()!)).not.toContain('Deny');
+    act(() => root.render(<ApprovalBanner approval={skip} agent={agent} onResolve={() => true} />));
+    expect(names(dialog()!)).toEqual(expect.arrayContaining(['Deny', 'Allow']));
+  });
+  it('the same card with an answer has Deny and Allow in Review (the read-only one above is not a card that never draws them)', () => {
+    act(() => root.render(<ApprovalBanner approval={long} agent={agent} onResolve={() => true} />));
+    press(card(), 'Review');
+    dwell(ATTENTION_DWELL_MS * 2);
+    expect(names(dialog()!)).toContain('Allow');
+    expect(names(dialog()!)).toContain('Deny');
+    expect(dialog()!.querySelector('[data-grant-choice]')).not.toBeNull();
   });
 
   it('a narrow pane draws it in the row density with the buttons under the text, and the dwell restarts', () => {

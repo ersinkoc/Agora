@@ -122,6 +122,17 @@ pub fn start_card_lines(
     width: usize,
     t: Text<'_>,
 ) -> Option<Vec<String>> {
+    start_card_lines_for(a, width, t, false)
+}
+
+/// [`start_card_lines`] for a window that may only watch (`viewer`, ADR-0106): the same request without how to answer it (the hub
+/// would refuse a viewer's answer and write the refusal down).
+pub fn start_card_lines_for(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    width: usize,
+    t: Text<'_>,
+    viewer: bool,
+) -> Option<Vec<String>> {
     let (line, settings, prompt) = crate::render::start_card(&a.action, &a.detail, t)?;
     let width = width.max(12);
     let mut lines = crate::render::wrap_row(&line, width, width);
@@ -141,8 +152,10 @@ pub fn start_card_lines(
         }
         lines.extend(wrapped.into_iter().map(|w| format!("  {w}")));
     }
-    lines.push(String::new());
-    lines.push(t(key!("tui-split-answer"), &[]));
+    if !viewer {
+        lines.push(String::new());
+        lines.push(t(key!("tui-split-answer"), &[]));
+    }
     Some(lines)
 }
 
@@ -157,7 +170,7 @@ pub fn start_card_fit<'a>(
     let right = cols.saturating_sub(left + 1);
     let room = usize::from((rows - 1).saturating_sub(1)).max(2);
     let a = crate::client::answered_approval(v.snapshot, Some(v.selected))?;
-    let lines = start_card_lines(a, usize::from(right).saturating_sub(3), t)?;
+    let lines = start_card_lines_for(a, usize::from(right).saturating_sub(3), t, v.viewer)?;
     Some((a, lines.len() <= room))
 }
 
@@ -228,11 +241,14 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
                 selected: false,
             });
         }
-        rows.push(Row {
-            text: format!(" {}", t(key!("tui-split-answer"), &[])),
-            paint: "\x1b[2m",
-            selected: false,
-        });
+        // ADR-0106: a viewer's list watches; it does not say how to answer (the hub would refuse it).
+        if !v.viewer {
+            rows.push(Row {
+                text: format!(" {}", t(key!("tui-split-answer"), &[])),
+                paint: "\x1b[2m",
+                selected: false,
+            });
+        }
         rows.push(Row {
             text: String::new(),
             paint: "",
@@ -614,7 +630,20 @@ pub struct Details {
 /// request y / n would answer asks to start an agent, the panel shows that request alone, like the old right panel; otherwise the
 /// agent's facts, its session line, and the request it waits on.
 pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Text<'_>) -> Details {
-    details(s, selected, width, height, t, false)
+    details(s, selected, width, height, t, false, false)
+}
+
+/// The inspector of a window that may only watch (ADR-0106), beside the list (`in_tab == false`) or the agent's own tab: the same
+/// request, without the keys that answer it (the hub would refuse a viewer's answer and write the refusal down).
+pub fn viewer_details(
+    s: &Snapshot,
+    selected: &str,
+    width: u16,
+    height: u16,
+    t: Text<'_>,
+    in_tab: bool,
+) -> Details {
+    details(s, selected, width, height, t, in_tab, true)
 }
 
 /// The inspector beside the agent's own tab, the keyboard in it: only that agent's request (never another agent's), answered
@@ -626,7 +655,7 @@ pub fn app_details_in_tab(
     height: u16,
     t: Text<'_>,
 ) -> Details {
-    details(s, selected, width, height, t, true)
+    details(s, selected, width, height, t, true, false)
 }
 
 fn details(
@@ -636,6 +665,7 @@ fn details(
     height: u16,
     t: Text<'_>,
     in_tab: bool,
+    viewer: bool,
 ) -> Details {
     let room = usize::from(height);
     let answered = if in_tab {
@@ -644,7 +674,8 @@ fn details(
         crate::client::answered_approval(s, Some(selected))
     };
     if let Some(a) = answered {
-        if let Some(card) = start_card_lines(a, usize::from(width).saturating_sub(1), t) {
+        if let Some(card) = start_card_lines_for(a, usize::from(width).saturating_sub(1), t, viewer)
+        {
             let mut lines = vec![t(key!("tui-attention"), &[])];
             lines.extend(card);
             let whole = width > 0 && lines.len() <= room;
@@ -749,20 +780,23 @@ fn details(
                 usize::from(width).max(12),
             ));
         }
-        lines.push(t(
-            if in_tab {
-                // ADR-0101: Alt+A, when the request offers an answer the agent remembers.
-                crate::client::answer_hint(
-                    a,
-                    key!("tui-tab-answer"),
-                    key!("tui-tab-answer-always"),
-                    key!("tui-tab-answer-always-only"),
-                )
-            } else {
-                key!("tui-split-answer")
-            },
-            &[],
-        ));
+        // ADR-0106: a viewer's inspector does not say how to answer (the hub would refuse it).
+        if !viewer {
+            lines.push(t(
+                if in_tab {
+                    // ADR-0101: Alt+A, when the request offers an answer the agent remembers.
+                    crate::client::answer_hint(
+                        a,
+                        key!("tui-tab-answer"),
+                        key!("tui-tab-answer-always"),
+                        key!("tui-tab-answer-always-only"),
+                    )
+                } else {
+                    key!("tui-split-answer")
+                },
+                &[],
+            ));
+        }
     }
     Details { lines, start: None }
 }
@@ -831,7 +865,7 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
     // ADR-0057: when the request y / n would answer asks to start an agent, the right panel shows it instead of a screen. One that
     // does not fit says how much is hidden; y refuses it until it was read whole (`start_card_fit`, the reader).
     let card: Option<Vec<String>> = crate::client::answered_approval(s, Some(v.selected))
-        .and_then(|a| start_card_lines(a, usize::from(right).saturating_sub(3), t))
+        .and_then(|a| start_card_lines_for(a, usize::from(right).saturating_sub(3), t, v.viewer))
         .map(|mut lines| {
             let room = usize::from(body.saturating_sub(1)).max(2);
             if lines.len() > room {
@@ -1068,6 +1102,67 @@ mod tests {
         assert!(
             rows[15].contains("tui-split-keys") && !rows[15].contains("viewer"),
             "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_viewers_list_and_inspector_show_requests_without_the_keys_that_answer_them() {
+        // ADR-0106 (#1140): the hub would refuse a viewer's answer and write the refusal down.
+        let plain = snapshot();
+        let mut start = snapshot();
+        start.approvals = vec![ApprovalSnapshot {
+            approval_id: "mac2/a9".into(),
+            agent_id: "mac2/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"mac2","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests."}"#.into(),
+            ..Default::default()
+        }];
+        let keys = |l: &str| l.contains("tui-split-answer") || l.contains("tui-tab-answer");
+        for s in [&plain, &start] {
+            // The split list: its tree and, for a start, the card on the right.
+            let v = View {
+                snapshot: s,
+                selected: "mac2/agent-1",
+                screen: None,
+                notice: "",
+                color: false,
+                cols: 100,
+                rows: 24,
+                now_ms: 0,
+                viewer: false,
+            };
+            let member = plain_rows(&frame(&v, &text), 24);
+            assert!(member.iter().any(|r| keys(r)), "{member:#?}");
+            let viewer = plain_rows(&frame(&View { viewer: true, ..v }, &text), 24);
+            assert!(!viewer.iter().any(|r| keys(r)), "{viewer:#?}");
+            assert!(
+                viewer.iter().any(|r| r.contains("tui-attention")),
+                "{viewer:#?}"
+            );
+            // The console's inspector, beside the list and in the agent's tab.
+            for in_tab in [false, true] {
+                let member = details(s, "mac2/agent-1", 60, 30, &text, in_tab, false);
+                let viewer = viewer_details(s, "mac2/agent-1", 60, 30, &text, in_tab);
+                assert!(member.lines.iter().any(|l| keys(l)), "{:#?}", member.lines);
+                assert!(!viewer.lines.iter().any(|l| keys(l)), "{:#?}", viewer.lines);
+                assert!(
+                    viewer.lines.iter().any(|l| l == "tui-attention"),
+                    "{:#?}",
+                    viewer.lines
+                );
+            }
+        }
+        // The reader of a start request.
+        let a = &start.approvals[0];
+        assert!(start_card_lines(a, 80, &text)
+            .unwrap()
+            .iter()
+            .any(|l| keys(l)));
+        let read = start_card_lines_for(a, 80, &text, true).unwrap();
+        assert!(!read.iter().any(|l| keys(l)), "{read:#?}");
+        assert!(
+            read.iter().any(|l| l.contains("Fix the tests.")),
+            "{read:#?}"
         );
     }
 

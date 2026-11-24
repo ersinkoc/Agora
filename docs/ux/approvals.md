@@ -117,6 +117,16 @@ composer) they are a **card in short** with **Review**, and the whole request is
   `review-once-home-*.png` (Review opened from Home's row), `review-once-attention-*.png` (from the attention dialog, in its place) and
   `review-once-grant-*.png` (the grant's segmented control, "More like this" chosen by keyboard).
 
+## A viewer's window (ADR-0106)
+
+A viewer watches: the hub refuses their answer and writes the refusal down in the owner's Activity, so their window offers none
+(#1140). Every request is the same card, whole, in the same places, with no **Deny**, **Allow** or **Allow always**: a start or a switch
+keeps **Review**, which shows all of it with only **Close** (no grant to choose); Home's row keeps its way to the agent or Review. The
+attention dialog keeps **Later**, and it and the phone's bar say "You can watch here. A member or the owner answers requests." where the
+answers would be. An older hub, which names no role, keeps the answers. The terminal client does the same: a viewer's `y`/`n` and
+Alt+Y/Alt+N say why and send nothing, and its requests (the list, the details panel, a chat tab, the reader of a start request) show
+without the keys that answer them.
+
 ## Allow always (ADR-0101)
 
 A structured agent can offer an answer it remembers (ACP `allow_always`); the window shows it only when the request says so

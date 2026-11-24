@@ -791,6 +791,8 @@ pub fn tool_line(c: &crate::tool::Call, t: Text<'_>) -> String {
 }
 
 /// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
+/// `watching` (a viewer's window, ADR-0106): no line to type on; the hint says the window watches (the hub would refuse a request, a
+/// mode or a model switch, and write the refusal down).
 pub fn render_chat(
     entries: &[ChatEntry],
     agent: &str,
@@ -798,6 +800,7 @@ pub fn render_chat(
     (cols, rows): (usize, usize),
     color: bool,
     t: Text<'_>,
+    watching: bool,
 ) -> Vec<String> {
     let (bold, dim, reset) = if color {
         (BOLD, DIM, RESET)
@@ -847,18 +850,26 @@ pub fn render_chat(
     }
     // The hint wraps to the width (a narrow pane showed only its start); the conversation gets what is left.
     let hint_width = cols.saturating_sub(1).max(10);
-    let hint = wrap_row(&t(key!("tui-chat-hint"), &[]), hint_width, hint_width);
-    let room = rows.saturating_sub(2 + hint.len()).max(1);
+    let hint_id = if watching {
+        key!("tui-chat-watching")
+    } else {
+        key!("tui-chat-hint")
+    };
+    let hint = wrap_row(&t(hint_id, &[]), hint_width, hint_width);
+    let input = usize::from(!watching);
+    let room = rows.saturating_sub(1 + input + hint.len()).max(1);
     let skip = lines.len().saturating_sub(room);
     let mut out: Vec<String> = lines.into_iter().skip(skip).collect();
     for h in hint {
         out.push(format!("{dim}{h}{reset}"));
     }
-    out.push(format!(
-        "{} {}",
-        t(key!("tui-chat-input"), &[]),
-        plain(typed)
-    ));
+    if !watching {
+        out.push(format!(
+            "{} {}",
+            t(key!("tui-chat-input"), &[]),
+            plain(typed)
+        ));
+    }
     out
 }
 
@@ -1122,7 +1133,7 @@ mod tests {
             ..Default::default()
         }];
         let cols = 40;
-        let lines = render_chat(&entries, "agent-1", "", (cols, 24), false, &t);
+        let lines = render_chat(&entries, "agent-1", "", (cols, 24), false, &t, false);
         let said: Vec<&String> = lines
             .iter()
             .take_while(|l| !l.starts_with("tui-chat-hint"))
@@ -1158,6 +1169,34 @@ mod tests {
     }
 
     #[test]
+    fn a_viewers_chat_has_no_line_to_type_on_and_says_it_watches() {
+        // ADR-0106 (#1140): the hub would refuse a viewer's request and mode or model switch, and write the refusal down.
+        let entries = vec![ChatEntry {
+            role: ChatRole::Agent as i32,
+            kind: ChatKind::Text as i32,
+            text: "done".into(),
+            ..Default::default()
+        }];
+        let member = render_chat(&entries, "a", "", (80, 10), false, &t, false);
+        assert_eq!(member.last().map(String::as_str), Some("tui-chat-input[] "));
+        assert!(member.iter().any(|l| l.contains("tui-chat-hint[]")));
+        let viewer = render_chat(&entries, "a", "", (80, 10), false, &t, true);
+        assert!(
+            viewer.iter().all(|l| !l.contains("tui-chat-input")),
+            "{viewer:?}"
+        );
+        assert!(
+            viewer.iter().all(|l| !l.contains("tui-chat-hint")),
+            "{viewer:?}"
+        );
+        assert_eq!(
+            viewer.last().map(String::as_str),
+            Some("tui-chat-watching[]")
+        );
+        assert!(viewer.iter().any(|l| l.contains("done")));
+    }
+
+    #[test]
     fn the_chat_shows_the_last_lines_and_drops_what_an_agent_could_use_to_drive_the_terminal() {
         let entry = |role: ChatRole, kind: ChatKind, text: &str| ChatEntry {
             role: role as i32,
@@ -1174,7 +1213,7 @@ mod tests {
             ),
             entry(ChatRole::Agent, ChatKind::ToolCall, "{\"tool\":\"ls\"}"),
         ];
-        let lines = render_chat(&entries, "agent-1", "ty\x1bped", (80, 24), false, &t);
+        let lines = render_chat(&entries, "agent-1", "ty\x1bped", (80, 24), false, &t, false);
         let text = lines.join("\n");
         assert!(
             !text.contains('\x1b') && !text.contains('\x07') && !text.contains('\u{202e}'),
@@ -1193,7 +1232,7 @@ mod tests {
         let mut other = entry(ChatRole::Agent, ChatKind::Notice, "");
         other.code = "future.thing".into();
         // Wide enough that the notice is on one line (wrapping is checked on its own).
-        let said = render_chat(&[notice, other], "a", "", (160, 24), false, &t).join("\n");
+        let said = render_chat(&[notice, other], "a", "", (160, 24), false, &t, false).join("\n");
         assert!(
             said.contains("tui-notice-agent_exited[stage=,exit_code=?,stderr_tail=boom[2J]"),
             "{said}"
@@ -1218,6 +1257,7 @@ mod tests {
             (160, 24),
             false,
             &t,
+            false,
         )
         .join("\n");
         assert!(said.contains("tui-notice-restarting[attempt=2]"), "{said}");
@@ -1232,7 +1272,7 @@ mod tests {
         // ADR-0089: the node could not save the conversation.
         let mut not_saved = entry(ChatRole::Agent, ChatKind::Notice, "");
         not_saved.code = "chat.history_not_saved".into();
-        let said = render_chat(&[not_saved], "a", "", (160, 24), false, &t).join("\n");
+        let said = render_chat(&[not_saved], "a", "", (160, 24), false, &t, false).join("\n");
         assert!(said.contains("tui-notice-history_not_saved"), "{said}");
         let a = AgentSnapshot {
             modes: vec![agora_protocol::v1::SessionOption {
@@ -1254,7 +1294,7 @@ mod tests {
         let many: Vec<ChatEntry> = (0..50)
             .map(|i| entry(ChatRole::Agent, ChatKind::Text, &format!("line {i}")))
             .collect();
-        let short = render_chat(&many, "a", "", (80, 10), false, &t);
+        let short = render_chat(&many, "a", "", (80, 10), false, &t, false);
         assert_eq!(short.len(), 7 + 2);
         assert!(
             short.iter().any(|l| l.contains("line 49"))
@@ -1438,7 +1478,7 @@ mod tests {
                 text: text.into(),
                 ..Default::default()
             };
-            render_chat(&[e], "agent-1", "", (100, 10), false, &t).join("\n")
+            render_chat(&[e], "agent-1", "", (100, 10), false, &t, false).join("\n")
         };
         assert!(
             line(r#"{"tool":"execute","arguments":{"command":"cargo test"}}"#)

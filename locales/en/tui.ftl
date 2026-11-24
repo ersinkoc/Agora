@@ -77,6 +77,8 @@ tui-chat-plan = Plan
 tui-chat-diff = changed { $path }
 tui-chat-input = ›
 tui-chat-hint = Type a request and press Enter · /mode or /model followed by a name switches · Ctrl-] goes back
+# ADR-0106: in place of the hint and the line to type on, in a viewer's window (the hub refuses a viewer's request or switch).
+tui-chat-watching = You can watch here. Sending requests and switching the mode or model need a member's role · Ctrl-] goes back
 tui-chat-mode = mode { $mode }
 tui-chat-model = model { $model }
 tui-chat-context = context { $percent }%

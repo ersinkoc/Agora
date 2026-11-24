@@ -73,6 +73,7 @@ tui-chat-plan = Plan
 tui-chat-diff = değiştirdi: { $path }
 tui-chat-input = ›
 tui-chat-hint = Bir istek yazıp Enter'a basın · /mode ya da /model ve bir ad geçiş yapar · Ctrl-] geri döner
+tui-chat-watching = Burada izleyebilirsin. İstek göndermek, modu ya da modeli değiştirmek için üye rolü gerekir · Ctrl-] geri döner
 tui-chat-mode = mod { $mode }
 tui-chat-model = model { $model }
 tui-chat-context = bağlam %{ $percent }
