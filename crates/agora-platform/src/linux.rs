@@ -184,6 +184,7 @@ pub(crate) fn ruleset(
     }
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let closed = closed_places(&sb.closed)?;
     let git_config = sb.git_config_file();
     let mut granted_git_config = None;
     for (paths, rights) in [
@@ -223,6 +224,16 @@ pub(crate) fn ruleset(
                 Err(_) if file_only => continue,
                 Err(e) => return Err(e),
             };
+            // #1150: what is checked is the descriptor the rule is made from, wherever its path led when it was opened.
+            {
+                use std::os::unix::fs::MetadataExt;
+                if closed.contains(&(metadata.dev(), metadata.ino())) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        crate::SandboxRefusal::ProtectedPathReachable,
+                    ));
+                }
+            }
             if file_only {
                 use std::os::unix::fs::MetadataExt;
                 if !metadata.is_file() || metadata.nlink() != 1 {
@@ -263,6 +274,110 @@ pub(crate) fn ruleset(
         fd: set,
         git_config: granted_git_config,
     })
+}
+
+/// #1150: the places no grant may be, as (device, inode): each of `closed`, and every folder above it as it is spelled (a link on the
+/// way included), each where it leads now; then every folder above where it really is and above its name's folder (a link in its
+/// place), up to `/`. A path that does not exist yet counts from its nearest existing folder. The node checked the grants by name
+/// before the start; [`ruleset`] compares the descriptor each rule is made from with these, so a grant swapped for a link in between
+/// (into the node's folder) refuses the start instead of granting where the link leads. Folders are climbed with `..` from an opened
+/// folder; only a file's own folder is opened again, by the path its descriptor names (`/proc/self/fd`). Anything but a missing
+/// component (no access, a loop of links, a file on the way, a climb that does not end) refuses the start: it fails closed.
+fn closed_places(closed: &[PathBuf]) -> io::Result<Vec<(u64, u64)>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let unresolved = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::SandboxRefusal::ProtectedPathUnresolved,
+        )
+    };
+    // `None`: the path does not exist (only that); any other failure is an error.
+    let open = |p: &std::path::Path| -> io::Result<Option<std::fs::File>> {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(p)
+        {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(unresolved()),
+        }
+    };
+    let id = |f: &std::fs::File| -> io::Result<(u64, u64, bool)> {
+        let m = f.metadata().map_err(|_| unresolved())?;
+        Ok((m.dev(), m.ino(), m.is_dir()))
+    };
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let record = |out: &mut Vec<(u64, u64)>, place: (u64, u64)| {
+        if !out.contains(&place) {
+            out.push(place);
+        }
+    };
+    for p in closed {
+        // A relative path (a `--data` given so) is taken from the node's folder, as everything else the node opens by it.
+        let p = std::path::absolute(p).map_err(|_| unresolved())?;
+        // By name: the path and every folder above it as spelled (the node's check compares names too).
+        for a in p.ancestors() {
+            if let Some(f) = open(a)? {
+                let (dev, ino, _) = id(&f)?;
+                record(&mut out, (dev, ino));
+            }
+        }
+        // Where it leads: from the path, and from its name's folder, climbed to `/`.
+        for start in std::iter::once(p.as_path()).chain(p.parent()) {
+            let mut found = None;
+            for a in start.ancestors() {
+                if let Some(f) = open(a)? {
+                    found = Some(f);
+                    break;
+                }
+            }
+            let mut at = found.ok_or_else(unresolved)?;
+            let (dev, ino, dir) = id(&at)?;
+            if !dir {
+                // A file (the control token): itself, then the folder it really is in.
+                record(&mut out, (dev, ino));
+                let real = opened_path(&at).map_err(|_| unresolved())?;
+                let parent = real.parent().ok_or_else(unresolved)?;
+                at = open(parent)?.ok_or_else(unresolved)?;
+            }
+            // Bounded: a path of at most PATH_MAX bytes has fewer folders than that. A climb that does not reach `/` refuses.
+            let mut top = false;
+            for _ in 0..libc::PATH_MAX {
+                let (dev, ino, _) = id(&at)?;
+                record(&mut out, (dev, ino));
+                let up = open_dotdot(&at).map_err(|_| unresolved())?;
+                let (up_dev, up_ino, _) = id(&up)?;
+                if (up_dev, up_ino) == (dev, ino) {
+                    top = true;
+                    break;
+                }
+                at = up;
+            }
+            if !top {
+                return Err(unresolved());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The folder above `dir` (`..` opened from its descriptor, as a place only).
+fn open_dotdot(dir: &std::fs::File) -> io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // SAFETY: a live directory descriptor and a NUL-terminated name; the result is a new descriptor or -1.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c"..".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 /// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as a place only (`O_PATH`, which Landlock takes and
@@ -1880,5 +1995,126 @@ mod held_folder_rule_tests {
         let _ = std::fs::remove_dir_all(&base);
         assert!(held.is_ok(), "{held:?}");
         assert_eq!(ran.trim(), dir.to_str().unwrap());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod closed_grant_tests {
+    use std::path::{Path, PathBuf};
+
+    /// The refusal a ruleset was made with, if any (`None`: it was made).
+    fn refusal(sb: &crate::Sandbox, held: Option<&crate::HeldFolder>) -> Option<String> {
+        match super::ruleset(sb, held, None) {
+            Ok(_) => None,
+            Err(e) => Some(
+                crate::sandbox_refusal(&e)
+                    .map_or_else(|| format!("not a refusal: {e}"), |r| r.token().to_string()),
+            ),
+        }
+    }
+
+    fn grant(write: &Path, closed: &[PathBuf]) -> crate::Sandbox {
+        let mut sb = crate::Sandbox::new(vec![], vec![write.to_path_buf()]);
+        sb.closed = closed.to_vec();
+        sb
+    }
+
+    /// #1150: the node checks the grants by name before the start, then Landlock opens them again. A grant that is a link by then
+    /// (swapped in a place another agent may write) into the node's folder, to its data folder or to its control token is refused
+    /// on what was opened; a link elsewhere, a real folder and a folder below a closed one (the agent's worktree) are granted.
+    #[test]
+    fn a_grant_that_leads_to_or_above_a_closed_path_when_opened_is_refused() {
+        if !super::sandbox_supported() {
+            eprintln!("skipped: no Landlock on this machine");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("agora-closed-grant-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (home, data, worktree, shared, elsewhere) = (
+            base.join("node"),
+            base.join("node/data"),
+            base.join("node/worktrees/w"),
+            base.join("shared"),
+            base.join("elsewhere"),
+        );
+        for d in [&data, &worktree, &shared, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let token = home.join("control.token");
+        std::fs::write(&token, "t").unwrap();
+        let closed = vec![
+            token.clone(),
+            home.clone(),
+            data.clone(),
+            base.join("node/missing/deeper"),
+        ];
+        let link = shared.join("grant");
+        let point = |to: &Path| {
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_dir(&link);
+            std::os::unix::fs::symlink(to, &link).unwrap();
+        };
+        let refused = Some("protected_path_reachable".to_string());
+        for to in [&home, &data, &token, &base] {
+            point(to);
+            assert_eq!(refusal(&grant(&link, &closed), None), refused, "{to:?}");
+        }
+        // Only the missing path closed: it counts from its nearest existing folder.
+        point(&home);
+        let missing = vec![base.join("node/missing/deeper")];
+        assert_eq!(refusal(&grant(&link, &missing), None), refused);
+        // A link elsewhere, a real folder and a folder below a closed one are granted, as before.
+        point(&elsewhere);
+        assert_eq!(refusal(&grant(&link, &closed), None), None);
+        assert_eq!(refusal(&grant(&shared, &closed), None), None);
+        assert_eq!(refusal(&grant(&worktree, &closed), None), None);
+        // A relative closed path (here a missing one) counts from the current folder.
+        let cwd = std::env::current_dir().unwrap();
+        let local = cwd.join(format!("agora-closed-local-{}", std::process::id()));
+        point(&cwd);
+        assert_eq!(
+            refusal(&grant(&link, &[local.file_name().unwrap().into()]), None),
+            refused,
+            "a missing relative path counts from the current folder"
+        );
+        // Nothing closed: nothing is compared.
+        point(&home);
+        assert_eq!(refusal(&grant(&link, &[]), None), None);
+        // An entry below the held folder is opened through its handle (F1022) and compared the same way.
+        let held = crate::HeldFolder::open(&shared).unwrap();
+        assert_eq!(refusal(&grant(&link, &closed), Some(&held)), refused);
+        // A closed path spelled through a link on the way (`spelled/via/data`, `via` a link to `elsewhere`): the folder above it by
+        // name (`spelled`) is refused too, as the node's own check compares names, and so is where it leads.
+        let spelled = base.join("spelled");
+        std::fs::create_dir_all(&spelled).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, spelled.join("via")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("data")).unwrap();
+        let through = vec![spelled.join("via/data")];
+        for to in [&spelled, &elsewhere] {
+            point(to);
+            assert_eq!(refusal(&grant(&link, &through), None), refused, "{to:?}");
+        }
+        // A closed path that cannot be looked at (a loop of links on the way, not a missing name) refuses the start: it never
+        // counts from a folder further up.
+        let ring = base.join("ring");
+        std::os::unix::fs::symlink(&ring, &ring).unwrap();
+        point(&elsewhere);
+        assert_eq!(
+            refusal(&grant(&link, &[ring.join("data")]), None),
+            Some("protected_path_unresolved".to_string())
+        );
+        // The node's generated Git file (an exact file below its data folder) is still read.
+        let git = data.join("gitconfig");
+        std::fs::write(&git, "").unwrap();
+        let mut sb = grant(&worktree, &closed);
+        sb.git_config = Some(git.clone());
+        assert_eq!(
+            super::ruleset(&sb, None, None).unwrap().git_config,
+            Some(git)
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 }

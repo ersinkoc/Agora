@@ -1460,8 +1460,14 @@ pub struct Sandbox {
     /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
     /// refuses to start an agent whose grants contain the control token file (ADR-0082) or any of these paths
-    /// ([`PROTECTED_PATHS_BY_REFUSAL`], #1114); Windows keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
+    /// ([`PROTECTED_PATHS_BY_REFUSAL`], #1114), and the platform checks the grants it opens against them again (`closed`, #1150); Windows keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
     pub deny: Vec<PathBuf>,
+    /// Where [`PROTECTED_PATHS_BY_REFUSAL`] holds (Linux): the paths the node checked no `read` or `write` grant reaches before the
+    /// start (its control token, its folder of stored secrets, the paths it keeps closed and its data folder). Checked again on each
+    /// grant as it is opened for the kernel (#1150): a grant whose opened file or folder is one of them, or a folder above one, refuses
+    /// the start ([`SandboxRefusal::ProtectedPathReachable`]), so a grant swapped for a link after the node's check cannot reach them.
+    /// Ignored elsewhere.
+    pub closed: Vec<PathBuf>,
     /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
     /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
     /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
@@ -1543,7 +1549,8 @@ pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
 
 /// True where [`Sandbox::deny`] is kept only by the node refusing the start (#1114): Linux, whose Landlock rules can only allow, so a
 /// node path below a folder an agent is given (a `--data` under `/tmp`, `/var` or `/opt`) would be open to it. There the node refuses
-/// to start a confined agent whose read or write grants reach one of its own paths. macOS enforces `deny` in the Seatbelt profile. On
+/// to start a confined agent whose read or write grants reach one of its own paths, and the platform checks each grant again as it
+/// opens it for Landlock ([`Sandbox::closed`], #1150). macOS enforces `deny` in the Seatbelt profile. On
 /// Windows the check does not run either: there the node's files are out of reach when their ACLs leave the agent's restricted token
 /// out (the default folders under the user's profile; a data folder that `Users` may read is not checked, #1114). Callers use this
 /// instead of a `cfg`.
@@ -1635,8 +1642,12 @@ pub enum SandboxRefusal {
     BroadWriteGrant,
     /// A folder the agent would write could not be labelled for confined agents.
     LabelFailed,
-    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS).
+    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS; Linux: one of
+    /// `Sandbox::closed`, or a folder above it, could not be looked at, #1150).
     ProtectedPathUnresolved,
+    /// A file or folder the agent may read or write is, as opened for the kernel, one of the node's own paths (`Sandbox::closed`) or a
+    /// folder above one (Linux, #1150: a grant swapped for a link after the node checked it).
+    ProtectedPathReachable,
     /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
     WorktreeNotFolder,
     /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
@@ -1654,6 +1665,7 @@ impl SandboxRefusal {
             Self::BroadWriteGrant => "broad_write_grant",
             Self::LabelFailed => "label_failed",
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
+            Self::ProtectedPathReachable => "protected_path_reachable",
             Self::WorktreeNotFolder => "worktree_not_folder",
             Self::WritableIsLink => "writable_is_link",
             Self::WritableHasLinks => "writable_has_links",
