@@ -314,3 +314,26 @@ contains = " done "
         );
     }
 }
+
+#[test]
+fn a_phrase_of_only_whitespace_does_not_match_every_screen() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "blank"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    assert_eq!(detector.detect(&term_with(b"oneword")), None);
+}

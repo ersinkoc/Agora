@@ -129,7 +129,9 @@ impl Matcher {
         match (contains, regex) {
             (Some(s), None) => {
                 let words: Vec<&str> = s.split_whitespace().collect();
-                let padded = s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace);
+                // A phrase of whitespace only has no word to bound: it keeps its raw match only.
+                let padded = !words.is_empty()
+                    && (s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace));
                 let collapsed = (words.len() > 1 || padded).then(|| collapse_whitespace(s, words));
                 Some(Self::Contains(s.to_string(), collapsed))
             }
