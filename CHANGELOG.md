@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A window that had fallen behind a terminal agent's output when its program crashed and was restarted now gets that program's end, as when it had kept up; before, it could be shown the restarted program's screen as the crashed one's last screen (audit F1500, #1150).
 - A terminal agent whose program ended while something it started in the background (outside its process group) went on writing to its terminal at least once a second is now seen ending within about two seconds: the window shows it exited, a crash is restarted, and stopping it returns within about two seconds; before, the stop waited for as long as that background program kept writing (#1150).
 - A window that opens a terminal just after its program ended now gets the program's exit code; before, it got "unknown" when the node let the terminal go a moment later (#1150).
 - In the terminal client, the start pickers (`s`, and `f` for a folder) now put fewer agents on a page when the window is too short or too narrow for nine, so every agent and the line naming the ones the machine cannot find stay visible; before, the bottom of a tall page was cut off (#1150).
