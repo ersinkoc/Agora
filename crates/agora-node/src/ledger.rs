@@ -1083,6 +1083,7 @@ fn ledger_bytes(st: &State) -> io::Result<Vec<u8>> {
         out.extend_from_slice(bytes);
     }
     out.extend_from_slice(tail.as_bytes());
+    debug_assert_eq!(out.len(), size(payload));
     Ok(out)
 }
 
