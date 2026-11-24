@@ -41,8 +41,7 @@ may also be reused by another run. Recovering work for an old run must not deliv
    without a task, ordinary messages and channel fanout keep their current contracts.
 6. Keep bounds for pending deliveries, bytes and receipts. When the hub cannot reserve space for a tracked delivery, it refuses
    before changing the board. At the node, a full inbox that cannot accept the entry returns a definitive refusal without a receipt.
-   A hub outage does not stop an agent or its local tools. The schema slice specifies the retry window and the bounds for the hub
-   queue and node inbox records in [the protocol spec](../specs/protocol.md#durable-cross-node-task-handoffs-adr-0109).
+   Pick byte, count and retry window limits before shipping the schema slice. A hub outage does not stop an agent or its local tools.
 
 ## Alternatives considered
 
@@ -71,4 +70,18 @@ original deterministic #1125 proof checks the pre-send boundary without timing a
 
 - Confirm legacy fallback during rollout versus requiring the capability for cross-node handoffs of a named task.
 - Confirm what a still-connected giver sees when the outcome remains unresolved beyond its tool timeout.
-- Decide where a person reads and reconciles an unresolved handoff.
+- Set the retention and retry limits (answered by Amendment A) and decide where a person reads and reconciles an unresolved
+  handoff.
+
+## Amendment A (accepted by the maintainer 2026-11-24, in the merger chat): the retry window and the bounds
+
+This answers the limits named in decision 6 and the open question above; the rest of the decision is unchanged.
+
+- The hub sets a delivery's `valid_until_ms` to 24 hours after it creates the delivery and stops retrying at that deadline. The node
+  keeps receipts through the deadline and accepts a new entry only before it.
+- Per hub: at most 1,024 pending or unresolved deliveries and 32 MiB of encoded delivery data. Per node: at most 1,024 durable
+  handoff records and 32 MiB of encoded inbox entries and receipts.
+- A summary is at most 16 KiB of UTF-8, with at most 20 refs totalling 16 KiB (the existing mesh limits). The encoded command fits
+  the negotiated frame limit.
+
+The wire details are in [the protocol spec](../specs/protocol.md#durable-cross-node-task-handoffs-adr-0109).
