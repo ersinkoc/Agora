@@ -68,7 +68,7 @@ impl Style {
     }
 }
 
-/// The longest payload an unterminated OSC, DCS, ... sequence may swallow: to the next line break or this many characters.
+/// The longest payload an unterminated CSI, OSC, DCS, ... sequence may swallow: to the next line break or this many characters.
 pub const ESCAPE_PAYLOAD_MAX: usize = 4096;
 
 /// Removes what would act on a terminal or a reader instead of being shown: escape sequences (CSI, OSC, DCS, ...) with their payload
@@ -88,14 +88,23 @@ pub fn strip_core(s: &str, style: Style) -> String {
         match c {
             '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
                 let kind = match c {
-                    '\u{1b}' => chars.next(),
+                    // A line break right after an ESC is left for the text.
+                    '\u{1b}' => chars.next_if(|&c| !line_break(c)),
                     '\u{9b}' => Some('['),
                     '\u{9d}' => Some(']'),
                     _ => Some('P'),
                 };
                 match kind {
                     Some('[') => {
-                        for c in chars.by_ref() {
+                        let mut taken = 0;
+                        while let Some(&c) = chars.peek() {
+                            // A line break ends a sequence that was never closed (it is left for the text, #1113).
+                            if line_break(c) || taken >= ESCAPE_PAYLOAD_MAX {
+                                break;
+                            }
+                            chars.next();
+                            taken += 1;
+                            // The final byte ends a CSI sequence.
                             if ('@'..='~').contains(&c) {
                                 break;
                             }
@@ -105,7 +114,7 @@ pub fn strip_core(s: &str, style: Style) -> String {
                         let mut taken = 0;
                         while let Some(&c) = chars.peek() {
                             // A line break ends a sequence that was never closed (it is left for the text).
-                            if c == '\n' || taken >= ESCAPE_PAYLOAD_MAX {
+                            if line_break(c) || taken >= ESCAPE_PAYLOAD_MAX {
                                 break;
                             }
                             chars.next();
@@ -142,6 +151,11 @@ pub fn strip_core(s: &str, style: Style) -> String {
         }
     }
     out
+}
+
+/// `\n` or `\r` (a bare carriage return is a line break too): where an escape sequence that was never closed ends.
+fn line_break(c: char) -> bool {
+    c == '\n' || c == '\r'
 }
 
 pub fn balanced(out: String, style: Style) -> String {

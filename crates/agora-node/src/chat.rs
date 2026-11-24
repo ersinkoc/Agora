@@ -2592,6 +2592,50 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_csi_keeps_the_line_break_and_the_next_line() {
+        // #1113: a CSI that is never closed ends at the next line break; the break and the next line's first letter stay.
+        assert_eq!(
+            strip_controls("x\u{1b}[1\nvisible line\nmore", Style::Prose),
+            "x\nvisible line\nmore"
+        );
+        assert_eq!(
+            strip_controls("x\u{9b}1\nvisible line", Style::Prose),
+            "x\nvisible line"
+        );
+        // A bare carriage return is a line break too, for a CSI and for an OSC.
+        assert_eq!(
+            strip_controls("x\u{1b}[1\rvisible", Style::Prose),
+            "x\nvisible"
+        );
+        assert_eq!(
+            strip_controls("x\u{1b}]0;title\rvisible", Style::Prose),
+            "x\nvisible"
+        );
+        assert_eq!(
+            strip_controls("x\u{1b}[1\r\nvisible", Style::Prose),
+            "x\nvisible"
+        );
+        // A lone ESC right before a line break does not take the break.
+        assert_eq!(
+            strip_controls("x\u{1b}\nvisible", Style::Prose),
+            "x\nvisible"
+        );
+        // And at 4 KiB when there is no line break.
+        let long = format!("a\u{1b}[{}tail", "9".repeat(ESCAPE_PAYLOAD_MAX + 100));
+        let cleaned = strip_controls(&long, Style::Prose);
+        assert!(
+            cleaned.starts_with('a') && cleaned.ends_with("tail") && cleaned.len() < 200,
+            "{}",
+            cleaned.len()
+        );
+        // A closed CSI still takes just its own payload.
+        assert_eq!(
+            strip_controls("a\u{1b}[31mred\u{9b}0mb", Style::Prose),
+            "aredb"
+        );
+    }
+
+    #[test]
     fn work_on_one_item_is_bounded_whatever_the_adapter_sends() {
         let b = ChatBoard::new();
         let a = AgentId::new("a");
