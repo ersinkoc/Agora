@@ -344,6 +344,200 @@ mod tests {
     use super::*;
 
     #[test]
+    fn command_targets_cover_each_resource_and_signed_request_ids() {
+        use agora_protocol::v1::{self, event::Body};
+
+        let mut view = View::default();
+        for (node, body) in [
+            (
+                "n1",
+                Body::AgentStarted(v1::AgentStarted {
+                    agent_id: "a".into(),
+                    node_id: "n1".into(),
+                    project_id: "agent-project".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n2",
+                Body::AgentStarted(v1::AgentStarted {
+                    agent_id: "unseen".into(),
+                    node_id: "n2".into(),
+                    project_id: "other-machine".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n1",
+                Body::TerminalOpened(v1::TerminalOpened {
+                    terminal_id: "t".into(),
+                    agent_id: "a".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n1",
+                Body::ApprovalRequested(v1::ApprovalRequested {
+                    approval_id: "ap".into(),
+                    agent_id: "a".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n1",
+                Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                    workspace_id: "w".into(),
+                    project_id: "workspace-project".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n1",
+                Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                    checkout_id: "c".into(),
+                    project_id: "checkout-project".into(),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "n1",
+                Body::WorktreeCreated(v1::WorktreeCreated {
+                    worktree_id: "wt".into(),
+                    checkout_id: "c".into(),
+                    ..Default::default()
+                }),
+            ),
+        ] {
+            view.apply(&v1::Event {
+                producer_id: node.into(),
+                body: Some(body),
+                ..Default::default()
+            });
+        }
+
+        // The local agent and project ids are separate from the node; the device is a request claim here.
+        let cases = [
+            (C::TerminalOpen(v1::TerminalOpen::default()), ("", "", "")),
+            (C::GrantRevoke(v1::GrantRevoke::default()), ("", "", "")),
+            (C::PreviewOpen(v1::PreviewOpen::default()), ("", "", "")),
+            (
+                C::TaskUpdate(v1::TaskUpdate {
+                    project_id: "sent-project".into(),
+                    ..Default::default()
+                }),
+                ("sent-project", "", ""),
+            ),
+            (
+                C::TaskDispatch(v1::TaskDispatch {
+                    project_id: "sent-project".into(),
+                    agent_id: "a".into(),
+                    ..Default::default()
+                }),
+                ("sent-project", "a", ""),
+            ),
+            (
+                C::AgentLaunch(v1::AgentLaunch {
+                    project_id: "launch-project".into(),
+                    authorization: Some(v1::DirectoryAuthorization {
+                        device_id: "launch-device".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ("launch-project", "", "launch-device"),
+            ),
+            (
+                C::GrantCreate(v1::GrantCreate {
+                    scope: "agent:a".into(),
+                    signer_device_id: "grant-device".into(),
+                    ..Default::default()
+                }),
+                ("agent-project", "a", "grant-device"),
+            ),
+            (
+                C::ApprovalResolve(v1::ApprovalResolve {
+                    approval_id: "ap".into(),
+                    signer_device_id: "approval-device".into(),
+                    ..Default::default()
+                }),
+                ("agent-project", "a", "approval-device"),
+            ),
+            (
+                C::TerminalInput(v1::TerminalInput {
+                    terminal_id: "t".into(),
+                    ..Default::default()
+                }),
+                ("agent-project", "a", ""),
+            ),
+            (
+                C::WorkspaceQuery(v1::WorkspaceQuery {
+                    workspace_id: "w".into(),
+                    ..Default::default()
+                }),
+                ("workspace-project", "", ""),
+            ),
+            (
+                C::FilesRead(v1::FilesRead {
+                    worktree_id: "wt".into(),
+                    ..Default::default()
+                }),
+                ("checkout-project", "", ""),
+            ),
+            (
+                C::WorktreeCreate(v1::WorktreeCreate {
+                    checkout_id: "c".into(),
+                    ..Default::default()
+                }),
+                ("checkout-project", "", ""),
+            ),
+            (
+                C::TerminalInput(v1::TerminalInput {
+                    terminal_id: "missing".into(),
+                    ..Default::default()
+                }),
+                ("", "", ""),
+            ),
+            (
+                C::AgentStop(v1::AgentStop {
+                    agent_id: "unseen".into(),
+                    ..Default::default()
+                }),
+                ("", "unseen", ""),
+            ),
+        ];
+        for (command, expected) in cases {
+            let target = Target::for_command("n1", Some(&command), &view);
+            assert_eq!(target.node, "n1");
+            assert_eq!(
+                (
+                    target.project_id.as_str(),
+                    target.agent_id.as_str(),
+                    target.requested_device_id.as_str()
+                ),
+                expected,
+                "{command:?}",
+            );
+        }
+        let no_command = Target::for_command("n1", None, &view);
+        assert_eq!(no_command.node, "n1");
+        assert!(
+            no_command.project_id.is_empty()
+                && no_command.agent_id.is_empty()
+                && no_command.requested_device_id.is_empty()
+        );
+    }
+
+    #[test]
+    fn audit_identifier_limits_count_utf8_bytes_and_reject_controls() {
+        let at_limit = "é".repeat(128);
+        assert_eq!(bounded_id(&at_limit), at_limit);
+        assert_eq!(bounded_id(&format!("{at_limit}x")), "");
+        assert_eq!(bounded_id(&"a".repeat(257)), "");
+        assert_eq!(bounded_id("agent\nalpha"), "");
+        assert_eq!(bounded_id("agent\u{0085}alpha"), "");
+    }
+
+    #[test]
     fn rows_are_appended_finished_once_and_never_edited_or_deleted() {
         let store = SqliteStore::open_in_memory().unwrap();
         let audit = Audit::new(&store);
