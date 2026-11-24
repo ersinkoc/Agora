@@ -125,3 +125,4 @@ Date: YYYY-MM-DD
 | 0106 | A window is told the role of the person it signed in as | Accepted |
 | 0107 | `agent.list` lists the agents a node found interrupted | Accepted |
 | 0108 | Forgetting an agent in the window reaches its node, which deletes its saved conversation | Accepted |
+| 0109 | Recover a cross-node task handoff after a hub restart | Accepted |
