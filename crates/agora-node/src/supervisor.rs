@@ -1603,12 +1603,14 @@ impl Supervisor {
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
     /// write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). ADR-0084: the same for the folder of stored
     /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. #1114: and, where
-    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started.
+    /// `Sandbox::deny` is ignored, for every path the node keeps closed to agents. Refused, never started. #1150: the paths checked are
+    /// handed to the platform (`Sandbox::closed`), which checks each grant again as it opens it for the kernel.
     fn refuse_reachable(
         &self,
         kind: &str,
-        profile: &agora_platform::Sandbox,
+        profile: &mut agora_platform::Sandbox,
     ) -> Result<(), SupervisorError> {
+        let mut closed = self.sandbox.closed_paths();
         if self.sandbox.token_reachable(profile) {
             return Err(SupervisorError::SandboxRefused(
                 kind.to_string(),
@@ -1617,12 +1619,17 @@ impl Supervisor {
             ));
         }
         if let Some(store) = self.credentials.store() {
-            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
-                return Err(SupervisorError::SandboxRefused(
-                    kind.to_string(),
-                    self.sandbox.level.name(),
-                    "secrets_reachable",
-                ));
+            if !store.list().is_empty() {
+                if self.sandbox.path_reachable(store.dir(), profile) {
+                    return Err(SupervisorError::SandboxRefused(
+                        kind.to_string(),
+                        self.sandbox.level.name(),
+                        "secrets_reachable",
+                    ));
+                }
+                if agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+                    closed.push(store.dir().to_path_buf());
+                }
             }
         }
         // #1114: the same for every path of the node's own (its data folder with the secrets, the ledger and the transcripts, its
@@ -1634,6 +1641,7 @@ impl Supervisor {
                 "protected_path_reachable",
             ));
         }
+        profile.closed = closed;
         Ok(())
     }
 
@@ -6553,5 +6561,57 @@ mod adapter_option_tests {
             option(sup.prepare_skip_apply(&approvals).map(Prepared::Call)),
             "approvals"
         );
+    }
+
+    /// #1150: the paths the start check keeps out of every grant (the control token, the node's own paths, its data folder and, once
+    /// it holds a secret, its folder of secrets) go to the platform with the profile, which checks each grant again as it opens it.
+    /// Only where a refusal is what keeps them closed (Linux); elsewhere nothing is added.
+    #[test]
+    fn the_paths_the_start_check_keeps_closed_go_to_the_platform() {
+        let base = std::env::temp_dir().join(format!("agora-1150-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, data) = (base.join("node"), base.join("node/data"));
+        std::fs::create_dir_all(&data).unwrap();
+        let token = home.join("control.token");
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.set_sandbox(crate::sandbox::SandboxPolicy {
+            level: crate::sandbox::Level::Worktree,
+            protect: vec![home.clone()],
+            data_dir: Some(data.clone()),
+            control_token: Some(token.clone()),
+            ..Default::default()
+        });
+        let store = crate::credentials::SecretStore::in_data(&data);
+        sup.set_credentials(crate::credentials::Credentials::new(
+            store.clone(),
+            BTreeMap::new(),
+        ));
+        let work = base.join("work");
+        let closed = |sup: &Supervisor| {
+            let mut profile = agora_platform::Sandbox::new(vec![], vec![work.clone()]);
+            sup.refuse_reachable("k", &mut profile).unwrap();
+            profile.closed
+        };
+        let checked = vec![token.clone(), home.clone(), data.clone()];
+        let want = |v: Vec<PathBuf>| {
+            if agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+                v
+            } else {
+                Vec::new()
+            }
+        };
+        assert_eq!(closed(&sup), want(checked.clone()));
+        store
+            .set("A_TOKEN", &crate::credentials::Secret::new("v").unwrap())
+            .unwrap();
+        let mut with_secrets = checked;
+        with_secrets.push(store.dir().to_path_buf());
+        assert_eq!(closed(&sup), want(with_secrets));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
