@@ -39,8 +39,12 @@
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
+//! - `cut:TEXT` (ADR-0111): works, then sends a finished tool call (`callId` `cut1`, tool `sh`) whose output is TEXT with 6 bytes
+//!   taken out of its middle (on character boundaries), and reports that cut (`cuts`: `/toolCall/output` at the place), then goes
+//!   idle. `cut-unreported:TEXT` does the same without reporting the cut.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
 //!
+//! With `--cuts` it declares `chat.cuts` (ADR-0111: it reports every cut it makes); `cut:` reports its cut either way.
 //! With `--turns` it declares `turns` (it reports its turns), so the node queues a prompt sent while one runs.
 //! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
 //! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
@@ -108,6 +112,19 @@ fn exited_reason() -> Value {
            "params": {"stage": "turn", "exit_code": "3", "stderr_tail": "x".repeat(2000), "extra": "no"}})
 }
 
+/// ADR-0111: `text` with `n` bytes (or a little more, to keep whole characters) taken out of its middle, and where they were.
+fn cut_middle(text: &str, n: usize) -> (String, usize) {
+    let mut from = text.len().saturating_sub(n) / 2;
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = (from + n).min(text.len());
+    while !text.is_char_boundary(to) {
+        to += 1;
+    }
+    (format!("{}{}", &text[..from], &text[to..]), from)
+}
+
 /// Runs until `shutdown` or end of input.
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let modes = std::env::args().any(|a| a == "--modes");
@@ -146,6 +163,10 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 }
                 if std::env::args().any(|a| a == "--scopes") {
                     caps.push("approval_scopes");
+                }
+                // `--cuts`: it reports every cut it makes in a chat item's text (ADR-0111).
+                if std::env::args().any(|a| a == "--cuts") {
+                    caps.push("chat.cuts");
                 }
                 reply(
                     out,
@@ -450,6 +471,21 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         json!({"sessionId": session,
                                "options": config_options(mode_config, &switch["config:auto_approve=".len()..])}),
                     )?,
+                    cut if cut.starts_with("cut:") || cut.starts_with("cut-unreported:") => {
+                        let (report, whole) = match cut.strip_prefix("cut:") {
+                            Some(whole) => (true, whole),
+                            None => (false, &cut["cut-unreported:".len()..]),
+                        };
+                        state(out, &session, "WORKING")?;
+                        let (kept, at) = cut_middle(whole, 6);
+                        let mut params = json!({"sessionId": session, "toolCall": {"callId": "cut1", "tool": "sh",
+                                                "status": "completed", "output": kept}});
+                        if report {
+                            params["cuts"] = json!([{"field": "/toolCall/output", "at": at}]);
+                        }
+                        note(out, "chat/append", params)?;
+                        state(out, &session, "IDLE")?;
+                    }
                     switch if modes && switch.starts_with("mode:") => note(
                         out,
                         "session/options",

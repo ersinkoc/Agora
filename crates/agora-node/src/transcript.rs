@@ -73,7 +73,9 @@
 //! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges, also of a mark a later cut (the stderr tail's, the node's) went through. Only tool output and stderr are shape-checked, never the agent's words |
 //! | bridge: stderr tail (400 bytes, cut at its front and marked `…`) | into a notice's parameters | (b): both ends of every notice parameter are edges, and the place just after a leading `…` (just before a trailing one) |
 //! | bridge: the stderr tail's home path (`/home/<name>` written `~`) | spliced | **not covered** across the splice |
-//! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) |
+//! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) until the bridge reports it (ADR-0111 build step 3) |
+//! | an adapter that declared `chat.cuts` (ADR-0111): a cut it reports on a `chat/append` item (`cuts`, checked by the host, kept only for such an adapter by the supervisor) | whatever it cut | recorded as the node's own: carried through the node's cleaning (as one text: a place inside an escape sequence lands where it was, `agora_adapters::text::strip_core_at`) and caps (`chat::tidy_cuts_at`, also at the very end of a field) or kept where the node only cuts the end (text, diff, notice parameter; shifted into a call's or a plan's text); (b) in the field, and for the agent's words in their stream too |
+//! | an adapter without `chat.cuts`, or a cut one that declared it does not report | whatever it cut | **not covered** (#1123) |
 //! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step, permission label and refused action 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
 //! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB (also one of digits) | end dropped | recorded (`cap_end`): (b) in the field, and for the agent's words in their stream too, so the next piece (which may go on with the value) starts at an edge; the place stays with the carry for later batches |
 //! | node: a tool call's text, a plan's text | made of the call's arguments, the plan's steps | made again by the writer from the redacted parts |
@@ -93,8 +95,8 @@
 //! `AGORA_PROPERTY_BASE` for more). Not covered: a value shorter than 8 bytes; a fragment shorter than 4 bytes; a part of 4 bytes or
 //! more of a value that stands at an edge only by chance is replaced too (a stop's flush, words said outside a turn, a turn's end, a
 //! take-up's boundaries); a value whose characters cleaning changes (`\r\n` written `\n`; line breaks and tabs as spaces in one-line
-//! fields) is not found; cuts another adapter makes on its own (#1123), the bridge's `fit_line` halving and the stderr tail's home
-//! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
+//! fields) is not found; cuts an adapter makes and does not report (#1123: one without `chat.cuts`, ADR-0111), the bridge's `fit_line`
+//! halving and the stderr tail's home path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
 //! hold. The bridge cleans and redacts a tool's whole output before
 //! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
 //! the agent chose and is written as it is.
@@ -219,6 +221,8 @@ pub struct Cuts {
     pub args: Vec<usize>,
     /// A tool call's tool name, each of its paths, each plan step, and a notice's parameters by key.
     pub tool: Vec<usize>,
+    /// ADR-0111: the entry's own path (a diff's), where the adapter reported a cut in it.
+    pub path: Vec<usize>,
     pub paths: Vec<Vec<usize>>,
     pub steps: Vec<Vec<usize>>,
     pub params: Vec<(String, Vec<usize>)>,
@@ -233,6 +237,7 @@ impl Cuts {
             && self.output.is_empty()
             && self.args.is_empty()
             && self.tool.is_empty()
+            && self.path.is_empty()
             && self.paths.iter().all(Vec::is_empty)
             && self.steps.iter().all(Vec::is_empty)
             && self.params.iter().all(|(_, c)| c.is_empty())
@@ -1085,7 +1090,7 @@ fn redacted(
         };
         let edges = open(&e.output, c.output.clone());
         redact_field(&mut e.output, known, pieces, edges, Vec::new());
-        redact_field(&mut e.path, known, pieces, Vec::new(), Vec::new());
+        redact_field(&mut e.path, known, pieces, c.path.clone(), Vec::new());
         for (k, v) in e.params.iter_mut() {
             // Both ends of a parameter are edges (a stderr tail is cut at its front), but not of the node's own numbers and ids
             // (`bytes`, `entries`), which would only be masked by chance.

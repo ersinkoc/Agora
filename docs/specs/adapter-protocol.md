@@ -44,6 +44,10 @@ turn: an adapter without `turns` is sent every prompt at once, as before; see "T
 `idle` only after a `working` or `blocked`, so a stray or repeated one is ignored, and reads `done` or `unknown` as the end of the turn too). An adapter, or a node, without these keeps the behaviour
 described before ADR-0090, byte for byte: the ACP bridge sends the new items only to a node that said `chat.rich`.
 
+ADR-0111 adds `chat.cuts`: the adapter reports every place it removes text from a string of a `chat/append` item (the `cuts` field
+below). For an adapter that declared it, an item without `cuts` means it cut nothing. The node reads `cuts` only from an adapter that
+declared `chat.cuts`; from any other it ignores the field and keeps the behaviour described before ADR-0111.
+
 ## Methods
 
 | Direction | Method | Purpose |
@@ -55,7 +59,7 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 | node → adapter | `session/set_config` | ADR-0090, capability `config`: `{sessionId, configId, value}`, one of the ids and values the adapter reported in `session/config` (`value` is a choice id for a select, `"true"` or `"false"` for a boolean). Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | node → adapter | `session/set_option` | ADR-0058: `{kind: SESSION_OPTION_KIND_MODE \| SESSION_OPTION_KIND_MODEL, id}`, one of the ids the adapter reported in `session/options`. Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | adapter → node | `state/update` | `working`, `blocked`, `idle`, with optional message |
-| adapter → node | `chat/append` | Structured transcript items (text, tool call, plan, diff, and since ADR-0058 a notice: `{code, params}`, never text). ADR-0090: `{thought: {text}}`; a tool call `{toolCall: {callId, tool?, argumentsJson?, kind?, status?, locations?: [{path, line}], output?}}` where a later item with the same `callId` updates the call (a field it leaves out keeps its value, one it sends replaces it, as ACP's `tool_call_update` does); a plan `{plan: {steps, entries?: [{text, status, priority}]}}` that replaces the earlier plan |
+| adapter → node | `chat/append` | Structured transcript items (text, tool call, plan, diff, and since ADR-0058 a notice: `{code, params}`, never text). ADR-0090: `{thought: {text}}`; a tool call `{toolCall: {callId, tool?, argumentsJson?, kind?, status?, locations?: [{path, line}], output?}}` where a later item with the same `callId` updates the call (a field it leaves out keeps its value, one it sends replaces it, as ACP's `tool_call_update` does); a plan `{plan: {steps, entries?: [{text, status, priority}]}}` that replaces the earlier plan. ADR-0111 (capability `chat.cuts`): optional `cuts: [{field, at}]` beside the item, see "Reported cuts" |
 | adapter → node | `approval/request` | Ask permission; node routes to the approvals queue. ADR-0101: `scopes` (the answers the agent offers: `APPROVAL_SCOPE_ONCE`, `APPROVAL_SCOPE_ALWAYS` for one it remembers; empty means ONCE only), `alwaysLabel` (the agent's own name for its always option) and `alwaysOptionId` (that one option's exact id). The node reads them only from an adapter that declared `approval_scopes`; from any other the request offers ONCE only |
 | adapter → node | `usage/report` | Model id, tokens, reported cost if known, quota status if known; since ADR-0058 `contextTokens` and `contextWindow`, the context's level and size now (0 when unknown) |
 | adapter → node | `session/options` | ADR-0058: `{modes[], models[], currentMode, currentModel}`, each option `{id, name, description, skipsPermissions}`. Sent at the start and whenever something in it changes; each replaces the last |
@@ -109,6 +113,29 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
   card is cancelled, the prompt taken back or, queued, dropped with `adapter.queue_dropped`).
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
+
+### Reported cuts (ADR-0111)
+
+An adapter that shortens a string of a `chat/append` item before it sends it (a long tool output, arguments or a plan step) says
+where, so the node can look for the part of a secret value that a cut may leave on either side (threat model T61). The item's params
+carry `cuts`, a list of `{field, at}`:
+
+- `field` is a JSON pointer into the item's params naming the string the cut is in, one of `/text/text`, `/thought/text`,
+  `/toolCall/tool`, `/toolCall/argumentsJson`, `/toolCall/output` (a call with a `callId`), `/toolCall/locations/N/path`,
+  `/plan/steps/N`, `/plan/entries/N/text`, `/diff/path`, `/diff/unifiedDiff` and `/notice/params/KEY` (`~1` for a `/` in a key, `~0`
+  for a `~`), always within the item the params carry (a plan with `entries` is read from its entries, so a cut in `/plan/steps/N`
+  of such an item is ignored: report it in `/plan/entries/N/text`);
+- `at` is a byte offset in that string as sent where text was removed (a JSON number, or a decimal string as proto3 JSON writes a
+  64-bit integer): `0` (its start was dropped), its length (its end was dropped), or a place between two characters inside it (a
+  middle was dropped).
+
+At most 64 entries are read per item. Each entry past the 64th, and each one whose `field` is not one of the above for this item or
+does not name a string, or whose `at` is past the string's end or inside a character, is ignored on its own: never the item, which is
+kept as if the entry were not there. The node logs that it ignored entries once per agent (`adapter.cuts_ignored`, with the agent and
+the count, never the text). The node treats each valid place as a place it cut itself: it carries it through its own cleaning and
+caps, and masks a fragment (4 bytes or more) of a held secret value that touches or crosses it, in the live stream and in the saved
+transcript alike. A place in the agent's words or thinking (`/text/text`, `/thought/text`) is a place in their stream too, which joins both. A place never changes how the node cleans the string: one inside an escape sequence, or between `\r` and `\n`, is taken where cleaning the whole string puts the text around it. Nothing else changes: an item from an
+adapter without `chat.cuts`, or without `cuts`, is read as before ADR-0111.
 
 ## Rules
 

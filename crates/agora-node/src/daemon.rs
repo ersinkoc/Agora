@@ -3064,13 +3064,14 @@ fn chat_event(
         // What a chat agent says goes to its transcript (ADR-0038).
         SupervisorEvent::Adapter {
             agent,
-            event: AdapterEvent::Chat { item, .. },
+            event: AdapterEvent::Chat { item, cuts, .. },
         } => {
             // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
             if let Some(word) = activity_word(item) {
                 mesh.set_activity(agent, word);
             }
-            chat.push_item(agent, item, now);
+            // ADR-0111: the supervisor kept the places only from an adapter that declared `chat.cuts`.
+            chat.push_item_cut(agent, item, cuts, now);
         }
         // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now, not the tick's, which is older
         // than what this tick already said).
