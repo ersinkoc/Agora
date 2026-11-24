@@ -1741,6 +1741,34 @@ mod tests {
         std::env::temp_dir().join(format!("agora-pipe-{}-{name}.sock", std::process::id()))
     }
 
+    /// #1150 G1: a count reported together with a cancelled operation is kept, not dropped. No real operation runs: the result is
+    /// written into the `OVERLAPPED`, where `GetOverlappedResult` reads the status and the count. So this tells the old code, which
+    /// took a count only from a call that succeeded, from the new.
+    #[test]
+    fn a_count_reported_with_a_cancelled_operation_is_kept() {
+        const STATUS_CANCELLED: usize = 0xC000_0120;
+        let p = path("finish-count");
+        let _l = listen(&p).unwrap();
+        let s = connect(&p).unwrap();
+        let finish_cancelled = |count: usize| {
+            let event = Event::new().unwrap();
+            let mut ov = overlapped(&event);
+            ov.Internal = STATUS_CANCELLED;
+            ov.InternalHigh = count;
+            // A limit of 1 ms on an event nobody sets: `finish` takes its time-out path, cancels, and reads the result.
+            s.finish(
+                std::ptr::addr_of_mut!(ov),
+                &event,
+                Some(Duration::from_millis(1)),
+            )
+            .unwrap()
+        };
+        assert_eq!(finish_cancelled(7), Some(7), "the count is kept");
+        assert_eq!(finish_cancelled(0), None, "no count: the time ran out");
+        s.shutdown().unwrap();
+        assert_eq!(finish_cancelled(0), Some(0), "after shutdown: the end");
+    }
+
     #[test]
     fn every_spelling_of_one_socket_path_reaches_one_listener() {
         let p = path("spelling");
