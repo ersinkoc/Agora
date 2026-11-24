@@ -194,6 +194,16 @@ fn errors_travel_as_codes_with_params() {
         info.params["capability"].value,
         Some(v1::param_value::Value::Str("worktree.remove".into()))
     );
+    // ADR-0109: a node that does not take durable handoffs says so to an old or local caller.
+    let info = c
+        .call(Cmd::DeliverTaskHandoff(v1::DeliverTaskHandoff::default()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(info.code, "protocol.capability_missing");
+    assert_eq!(
+        info.params["capability"].value,
+        Some(v1::param_value::Value::Str("mesh.task_handoff.v1".into()))
+    );
 }
 
 #[test]

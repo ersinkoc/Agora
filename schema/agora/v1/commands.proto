@@ -103,6 +103,8 @@ message CommandRequest {
     RenewRequest renew = 108;
     // ADR-0095, sent only to a node with the capability `task.dispatch` (a hub refuses it for any other node).
     TaskDispatch task_dispatch = 109;
+    // ADR-0109: the hub sends this only to a node after negotiating `mesh.task_handoff.v1`.
+    DeliverTaskHandoff deliver_task_handoff = 110;
   }
 }
 
@@ -154,6 +156,8 @@ message CommandOk {
     RenewResponse renew = 30;
     // ADR-0095: the answer to `TaskDispatch`.
     TaskDispatchResult task_dispatch = 31;
+    // ADR-0109: the node has durably accepted a `DeliverTaskHandoff`.
+    TaskHandoffReceipt task_handoff_receipt = 32;
   }
 }
 
@@ -874,4 +878,26 @@ message WorkspaceQuery {
 // a node that does answers `auth.unauthenticated` to a wrong one and closes the connection. Never logged, never in an event.
 message ControlAuth {
   string token = 1;
+}
+
+// ADR-0109: a cross-node handoff of a named task to one specific run. Summary and refs are untrusted mesh data.
+message DeliverTaskHandoff {
+  // Opaque 16-byte identities; the hub keeps both unchanged on a retry.
+  bytes delivery_id = 1;
+  bytes receiver_run_id = 2;
+  string agent_id = 3;
+  string project_id = 4;
+  string task_id = 5;
+  string summary = 6;
+  repeated string refs = 7;
+  // Deadline for creating a new entry, in Unix milliseconds; unchanged on a retry.
+  uint64 valid_until_ms = 8;
+  string sender_node = 9;
+  string sender_agent_id = 10;
+}
+
+// Echoes the two identities of the single durable inbox entry, including when it has already been read.
+message TaskHandoffReceipt {
+  bytes delivery_id = 1;
+  bytes receiver_run_id = 2;
 }

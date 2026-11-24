@@ -4,6 +4,9 @@
 use crate::error::{Error, ErrorCode};
 use crate::v1::{Hello, Resume, ResumeOk, Welcome};
 
+/// ADR-0109: durable cross-node task handoff delivery on the hub/node link.
+pub const TASK_HANDOFF_V1: &str = "mesh.task_handoff.v1";
+
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Support {

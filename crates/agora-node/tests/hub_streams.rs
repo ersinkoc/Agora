@@ -517,6 +517,32 @@ fn a_listed_subscription_needs_a_grant_on_a_dynamic_stream_too() {
     stop(&socket, &shell.agent_id);
 }
 
+/// ADR-0109: until this node keeps a durable handoff inbox, the hub's delivery is refused as a missing capability where the hub's
+/// commands enter, before a `signed_commands` line that covers it (`mesh.*`) could ask for a grant on it.
+#[test]
+fn a_handoff_delivery_is_refused_before_the_signed_command_policy() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("handoff", "mesh.*");
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let script = vec![(
+        STREAM_COMMANDS,
+        req(
+            "handoff",
+            Cmd::DeliverTaskHandoff(v1::DeliverTaskHandoff::default()),
+        ),
+    )];
+    let seen = hub(&n, &socket, script, |_| true);
+    assert_eq!(
+        seen.answers.get("handoff").map(String::as_str),
+        Some("protocol.capability_missing"),
+        "{:?}",
+        seen.answers
+    );
+}
+
 /// The control socket holds to the same rule for a local client: a command that is not a subscription on a dynamic stream is
 /// refused there, and a chat subscription on stream 1 too (it needs a stream of its own).
 #[test]
