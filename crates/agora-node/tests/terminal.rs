@@ -504,3 +504,19 @@ fn a_stop_returns_while_a_descendant_keeps_writing() {
     assert!(returned, "dropping the handle did not return");
 }
 
+/// F1481: a subscription made after the process ended (the node still holds its terminal) ends with that exit, so a window that
+/// subscribed late gets the program's exit code rather than an unknown one when the terminal is let go.
+#[test]
+fn a_subscription_after_the_end_gets_the_exit() {
+    if !sh_on_path() {
+        return;
+    }
+    let h = handle(&["sh", "-c", "exit 7"]);
+    wait_for(&h, "exit", |s| s.exit.is_some());
+    let (snap, sub) = h.subscribe();
+    assert_eq!(snap.exit.and_then(|e| e.code), Some(7));
+    match sub.recv_timeout(Duration::from_secs(2)) {
+        Ok(Output::Exited(st)) => assert_eq!(st.code, Some(7)),
+        other => panic!("no exit for a late subscriber: {other:?}"),
+    }
+}

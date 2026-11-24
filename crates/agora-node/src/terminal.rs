@@ -615,6 +615,11 @@ impl TerminalWatch {
             let mut g = self.inner.lock();
             let history = (lines > 0).then(|| HistoryCapture::capture(g.term.as_ref(), lines));
             let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
+            // F1481: the process already ended, so its `Exited` went out before this subscriber was there. It gets it first (an
+            // empty queue has room), and the window hears the code rather than an unknown end once the terminal is let go.
+            if let Some(st) = g.exit {
+                let _ = tx.try_send(Output::Exited(st));
+            }
             g.subscribers.push(Subscriber {
                 tx,
                 lagged: Arc::clone(&lagged),
