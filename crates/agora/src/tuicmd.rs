@@ -5142,6 +5142,8 @@ fn pick_kind(
     area: Area,
     wait: Duration,
 ) -> Option<usize> {
+    // Sized once for the window the question opens in: a window resized meanwhile redraws the box, but keeps the page size, so the
+    // numbers already on the screen never change under the person's finger (a smaller window can cut the page again, as before).
     let per = kind_page(say, machine, under_title, kinds, missing, area);
     let pages = kinds.len().div_ceil(per);
     let mut page = 0;
