@@ -3164,6 +3164,10 @@ mod idempotency_tests {
 
     /// F1500: a subscriber that fell behind a process that crashed is resynced from that process's terminal, never repainted with the
     /// screen of the process the restart started since (it gets the unknown exit: the crashed terminal is gone).
+    ///
+    /// Unix only: the lag is made by flooding the terminal with output, and through ConPTY on a Windows runner that flood can take
+    /// minutes (it timed out on main after the merge of #1176). A Windows variant that lags without a flood is tracked on #1150.
+    #[cfg(unix)]
     #[test]
     fn a_lagged_subscriber_of_a_crashed_process_is_never_repainted_with_the_restarted_one() {
         if !agora_platform::PTY_SUPPORTED
