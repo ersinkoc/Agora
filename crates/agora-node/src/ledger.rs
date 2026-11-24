@@ -876,6 +876,25 @@ impl Ledger {
         let _ = self.flush();
     }
 
+    /// ADR-0108: the person forgot the agent in the window: it is no longer offered for Resume (by hand, or by `resume = auto` at the
+    /// next start) and no longer kept, and the session it kept for a take-up goes with it. The ids already given stay given
+    /// ([`Self::next_id`] is not lowered), so the id is never used again. In memory only (the caller may hold the supervisor's lock):
+    /// the ledger and the kept session's file are written by the next [`Self::flush_all`]. Returns whether the ledger held it.
+    pub fn forget(&self, agent_id: &str) -> bool {
+        let mut st = self.st();
+        let held = st.entries.remove(agent_id).is_some();
+        st.early_sessions.remove(agent_id);
+        st.early_states.remove(agent_id);
+        st.bound.remove(agent_id);
+        if st.kept.remove(agent_id).is_some() || held {
+            st.mark_kept_pending(agent_id.to_string());
+        }
+        if held {
+            st.dirty = true;
+        }
+        held
+    }
+
     /// Learns from one event the node records. Writes the file when an agent started, reported its session, or ended; a failed
     /// write is retried with the next one (a full disk must never stop agents).
     pub fn observe(&self, body: &Body, now_ms: u64) {
@@ -1258,6 +1277,31 @@ mod tests {
             state: state as i32,
             reported: false,
         })
+    }
+
+    /// ADR-0108: a forgotten agent is no longer offered for Resume, also after the node starts again, its kept session goes, and its
+    /// id is never given again.
+    #[test]
+    fn a_forgotten_agent_is_not_offered_again_and_its_id_stays_given() {
+        let dir = temp("forget");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-4", "/wt/a", ""), 1);
+        l.observe(&started("agent-5", "/wt/b", ""), 1);
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        assert_eq!(l.interrupted().len(), 2);
+        let kept = dir.join(LEDGER_DIR).join("kept-agent-5.pb");
+        std::fs::write(&kept, b"x").unwrap();
+        assert!(l.forget("agent-5"));
+        assert!(l.get("agent-5").is_none());
+        l.flush_all().unwrap();
+        assert!(!kept.exists(), "its kept session goes too");
+        assert!(!l.forget("agent-5"), "a second forget finds nothing");
+        drop(l);
+        let l = Ledger::open(&dir, 30).unwrap();
+        let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
+        assert_eq!(offered, vec!["agent-4".to_string()]);
+        assert_eq!(l.next_id(), 6, "agent-5 is never given again");
     }
 
     #[test]

@@ -261,6 +261,8 @@ where
     if verifies_devices {
         give_device_changes(hub, node_id);
     }
+    // ADR-0108: the forgets owed to it, oldest first (a node without `agent.forget.local` is never sent one; they wait).
+    give_forgets(hub, node_id, hub.forgets().pending(node_id));
     // ADR-0039 amendment B, #1036: board membership looks now, not only at the node's next event. A redial that wrote the node's
     // late end together with its `up` makes it due to hand over its local work, and an idle node that is caught up may send no
     // event for a long time (ADR-0054). The asks go out after the device changes, before anything the connection carries.
@@ -1246,7 +1248,14 @@ where
                 &target,
             );
             Some(match result {
-                Ok(()) => ok_empty(client_request_id.clone()),
+                Ok((node, local)) => {
+                    // ADR-0108: passed on to its node now when it is connected and able; otherwise when it next connects. A key with
+                    // no node's own id (no `/`) names nothing a node keeps.
+                    if !local.is_empty() {
+                        give_forgets(hub, &node, vec![local]);
+                    }
+                    ok_empty(client_request_id.clone())
+                }
                 Err(e) => refuse(e),
             })
         }
@@ -1647,6 +1656,66 @@ fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
                 }
             }
             _ => hub.board_join_settled(&node, &project),
+        }
+    });
+}
+
+/// ADR-0108: passes the person's forgets of `agents` (the node's own ids) on to `node`, one after another in one task, each after the
+/// node answered the one before: the node's queue is never filled with them. An answer, whatever it says, settles that forget (the
+/// node decided: removed, unknown, refused while the agent runs there, or refused by its grants); a node that is not connected, does
+/// not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Transient codes
+/// (`node.offline`, `node.timeout`, `internal`) settle it too, as ADR-0108 says: the person forgets the agent again to retry. Each
+/// answer is audited under the hub's own id with its code as the outcome, and the agent and its project in their own columns.
+fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
+    agents.retain(|a| !a.is_empty());
+    if agents.is_empty() || !hub.router().is_connected(node) {
+        return;
+    }
+    let (router, forgets, store) = (
+        Arc::clone(hub.router()),
+        Arc::clone(hub.forgets()),
+        hub.shared_store(),
+    );
+    let node = node.to_string();
+    // Each agent with its project, for its audit row (read now: the task does not hold the hub).
+    let agents: Vec<(String, String)> = agents
+        .into_iter()
+        .map(|a| {
+            let project = hub.agent_project(&node, &a);
+            (a, project)
+        })
+        .collect();
+    tokio::spawn(async move {
+        for (agent, project) in agents {
+            let req = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command_request::Command::AgentForget(v1::AgentForget {
+                    agent_id: agent.clone(),
+                })),
+            };
+            let Ok(reply) = router.send(&node, req) else {
+                return;
+            };
+            // No deadline: the reply ends when the node answers or its connection goes (the router drops the sender).
+            let Ok(resp) = reply.await else {
+                return;
+            };
+            let outcome = match &resp.result {
+                Some(command_response::Result::Err(e)) => e.code.clone(),
+                _ => "ok".to_string(),
+            };
+            let _ = forgets.answered(&node, &agent);
+            // The outcome column holds the code alone; the agent and its project have columns of their own.
+            let _ = crate::audit::Audit::new(&store).record_target(
+                "",
+                now_ms(),
+                crate::ca::RESERVED_HUB_ID,
+                "agent.forget.local",
+                &outcome,
+                &crate::audit::Target::of_agent(&node, &agent, &project),
+            );
         }
     });
 }

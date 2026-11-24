@@ -45,6 +45,10 @@ Both need new protocol messages, so both need an ADR (AGENTS.md: schema changes)
 - **Who:** the owner, and a member for agents in their granted projects (ADR-0049). It is recorded in the audit trail.
 - **Node:** no node involvement; a node's own data (a terminal's scrollback, an adapter session file) is not deleted by this. Removing a
   worktree the node made stays a separate, explicit action.
+  *Amended by ADR-0108:* the hub passes the forget on (`AgentForget` with the node's own id of the agent) to a node that offers
+  `agent.forget.local`, keeping it owed while the node is offline. That node removes the agent's saved conversation
+  (`<id>.jsonl`, `<id>.earlier.jsonl`) and its Resume offer, and refuses while the agent runs there. The scrollback, the adapter's
+  session files and the worktree still stay.
 - **Clients:** the window's "Remove from the list" offers "Remove for everyone" when the capability is present; the TUI gets the same key.
 
 ## Consequences
