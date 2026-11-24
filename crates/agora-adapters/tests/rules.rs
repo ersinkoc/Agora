@@ -228,3 +228,112 @@ fn a_phrase_the_agent_wraps_across_lines_on_a_narrow_screen_is_still_found() {
     // Only whitespace is collapsed: different words still do not match.
     assert_eq!(detector.detect(&other).unwrap().rule_id, "prompt");
 }
+
+#[test]
+fn a_wrapped_phrase_still_requires_the_whitespace_at_each_end() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "finished"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " build done "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    for text in ["note build done next", "note build\r\n  done next"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    // The region's edges are boundaries too: rows are read without their trailing blanks.
+    for text in ["note build done", "build done next"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    for text in ["note prebuild done next", "note build done-ish next"] {
+        assert_eq!(
+            detector.detect(&term_with(text.as_bytes())),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_padded_single_word_is_found_wrapped_and_only_as_a_whole_word() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "finished"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " done "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    for text in ["build\r\ndone next", "build done", "done"] {
+        assert_eq!(
+            detector
+                .detect(&term_with(text.as_bytes()))
+                .map(|d| d.state),
+            Some(AgentState::Done),
+            "{text:?}"
+        );
+    }
+    for text in ["undone next", "build doneish"] {
+        assert_eq!(
+            detector.detect(&term_with(text.as_bytes())),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_phrase_of_only_whitespace_does_not_match_every_screen() {
+    let manifest = Manifest::parse(
+        r#"
+kind = "wrap"
+display_name = "Wrap"
+version = "1"
+min_engine = 1
+[process]
+launch = ["fake"]
+[[rules]]
+id = "blank"
+state = "done"
+priority = 1
+region = "bottom_non_empty_lines(12)"
+contains = " "
+"#,
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    assert_eq!(detector.detect(&term_with(b"oneword")), None);
+}
