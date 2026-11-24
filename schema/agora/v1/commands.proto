@@ -5,6 +5,7 @@ package agora.v1;
 import "agora/v1/common.proto";
 import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
+import "agora/v1/events.proto";
 import "agora/v1/pairing.proto";
 import "agora/v1/preview.proto";
 
@@ -703,6 +704,9 @@ message AgentSummary {
 
 message AgentListResult {
   repeated AgentSummary agents = 1;
+  // ADR-0107: the agents the node found interrupted (ADR-0060) and still offers, oldest id first, each the `AgentInterrupted` the
+  // node announces for it. An agent the supervisor holds is in `agents` only. Old nodes send none.
+  repeated AgentInterrupted interrupted = 2;
 }
 
 // ADR-0030: which agents this node can start.

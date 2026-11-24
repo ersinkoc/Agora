@@ -109,3 +109,27 @@ message Welcome {
 2. **Hub:** fill it, with a test per role, a node connection, and a role change that reconnects with the new value.
 3. **Clients:** the terminal client (picker, pairing cards, `f` for a viewer), then the web (pairing cards, Usage, start actions), each
    with tests that no refused row is written for a member or viewer in the normal course. This closes #1099.
+
+## Build status
+
+- **Built:** steps 1 and 2 in #1139 (the schema, the fixtures in `schema/fixtures/person-role/`, the hub), and step 3 in the clients
+  #1141, which closes #1099.
+- **Open questions answered as proposed.** A hub not in team mode sends `PERSON_ROLE_OWNER`, and `Welcome` carries no grants.
+- **Delivery differs from the Decision's wording.** A window sends no `Hello`: it opens with `Subscribe`, and the hub built a `Welcome`
+  for nodes only. A window-sent `Hello` would be refused by an older hub, so the hub sends the window an unasked `Welcome` as its
+  **first frame**, before the snapshot. That `Welcome` has an empty capability list and an empty peer id, and
+  `docs/specs/protocol.md` section 1 describes it. An older window ignores it, as it ignores every control frame it does not use. A
+  newer window treats any other first frame as an older hub (`PERSON_ROLE_UNSPECIFIED`).
+- **Clients.**
+  - Both the web and the terminal client ask `PairStatus` and `UsageReport` only for the owner, and take the picker's role from the
+    `Welcome`.
+  - Neither sends a viewer's typing or terminal sizes. Sizes are refused for a viewer too, and the window sends them by itself. The web
+    sends neither until the connection has said the role (its `Welcome`, or an older hub's first frame); typing meanwhile waits. So an
+    owner made a viewer sends no size on reconnecting, and a viewer made a member sends its sizes once the new `Welcome` arrives.
+  - The terminal client hides from a viewer the keys that change something (`y`/`n`, `s`, `f`, `x`, `u`, `d`, `v`) and Give on the
+    board. A key pressed anyway says so and sends nothing.
+  - The web hides start, new terminal, close, resume, remove, prompts, options, Give, removing a device, approving another device and
+    revoking a helper's grant. Forgetting a machine is offered to the owner only (the hub refuses `node.forget` to anyone else). A
+    viewer's empty Home says what they will see instead of asking them to start an agent.
+- **Not built:** a viewer's answer buttons on requests in the web, and a chat tab's prompt line in the terminal client (#1140). The hub
+  refuses and audits both, as before.

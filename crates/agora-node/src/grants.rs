@@ -182,6 +182,11 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::TerminalResize(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
+        // Watching names its agent, so a grant for that agent (or its project) covers it, as it covers typing into it.
+        Cmd::TerminalSubscribe(t) => {
+            s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
+        }
+        Cmd::ChatSubscribe(c) => s.agent = Some(c.agent_id.clone()),
         // Commands about a worktree or a new terminal name no agent: only a `node` grant covers them.
         _ => {}
     }
@@ -740,6 +745,51 @@ mod tests {
         assert!(refused(g.gate(&typing("a-2"), NOW)), "another agent");
         assert!(refused(g.gate(&prompt("a-1"), NOW)), "another command");
         assert!(refused(g.gate(&typing("a-1"), NOW + HOUR)), "expired");
+    }
+
+    #[test]
+    fn watching_a_terminal_or_a_chat_is_covered_by_a_grant_for_that_agent() {
+        let g = grants(&["terminal.*", "chat.subscribe"]);
+        g.set_project_resolver(Box::new(|a| (a == "a-3").then(|| "p-3".to_string())));
+        let watch = |a: &str| {
+            Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+                terminal_id: format!("t-{a}"),
+                ..Default::default()
+            })
+        };
+        let follow = |a: &str| Cmd::ChatSubscribe(v1::ChatSubscribe { agent_id: a.into() });
+        assert!(refused(g.gate(&watch("a-1"), NOW)));
+        assert!(refused(g.gate(&follow("a-1"), NOW)));
+        g.create(
+            &grant(
+                "g1",
+                "agent:a-1",
+                &["terminal.*", "chat.subscribe"],
+                NOW + HOUR,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-1"), NOW).is_ok());
+        assert!(g.gate(&follow("a-1"), NOW).is_ok());
+        assert!(refused(g.gate(&watch("a-2"), NOW)), "another agent");
+        assert!(refused(g.gate(&follow("a-2"), NOW)), "another agent");
+        // A project grant covers its agents.
+        g.create(
+            &grant("g2", "project:p-3", &["terminal.subscribe"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-3"), NOW).is_ok());
+        assert!(refused(g.gate(&watch("a-2"), NOW)));
+        // A machine-wide grant still covers every agent.
+        g.create(
+            &grant("g3", "node", &["terminal.subscribe"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&watch("a-2"), NOW).is_ok());
+        assert!(refused(g.gate(&follow("a-2"), NOW)), "another command");
     }
 
     #[test]

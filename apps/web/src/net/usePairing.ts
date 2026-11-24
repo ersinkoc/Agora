@@ -5,6 +5,7 @@ import type { PairAnswer } from '../components/PairRequest';
 import type { PairingUi } from '../components/Pairing';
 import type { Live, LinkState } from './live';
 import { applyPairNote, emptyPairState, shownCards, shownRecent, type PairCard, type PairNote, type PairOwner, type PairWindow } from './pairing';
+import { ownerOfRole, type PersonRole } from './role';
 
 const code = (e: unknown): string => (e as { code?: string }).code ?? '';
 const windowOf = (s: { open?: boolean | null; closesAtMs?: unknown; pending?: number | null } | null | undefined): PairWindow | undefined =>
@@ -13,7 +14,7 @@ const windowOf = (s: { open?: boolean | null; closesAtMs?: unknown; pending?: nu
 /** How often the switch's state is read again while the owner has the window open (the hub closes it by itself after 10 minutes). */
 export const WINDOW_POLL_MS = 20_000;
 
-export function usePairing(api: Live | undefined, link: LinkState): { ui: PairingUi | undefined; owner: PairOwner; dispatch: (n: PairNote) => void } {
+export function usePairing(api: Live | undefined, link: LinkState, role: PersonRole = 'unspecified'): { ui: PairingUi | undefined; owner: PairOwner; dispatch: (n: PairNote) => void } {
   const [state, setState] = useState(emptyPairState);
   const dispatch = useCallback((n: PairNote) => setState((s) => applyPairNote(s, n)), []);
   // A new hub connection starts from nothing: what the last session knew is not carried over.
@@ -21,10 +22,13 @@ export function usePairing(api: Live | undefined, link: LinkState): { ui: Pairin
 
   // Is this session the owner's? The hub answers `PairStatus` to the owner only; everyone else gets `auth.forbidden`. That answer is
   // final for the connection (a change of role or grants ends it, and a new connection asks again), so a window that is not the owner's
-  // stops asking: each refusal is a row in the owner's Activity (#904).
+  // stops asking: each refusal is a row in the owner's Activity (#904). ADR-0106: a hub that names the role in its `Welcome` is not
+  // asked for a member or a viewer at all; the owner's window still asks, to learn whether pairing is on.
   const live = link === 'live';
+  const known = ownerOfRole(role);
   useEffect(() => {
     if (!api || !live) return;
+    if (known) { dispatch({ type: 'owner', owner: known }); return; }
     let stop = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     const read = () => api.command('', { pairStatus: {} }).then((ok) => {
@@ -39,7 +43,7 @@ export function usePairing(api: Live | undefined, link: LinkState): { ui: Pairin
     void read();
     timer = setInterval(() => { void read(); }, WINDOW_POLL_MS);
     return () => { stop = true; clearInterval(timer); };
-  }, [api, live, dispatch]);
+  }, [api, live, known, dispatch]);
 
   const onAnswer = useCallback(async (card: PairCard, approve: boolean, replace: boolean): Promise<PairAnswer> => {
     if (!api) return 'failed';

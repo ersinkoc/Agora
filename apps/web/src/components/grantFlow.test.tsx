@@ -88,3 +88,25 @@ describe('the grant question for a task', () => {
     expect(button('Allow for 1 hour')).toBeUndefined();
   });
 });
+
+// A refused terminal or chat subscription asks for that agent only, and the window subscribes again on its own stream.
+function WatchHarness({ command, sign }: { command: GrantDeps['command']; sign: GrantDeps['sign'] }) {
+  flow = useGrantFlow({ command, sign });
+  return flow.question ? <GrantDialog machine="laptop" agent="claude · a-1" kind={flow.question.ask.kind} busy={flow.question.busy} failed={flow.question.failed} onAllow={() => void flow.allow()} onClose={flow.dismiss} /> : null;
+}
+
+describe('the grant question for watching', () => {
+  for (const body of [{ terminalSubscribe: { terminalId: 't-a-1' } }, { chatSubscribe: { agentId: 'a-1' } }] as CommandBody[]) {
+    it(`asks to watch that agent and does not resend ${Object.keys(body)[0]}`, async () => {
+      const command = vi.fn(async (_node: string, _body: CommandBody) => ({}));
+      const sign = vi.fn(async (_node: string, ask: { scope: string; commands: string[] }) => ({ grantId: 'gr-1', ...ask }));
+      act(() => root.render(<WatchHarness command={command} sign={sign as unknown as GrantDeps['sign']} />));
+      act(() => flow.request('n1', body));
+      expect(document.body.textContent).toContain('Allow watching claude · a-1 for 1 hour?');
+      await act(async () => { button('Allow for 1 hour')!.click(); for (let i = 0; i < 6; i++) await Promise.resolve(); });
+      await flush();
+      expect(sign.mock.calls[0]?.[1].scope).toBe('agent:a-1');
+      expect(command.mock.calls.map(([, b]) => Object.keys(b)[0])).toEqual(['grantCreate']);
+    });
+  }
+});
