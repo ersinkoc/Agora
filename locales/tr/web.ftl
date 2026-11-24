@@ -7,6 +7,7 @@ attention-title = Sizi bekleyenler
 attention-empty = Her şey sakin. Sizi bekleyen yok.
 fleet-title = Ajanlarınız
 fleet-empty = Henüz ajan yok. Bir ajan başlatın, burada görünsün.
+fleet-watch-empty = Henüz çalışan ajan yok.
 
 state-working = Çalışıyor
 state-needs-you = Sizi bekliyor
@@ -1160,6 +1161,8 @@ fleet-firstrun-title = Makineleriniz hazır. İlk ajanı başlatın.
 fleet-firstrun-text = Bir makine ve klasör seçin. Ajan burada görünür ve size gerektiğinde haber verir.
 fleet-firstrun-cli = Ya da o makinedeki bir terminalden
 fleet-firstrun-offline = Şu an tüm makineler çevrimdışı. Birinde Agora'yı başlatın, burada görünsün.
+fleet-watch-title = Henüz çalışan bir şey yok
+fleet-watch-text = Burada izleyebilirsiniz. Üyelerin ya da sahibin başlattığı ajanlar, neye ihtiyaç duydukları ile birlikte burada görünür.
 fleet-offline-title = Agora'ya ulaşılamıyor
 fleet-offline-text = Ajanlarınız makinelerinde çalışmaya ve yaptıklarını kaydetmeye devam ediyor. Bağlantı geri gelir gelmez yeniden burada görünürler.
 fleet-offline-stale = Agora ile bağlantı kesildi. Gördükleriniz bu pencerenin bildiği son durum ve eski olabilir. Ajanlar makinelerinde çalışmaya devam ediyor.

@@ -310,6 +310,8 @@ pub struct App {
     /// The agent whose pane has the keyboard now, and the changes not yet taken (see [`App::take_pane_focus`]).
     pane_focus: Option<String>,
     focus_changes: Vec<(String, bool)>,
+    /// ADR-0106: the hub said the person is a viewer: the footer shows only the keys that read, and typing is not sent.
+    pub viewer: bool,
 }
 
 impl Default for App {
@@ -332,6 +334,7 @@ impl Default for App {
             forwarding: None,
             pane_focus: None,
             focus_changes: Vec::new(),
+            viewer: false,
         }
     }
 }
@@ -1380,7 +1383,9 @@ impl App {
         // The footer: the keys for where the keyboard is, the mouse state, the last notice.
         let keys = match (self.palette.is_some(), self.focus) {
             (true, _) => key!("tui-app-keys-palette"),
+            (false, Focus::Tree) if self.viewer => key!("tui-app-keys-tree-viewer"),
             (false, Focus::Tree) => key!("tui-app-keys-tree"),
+            (false, Focus::Terminal) if self.viewer => key!("tui-app-keys-terminal-viewer"),
             (false, Focus::Terminal)
                 if self
                     .active_agent()
@@ -2600,6 +2605,28 @@ mod tests {
         assert!(lines[0].contains("│Machine: mac"), "{lines:#?}");
         assert!(
             lines[29].starts_with("tui-app-keys-terminal · tui-app-mouse-on"),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn a_viewers_footer_shows_only_the_keys_that_read() {
+        // ADR-0106: the hub said the person is a viewer.
+        let rows = rows();
+        let mut app = App {
+            viewer: true,
+            ..App::default()
+        };
+        let lines = draw(&app, &rows, None, ColorMode::Full);
+        assert!(
+            lines[29].starts_with("tui-app-keys-tree-viewer · "),
+            "{lines:#?}"
+        );
+        key(&mut app, &rows, Key::Enter);
+        let vt = AlacrittyTerminal::new(Size { cols: 58, rows: 28 });
+        let lines = draw(&app, &rows, Some(&vt), ColorMode::Full);
+        assert!(
+            lines[29].starts_with("tui-app-keys-terminal-viewer · "),
             "{lines:#?}"
         );
     }

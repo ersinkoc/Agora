@@ -78,6 +78,15 @@ fn describe(f: &FieldDescriptorProto) -> String {
     format!("{label}{:?} {}", f.r#type(), f.type_name())
 }
 
+fn oneof_name<'a>(message: &'a DescriptorProto, field: &FieldDescriptorProto) -> Option<&'a str> {
+    // A proto3 optional field's synthetic oneof only tracks presence, which describe already checks.
+    if field.proto3_optional() {
+        return None;
+    }
+    let index = usize::try_from(field.oneof_index?).ok()?;
+    message.oneof_decl.get(index).map(|oneof| oneof.name())
+}
+
 /// Returns one line per breaking change; empty means compatible.
 pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> Vec<String> {
     let (b, h) = (index(base), index(head));
@@ -108,6 +117,14 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                             bf.name(),
                             describe(bf).trim(),
                             describe(hf).trim()
+                        ));
+                    }
+                    let old_oneof = oneof_name(bm, bf);
+                    let new_oneof = oneof_name(hm, hf);
+                    if old_oneof != new_oneof {
+                        out.push(format!(
+                            "{name}.{}: oneof changed from {old_oneof:?} to {new_oneof:?}",
+                            bf.name()
                         ));
                     }
                 }
@@ -178,6 +195,74 @@ mod tests {
         ) + "message Other { uint64 x = 1; }";
         let added = added.replace("COLOR_RED = 1;", "COLOR_RED = 1; COLOR_BLUE = 2;");
         assert_eq!(check(&added), Vec::<String>::new());
+    }
+
+    #[test]
+    fn making_published_fields_alternatives_is_breaking() {
+        let schema = "syntax = \"proto3\"; package agora.v1;";
+        let base = fds(
+            "oneof-base",
+            &format!("{schema} message Thing {{ string name = 1; uint32 id = 2; }}"),
+        );
+        let changed = fds(
+            "oneof-head",
+            &format!(
+                "{schema} message Thing {{ oneof choice {{ string name = 1; uint32 id = 2; }} }}"
+            ),
+        );
+        assert!(!base.file.is_empty() && !changed.file.is_empty());
+        assert!(breaking_changes(&base, &base).is_empty());
+        println!("CONTROL OK: unchanged fields pass");
+        let changes = breaking_changes(&base, &changed);
+        if changes.is_empty() {
+            println!(
+                "PROBLEM CONFIRMED: expected a breaking change for each field, actual {changes:?}"
+            );
+        }
+        assert_eq!(changes.len(), 2, "{changes:?}");
+    }
+
+    #[test]
+    fn comparing_oneofs_uses_the_group_name_and_allows_new_alternatives() {
+        let schema = "syntax = \"proto3\"; package agora.v1;";
+        let base = fds(
+            "groups-base",
+            &format!(
+                "{schema} message Thing {{
+                oneof key {{ string name = 1; }}
+                oneof size {{ uint32 count = 2; }}
+                optional bool ready = 3;
+            }}"
+            ),
+        );
+        let head = fds(
+            "groups-head",
+            &format!(
+                "{schema} message Thing {{
+                oneof size {{ uint32 count = 2; }}
+                oneof key {{ string name = 1; uint64 id = 4; }}
+                optional bool ready = 3;
+            }}"
+            ),
+        );
+        assert!(!base.file.is_empty() && !head.file.is_empty());
+        assert!(breaking_changes(&base, &head).is_empty());
+
+        let split = fds(
+            "groups-split",
+            &format!(
+                "{schema} message Thing {{
+                string name = 1;
+                oneof size {{ uint32 count = 2; }}
+                optional bool ready = 3;
+            }}"
+            ),
+        );
+        assert!(!split.file.is_empty());
+        assert_eq!(
+            breaking_changes(&base, &split),
+            [r#"agora.v1.Thing.name: oneof changed from Some("key") to None"#]
+        );
     }
 
     #[test]
