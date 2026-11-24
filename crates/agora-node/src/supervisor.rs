@@ -324,7 +324,7 @@ impl AdapterCall {
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
                 given(self.caller.prompt(session, text, *from_mesh, WAIT))
-                    .map_err(|e| SupervisorError::Spawn(e.to_string()))
+                    .map_err(|e| SupervisorError::Prompt(e.to_string()))
             }
             CallOp::Cancel => given(self.caller.cancel(session, WAIT)).map_err(adapter_error),
             CallOp::SetConfig { id, value } => {
@@ -379,6 +379,10 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// #1150: an adapter was not given a prompt (it did not answer in time, it exited, or it answered with an error); the text is for
+    /// logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the reference
+    /// `agent.prompt` (no stable code says this yet).
+    Prompt(String),
     /// RM-19 (#903): the start failed and this machine cannot find the kind's program: `(kind, program)`. Nothing was started.
     ProgramMissing(String, String),
     /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
@@ -460,6 +464,11 @@ impl SupervisorError {
                 // the supervisor's log keeps, so a start that failed is not silent. `{:?}` escapes control characters.
                 eprintln!("agent start failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
+            }
+            Self::Prompt(text) => {
+                // As for a failed start: only the reference goes to the caller, the cause to the node's log (`{:?}` escapes it).
+                eprintln!("agent prompt failed: {text:?}");
+                Error::new(ErrorCode::Internal).with("incident_id", "agent.prompt")
             }
             Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
                 .with("kind", k.as_str())
