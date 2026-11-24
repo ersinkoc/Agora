@@ -859,11 +859,19 @@ pub fn pair(
     t: &Timeouts,
     show: &mut dyn FnMut(&Number),
 ) -> Result<Verified, PairError> {
+    run_to_end(run(w, t, show)).map_err(|e| PairError::Unreachable(e.to_string()))?
+}
+
+/// Runs `fut` on a runtime of its own and returns as soon as it ends. Dropping the runtime would wait, with no limit, for its blocking
+/// pool: a dial whose wait ran out while the host name was still being looked up (`lookup_host` runs on that pool and cannot be
+/// stopped) would keep the caller until the resolver gave up, past every wait in [`Timeouts`]. That lookup is left to end on its own.
+fn run_to_end<F: std::future::Future>(fut: F) -> std::io::Result<F::Output> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()
-        .map_err(|e| PairError::Unreachable(e.to_string()))?;
-    rt.block_on(run(w, t, show))
+        .build()?;
+    let out = rt.block_on(fut);
+    rt.shutdown_background();
+    Ok(out)
 }
 
 /// The stable error code to show for a failure that carries one, so a caller can find its sentence in `locales/`.
@@ -1499,5 +1507,20 @@ mod tests {
             check(&ca.pem, &cert, &other.leaf(HOST), &csr, now()).unwrap_err(),
             unverified
         );
+    }
+
+    /// #1150: a wait that runs out while a blocking task (a host name lookup) is still running ends the call when the wait does; the
+    /// runtime used to wait for the task on its way out, so `agora join` outlasted its connect wait by the resolver's own timeout.
+    #[test]
+    fn a_wait_that_ran_out_does_not_wait_for_a_lookup_still_running() {
+        let start = std::time::Instant::now();
+        let got = run_to_end(async {
+            let slow = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+            tokio::time::timeout(Duration::from_millis(200), slow).await
+        })
+        .unwrap();
+        assert!(got.is_err());
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "took {took:?}");
     }
 }
