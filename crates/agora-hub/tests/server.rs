@@ -2364,6 +2364,270 @@ async fn a_forget_reaches_a_capable_node_when_it_connects_and_is_owed_until_it_a
     assert_eq!(st.hub.forgets().pending("n2"), vec!["agent-3"]);
 }
 
+const FORGET_CAP: &str = "agent.forget.local";
+
+/// A hub that offers `agent.forget.local`, on `store`.
+fn forget_state(store: SqliteStore) -> Arc<ServerState> {
+    Arc::new(ServerState {
+        hub: Arc::new(Hub::open(store).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec![FORGET_CAP.into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    })
+}
+
+/// `n1` ran `agents`, which ended, and went away; then the person forgot them: each is owed to `n1`.
+async fn forgets_owed_while_away(st: &Arc<ServerState>, agents: &[&str]) {
+    let (mut conn, task) = node_conn(st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    let mut bodies = vec![online("n1")];
+    for a in agents {
+        bodies.push(agent("n1", a));
+        bodies.push(Body::AgentExited(v1::AgentExited {
+            agent_id: (*a).into(),
+            exit_code: 0,
+        }));
+    }
+    for (i, b) in bodies.into_iter().enumerate() {
+        conn.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("n1", i as u64 + 1, b),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut conn).await;
+    }
+    drop(conn);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+    for a in agents {
+        st.hub.forget_agent(&format!("n1/{a}"), 100).unwrap();
+    }
+    assert_eq!(st.hub.forgets().pending("n1"), agents.to_vec());
+}
+
+/// `n1` connects offering `agent.forget.local` and is sent the forget of `agent`.
+async fn forget_sent(
+    st: &Arc<ServerState>,
+    agent: &str,
+) -> (
+    Conn<TcpStream>,
+    tokio::task::JoinHandle<()>,
+    v1::CommandRequest,
+) {
+    let (mut conn, task) = node_conn(st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    let sent = command_to_node(&mut conn, Duration::from_secs(10))
+        .await
+        .expect("the forget is sent after the Welcome");
+    assert!(
+        matches!(sent.command, Some(command_request::Command::AgentForget(ref f)) if f.agent_id == agent),
+        "{sent:?}"
+    );
+    (conn, task, sent)
+}
+
+/// The node answers `sent` with `code` (`None`: `ok`), and the hub has taken the answer in (its audit row is written).
+async fn answer_forget(
+    st: &Arc<ServerState>,
+    conn: &mut Conn<TcpStream>,
+    sent: v1::CommandRequest,
+    code: Option<agora_protocol::ErrorCode>,
+) {
+    let rows = || {
+        agora_hub::audit::Audit::new(st.hub.store())
+            .list(0, Some(agora_hub::ca::RESERVED_HUB_ID), 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "agent.forget.local")
+            .count()
+    };
+    let before = rows();
+    let result = match code {
+        None => command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        }),
+        Some(c) => command_response::Result::Err(
+            agora_protocol::Error::new(c)
+                .with("node_id", "n1")
+                .to_info(),
+        ),
+    };
+    let answer = v1::CommandResponse {
+        request_id: sent.request_id,
+        result: Some(result),
+    };
+    conn.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    until("the hub to take the answer in", || rows() > before).await;
+}
+
+async fn leave(st: &Arc<ServerState>, conn: Conn<TcpStream>, task: tokio::task::JoinHandle<()>) {
+    drop(conn);
+    let _ = task.await;
+    until("n1 to leave", || !st.hub.router().is_connected("n1")).await;
+}
+
+/// ADR-0108 amendment A: an answer that says the node could not decide now (`node.offline` from a stopping node, `node.timeout`,
+/// `internal`) keeps the forget, which is sent again after the node's next `Welcome`; an `ok` then settles it. A stopping node's
+/// `node.offline` also ends this connection's round: the forgets behind it wait for the next one.
+#[tokio::test]
+async fn a_forget_answered_with_a_passing_failure_is_kept_and_sent_again_after_the_next_welcome() {
+    use agora_protocol::ErrorCode;
+    for code in [
+        ErrorCode::NodeOffline,
+        ErrorCode::NodeTimeout,
+        ErrorCode::Internal,
+    ] {
+        let st = forget_state(SqliteStore::open_in_memory().unwrap());
+        forgets_owed_while_away(&st, &["agent-3", "agent-4"]).await;
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, Some(code.clone())).await;
+        if code == ErrorCode::NodeOffline {
+            assert!(
+                command_to_node(&mut conn, Duration::from_millis(500))
+                    .await
+                    .is_none(),
+                "a stopping node is sent no more forgets"
+            );
+        } else {
+            // Another passing failure does not end the round: the next forget goes on this connection (and is settled).
+            let sent = command_to_node(&mut conn, Duration::from_secs(10))
+                .await
+                .unwrap();
+            answer_forget(&st, &mut conn, sent, None).await;
+        }
+        let kept = if code == ErrorCode::NodeOffline {
+            vec!["agent-3", "agent-4"]
+        } else {
+            vec!["agent-3"]
+        };
+        assert_eq!(st.hub.forgets().pending("n1"), kept, "{code:?}");
+        leave(&st, conn, task).await;
+        assert_eq!(st.hub.forgets().pending("n1"), kept, "{code:?}");
+
+        // The next connection is sent it again, and an `ok` settles it.
+        let (mut conn, _task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, None).await;
+        if code == ErrorCode::NodeOffline {
+            let sent = command_to_node(&mut conn, Duration::from_secs(10))
+                .await
+                .unwrap();
+            answer_forget(&st, &mut conn, sent, None).await;
+        }
+        assert!(st.hub.forgets().pending("n1").is_empty(), "{code:?}");
+    }
+}
+
+/// ADR-0108 amendment A: an answer that says the node decided drops the forget at once, as before.
+#[tokio::test]
+async fn a_forget_answered_with_a_decision_is_dropped() {
+    use agora_protocol::ErrorCode;
+    for code in [
+        None,
+        Some(ErrorCode::AgentRunning),
+        Some(ErrorCode::ProtocolInvalidMessage),
+        Some(ErrorCode::ApprovalGrantRequired),
+        Some(ErrorCode::NodePolicyDenied),
+    ] {
+        let st = forget_state(SqliteStore::open_in_memory().unwrap());
+        forgets_owed_while_away(&st, &["agent-3"]).await;
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(&st, &mut conn, sent, code.clone()).await;
+        assert!(st.hub.forgets().pending("n1").is_empty(), "{code:?}");
+        leave(&st, conn, task).await;
+        let (mut conn, _task) = node_conn(&st, "n1").await;
+        handshake_offering(&mut conn, &[FORGET_CAP]).await;
+        assert!(
+            command_to_node(&mut conn, Duration::from_millis(500))
+                .await
+                .is_none(),
+            "{code:?}"
+        );
+    }
+}
+
+/// ADR-0108 amendment A: a node that keeps answering `internal` is not sent the same forget for ever: after the fifth such answer
+/// (`forgets::MAX_TRANSIENT`) it is dropped (retention removes the files, as for a forget past the 1000 bound).
+#[tokio::test]
+async fn a_forget_that_keeps_failing_is_dropped_after_five_passing_failures() {
+    let st = forget_state(SqliteStore::open_in_memory().unwrap());
+    forgets_owed_while_away(&st, &["agent-3"]).await;
+    for i in 1..=agora_hub::forgets::MAX_TRANSIENT {
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(
+            &st,
+            &mut conn,
+            sent,
+            Some(agora_protocol::ErrorCode::Internal),
+        )
+        .await;
+        leave(&st, conn, task).await;
+        let left: Vec<&str> = if i < agora_hub::forgets::MAX_TRANSIENT {
+            vec!["agent-3"]
+        } else {
+            vec![]
+        };
+        assert_eq!(st.hub.forgets().pending("n1"), left, "after {i}");
+    }
+    let (mut conn, _task) = node_conn(&st, "n1").await;
+    handshake_offering(&mut conn, &[FORGET_CAP]).await;
+    assert!(command_to_node(&mut conn, Duration::from_millis(500))
+        .await
+        .is_none());
+    // The person forgets it again: it is owed afresh.
+    st.hub.forget_agent("n1/agent-3", 200).unwrap();
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+}
+
+/// ADR-0108 amendment A: a kept forget, and how many passing failures it has had, survive a hub restart.
+#[tokio::test]
+async fn a_kept_forget_and_its_failures_survive_a_hub_restart() {
+    let path =
+        std::env::temp_dir().join(format!("agora-hub-forget-kept-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let st = forget_state(SqliteStore::open(&path).unwrap());
+        forgets_owed_while_away(&st, &["agent-3"]).await;
+        for _ in 0..4 {
+            let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+            answer_forget(
+                &st,
+                &mut conn,
+                sent,
+                Some(agora_protocol::ErrorCode::NodeTimeout),
+            )
+            .await;
+            leave(&st, conn, task).await;
+        }
+        assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    }
+    // A new hub on the same store: still owed, and sent after the Welcome; one more passing failure reaches the bound.
+    let st = forget_state(SqliteStore::open(&path).unwrap());
+    assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+    answer_forget(
+        &st,
+        &mut conn,
+        sent,
+        Some(agora_protocol::ErrorCode::Internal),
+    )
+    .await;
+    leave(&st, conn, task).await;
+    assert!(st.hub.forgets().pending("n1").is_empty());
+    drop(st);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The audit outcome of the newest `AgentList` row, once it is no longer `sent` (or `sent` after `wait`).
 async fn agent_list_outcome(st: &ServerState, wait: Duration) -> String {
     let end = tokio::time::Instant::now() + wait;

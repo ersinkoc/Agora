@@ -100,6 +100,34 @@ unbuilt, which the maintainer accepted as a promise that a forget removes the co
 - Node tests: forget, then both files are gone and a take-up or resume seeds an empty ring; a batch queued before the forget does not
   recreate the file; an invalid id touches nothing.
 
+## Amendment A (accepted by the maintainer 2026-11-24, in the merger chat): a transient answer keeps the forget
+
+Accepted: 2026-11-24 (the maintainer, in the merger chat: "Yes, amend and build"). The approval named it "Amendment B"; this ADR had
+no amendment before, so it is written as Amendment A. Origin: the review of #1143, recorded on issue #1150. Decision 1 above is
+unchanged as written; this amendment replaces only its "whatever the answer".
+
+Decision 1 drops a pending forget on any answer. Some answers say only that the node could not decide now, and dropping the forget
+then can leave an interrupted agent's conversation and Resume offer on the node until the person forgets it again.
+
+1. **A decision drops the forget.** The hub drops a pending forget when the node's answer says it decided: `ok` (removed, or an agent
+   it does not know), `agent.running` (as decision 2 says), `protocol.invalid_message` (an id that is not a plain name, or a forget
+   on the wrong stream), `approval.grant_required` (its grant gate, ADR-0041), `node.policy_denied` (the node takes no routed
+   commands), and any other code not listed in item 2.
+2. **A transient answer keeps it.** The hub keeps the forget, to send again after the node's next `Welcome` (or at once when the
+   person forgets the agent again), when the answer is `node.offline` (a stopping node), `node.timeout` (the node's own wait for the removal,
+   `FORGET_WAIT`, or the uplink's wait for a routed command, `ROUTED_DEADLINE`, ran out) or `internal`. After a `node.offline` the hub
+   sends that connection no more of the node's pending forgets: the rest wait for its next connection too. A connection lost before
+   the node answers keeps the forget as before and is not counted (the node may never have received it).
+3. **Bound.** A forget is dropped at its **5th** transient answer (`forgets::MAX_TRANSIENT`), however it was sent, so a node that
+   always fails a forget gets it at most five times. A dropped forget leaves the agent's file and Resume
+   offer on the node, as decision 1 already does for a forget past the 1000 bound: retention removes the file, and a person who forgets
+   the agent again makes it pending afresh, with a new count. A person forgetting an agent whose forget is still pending does not add
+   it twice and does not restart its count. The other bounds of decision 1 stay: 1000 per node, oldest dropped first; forgetting the
+   machine drops its list.
+4. **Storage.** The count is kept with the forget in the hub's settings (`forget.<node>`), so a hub restart keeps both. An entry that
+   has had no transient answer is written as before (the agent's id as a string); one that has is written as
+   `{"agent": <id>, "transient": <n>}`. A list written before this amendment reads as it was.
+
 ## Open questions for the maintainer
 
 1. Option 1 (reuse `AgentForget` with a capability) or option 2 (a new message)?

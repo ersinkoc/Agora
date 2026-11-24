@@ -1661,11 +1661,12 @@ fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
 }
 
 /// ADR-0108: passes the person's forgets of `agents` (the node's own ids) on to `node`, one after another in one task, each after the
-/// node answered the one before: the node's queue is never filled with them. An answer, whatever it says, settles that forget (the
-/// node decided: removed, unknown, refused while the agent runs there, or refused by its grants); a node that is not connected, does
-/// not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Transient codes
-/// (`node.offline`, `node.timeout`, `internal`) settle it too, as ADR-0108 says: the person forgets the agent again to retry. Each
-/// answer is audited under the hub's own id with its code as the outcome, and the agent and its project in their own columns.
+/// node answered the one before: the node's queue is never filled with them. An answer that says the node decided settles that
+/// forget (`ok`: removed or unknown; `agent.running`; refused by its grants or policy; an invalid id). Amendment A: one that says it
+/// could not decide now ([`forget_failed_for_now`]) keeps it, counted, for the node's next connection (dropped at the bound,
+/// `forgets::MAX_TRANSIENT`); after a stopping node's `node.offline` the rest wait for that connection too. A node that is not
+/// connected, does not offer `agent.forget.local`, or whose connection ends first is sent the rest when it next connects. Each answer
+/// is audited under the hub's own id with its code as the outcome, and the agent and its project in their own columns.
 fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
     agents.retain(|a| !a.is_empty());
     if agents.is_empty() || !hub.router().is_connected(node) {
@@ -1706,7 +1707,12 @@ fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
                 Some(command_response::Result::Err(e)) => e.code.clone(),
                 _ => "ok".to_string(),
             };
-            let _ = forgets.answered(&node, &agent);
+            let passing = forget_failed_for_now(&outcome);
+            if passing {
+                let _ = forgets.failed_for_now(&node, &agent);
+            } else {
+                let _ = forgets.answered(&node, &agent);
+            }
             // The outcome column holds the code alone; the agent and its project have columns of their own.
             let _ = crate::audit::Audit::new(&store).record_target(
                 "",
@@ -1716,8 +1722,24 @@ fn give_forgets(hub: &Hub, node: &str, mut agents: Vec<String>) {
                 &outcome,
                 &crate::audit::Target::of_agent(&node, &agent, &project),
             );
+            // The node is stopping: it would answer the rest the same way.
+            if outcome == ErrorCode::NodeOffline.as_str() {
+                return;
+            }
         }
     });
+}
+
+/// ADR-0108 amendment A: the codes a node answers a forget with when it could not decide now: it is stopping (`node.offline`), the
+/// removal or the uplink's own wait ran out (`node.timeout`), or something failed (`internal`). Every other answer is a decision.
+fn forget_failed_for_now(code: &str) -> bool {
+    [
+        ErrorCode::NodeOffline,
+        ErrorCode::NodeTimeout,
+        ErrorCode::Internal,
+    ]
+    .iter()
+    .any(|c| c.as_str() == code)
 }
 
 /// Sends one board notice to its agent as a mesh message from the hub (best effort, like any mesh post).
