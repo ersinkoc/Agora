@@ -319,6 +319,24 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                         bf.name()
                     ));
                 }
+                let base_options = bf.options.as_ref();
+                let head_options = hf.options.as_ref();
+                let base_ctype = base_options.and_then(|o| o.ctype).unwrap_or_default();
+                let head_ctype = head_options.and_then(|o| o.ctype).unwrap_or_default();
+                if base_ctype != head_ctype {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: C++ type option changed",
+                        bf.name()
+                    ));
+                }
+                let base_jstype = base_options.and_then(|o| o.jstype).unwrap_or_default();
+                let head_jstype = head_options.and_then(|o| o.jstype).unwrap_or_default();
+                if base_jstype != head_jstype {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: JavaScript type option changed",
+                        bf.name()
+                    ));
+                }
             }
         }
     }
