@@ -60,11 +60,12 @@ export function StartSummary({ start }: { start: StartRequest }) {
 // folder), whether in its own worktree, how deep, and the whole first prompt. It is the agent's text, shown as text only, with any
 // hidden character written as a visible escape. Redesign PR 5: this is the full request, in the request frame: Review's dialog
 // (`full`, the prompt whole in the dialog's own scroll) and the phone's card. Panes and the side panel show `StartSummary` with Review.
+// Without `onResolve` (a viewer's window, ADR-0106) it is read-only: the whole request, with no answers and no choice of a grant.
 export function StartApproval({ approval, start, busy, onResolve, density = 'card', titleWrap, lead, foot }: {
   approval: ApprovalModel;
   start: StartRequest;
   busy?: boolean;
-  onResolve: (approved: boolean, choice: StartChoice) => void;
+  onResolve?: (approved: boolean, choice: StartChoice) => void;
   density?: ApprovalDensity;
   titleWrap?: (title: ReactElement) => ReactNode;
   // Before the answers (Review's Close).
@@ -94,8 +95,10 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
         {lead}
         {/* Redesign PR 4: Deny, then Allow, as on every request. An Allow that starts a helper that would not ask is the danger button
             (ADR-0102), and it still opens the confirmation below first. */}
-        <Button size="sm" disabled={busy} onClick={() => onResolve(false, { grant: 0, nested: false })}>{t('approval-deny')}</Button>
-        <Button size="sm" variant={skipping.length > 0 ? 'danger' : 'primary'} disabled={busy || confirming} onClick={() => (skipping.length > 0 ? setConfirming(true) : onResolve(true, choice()))}>{t('approval-allow')}</Button>
+        {onResolve && <>
+          <Button size="sm" disabled={busy} onClick={() => onResolve(false, { grant: 0, nested: false })}>{t('approval-deny')}</Button>
+          <Button size="sm" variant={skipping.length > 0 ? 'danger' : 'primary'} disabled={busy || confirming} onClick={() => (skipping.length > 0 ? setConfirming(true) : onResolve(true, choice()))}>{t('approval-allow')}</Button>
+        </>}
       </>}>
       <div className="flex flex-col gap-2 text-xs">
         <KeyValue items={facts} />
@@ -112,14 +115,14 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
         {/* #1070: the grant is the kit's segmented control (one tab stop, the arrow keys choose). Its segments are short so they are never
             cut; what "More like this" allows is said in full under it, always (it never appears or goes with the choice, so nothing under
             it moves while the person chooses). What is sent is unchanged: `choice()`. */}
-        {start.grantAllowed && <div className="flex min-w-0 flex-col items-start gap-1.5" data-grant-choice>
+        {onResolve && start.grantAllowed && <div className="flex min-w-0 flex-col items-start gap-1.5" data-grant-choice>
           <span id={`${scope}-label`} className="text-muted">{t('start-approval-scope')}</span>
           <SegmentedControl labelledBy={`${scope}-label`} value={more ? 'more' : 'once'} onChange={(v) => setMore(v === 'more')}
             items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who }) }]} />
           <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</p>
           {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
         </div>}
-        {confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
+        {onResolve && confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
           <div className="min-w-0 flex-1 basis-64"><strong className="block">{t('session-confirm-title')}</strong>
             <span className="text-muted">{t('start-confirm-skip-body', { name: skipping.map(optionName).join(', ') })}</span></div>
           <button type="button" className="button px-3 py-1 text-xs" disabled={busy} onClick={() => { setConfirming(false); onResolve(true, choice()); }}>{t('start-confirm-skip-yes')}</button>

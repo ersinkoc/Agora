@@ -122,17 +122,20 @@ export function SkipApproval({ approval, busy, onResolve, density = 'card', titl
         {lead}
         {/* Redesign PR 4: Deny, then Allow, as on every request; this Allow lets the agent act without asking, so it is the danger button
             (ADR-0102). The dwell and "Read it first" are unchanged. */}
-        <Button size="sm" disabled={g.denyOff} onClick={() => g.answer(false)}>{t('approval-deny')}</Button>
-        <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={g.allowOff} aria-describedby={!g.ready ? g.wait : undefined} onClick={() => g.answer(true)}>
-          {t('approval-allow')}
-          {g.answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${g.ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
-        </Button>
+        {/* Read-only without `onResolve` (a viewer's window, ADR-0106): no answers at all. */}
+        {onResolve && <>
+          <Button size="sm" disabled={g.denyOff} onClick={() => g.answer(false)}>{t('approval-deny')}</Button>
+          <Button size="sm" variant="danger" className="relative overflow-hidden" disabled={g.allowOff} aria-describedby={!g.ready ? g.wait : undefined} onClick={() => g.answer(true)}>
+            {t('approval-allow')}
+            {g.answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${g.ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
+          </Button>
+        </>}
       </>}>
       <div className="flex flex-col gap-2 text-xs">
         <p className="m-0">{t('skip-approval-body')}</p>
         <KeyValue items={facts} />
         <p className="m-0 text-muted">{t('skip-approval-scope')}</p>
-        {!g.capable && <p role="note" className="m-0 text-muted">{t('skip-approval-other-window')}</p>}
+        {onResolve && !g.capable && <p role="note" className="m-0 text-muted">{t('skip-approval-other-window')}</p>}
       </div>
     </ApprovalRequest>
   );

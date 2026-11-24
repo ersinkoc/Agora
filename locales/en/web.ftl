@@ -486,6 +486,8 @@ filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
 prompt-intro = This agent works through requests, not a terminal. Tell it what to do.
+# ADR-0106 (#1140): the same, in a window that cannot send it anything (a viewer's).
+prompt-intro-watching = This agent works through requests, not a terminal.
 prompt-label = What should it do?
 prompt-send = Send
 prompt-sent = Sent.
@@ -496,6 +498,7 @@ history-none = Nothing has been committed here yet.
 history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
+chat-empty-watching = Nothing said yet.
 chat-log = Conversation
 chat-plan = Plan
 chat-plan-steps =
@@ -1242,6 +1245,8 @@ notify-body-named-on = { $name } on { $machine } needs you
 attention-sent = Answer sent. If this card stays, open it with Review.
 # A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
 approval-sent = Answer sent.
+# ADR-0106: where a request would have its answers, in a viewer's window (the hub refuses a viewer's answer).
+approval-watching = You can watch here. A member or the owner answers requests.
 attention-notify-names-warn = These names come from the agents and machines themselves, and a notification may show them on a locked screen. A name that is not plain text is left out.
 
 # Usage (no money: tokens, context and time)
@@ -1324,6 +1329,8 @@ chat-files-more = And { $count } more
 chat-plan-label = Plan
 chat-error-label = Something went wrong
 prompt-hint = Enter sends, Shift+Enter starts a new line.
+# ADR-0106: in place of the box to type in, in a viewer's window (the hub refuses a viewer's request).
+prompt-watching = You can watch here. A member or the owner talks to this agent.
 session-started-with = { $name }: { $value }
 session-started-hint = Chosen when this agent was started. The agent does not report it, so it may have changed since.
 empty-changes-title = All clean

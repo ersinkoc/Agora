@@ -144,7 +144,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <PanelGallery messages={demoMessages} fleet={demoAgents} />
-      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
+      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       <ChatActionsContext.Provider value={{ setConfig: async (_a, _c, v) => (v === 'yolo' ? { approvalNeeded: 'demo/9' } : true), cancelTurn: async () => true, approvals: new Set(['demo/9']) }}>
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       </ChatActionsContext.Provider>
@@ -177,6 +177,16 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <div data-start-narrow className="w-[12.5rem]"><ApprovalBanner approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned /></div>
         <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
         <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
+      </div>
+      {/* ADR-0106 (#1140): the same requests in a viewer's window, read-only: a plain request and a start's card with no answers, and
+          the whole start and switch as Review shows them, with no answers and no grant to choose. */}
+      <div data-viewer-requests className="grid max-w-3xl grid-cols-1 gap-3">
+        <div className="approvals">
+          <ApprovalCard approval={{ ...(demoApprovals[0] as ApprovalModel), machineName: 'laptop' }} agent={demoAgents[0]} onOpen={() => {}} />
+          <ApprovalCard approval={demoStartLongApproval as ApprovalModel} agent={demoAgents[0]} onOpen={() => {}} />
+        </div>
+        <div data-start-full-readonly className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" /></div>
+        <div data-skip-full-readonly className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" /></div>
       </div>
       <HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}

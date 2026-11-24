@@ -905,8 +905,10 @@ impl Session {
         })
     }
 
-    /// Sends a request to an agent (a routed `agent.prompt`) and waits for the machine to take it.
+    /// Sends a request to an agent (a routed `agent.prompt`) and waits for the machine to take it. A viewer's session (ADR-0106) does not
+    /// send it: `auth.forbidden` without a request, where the hub would refuse it and write the refusal down.
     pub fn prompt(&mut self, node: &str, agent_id: &str, text: &str) -> Result<(), String> {
+        self.viewer_refused()?;
         self.command(
             node,
             command_request::Command::AgentPrompt(agora_protocol::v1::AgentPrompt {
@@ -917,7 +919,8 @@ impl Session {
         )
     }
 
-    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered.
+    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered. Not sent for a viewer, as
+    /// [`Session::prompt`] is not.
     pub fn set_option(
         &mut self,
         node: &str,
@@ -925,6 +928,7 @@ impl Session {
         model: bool,
         id: &str,
     ) -> Result<(), String> {
+        self.viewer_refused()?;
         let command = if model {
             command_request::Command::AgentSetModel(agora_protocol::v1::AgentSetModel {
                 agent_id: agent_id.to_string(),
@@ -937,6 +941,16 @@ impl Session {
             })
         };
         self.command(node, command, Duration::from_secs(15))
+    }
+
+    /// ADR-0106: `auth.forbidden` for a viewer's session, whose window only watches; nothing is sent.
+    fn viewer_refused(&self) -> Result<(), String> {
+        if self.person_role == PersonRole::Viewer {
+            return Err(agora_protocol::ErrorCode::AuthForbidden
+                .as_str()
+                .to_string());
+        }
+        Ok(())
     }
 
     /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033). The hub
