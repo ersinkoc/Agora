@@ -558,9 +558,9 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
                 std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
                 options.open(&tmp)?
             };
-            // Private from its creation on, not made private just after it (#320).
+            // Private from its creation on, not made private just after it (#320), and not shared while it is written.
             #[cfg(windows)]
-            let mut f = windows::create_private_new(&tmp)?;
+            let mut f = windows::create_private_new(&tmp, 0)?;
             f.write_all(contents)?;
             f.sync_all()?;
             // Windows cannot rename a file that is still open.

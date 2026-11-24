@@ -2061,8 +2061,8 @@ fn link_guard(dir: &Path, wait: std::time::Duration) -> std::io::Result<std::fs:
     let busy = || std::io::Error::from(std::io::ErrorKind::TimedOut);
     let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
     loop {
-        // On Windows a first save creates the file unshared for a moment (a sharing violation for anyone opening it then), so an open
-        // that fails for a reason that can clear is tried again within the wait (Codex review of F1031: only those).
+        // On Windows an open can fail for a moment for a reason that clears (another program, such as a virus scanner, holding the file
+        // just after it was written), so such an open is tried again within the wait (Codex review of F1031: only those).
         let file = match agora_platform::open_lock_private(&lock) {
             Ok(f) => f,
             Err(e) if lasting(&e) => return Err(e),
