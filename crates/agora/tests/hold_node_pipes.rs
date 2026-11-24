@@ -1472,11 +1472,17 @@ fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_t
         "the usage was logged before the stop"
     );
     prompt(&node, &id, "hold:my token is SECRETVA|LUE-ABCDEFGH-XYZ ok");
+    // #1147: live, words that end in part of the value wait (at most 300 ms) and go with that part replaced.
     wait_for("the first words", || {
         chat(&node, &id)
             .iter()
-            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text.ends_with("SECRETVA"))
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text == "my token is <redacted>")
     });
+    assert!(
+        chat(&node, &id).iter().all(|e| leaked(&e.text).is_empty()),
+        "{:#?}",
+        chat(&node, &id)
+    );
     wait_for("the agent to work", || {
         state_of(&node, &id) == Some(AgentState::Working)
     });
