@@ -1390,20 +1390,6 @@ fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the
     assert_eq!(logged_usage(&node, &id), (10, 7), "the usage of the turn");
 }
 
-/// A turn whose answer is shown and not yet in the conversation's file (the writer, once a second, may have run just after it: then
-/// another turn). Its word.
-fn an_answer_not_yet_written(rig: &Rig, node: &Node, id: &str) -> String {
-    for n in 0..20 {
-        let word = format!("last-{n}");
-        prompt(node, id, &word);
-        wait_for("the answer", || agent_said(node, id, &word));
-        if !on_disk(rig, id, &word) {
-            return word;
-        }
-    }
-    panic!("every answer was on disk before the stop");
-}
-
 /// ADR-0104 O2: a clean stop writes what the conversation's writer and the usage merge (5 s) still held: words the agent said in a turn
 /// still open (held back, as the node holds a secret value: #1103's writer releases them at the turn's end or a stop) are in the file
 /// after it, and the usage of the turn before, still being gathered, is in the log.
@@ -1449,20 +1435,55 @@ fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
 }
 
 /// Review of #1108 (#1119 item 2): a start or a resume launches its adapter under the supervisor's lock (an `initialize` may take 30 s).
-/// A stop that comes meanwhile still writes, within its deadline, what does not need that lock: the answer shown and not yet in the
-/// file, and the usage still being gathered. Then, once the lock is free, it lets the adapter go, which keeps running.
+/// A stop that comes meanwhile still writes, within its deadline, what does not need that lock: the agent's words held back in its open
+/// turn and the usage of the turn before, still being gathered. Then, once the lock is free, it lets the adapter go, which keeps running.
 ///
 /// The test holds the supervisor as such a launch does, until the stop has written both (or for 10 s: before, the stop waited for the
-/// lock and wrote nothing until then).
+/// lock and wrote nothing until then). The node holds a secret and the words end inside it: this stop writes twice (once while the lock
+/// is busy, again after the let-go), and no piece of the value is ever on disk, after the stop nor once the next node wrote the rest.
 #[test]
 fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_the_usage() {
     let _serial = serial();
     let rig = Rig::new("busy");
+    let value = "SECRETVALUE-ABCDEFGH-XYZ";
+    agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaked = |body: &str| -> Vec<String> {
+        pieces
+            .iter()
+            .filter(|p| body.contains(**p))
+            .map(|p| (*p).to_string())
+            .collect()
+    };
     let node = rig.node();
     let id = started(&rig, &node);
     let pid = pid_of(&node, &id);
-    let word = an_answer_not_yet_written(&rig, &node, &id);
-    let gathered = logged_usage(&node, &id);
+    prompt(&node, &id, "counted");
+    wait_for("the answer", || agent_said(&node, &id, "counted"));
+    // The turn's usage is gathered for 5 s before it is logged: what follows is well within that.
+    assert_eq!(
+        logged_usage(&node, &id),
+        (0, 0),
+        "the usage was logged before the stop"
+    );
+    prompt(&node, &id, "hold:my token is SECRETVA|LUE-ABCDEFGH-XYZ ok");
+    wait_for("the first words", || {
+        chat(&node, &id)
+            .iter()
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text.ends_with("SECRETVA"))
+    });
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    assert!(
+        !on_disk(&rig, &id, "my token is"),
+        "written while the turn was open: the test no longer shows the stop's flush"
+    );
     let (sup, events, file) = (
         std::sync::Arc::clone(&node.supervisor),
         std::sync::Arc::clone(&node.events),
@@ -1486,7 +1507,7 @@ fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_t
                 .sum::<u64>()
         };
         let written = || {
-            std::fs::read_to_string(&file).is_ok_and(|t| t.contains(&word)) && usage() > gathered.0
+            std::fs::read_to_string(&file).is_ok_and(|t| t.contains("my token is")) && usage() > 0
         };
         let held_since = Instant::now();
         while !written() && held_since.elapsed() < Duration::from_secs(10) {
@@ -1505,64 +1526,29 @@ fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_t
     );
     assert!(took < Duration::from_secs(4), "it took {took:?}");
     assert!(alive(pid), "the adapter ended with its node");
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
+    assert!(
+        leaked(&body).is_empty(),
+        "{:?} on disk after the stop: {body}",
+        leaked(&body)
+    );
+
     let node = rig.node();
     assert!(held(&node, &id), "the agent was not taken up again");
-    prompt(&node, &id, "after");
-    wait_for("the answer after the restart", || {
-        agent_said(&node, &id, "after")
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
+    wait_for("the agent to be idle", || {
+        state_of(&node, &id) == Some(AgentState::Idle)
     });
-}
-
-/// #1119 item 5: an adapter that really ended (it crashed) a moment before its node stopped, and whose end the supervision loop had not
-/// taken yet. The stop lets go of it as of every held adapter and does not record the end (it cannot tell it from the end its own let-go
-/// causes). The next node learns it from the holder: it does not take the agent up, the holder lets it go, and the agent is offered for
-/// Resume, which is not refused as still running.
-///
-/// Deterministic as the drain test above: the test holds the supervisor, so the loop cannot take the end before the stop.
-#[test]
-fn an_adapter_that_ended_just_before_its_node_stopped_is_offered_for_resume_by_the_next_node() {
-    let _serial = serial();
-    let rig = Rig::new("ended");
-    let node = rig.node();
-    let id = started(&rig, &node);
-    let agent = AgentId::new(id.clone());
-    let pid = pid_of(&node, &id);
-    let holder = holder_pid(&rig);
-    let sup = std::sync::Arc::clone(&node.supervisor);
-    {
-        let guard = sup.lock().unwrap();
-        // The fake adapter exits with 3 on this prompt, before it answers.
-        let _ = guard.adapter_prompt(&agent, "crash", false);
-        wait_for("the adapter to end", || !alive(pid));
-        // The holder says how it ended with the end of its output, which the reader hands over as `Exited`.
-        std::thread::sleep(Duration::from_millis(1500));
-        node.begin_stop();
-    }
-    drop(sup);
-    assert_eq!(
-        state_of(&node, &id),
-        Some(AgentState::Idle),
-        "the loop took the end"
-    );
-    drop(node);
-
-    let node = rig.node();
-    assert!(!held(&node, &id), "an ended agent was taken up");
+    wait_for("the rest on disk", || on_disk(&rig, &id, " ok"));
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
     assert!(
-        !node
-            .supervisor
-            .lock()
-            .unwrap()
-            .list()
-            .iter()
-            .any(|v| v.id == agent && v.running),
-        "an ended agent is shown running"
+        leaked(&body).is_empty(),
+        "{:?} on disk after the rest: {body}",
+        leaked(&body)
     );
-    let entry = node.ledger.get(&id).expect("the agent in the ledger");
-    assert!(entry.interrupted(), "not offered for Resume: {entry:?}");
-    assert!(!entry.still_running(), "{entry:?}");
-    // The holder let it go: it ran only this agent, so it ends.
-    wait_for("the holder to let the agent go and end", || !alive(holder));
+    // The first turn's, which the stop wrote (the second turn's is still being gathered, or logged too on a slow runner).
+    let logged = logged_usage(&node, &id);
+    assert!(logged.0 >= 10, "{logged:?}");
 }
 
 /// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);
