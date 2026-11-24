@@ -25,12 +25,20 @@ pub fn load(schema_root: &Path) -> Result<FileDescriptorSet, String> {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     }
     for e in std::fs::read_dir(dir)? {
-        let p = e?.path();
-        if p.is_dir() {
+        let e = e?;
+        let file_type = e.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let p = e.path();
+        if file_type.is_dir() {
             collect(&p, out)?;
         } else if p.extension().is_some_and(|x| x == "proto") {
             out.push(p);
