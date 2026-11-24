@@ -127,3 +127,4 @@ Date: YYYY-MM-DD
 | 0108 | Forgetting an agent in the window reaches its node, which deletes its saved conversation | Accepted |
 | 0109 | Recover a cross-node task handoff after a hub restart | Accepted |
 | 0110 | A prompt or decision the adapter does not take is a stable error | Accepted |
+| 0111 | Adapters report where they cut text, so redaction sees every edge | Accepted |
