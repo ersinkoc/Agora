@@ -257,19 +257,20 @@ busy live fleets or change any budget; larger-tree work still needs measurements
 The old scroll long-task count included later picks and filters and is superseded by these phase-specific results.
 
 **Explorer windowing (#1126).** At 120 agents, Explorer renders agent rows in batches near its scroll area. Group headings remain
-available, and the focused and selected batches stay mounted. Browsers without the visibility or size observers render the
-whole list. The table records two paired Chromium runs with the corrected fixture and the same benchmark script.
+available, and the focused and selected batches stay mounted. Rows keep their identity when an earlier row is added or removed.
+Each group has one list, and a mounted item carries its position and the full group size. Browsers without the visibility or size
+observers render the whole list. The table records two paired Chromium runs with the corrected fixture and the same benchmark script.
 Both builds showed 500 agents, 50 projects and 10 machines. Picking waits for a visible row after moving the scrollbar. The
 click-to-frame timer starts when the row is ready. The runner counts samples that need more than two settling frames.
 
 | Metric | Before windowing | With windowing |
 | --- | --- | --- |
 | Initially mounted agent rows | 500 | 30 |
-| Explorer DOM nodes | 8 200 | 871 |
-| Scroll frame gap, p50 | 40.6–40.8 ms | 16.6–16.7 ms |
-| Scroll frame gap, p95 | 51.3 ms | 17.0–17.5 ms |
-| Pick → frame, p95 | 63.2–64.7 ms | 21.2–22.3 ms |
-| Long tasks while scrolling | 5–7 | 0 |
+| Explorer DOM nodes | 8 200 | 918 |
+| Scroll frame gap, p50 | 40.7–42.0 ms | 16.6–16.7 ms |
+| Scroll frame gap, p95 | 50.9–51.8 ms | 17.4–17.8 ms |
+| Pick → frame, p95 | 62.8–69.8 ms | 20.9–22.2 ms |
+| Long tasks while scrolling | 3–8 | 0 |
 
 The median reaches one 60 Hz interval in this fixture. The p95 remains just above 16.7 ms. Both builds reached the end of the
 tree and visited 20 agent rows with 40 consecutive Tab presses.
