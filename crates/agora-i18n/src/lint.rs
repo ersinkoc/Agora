@@ -296,8 +296,17 @@ pub fn rust_keys(src: &str) -> Vec<String> {
             .chars()
             .next_back()
             .is_none_or(|c| c.is_ascii() && !c.is_alphanumeric() && c != '_');
-        if token_start && bytes.get(i..i + 4) == Some(b"key!") {
-            let mut p = i + 4;
+        if token_start && bytes.get(i..i + 3) == Some(b"key") {
+            let mut p = i + 3;
+            while bytes.get(p).is_some_and(u8::is_ascii_whitespace) {
+                p += 1;
+            }
+            if bytes.get(p) != Some(&b'!') {
+                let ch = source[i..].chars().next().unwrap_or_default();
+                i += ch.len_utf8();
+                continue;
+            }
+            p += 1;
             while bytes.get(p).is_some_and(u8::is_ascii_whitespace) {
                 p += 1;
             }
