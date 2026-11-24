@@ -1192,18 +1192,17 @@ impl Helpers for Spawner {
 
 /// Whether `prompt` holds one of a kind's `[[typed]]` marker texts, ignoring case and whitespace as the screen rules do: they find a
 /// phrase with its runs of whitespace (line breaks included) as one space, so a prompt that only spaces a marker differently could
-/// still stand in for it once typed (ADR-0057).
+/// still stand in for it once typed (ADR-0057). Not covered: a word the input box breaks in its middle reads as two words to the rules
+/// (`Entersend` wrapped after `Enter`), and a marker given only as a regex; the shipped kinds' `[[typed]]` rules also need their footer
+/// whole on one row by a regex.
 fn carries_marker(prompt: &str, markers: &[String]) -> bool {
-    let words = |s: &str| {
-        s.to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let prompt = words(prompt);
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Both with case as written and lowercased: lowercasing is not the same letter by letter everywhere (a final sigma), so the
+    // case-kept comparison keeps every match the case-sensitive screen rules can make.
+    let (kept, lower) = (words(prompt), words(&prompt.to_lowercase()));
     markers.iter().any(|m| {
-        let m = words(m);
-        !m.is_empty() && prompt.contains(&m)
+        let (m_kept, m_lower) = (words(m), words(&m.to_lowercase()));
+        !m_kept.is_empty() && (kept.contains(&m_kept) || lower.contains(&m_lower))
     })
 }
 
@@ -1233,6 +1232,8 @@ mod tests {
             "any prompt",
             &[" \n ".to_string(), String::new()]
         ));
+        // A marker whose lowercase form differs letter by letter (final sigma) is still found as written.
+        assert!(carries_marker("ΑΣΒ", &["ΑΣ".to_string()]));
     }
 
     #[test]
