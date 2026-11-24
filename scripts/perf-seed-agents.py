@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Seeds a stopped hub database with a large fleet for scripts/perf-tree.mjs: NODES machines x PROJECTS projects x AGENTS agents.
-# Standard library only; writes protobuf by hand (the four event kinds it needs). Usage: perf-seed-agents.py HUB_DB [nodes projects agents]
+# Standard library only; writes protobuf by hand. Usage: perf-seed-agents.py HUB_DB [nodes projects agents]
 import sqlite3, sys, time
 def varint(n):
     out=b''
@@ -27,7 +27,10 @@ for n in range(nodes):
     put(10, s(1,node)+s(2,node)+s(3,'linux')+s(4,'0.3.11'))
     for p in range(projects_per):
         pid=f'project-{n*projects_per+p:02d}'
-        put(20, s(1,f'c{p}')+s(2,node)+s(3,pid)+s(4,f'/home/dev/code/{pid}'))
+        path=f'/home/dev/code/{pid}'
+        put(20, s(1,f'c{p}')+s(2,node)+s(3,pid)+s(4,path))
+        # Explorer derives an agent's project through its worktree and checkout.
+        put(21, s(1,f'c{p}')+s(2,f'c{p}')+s(3,path))
         for a in range(agents_per):
             aid=f'agent-{p*agents_per+a+1}'
             put(30, s(1,aid)+s(2,pid)+s(3,node)+s(4,f'c{p}')+s(5,['claude-code','codex','wrongstack'][a%3]))
