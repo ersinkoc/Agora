@@ -42,6 +42,7 @@ cli-usage =
       agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
       agora node untrust CİHAZ_ID [--data DİZİN]
       agora node secret set AD | list | remove AD [--data DİZİN]
+      agora history purge [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -489,6 +490,8 @@ cli-secret-name = { $name }
 cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi kullanın, rakamla başlamasın ve sistemin ya da Agora'nın kullandığı bir ad olmasın.
 cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
 cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
+cli-history-purged = Bu makinenin ajanları için tuttuğu sohbet geçmişi silindi.
+cli-history-purge-failed = Sohbet geçmişi silinemedi. Düğümün veri klasörünün size ait ve yazılabilir olduğunu kontrol edin.
 cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.
 
 # ADR-0065: hub'da `agora pair`, yeni makinede `agora join`.
