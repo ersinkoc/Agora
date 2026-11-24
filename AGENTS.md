@@ -70,6 +70,9 @@ collisions:
   crate boundaries, or a dependency policy, write `docs/adr/NNNN-title.md` with status `Proposed` and stop
   for human review.
 - **Docs move with code.** If behavior described in `docs/` changes, update the doc in the same PR.
+- **Changelog by fragment.** A user-visible change adds one file `changelog.d/<slug>.md` holding its CHANGELOG bullet
+  (`changelog.d/README.md`). Never edit `CHANGELOG.md` outside a release PR, which folds the fragments in with
+  `scripts/fold-changelog.sh`; two PRs then never conflict on it.
 - **Leave a handoff note.** When stopping mid-task, append to the PR description: what is done, what is
   not, how to verify, known risks.
 
