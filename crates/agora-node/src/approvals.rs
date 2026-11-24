@@ -1934,9 +1934,13 @@ impl NodeApprovals {
     /// adapter, or a check that its agent is gone). False when it was already answered, withdrawn or expired: then nothing is done.
     pub fn take_pending(&self, id: &str) -> bool {
         let taken = self.q().withdraw(id).is_some();
-        // R2: also when it was not in the queue (handed to the sweep as expired while its answer call ran): the sweep must not end
-        // a request that was settled.
-        self.r().remove(id);
+        // The route goes only with the request: a put-back by another command may have just inserted it (route first, then the
+        // queue entry), and removing it then would leave that request pending with no route.
+        if taken {
+            self.r().remove(id);
+        }
+        // R2: the late list also when it was not in the queue (handed to the sweep as expired while its answer call ran): the
+        // sweep must not end a request that was settled. An expired put-back never inserts a route, so none is left behind.
         self.l().retain(|(i, _, _)| i != id);
         taken
     }
