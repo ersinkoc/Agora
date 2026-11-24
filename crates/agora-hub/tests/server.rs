@@ -2589,6 +2589,41 @@ async fn a_forget_that_keeps_failing_is_dropped_after_five_passing_failures() {
     assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
 }
 
+/// ADR-0108 amendment A: a connection that ends before the node answers keeps the forget and does not count (the node may never have
+/// received it): after three such ends it is still stored as a plain id, and it still takes `MAX_TRANSIENT` passing failures to drop.
+#[tokio::test]
+async fn a_connection_lost_before_the_answer_keeps_the_forget_uncounted() {
+    let st = forget_state(SqliteStore::open_in_memory().unwrap());
+    forgets_owed_while_away(&st, &["agent-3"]).await;
+    for _ in 0..3 {
+        let (conn, task, _sent) = forget_sent(&st, "agent-3").await;
+        leave(&st, conn, task).await;
+        assert_eq!(st.hub.forgets().pending("n1"), vec!["agent-3"]);
+    }
+    let stored = st.hub.store().setting("forget.n1").unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stored).unwrap(),
+        serde_json::json!(["agent-3"]),
+        "no passing failure counted"
+    );
+    for i in 1..=agora_hub::forgets::MAX_TRANSIENT {
+        let (mut conn, task, sent) = forget_sent(&st, "agent-3").await;
+        answer_forget(
+            &st,
+            &mut conn,
+            sent,
+            Some(agora_protocol::ErrorCode::Internal),
+        )
+        .await;
+        leave(&st, conn, task).await;
+        assert_eq!(
+            st.hub.forgets().pending("n1").is_empty(),
+            i == agora_hub::forgets::MAX_TRANSIENT,
+            "after {i}"
+        );
+    }
+}
+
 /// ADR-0108 amendment A: a kept forget, and how many passing failures it has had, survive a hub restart.
 #[tokio::test]
 async fn a_kept_forget_and_its_failures_survive_a_hub_restart() {

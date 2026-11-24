@@ -126,7 +126,9 @@ then can leave an interrupted agent's conversation and Resume offer on the node 
    machine drops its list.
 4. **Storage.** The count is kept with the forget in the hub's settings (`forget.<node>`), so a hub restart keeps both. An entry that
    has had no transient answer is written as before (the agent's id as a string); one that has is written as
-   `{"agent": <id>, "transient": <n>}`. A list written before this amendment reads as it was.
+   `{"agent": <id>, "transient": <n>}`. A list written before this amendment reads as it was. The other way does not hold: a hub from
+   before this amendment reads a list that holds a counted entry as empty, so going back to such a hub drops all of that node's
+   pending forgets (retention still removes the files on the node).
 
 ## Open questions for the maintainer
 
