@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id cline, version 3.0.75. Untested in Agora until someone runs it.
+kind = "registry-cline"
+display_name = "Cline"
+version = "3.0.75"
+min_engine = 1
+
+[structured]
+acp = { argv = ["npx", "--yes", "cline@3.0.75", "--acp"] }

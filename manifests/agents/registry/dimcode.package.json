@@ -1,0 +1,27 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "DimCode",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "dimcode",
+      "version": "0.5.32"
+    }
+  ],
+  "name": "registry-dimcode",
+  "skipped": [],
+  "source": {
+    "id": "dimcode",
+    "license": "proprietary",
+    "license_url": "https://dimagent.cn/terms",
+    "version": "0.5.32",
+    "website": "https://dimagent.cn/"
+  },
+  "tested": false
+}

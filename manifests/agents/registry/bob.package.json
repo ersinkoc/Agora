@@ -1,0 +1,27 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Bob",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@ibm/bob",
+      "version": "2.1.0"
+    }
+  ],
+  "name": "registry-bob",
+  "skipped": [],
+  "source": {
+    "id": "bob",
+    "license": "proprietary",
+    "license_url": "https://www.ibm.com/support/customer/csol/terms/?id=L-EBQG-R9G8MA",
+    "version": "2.1.0",
+    "website": "https://bob.ibm.com"
+  },
+  "tested": false
+}

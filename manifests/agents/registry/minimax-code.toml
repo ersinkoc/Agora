@@ -1,0 +1,9 @@
+# Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.
+# Registry id minimax-code, version 0.7.9. Untested in Agora until someone runs it.
+kind = "registry-minimax-code"
+display_name = "MiniMax Code"
+version = "0.7.9"
+min_engine = 1
+
+[structured]
+acp = { argv = ["npx", "--yes", "@minimax-ai/code-acp@0.7.9", "acp"] }

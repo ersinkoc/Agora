@@ -1,0 +1,66 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Kiro CLI",
+  "installers": [
+    {
+      "args": [
+        "acp",
+        "--agent-engine=v3"
+      ],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "fa32d8f2054d79642922db696683630114b2cea99a2c7f655becd923afe33ccf",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-universal-darwin.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "fa32d8f2054d79642922db696683630114b2cea99a2c7f655becd923afe33ccf",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-universal-darwin.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "ee719fcf8d1166a44eb543e9acada6e2766cf13765787612336d0a43f3903766",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-aarch64-linux.tar.gz"
+        },
+        "linux-aarch64-musl": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "374cdf12c03ccd1c7d04a2e911a0f0b89277a3750c52b6cf10f44236fabb6fd9",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-aarch64-linux-musl.zip"
+        },
+        "linux-x86_64": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "2ebb8688b84765e4baf46d6e28b3e79780e7724e198591c22d0528d03a88a282",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-x86_64-linux.tar.gz"
+        },
+        "linux-x86_64-musl": {
+          "cmd": "./kirocli/bin/kiro-cli",
+          "env_names_not_copied": [],
+          "sha256": "f11185c3edb2a9b80aa3b3f407e3fd6f003175c07ea9d83804d74f298d24eba3",
+          "url": "https://prod.download.cli.kiro.dev/stable/3.0.0/kirocli-x86_64-linux-musl.zip"
+        }
+      },
+      "provides": [
+        "kiro-cli"
+      ]
+    }
+  ],
+  "name": "registry-kiro",
+  "skipped": [],
+  "source": {
+    "id": "kiro",
+    "license": "proprietary",
+    "license_url": "https://kiro.dev/license/",
+    "repository": "https://github.com/kirodotdev/Kiro",
+    "version": "3.0.0",
+    "website": "https://kiro.dev/docs/cli/acp/"
+  },
+  "tested": false
+}

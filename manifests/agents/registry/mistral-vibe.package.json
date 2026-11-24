@@ -1,0 +1,57 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Mistral Vibe",
+  "installers": [
+    {
+      "args": [],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./vibe-acp",
+          "env_names_not_copied": [],
+          "sha256": "4492735d66b615cb321e19e762199df957744ff9f8e7cccaf39fbebd55cad8a0",
+          "url": "https://github.com/mistralai/mistral-vibe/releases/download/v3.1.4/vibe-acp-darwin-aarch64-3.1.4.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./vibe-acp",
+          "env_names_not_copied": [],
+          "sha256": "a5e2fac0ec4ea09c7c8fd218ae2acbb9b830ecd071668fe7f4293e793a104940",
+          "url": "https://github.com/mistralai/mistral-vibe/releases/download/v3.1.4/vibe-acp-darwin-x86_64-3.1.4.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./vibe-acp",
+          "env_names_not_copied": [],
+          "sha256": "3db34e9f64920ddc819687e848ac3ebb730112538a56b0b64633bce6beccaf74",
+          "url": "https://github.com/mistralai/mistral-vibe/releases/download/v3.1.4/vibe-acp-linux-aarch64-3.1.4.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./vibe-acp",
+          "env_names_not_copied": [],
+          "sha256": "934a79356755821a31e6ce1aee7f7f1eacb6b1e6c78901acf1eb7fc4650aece7",
+          "url": "https://github.com/mistralai/mistral-vibe/releases/download/v3.1.4/vibe-acp-linux-x86_64-3.1.4.tar.gz"
+        },
+        "windows-x86_64": {
+          "cmd": "./vibe-acp.exe",
+          "env_names_not_copied": [],
+          "sha256": "4f8681d6e0496a258ba62acf57188961ebdfdc5799f26fe218adb43c637c7b79",
+          "url": "https://github.com/mistralai/mistral-vibe/releases/download/v3.1.4/vibe-acp-windows-x86_64-3.1.4.zip"
+        }
+      },
+      "provides": [
+        "vibe-acp"
+      ]
+    }
+  ],
+  "name": "registry-mistral-vibe",
+  "skipped": [],
+  "source": {
+    "id": "mistral-vibe",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/mistralai/mistral-vibe/blob/main/LICENSE",
+    "repository": "https://github.com/mistralai/mistral-vibe",
+    "version": "3.1.4",
+    "website": "https://mistral.ai/products/vibe"
+  },
+  "tested": false
+}

@@ -405,6 +405,9 @@ pub enum SupervisorError {
     SettingUnknown(String, String),
     /// ADR-0066: a value the setting does not take: `(kind, setting)`.
     SettingInvalid(String, String),
+    /// #1133: the owner's `agents.registry` policy switches this registry kind off: `(kind, rule)`, the rule `registry_off` or
+    /// `registry_denied`. Nothing was started.
+    RegistryRefused(String, &'static str),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -421,6 +424,10 @@ impl SupervisorError {
             Self::UnknownKind(k) => {
                 Error::new(ErrorCode::AgentKindUnknown).with("kind", k.as_str())
             }
+            Self::RegistryRefused(k, rule) => Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", *rule)
+                .with("kind", k.as_str()),
             Self::PublisherRevoked(k, p) => Error::new(ErrorCode::AgentPublisherRevoked)
                 .with("kind", k.as_str())
                 .with("publisher", p.as_str()),
@@ -987,6 +994,10 @@ pub struct Supervisor {
     parents: BTreeMap<AgentId, AgentId>,
     /// ADR-0059: the owner's `skip_permissions` policy.
     skip_permissions: SkipPermissions,
+    /// ADR-0092 (#1133): the owner's `agents.registry` policy; a registry kind it switches off is neither listed nor started.
+    registry: crate::manifests::RegistryPolicy,
+    /// The kinds registered from the ACP registry's converted manifests (by origin, not by name).
+    registry_kinds: BTreeSet<String>,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
     /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
@@ -1010,6 +1021,8 @@ impl Supervisor {
             sent: Arc::default(),
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
+            registry: crate::manifests::RegistryPolicy::default(),
+            registry_kinds: BTreeSet::new(),
             holder: None,
             kept_launch: BTreeSet::new(),
         }
@@ -1264,6 +1277,41 @@ impl Supervisor {
     /// ADR-0059: the owner's `skip_permissions` policy (from the node's policy file; the default allows).
     pub fn set_skip_permissions(&mut self, policy: SkipPermissions) {
         self.skip_permissions = policy;
+    }
+
+    /// ADR-0092 (#1133): the owner's `agents.registry` policy (from the node's policy file; the default offers them all).
+    pub fn set_registry_policy(&mut self, policy: crate::manifests::RegistryPolicy) {
+        self.registry = policy;
+    }
+
+    /// #1133: whether a start of `kind` must be signed by a person's device: a kind from the ACP registry started through a package
+    /// runner. Read where the hub's commands enter the node. A kind not known yet whose name says it is a registry one (`registry-*`, a
+    /// manifest added after the node read its folder) is held to it too: its description is read only after this check (review F6).
+    pub fn start_needs_signature(&self, kind: &str) -> bool {
+        match self.kinds.get(kind) {
+            Some(k) => {
+                self.registry_kinds.contains(kind)
+                    && crate::manifests::fetches_at_start(&k.manifest)
+            }
+            None => kind.starts_with(crate::manifests::REGISTRY_PREFIX),
+        }
+    }
+
+    /// The owner's registry policy for `kind`: why it is switched off, for a kind from the registry only.
+    fn registry_refusal(&self, kind: &str) -> Option<&'static str> {
+        if self.registry_kinds.contains(kind) {
+            self.registry.refusal(kind)
+        } else {
+            None
+        }
+    }
+
+    /// #1133: a registry kind the owner's policy switches off is not started, by any path.
+    fn refuse_registry(&self, kind: &str) -> Result<(), SupervisorError> {
+        match self.registry_refusal(kind) {
+            Some(rule) => Err(SupervisorError::RegistryRefused(kind.to_string(), rule)),
+            None => Ok(()),
+        }
     }
 
     /// ADR-0059: resolves a start's launch options and checks them against the owner's policy, before anything is created.
@@ -1616,6 +1664,28 @@ impl Supervisor {
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
     pub fn register(&mut self, manifest: Manifest) {
+        // A hand-made description of a kind replaces a registry one of the same name: it is no longer the registry's (#1133 F5).
+        self.registry_kinds.remove(&manifest.kind);
+        self.register_kind(manifest);
+    }
+
+    /// [`Self::register`] for a kind converted from the ACP registry (ADR-0092, `manifests::Source::Registry`): the owner's
+    /// `agents.registry` policy and the signed-start rule apply to it, by its origin, never by its name alone.
+    pub fn register_from_registry(&mut self, manifest: Manifest) {
+        self.registry_kinds.insert(manifest.kind.clone());
+        self.register_kind(manifest);
+    }
+
+    /// [`Self::register`] or [`Self::register_from_registry`], by where the description came from.
+    pub fn register_loaded(&mut self, loaded: crate::manifests::Loaded) {
+        if loaded.source == crate::manifests::Source::Registry {
+            self.register_from_registry(loaded.manifest);
+        } else {
+            self.register(loaded.manifest);
+        }
+    }
+
+    fn register_kind(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
         let ready = Detector::ready(&manifest);
         let typed = Detector::typed(&manifest);
@@ -1674,6 +1744,8 @@ impl Supervisor {
     /// #897: an agent of a kind started as a plain process (an adapter or ACP bridge) also needs the platform to confine a command,
     /// which Windows cannot yet; before, it failed only at spawn, after its worktree was made, as an internal error.
     fn refuse_unconfinable(&self, kind: &str) -> Result<(), SupervisorError> {
+        // Every start path checks this first, so the owner's registry policy is checked with it.
+        self.refuse_registry(kind)?;
         let structured = self
             .kinds
             .get(kind)
@@ -3831,6 +3903,7 @@ impl Supervisor {
                 return Err(SupervisorError::StillRunning(id.clone()));
             }
             self.check_limits()?;
+            self.refuse_registry(&entry.agent.kind)?;
             // An adapter is a plain process: it needs the platform to confine a command (#897).
             if !self.sandbox.enforceable_for_commands() {
                 return Err(SupervisorError::SandboxUnavailable(
@@ -3926,6 +3999,7 @@ impl Supervisor {
             return Err(SupervisorError::StillRunning(id.clone()));
         }
         self.check_limits()?;
+        self.refuse_registry(&entry.agent.kind)?;
         let (kind, worktree, session, project) = (
             entry.agent.kind.clone(),
             entry.worktree.clone(),
@@ -4256,6 +4330,8 @@ impl Supervisor {
     pub fn kinds(&self) -> Vec<KindInfo> {
         self.kinds
             .values()
+            // #1133: a registry kind the owner's policy switches off is not offered.
+            .filter(|k| self.registry_refusal(&k.manifest.kind).is_none())
             .map(|k| {
                 let m = &k.manifest;
                 let acp = m.structured.as_ref().and_then(|s| s.acp.as_ref());

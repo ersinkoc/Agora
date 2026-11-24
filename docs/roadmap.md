@@ -49,6 +49,7 @@ criteria are met.
 - **Exit:** a third-party adapter in another language connects without a core change.
 
 ## Phase 7 — Scale out
-- Windows node; desktop app (Tauri); team mode with Postgres, policies, audit UI; mobile approvals.
+- Windows node; desktop app (Tauri); team mode on SQLite with users, roles, policies and an audit UI; mobile approvals.
+  Postgres follows a measured need under ADR-0049.
 - Optional agent sandboxing (threat model T8); privacy features for cloud (region, E2E terminal encryption).
 - Cloud (multi-tenant hub) planning.

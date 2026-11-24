@@ -1,0 +1,66 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Junie",
+  "installers": [
+    {
+      "args": [
+        "--acp=true"
+      ],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./Applications/junie.app/Contents/MacOS/junie",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-macos-aarch64.zip"
+        },
+        "darwin-x86_64": {
+          "cmd": "./Applications/junie.app/Contents/MacOS/junie",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-macos-amd64.zip"
+        },
+        "linux-aarch64": {
+          "cmd": "./junie-app/bin/junie",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-linux-aarch64.zip"
+        },
+        "linux-x86_64": {
+          "cmd": "./junie-app/bin/junie",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-linux-amd64.zip"
+        },
+        "windows-aarch64": {
+          "cmd": "./junie/junie.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-windows-aarch64.zip"
+        },
+        "windows-x86_64": {
+          "cmd": "./junie/junie.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://github.com/JetBrains/junie-acp-release/releases/download/4100.11/junie-release-4100.11-windows-amd64.zip"
+        }
+      },
+      "provides": [
+        "junie"
+      ]
+    }
+  ],
+  "name": "registry-junie",
+  "skipped": [],
+  "source": {
+    "id": "junie",
+    "license": "proprietary",
+    "license_url": "https://www.jetbrains.com/legal/docs/terms/jetbrains-ai-service/",
+    "repository": "https://github.com/JetBrains/junie-acp-release",
+    "version": "4100.11.0",
+    "website": "https://junie.jetbrains.com"
+  },
+  "tested": false
+}

@@ -1,0 +1,66 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Devin",
+  "installers": [
+    {
+      "args": [
+        "acp"
+      ],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./bin/devin",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-aarch64-apple-darwin.tar.gz"
+        },
+        "darwin-x86_64": {
+          "cmd": "./bin/devin",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-x86_64-apple-darwin.tar.gz"
+        },
+        "linux-aarch64": {
+          "cmd": "./bin/devin",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-aarch64-unknown-linux.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./bin/devin",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-x86_64-unknown-linux.tar.gz"
+        },
+        "windows-aarch64": {
+          "cmd": "./bin\\devin.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-aarch64-pc-windows.zip"
+        },
+        "windows-x86_64": {
+          "cmd": "./bin\\devin.exe",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-x86_64-pc-windows.zip"
+        }
+      },
+      "provides": [
+        "devin"
+      ]
+    }
+  ],
+  "name": "registry-devin",
+  "skipped": [],
+  "source": {
+    "id": "devin",
+    "license": "proprietary",
+    "license_url": "https://cognition.com/legal/platform-terms-of-service",
+    "repository": "https://github.com/CognitionAI/devin-cli",
+    "version": "3000.14.30821",
+    "website": "https://docs.devin.ai/cli"
+  },
+  "tested": false
+}
