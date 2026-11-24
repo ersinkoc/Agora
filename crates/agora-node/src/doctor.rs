@@ -202,6 +202,7 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
                 }
             }
         }
+        out.extend(protected_path_reachable(&sandbox, inputs));
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
@@ -477,6 +478,27 @@ fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Ve
     out
 }
 
+/// #1114: the node's data folder or manifests folder that a folder agents may read or write contains, where only the node's refusal
+/// keeps them closed (Linux): the node then refuses every confined start (`protected_path_reachable`). The control socket's folder is
+/// the `control-token-reachable` check's. The worktree root and the projects are not known here, so the node's own list
+/// (`daemon::node_private_paths`) can hold more; it lies in the same folders in the usual layout.
+fn protected_path_reachable(
+    sandbox: &crate::sandbox::SandboxPolicy,
+    inputs: &Inputs,
+) -> Option<Check> {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut probe = sandbox.clone();
+    probe.protect = vec![abs(&inputs.data_dir), abs(&inputs.manifests_dir)];
+    probe.data_dir = None;
+    let profile = probe.profile("doctor", None, Path::new("/nonexistent-agora-doctor"), "")?;
+    let path = probe.protected_reachable(&profile)?;
+    Some(check(
+        "protected-path-reachable",
+        Status::Fail,
+        path.display().to_string(),
+    ))
+}
+
 /// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-profile` on macOS: measured on a real Mac for the agent's own socket, another one and the resolver; or why
 /// not: `sockets-abstract`, `sockets-none`), which socket variables the node leaves out of an agent's environment
 /// (`env-scrubbed`) and which of them the owner let through (`env-passed`). Names only, never values.
@@ -741,6 +763,41 @@ mod tests {
 
     fn find<'a>(c: &'a [Check], id: &str) -> Vec<&'a Check> {
         c.iter().filter(|c| c.id == id).collect()
+    }
+
+    #[test]
+    fn a_data_folder_inside_a_folder_agents_may_read_is_named_where_only_a_refusal_closes_it() {
+        let d = std::fs::canonicalize(tmp("protected")).unwrap();
+        let inputs = Inputs {
+            data_dir: d.join("node/data"),
+            socket: d.join("sock/node.sock"),
+            manifests_dir: d.join("sock/manifests"),
+            agora_home: none_home(),
+        };
+        std::fs::create_dir_all(&inputs.data_dir).unwrap();
+        let mut policy = crate::sandbox::SandboxPolicy {
+            level: crate::sandbox::Level::Worktree,
+            ..Default::default()
+        };
+        // Nothing the agents are given reaches the node's folders (unless the system temp folder is one agents are given: `/tmp` on
+        // Linux, where `TMPDIR` is not set).
+        let given = policy
+            .profile("doctor", None, Path::new("/nonexistent-agora-doctor"), "")
+            .is_some_and(|p| policy.path_reachable(&d, &p));
+        if !given {
+            assert!(protected_path_reachable(&policy, &inputs).is_none());
+        }
+        // The owner gives every agent the folder holding the data folder.
+        policy.read = vec![d.join("node")];
+        let c = protected_path_reachable(&policy, &inputs);
+        if agora_platform::PROTECTED_PATHS_BY_REFUSAL {
+            let c = c.expect("named");
+            assert_eq!((c.id, c.status), ("protected-path-reachable", Status::Fail));
+            assert_eq!(c.detail, inputs.data_dir.display().to_string());
+        } else {
+            assert!(c.is_none());
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     const MANIFEST: &str = "kind = \"demo\"\ndisplay_name = \"Demo\"\nversion = \"1\"\nmin_engine = 1\n[process]\nnames = [\"demo\"]\nlaunch = [\"LAUNCH\"]\n";

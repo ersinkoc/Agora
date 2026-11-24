@@ -322,6 +322,8 @@ describe('live stream ownership', () => {
     const t = setup();
     const s = t.sockets[0]!;
     s.onopen!();
+    // The connection says the role first (ADR-0106; here an older hub's snapshot): only then does a terminal get sizes and typing.
+    s.onmessage!(snapshot(1));
     const session = t.live.terminal('n', 'x').connect(() => {});
     const commands = () => s.sent.map(b => decodeFrame(b)!).filter(f => f.streamId === STREAM_COMMANDS && f.kind === 0).length;
     const closes = () => s.sent.map(b => decodeFrame(b)!).filter(f => f.kind === STREAM_CLOSE).length;
