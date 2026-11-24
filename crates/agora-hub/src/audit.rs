@@ -45,7 +45,7 @@ enum Resource<'a> {
 
 impl<'a> Target<'a> {
     /// Uses only identifiers documented by the command and the hub's current node-qualified projection.
-    pub(crate) fn for_command(node: &'a str, command: Option<&C>, view: &View) -> Self {
+    pub(crate) fn for_command(node: &'a str, command: Option<&'a C>, view: &View) -> Self {
         use Resource::*;
         let mut target = Self {
             node,
@@ -55,6 +55,11 @@ impl<'a> Target<'a> {
         let resource = match cmd {
             C::AgentStart(c) => Project(&c.project_id),
             C::AgentLaunch(c) => Project(&c.project_id),
+            C::AgentForget(c) => {
+                let (producer, id) = split_key(&c.agent_id).unwrap_or((&c.agent_id, ""));
+                target.node = producer;
+                Agent(id)
+            }
             C::AgentResume(c) => Agent(&c.agent_id),
             C::AgentStop(c) => Agent(&c.agent_id),
             C::AgentPrompt(c) => Agent(&c.agent_id),
@@ -89,6 +94,7 @@ impl<'a> Target<'a> {
             },
             _ => Machine,
         };
+        let node = target.node;
         let q = |id: &str| qualified(node, id);
         // Approval and terminal records carry the qualified agent id. Any other node prefix is outside this command's scope.
         let local_id = |key: &str| match split_key(key) {

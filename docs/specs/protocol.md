@@ -308,7 +308,8 @@ Request/response with `request_id` and `idempotency_key`. Responses are `Ok { re
 `Err { code, params }` (see `error-codes.md`).
 
 Team audit (ADR-0049) includes `project_id` and `agent_id` when the command or the hub's node-qualified view
-identifies those targets. Signed commands record `requested_device_id` from the request. A fresh, successful node
+identifies those targets. For a hub-side `AgentForget`, the audit row takes the node and local agent id from the
+qualified key and resolves the project before forgetting. Signed commands record `requested_device_id` from the request. A fresh, successful node
 reply establishes `signer_device_id`. Replies to requests with a caller-supplied idempotency key may be cached, so
 such replies leave the signer field empty. Earlier rows and commands without the corresponding identifier use empty strings.
 

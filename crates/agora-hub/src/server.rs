@@ -1224,16 +1224,21 @@ where
             Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"),
         )),
         // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
-        crate::dispatch::Route::ForgetAgent { agent_id, node } => {
-            Some(match hub.forget_agent(&agent_id, now_ms()) {
-                Ok(()) => {
-                    audit(hub, who, "agent.forget", &node, "ok");
-                    ok_empty(client_request_id.clone())
-                }
-                Err(e) => {
-                    audit(hub, who, "agent.forget", &node, e.code.as_str());
-                    refuse(e)
-                }
+        crate::dispatch::Route::ForgetAgent { agent_id, .. } => {
+            let (target, _) = hub.audit_target(&req);
+            let result = hub.forget_agent(&agent_id, now_ms());
+            let outcome = result.as_ref().map_or_else(|e| e.code.as_str(), |_| "ok");
+            let _ = crate::audit::Audit::new(hub.store()).record_target(
+                &who.session,
+                now_ms(),
+                &who.user,
+                "agent.forget",
+                outcome,
+                &target,
+            );
+            Some(match result {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
             })
         }
         // ADR-0073: the hub forgets an offline machine (owner only, decided in `dispatch`).

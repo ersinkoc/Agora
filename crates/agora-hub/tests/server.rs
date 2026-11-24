@@ -2073,6 +2073,31 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         .unwrap();
     assert!(matches!(ev.body, Some(Body::AgentForgotten(ref e)) if e.agent_id == "n1/a1"));
 
+    let missing = forget_agent(&mut client, "n1/missing").await;
+    assert_eq!(err_code(&missing), "agent.not_found");
+
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 10)
+        .unwrap();
+    let rows: Vec<_> = rows.iter().filter(|r| r.action == "agent.forget").collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|r| r.outcome.as_str()).collect::<Vec<_>>(),
+        ["agent.running", "ok", "agent.not_found"]
+    );
+    println!("CONTROL OK: all three forget outcomes were recorded");
+    let targets: Vec<_> = rows
+        .iter()
+        .map(|r| (r.node.as_str(), r.project_id.as_str(), r.agent_id.as_str()))
+        .collect();
+    let expected = [("n1", "p", "a1"), ("n1", "p", "a1"), ("n1", "", "missing")];
+    if targets != expected {
+        println!("EXPECTED: {expected:?}\nACTUAL: {targets:?}\nPROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert_eq!(targets, expected);
+
     // A client that arrives now no longer sees the agent, but the hub's usage still counts it.
     let mut later = dial(addr, Some("good-token")).await;
     subscribe(&mut later, v1::Subscribe::default().encode_to_vec()).await;
