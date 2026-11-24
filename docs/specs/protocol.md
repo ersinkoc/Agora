@@ -620,7 +620,8 @@ All additions; nothing published changed.
 All additions; nothing published changed.
 
 - **Ledger.** A node keeps `<data>/sessions/ledger.json` (folder `0700`, file `0600` on Unix, an owner-only ACL on Windows; replaced
-  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
+  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read; a write that would be larger leaves out the oldest ended entries first, then the oldest
+  others, until it fits, and keeps the next id). Per agent: id, kind, project,
   folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
   and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
   ADR-0059 (recorded from `AgentStarted`, never applied by `agent.resume`: a resumed or restarted-again agent asks before acting,

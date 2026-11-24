@@ -29,7 +29,7 @@ pub const LEDGER_FILE: &str = "ledger.json";
 pub const KEEP_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 /// Most entries kept; the oldest ended ones go first.
 pub const MAX_ENTRIES: usize = 512;
-/// A larger file is not read (it was not written by this ledger).
+/// The byte limit a ledger snapshot must fit for the next open to read it.
 const MAX_FILE_BYTES: u64 = 4 << 20;
 /// Longest text kept in one field; a longer one is not something the node wrote and is dropped.
 const MAX_FIELD: usize = 4096;
@@ -1029,14 +1029,9 @@ impl Ledger {
             if !st.dirty {
                 return Ok(());
             }
+            let bytes = ledger_bytes(&st)?;
             st.dirty = false;
-            let entries: Vec<Value> = st.entries.values().map(Entry::to_json).collect();
-            serde_json::to_vec(&json!({
-                "version": VERSION,
-                "next_id": st.next_id,
-                "entries": entries,
-            }))
-            .map_err(io::Error::other)?
+            bytes
         };
         let written = agora_platform::write_private(path, &bytes);
         if written.is_err() {
@@ -1052,6 +1047,44 @@ impl Ledger {
         write_kept_pending(&self.state, &self.write, self.dir().as_deref());
         written
     }
+}
+
+/// Encodes one snapshot the reader can reopen. If it hits the byte limit before the count limit,
+/// omit entries in the same order as count pruning, keeping the next id for every entry we saw.
+fn ledger_bytes(st: &State) -> io::Result<Vec<u8>> {
+    let head = b"{\"entries\":[";
+    let tail = format!("],\"next_id\":{},\"version\":{VERSION}}}", st.next_id);
+    let mut entries = st
+        .entries
+        .values()
+        .map(|e| serde_json::to_vec(&e.to_json()).map(|bytes| (e, bytes)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
+    // Count a comma with each entry, then subtract the unused last comma when there are entries.
+    let mut payload: usize = entries.iter().map(|(_, bytes)| bytes.len() + 1).sum();
+    let size = |payload: usize| head.len() + payload.saturating_sub(1) + tail.len();
+    let mut first = 0;
+    if size(payload) > MAX_FILE_BYTES as usize {
+        entries.sort_by_key(|(e, _)| (!e.ended, e.last_touched(), e.agent_id.as_str()));
+        for (_, bytes) in &entries {
+            if size(payload) <= MAX_FILE_BYTES as usize {
+                break;
+            }
+            payload -= bytes.len() + 1;
+            first += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(size(payload));
+    out.extend_from_slice(head);
+    for (i, (_, bytes)) in entries[first..].iter().enumerate() {
+        if i != 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(bytes);
+    }
+    out.extend_from_slice(tail.as_bytes());
+    debug_assert_eq!(out.len(), size(payload));
+    Ok(out)
 }
 
 /// Folds one event in; true when the change must be written now.
@@ -1805,6 +1838,54 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(LEDGER_FILE)]);
+    }
+
+    #[test]
+    fn the_ledger_round_trips_when_its_entries_exceed_the_file_budget() {
+        let dir = temp("byte-budget");
+        let mut l = Ledger::in_memory();
+        let folder = format!("/{}", vec!["p".repeat(248); 16].join("/"));
+        for i in 1..=MAX_ENTRIES {
+            let id = format!("agent-{i}");
+            directory_start(&l, &id, &folder, 100 + i as u64);
+            if i > 1 && i <= 32 {
+                l.observe(
+                    &Body::AgentExited(v1::AgentExited {
+                        agent_id: id,
+                        exit_code: 0,
+                    }),
+                    100 + i as u64,
+                );
+            }
+        }
+        let sessions = dir.join(LEDGER_DIR);
+        std::fs::create_dir(&sessions).unwrap();
+        let path = sessions.join(LEDGER_FILE);
+        // Write one snapshot of the same events an on-disk ledger receives.
+        l.path = Some(path.clone());
+        l.st().dirty = true;
+        l.flush().unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        drop(l);
+        let l = Ledger::open(&dir, 1_000).unwrap();
+        let first_active = l.get("agent-1");
+        let latest = l.get(&format!("agent-{MAX_ENTRIES}"));
+        let first_ended = l.get("agent-2");
+        let next = l.next_id();
+        drop(l);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        assert!(size <= MAX_FILE_BYTES, "{size} bytes");
+        assert!(
+            first_ended.is_none(),
+            "oldest ended entry kept ahead of a running one"
+        );
+        for active in [first_active, latest] {
+            let active = active.expect("running agent survived the write");
+            assert!(active.interrupted());
+            assert_eq!(active.folder, folder);
+        }
+        assert_eq!(next, MAX_ENTRIES as u64 + 1);
     }
 
     #[test]
