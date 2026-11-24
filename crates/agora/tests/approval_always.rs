@@ -513,5 +513,12 @@ fn a_secret_in_the_always_options_name_never_reaches_the_card() {
         ("<redacted>", "allow_always")
     );
     e.decide(&r, true, true, ApprovalScope::Always).unwrap();
-    e.wait_said(&agent, "selected:allow_always");
+    // The agent's own words saying which option it got end in part of the held value, so the live view masks them (by chance, at its
+    // end): the decision is read from the node's record instead.
+    let done = wait("the decision", || resolved(&e, &r.approval_id));
+    assert!(done.approved && done.scope == ApprovalScope::Always as i32);
+    let records = wait("the always record", || {
+        Some(always_records(&e, &agent)).filter(|v| !v.is_empty())
+    });
+    assert_eq!(records[0].approval_id, r.approval_id);
 }
