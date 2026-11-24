@@ -106,7 +106,17 @@ fn io_err(e: &io::Error) -> InstallError {
         } else {
             Code::IoFailed
         },
-        detail: format!("{:?}", e.kind()).to_ascii_lowercase(),
+        detail: io_detail(e),
+    }
+}
+
+/// The detail of an I/O failure: the kind of error, with the system's error number when the kind alone does not say what it was
+/// (for example `uncategorized_32` for a Windows error the standard library gives no kind).
+fn io_detail(e: &io::Error) -> String {
+    let kind = format!("{:?}", e.kind()).to_ascii_lowercase();
+    match e.raw_os_error() {
+        Some(n) if kind == "uncategorized" || kind == "other" => format!("{kind}_{n}"),
+        _ => kind,
     }
 }
 
@@ -1593,6 +1603,20 @@ mod lock_open_tests {
         let opened = open_lock(&agents, &open).map(drop);
         let _ = std::fs::remove_dir_all(&agents);
         assert!(opened.is_ok(), "{opened:?}");
+    }
+
+    /// An I/O failure whose kind says nothing (a sharing violation on Windows) keeps the system's error number in its detail.
+    #[test]
+    fn an_io_failure_of_no_known_kind_keeps_its_error_number() {
+        assert_eq!(
+            io_detail(&io::Error::from_raw_os_error(999_999)),
+            "uncategorized_999999"
+        );
+        assert_eq!(
+            io_detail(&io::Error::from(io::ErrorKind::NotFound)),
+            "notfound"
+        );
+        assert_eq!(io_detail(&io::Error::other("x")), "other");
     }
 }
 
