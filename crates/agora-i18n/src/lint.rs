@@ -359,6 +359,9 @@ fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> io::Result<()> {
 pub fn load_locales(root: &Path) -> io::Result<BTreeMap<String, BTreeSet<String>>> {
     let mut map = BTreeMap::new();
     let dir = root.join("locales");
+    if !fs::symlink_metadata(&dir)?.file_type().is_dir() {
+        return Err(io::Error::from(io::ErrorKind::NotADirectory));
+    }
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
