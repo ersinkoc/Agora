@@ -215,7 +215,7 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   character, the line and paragraph separators and the private use areas; also refused in the requested `folder` and in the folder
   it resolves to); no leading `!`, `/`, `#`, `&`, `$` or `?` (a shell escape, a slash command, a memory edit, a background send, a
   skill form or the shortcuts key in common agents); and no text the kind's `[[typed]]` rules require on screen (its footer,
-  compared case-insensitively), which could stand in for the real footer; and no last word starting with `@` (a file picker would take the
+  compared case-insensitively and with every run of whitespace, line breaks included, as one space, as the screen rules read it), which could stand in for the real footer; and no last word starting with `@` (a file picker would take the
   Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
 - **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
   `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open

@@ -169,7 +169,9 @@ a first prompt typed for it (the prompt is left for the user). Every shipped ter
 that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
 `[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
 footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
-require (`contains` in the rule, `all` or `any`), and the top-level
+require (`contains` in the rule, `all` or `any`; compared ignoring case and with every run of whitespace as one space, see
+`mesh-tools.md`; a word the box breaks in its middle and a marker given only as a regex are not covered, so a kind's `[[typed]]` rules
+should also need the footer whole on one row by a regex, as the shipped ones do), and the top-level
 `input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
