@@ -25,6 +25,8 @@ pub struct View<'a> {
     pub rows: u16,
     /// Now, in milliseconds since the Unix epoch: what "last seen" of an offline machine counts from (ADR-0070).
     pub now_ms: u64,
+    /// ADR-0106: the hub said the person is a viewer; the keys that change something are not shown.
+    pub viewer: bool,
 }
 
 /// The agents in the order the tree shows them: machines online first, then by name; agents by id within a machine.
@@ -962,7 +964,14 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
     );
     status.push_str("  ");
     status.push_str(&if v.notice.is_empty() {
-        t(key!("tui-split-keys"), &[])
+        t(
+            if v.viewer {
+                key!("tui-split-keys-viewer")
+            } else {
+                key!("tui-split-keys")
+            },
+            &[],
+        )
     } else {
         v.notice.to_string()
     });
@@ -1038,6 +1047,31 @@ mod tests {
     }
 
     #[test]
+    fn a_viewers_status_line_shows_only_the_keys_that_read() {
+        // ADR-0106: the hub said the person is a viewer.
+        let s = snapshot();
+        let v = View {
+            snapshot: &s,
+            selected: "",
+            screen: None,
+            notice: "",
+            color: false,
+            cols: 100,
+            rows: 16,
+            now_ms: 0,
+            viewer: true,
+        };
+        let rows = plain_rows(&frame(&v, &text), 16);
+        assert!(rows[15].contains("tui-split-keys-viewer"), "{rows:#?}");
+        let v = View { viewer: false, ..v };
+        let rows = plain_rows(&frame(&v, &text), 16);
+        assert!(
+            rows[15].contains("tui-split-keys") && !rows[15].contains("viewer"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn a_request_to_start_an_agent_is_shown_whole_on_the_right_while_it_is_the_one_answered() {
         // Seen on macOS: the split view listed an `agent.start` request as raw JSON cut to the panel ("agent.start {\"agent\":\"…"),
         // so y signed a start whose prompt and folder were never in view.
@@ -1058,6 +1092,7 @@ mod tests {
             cols: 100,
             rows: 16,
             now_ms: 0,
+            viewer: false,
         };
         let rows = plain_rows(&frame(&v, &text), 16);
         let left: Vec<&str> = rows
@@ -1137,6 +1172,7 @@ mod tests {
             cols: 100,
             rows: 10,
             now_ms: 0,
+            viewer: false,
         };
         let rows = plain_rows(&frame(&v, &text), 10);
         let at = |id: &str| {
@@ -1171,6 +1207,7 @@ mod tests {
             cols: 100,
             rows: 12,
             now_ms: 0,
+            viewer: false,
         };
         let f = frame(&v, &text);
         let rows = plain_rows(&f, 12);
@@ -1221,6 +1258,7 @@ mod tests {
             cols: 80,
             rows: 10,
             now_ms: 0,
+            viewer: false,
         };
         let f = frame(&v, &text);
         let sgr_free = f.replace("\x1b[?25l", "").replace("\x1b[K", "");
@@ -1257,6 +1295,7 @@ mod tests {
             cols: 90,
             rows: 12,
             now_ms: 0,
+            viewer: false,
         };
         let rows = plain_rows(&frame(&v, &text), 12);
         // Ten panel rows (12 minus the status line and the title): the last ten of the agent's screen, the prompt at the bottom.
@@ -1281,6 +1320,7 @@ mod tests {
             cols: 60,
             rows: 8,
             now_ms: 0,
+            viewer: false,
         };
         let rows = plain_rows(&frame(&v, &text), 8);
         assert!(rows[1].contains("│┌─┐ 漢字ok"), "{rows:#?}");

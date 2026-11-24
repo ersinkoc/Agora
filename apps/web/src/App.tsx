@@ -9,6 +9,7 @@ import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import type { DiffSource } from './net/diff';
 import { usePairing } from './net/usePairing';
+import { mayChange, ownsMachines, type PersonRole } from './net/role';
 import { PairRequest } from './components/PairRequest';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
@@ -118,8 +119,12 @@ export function App() {
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
+  // ADR-0106: the role of the person this window signed in as, as the hub's first frame said (`unspecified` from an older hub). A viewer's
+  // window offers nothing that changes something: the hub would refuse it, and write the refusal down in the owner's Activity.
+  const [role, setRole] = useState<PersonRole>('unspecified');
+  const changes = mayChange(role);
   // ADR-0065: machines asking to join (owner only, memory only).
-  const pairing = usePairing(api, link);
+  const pairing = usePairing(api, link, role);
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
   // ADR-0061: this person's registered devices as the hub lists them, their fingerprints, and the requests put off for now.
@@ -334,11 +339,11 @@ export function App() {
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.
     forgetSkipCapable();
     forgetGiveSupport();
-    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
+    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch, onRole: setRole,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
       onGrantRequired: grants.request });
     setApi(c);
-    return () => { c.close(); setApi(undefined); };
+    return () => { c.close(); setApi(undefined); setRole('unspecified'); };
   }, [hub, pairing.dispatch, grants.request]);
   // "Lock" in the title bar: this window's session ends at the hub and the sign-in screen comes back. Agents keep running.
   const lockNow = useCallback(() => {
@@ -361,7 +366,7 @@ export function App() {
   // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
   const boardList = useMemo(() => (live ? boards(live) : []), [live]);
   const giveApi = useMemo<GiveApi | undefined>(() => {
-    if (!hub || !api || !live) return undefined;
+    if (!hub || !api || !live || !changes) return undefined;
     const list = machines(live);
     return {
       agents, online: new Set(list.filter((m) => m.online).map((m) => m.id)), machines: list.map((m) => ({ id: m.id, name: m.name })), send: (agent, task) => giveTask(api.command, agent, task),
@@ -371,7 +376,7 @@ export function App() {
         loadKinds, inspect: inspectDirectory, list: listDirectory, launch: launchAgent,
       },
     };
-  }, [hub, api, live, agents, device, mine, askApproval, loadKinds, inspectDirectory, listDirectory, launchAgent]);
+  }, [hub, api, live, changes, agents, device, mine, askApproval, loadKinds, inspectDirectory, listDirectory, launchAgent]);
   const giving = useGiveAsk();
   // What was heard of machines that do not take tasks belongs to one connection, and to a machine until it goes offline (an update restarts it).
   useEffect(() => { if (link === 'live') forgetGiveSupport(); }, [link]);
@@ -459,7 +464,7 @@ export function App() {
   }, [api]);
   // The approvals that wait now (hub-wide keys), so a control that sent a switch knows when its card is gone.
   const waitingApprovals = useMemo<ReadonlySet<string>>(() => new Set(live ? [...live.approvals.keys()] : []), [live]);
-  const chatActions = useMemo<ChatActions>(() => (hub && api ? { setConfig, cancelTurn, rich, approvals: waitingApprovals } : {}), [hub, api, setConfig, cancelTurn, rich, waitingApprovals]);
+  const chatActions = useMemo<ChatActions>(() => (hub && api && changes ? { setConfig, cancelTurn, rich, approvals: waitingApprovals } : {}), [hub, api, changes, setConfig, cancelTurn, rich, waitingApprovals]);
 
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered.
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered. Addressed by the hub-wide key the
@@ -534,11 +539,11 @@ export function App() {
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next, group: 'go', icon: 'bell', keys: 'N' },
     { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); }, group: 'go', icon: 'grid' },
-    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); }, icon: 'plus' as const }] : []),
+    ...(hub && changes ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); }, icon: 'plus' as const }] : []),
     // The tools open as panes of the window, beside the agent in focus (not on a phone, which has no panes).
     ...(phone ? [] : [
       ...TOOL_PANELS.map((panel) => ({ id: `tool-${panel}`, label: t(`palette-open-${panel}`), run: () => { toWindow(); requestTool({ panel }); }, icon: TOOL_ICON[panel] })),
-      ...(hub ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); }, icon: 'terminal' as const }] : []),
+      ...(hub && changes ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); }, icon: 'terminal' as const }] : []),
     ]),
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines'), group: 'go', icon: 'machine' },
     ...paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
@@ -550,10 +555,10 @@ export function App() {
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
-    ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); }, group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })) : []),
+    ...(hub && api && changes ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); }, group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })) : []),
     // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
     ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task), group: 'tasks' as const, icon: 'board' as const })) : []),
-  ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
+  ], [api, agents, go, toWindow, hub, changes, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -580,31 +585,31 @@ export function App() {
   return (
     <AnswerHoldsProvider listed={heldIds}>
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
-    <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
+    <CloseAgentContext.Provider value={hub && api && changes ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
-      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined}
-        pairing={pairing.ui} onStart={hub && api && live ? (node) => { toWindow(); openStart(node); } : undefined} onNewTerminal={hub && api && live ? (node) => { toWindow(); openStart(node, true); } : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
+      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
+        pairing={pairing.ui} onStart={hub && api && live && changes ? (node) => { toWindow(); openStart(node); } : undefined} onNewTerminal={hub && api && live && changes ? (node) => { toWindow(); openStart(node, true); } : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
-          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
+          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
+          source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
-        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
+        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} stale={hub ? link !== 'live' : false} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
         ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'}
-          onStart={hub && api && live ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
+          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes}
+          onStart={hub && api && live && changes ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
-          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
-          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
-          onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
-          onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} />}
+          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
+          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api && changes ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
+          onStart={hub && api && live && changes ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
+          onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api && changes ? forgetAgent : undefined} onResume={hub && api && changes ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
+          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. My machines
           shows every request in full itself, so nothing floats there. */}
@@ -613,7 +618,7 @@ export function App() {
       <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
-      {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
+      {hub && live && changes && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}
         machines={machines(live).filter((m) => trustedOn.includes(m.id)).map((m) => ({ id: m.id, name: m.name }))}
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}

@@ -253,7 +253,7 @@ export interface PhoneCommon {
 const machineName = (machines: readonly MachineModel[], id: string) => machines.find((m) => m.id === id)?.name || id;
 
 // The list: what needs you first, then every machine with its agents. Tapping an agent opens it.
-export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, notice, link, onRetry, onOpen, onStart, onCommand, onLock, start, pairing, guest }: PhoneCommon & {
+export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, notice, link, onRetry, onOpen, onStart, onCommand, onLock, start, pairing, guest, watching }: PhoneCommon & {
   agents: readonly AgentTileModel[];
   link: 'connecting' | 'live' | 'offline';
   onRetry?: () => void;
@@ -266,6 +266,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
   pairing?: PairingUi;
   // The hub said this session is not the owner's: an empty window says no project is theirs yet (#904).
   guest?: boolean;
+  watching?: boolean;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   const fleet = useMemo(() => agents.filter((a) => !(a.closed && cleared.has(a.id))), [agents, cleared]);
@@ -309,7 +310,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <h2 className="phone-section__title">{t('pair-section', { count: pairing.cards.length })}</h2>
         <div className="grid gap-2"><PairCards ui={pairing} /></div>
       </section>}
-      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} guest={guest} />}
+      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} guest={guest} watching={watching} />}
       {pairing && <div className="px-3"><PairRecentList recent={pairing.recent} /></div>}
       {pairing?.window?.open && !empty && <div className="px-3"><PairWindowControl ui={pairing} /></div>}
       {needs.length > 0 && <section className="phone-section" aria-label={t('attention-title')}>

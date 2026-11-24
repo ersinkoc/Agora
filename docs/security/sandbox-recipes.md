@@ -77,7 +77,8 @@ names Claude Code and Codex read are removed from every agent that is not listed
 
 Three limits of the protection around the store itself. (a) With `sandbox = off` an agent is not confined and can read `<data>/secrets` like any
 file of yours; the store protects nothing from an unconfined agent. (b) The node refuses to start a confined agent whose read or write grants
-reach the secrets folder (`agent.sandbox_unavailable`, reason `secrets_reachable`), but only **at start** and only once a secret is stored:
+reach the secrets folder (`agent.sandbox_unavailable`, reason `secrets_reachable`), but only **at start** and only once a secret is stored
+(on Linux a grant that reaches the data folder is refused whether or not a secret is stored, reason `protected_path_reachable`, #1114):
 a secret you add while an agent with a broad grant (a read grant on your whole data folder or above) is already running is not caught, so
 restart such agents after storing a secret. (c) Names Windows cannot use as file names (`CON`, `NUL`, `COM1`, ...) and a name that differs from
 a stored one only in capitals are refused as secret names on every system.
@@ -143,6 +144,14 @@ sandbox.write = ~/.cargo/registry, ~/.npm, ~/.cache
 
 `/tmp` is writable to agents already.
 
+Landlock can only allow, so the node keeps its own folders closed by refusing instead: a confined start is refused
+(`agent.sandbox_unavailable`) when a folder an agent is given contains the node's control token (`control_token_reachable`) or any other
+folder of the node's own, its data folder (stored secrets, the session ledger, chat transcripts) or its manifests (`protected_path_reachable`,
+#1114). Every agent may read `/usr`, `/lib*`, `/bin`, `/sbin`, `/etc`, `/opt`, `/proc`, `/sys`, `/run` and `/var` and write `/tmp`, so a
+node whose `--data` or `--manifests` lies under one of them starts no confined agent; keep the node's folder under your home (`~/.agora`).
+`agora doctor` names the folder. A `sandbox.read` or `sandbox.write` entry *inside* the node's data folder is not refused on Linux and opens
+what it names: do not add one.
+
 ## Windows (restricted token, ADR-0050)
 
 Confinement is **switched off** (`ENABLED = false`) until the maintainer turns it on. The design is ADR-0050 with Amendment B: a restricted token at
@@ -168,13 +177,14 @@ PowerShell are not affected. Run such an agent with `sandbox = off` until this i
 
 **Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). Measured with Node 26:
 `child_process.spawnSync` fails with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the
-child starts. The asynchronous `spawn` creates its pipes the same way (not measured separately). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
+child starts. The asynchronous `spawn` creates its pipes the same way and fails the same way (measured for ADR-0105). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
 created without explicit security its own default permissions (full access for the owner, the system and administrators, read for
 `Everyone`), and a restricted token passes only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted,
 so that end cannot be opened for writing. **Consequence: a Node-based agent (Claude Code, Gemini CLI and others) that starts a tool or an MCP
 server with piped stdio, Node's default, cannot do so when confined on Windows.** Real agents were not measured. A Rust stand-in program
 (Rust's standard library, piped stdio included) and `cmd` start children confined, so Rust agents such as Codex are expected to work, but no
-real Codex run was measured. Fixing the Node case needs another confinement mechanism, a decision for ADR-0050.
+real Codex run was measured. ADR-0105 keeps this confinement and puts the fix in libuv (libuv/libuv#5464): its stdio pipes should carry
+the creating token's default permissions. Until a Node release carries it, run Node-based agents on Windows with `sandbox = off`.
 
 **Adapter and ACP (structured) agents cannot be confined on Windows** (#897). Windows confines terminal (PTY) agents only, so with any
 `sandbox` level other than `off` such an agent is refused before anything is created: `agent.sandbox_unavailable` with
