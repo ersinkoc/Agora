@@ -301,6 +301,10 @@ struct PendingState {
     /// [`HostError::Detached`]; one whose line is still queued is answered [`HostError::Exited`] and its line is never written; one whose
     /// line is being written is answered by the writer when that write returns (#1119 item 1).
     detached: bool,
+    /// Lines the writer has written to the adapter's input (for a process the holder runs: that the holder took), counted under the lock
+    /// the writer already takes after each write (#1150: so a test can tell that a call's line was given, and a let-go answers it
+    /// [`HostError::Detached`]).
+    written: usize,
 }
 
 /// A call waiting for its answer, and how far its line got.
@@ -982,6 +986,15 @@ impl Adapter {
         self.read.load(Ordering::Acquire)
     }
 
+    /// #1150: how many lines the writer has written to the adapter's input so far (for a process the holder runs: that the holder took),
+    /// so that a test can tell a call's line was given (a let-go then answers it [`HostError::Detached`], never [`HostError::Exited`]).
+    pub fn lines_written(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .written
+    }
+
     /// ADR-0093: an adapter whose process the holder runs, over the link the node has to it. `replay` are events the node rebuilt from
     /// what the holder kept (a request still waiting for the person); they come first, before anything the process says from now.
     pub fn attach_held(io: HeldIo, replay: Vec<AdapterEvent>) -> io::Result<Self> {
@@ -1528,6 +1541,7 @@ fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: 
             .and_then(|()| stdin.flush());
         if wrote.is_ok() {
             let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.written += 1;
             if p.closed && p.detached {
                 // The reader of an adapter the node let go ended while this line was written: given, its answer is not read.
                 if let Some(w) = p.map.remove(&id) {

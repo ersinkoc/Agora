@@ -1568,7 +1568,10 @@ fn a_node_stops_in_time_while_its_holder_does_not_answer() {
     let id = started(&rig, &node);
     let pid = pid_of(&node, &id);
     let paused = Paused::new(holder_pid(&rig));
-    // The reader asks the holder every few milliseconds; let it be in a read that does not come back.
+    // The reader asks the holder every few milliseconds; let it be in a read that does not come back. A fixed wait, not a signal (#1150:
+    // nothing tells a read that was sent from one about to be, and a seam for it would sit on the reader's poll): it cannot make the
+    // test fail. A longer stall here only makes the hung read more certain; a reader that has not reached its read by the stop sees the
+    // stop flag first and ends at once, so the stop is quicker and the test merely less strict.
     std::thread::sleep(Duration::from_millis(300));
     let stopping = Instant::now();
     drop(node);
@@ -1706,6 +1709,14 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
         .unwrap();
     let node = rig.node();
     let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    let lines = || {
+        node.supervisor
+            .lock()
+            .unwrap()
+            .adapter_lines_written(&agent)
+    };
+    let started_with = lines();
     prompt(&node, &id, "ask");
     let requested = |node: &Node| {
         node.events
@@ -1717,10 +1728,14 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
             })
     };
     wait_for("the request", || requested(&node).is_some());
+    // The prompt's line is counted (the writer counts a line after the holder took it, so a stalled writer may not have yet).
+    wait_for("the prompt's line to be counted", || lines() > started_with);
     let approval = requested(&node).unwrap().approval_id;
     // The adapter cannot answer while it is stopped: the decision's delivery waits for it.
     let adapter = pid_of(&node, &id);
     let paused = Paused::new(adapter);
+    // Nothing else is sent to the agent while its request waits: the next line written is the decision.
+    let before = lines();
     let socket = node.socket().unwrap().to_path_buf();
     let signature = key
         .sign(
@@ -1745,13 +1760,12 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
             )
         })
     };
-    // The decision was verified and left the queue; what follows is in memory (the call is queued for the adapter at once). The stop
-    // must come after that: a decision that only reaches the adapter after the node let it go was not delivered, and is rightly
-    // recorded so (a fixed 500 ms wait here failed once on a macOS runner; the cause was not established).
-    wait_for("the decision to leave the queue", || {
-        node.approvals.pending_count() == 0
-    });
-    std::thread::sleep(Duration::from_millis(300));
+    // The stop must come after the decision's line was written (the holder took it for the stopped adapter's input): a decision that
+    // only reaches the adapter after the node let it go was not delivered, and is rightly recorded so (#1119 item 1). A fixed wait
+    // here (500 ms, which failed once on a macOS runner for a cause not established, then 300 ms) let a runner that stalls the writer
+    // longer fail the test (#1150); the line counted as written is what a let-go answers as given (`Detached`), not `Exited`. The
+    // supervisor is locked for each look only: the decision takes it to make its call.
+    wait_for("the decision's line to be written", || lines() > before);
     drop(node);
     // A stopped agent has not ended: the holder keeps it.
     assert!(alive(adapter), "the stopped adapter was ended");

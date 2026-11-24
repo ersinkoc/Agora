@@ -3478,6 +3478,15 @@ impl Supervisor {
             .map_or(0, Adapter::events_read)
     }
 
+    /// #1150: how many lines the writer of `id`'s adapter has written to its input (0 for none), so a test can tell a call's line was
+    /// given before the node stops.
+    pub fn adapter_lines_written(&self, id: &AgentId) -> usize {
+        self.adapters
+            .get(id)
+            .and_then(|e| e.adapter.as_ref())
+            .map_or(0, Adapter::lines_written)
+    }
+
     fn tick_agent(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         // Pending restart.
         let due = self
