@@ -120,6 +120,15 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
     {
         return None;
     }
+    let days_in_month = match mo {
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if d > days_in_month {
+        return None;
+    }
     let mut i = 19;
     let mut frac_ms = 0i64;
     if b[i] == b'.' {

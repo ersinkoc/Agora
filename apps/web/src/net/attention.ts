@@ -67,7 +67,7 @@ export function whoOf(it: AttentionItem): { name: string; machine: string } {
 }
 // A cut for a name placed in the card's "who" line, so a very long one never pushes the buttons out of view.
 export const WHO_MAX = 60;
-export const shorten = (s: string, max: number): string => { const v = visible(s.replace(/\s+/g, ' ').trim()); return v.length > max ? `${v.slice(0, max)}…` : v; };
+export const shorten = (s: string, max: number): string => { const v = visible(s.replace(/\s+/g, ' ').trim()); const chars = Array.from(v); return chars.length > max ? `${chars.slice(0, max).join('')}…` : v; };
 
 // A key for everything the card displays: the request and every word shown of it, and who asks (the agent, the machine, the kind of
 // request to join). A change of any of it restarts the dwell.
@@ -107,7 +107,8 @@ export interface NotifyText { title: { id: string }; body: { id: string; params:
 export const NAME_MAX = 24;
 export function plainName(s: string | undefined): string | undefined {
   const v = (s ?? '').replace(/\s+/g, ' ').trim();
-  return v.length > 0 && v.length <= NAME_MAX && /^[\p{L}\p{N} ._@·-]+$/u.test(v) ? v : undefined;
+  const length = Array.from(v).length;
+  return length > 0 && length <= NAME_MAX && /^[\p{L}\p{N} ._@·-]+$/u.test(v) ? v : undefined;
 }
 export function notifyText(items: readonly AttentionItem[], how: NotifyMode): NotifyText {
   const tag = 'agora-needs-you'; // one at a time: a newer one replaces the older

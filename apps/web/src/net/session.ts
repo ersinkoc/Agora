@@ -49,7 +49,7 @@ export async function signIn(code: string, password?: string, fetcher: typeof fe
     if (r.status === 503) return { ok: false, reason: 'busy' };
     if (!r.ok) return { ok: false, reason: 'failed' };
     const body = (await r.json()) as { token?: unknown };
-    if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };
+    if (typeof body.token !== 'string' || body.token.length === 0) return { ok: false, reason: 'failed' };
     rememberToken(body.token);
     return { ok: true, token: body.token };
   } catch {

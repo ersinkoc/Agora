@@ -37,7 +37,14 @@ pub struct LeaseTable {
 }
 
 fn normalize(path: &str) -> Result<String, LeaseError> {
+    if path.contains('\0') {
+        return Err(LeaseError::InvalidPath);
+    }
     let unified = path.replace('\\', "/");
+    let bytes = unified.as_bytes();
+    if unified.starts_with('/') || (bytes.get(1) == Some(&b':') && bytes[0].is_ascii_alphabetic()) {
+        return Err(LeaseError::InvalidPath);
+    }
     let mut parts = Vec::new();
     for part in unified.split('/') {
         match part {

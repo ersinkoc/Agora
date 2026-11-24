@@ -15,7 +15,7 @@ export const runsAs = (level: number): RunsAs => (level === 3 ? 'chat' : level =
  * characters, at most `max` characters. It is only ever rendered as text, never as markup. */
 export function plainText(s: string, max = 48): string {
   // eslint-disable-next-line no-control-regex
-  const one = s.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, ' ').replace(/\s+/g, ' ').trim();
+  const one = s.replace(/[\u0000-\u001f\u007f-\u009f\u061c​-‏‪-‮⁦-⁩﻿]/g, ' ').replace(/\s+/g, ' ').trim();
   const chars = [...one];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : one;
 }
@@ -66,7 +66,7 @@ export function readKnown(storage: Pick<Storage, 'getItem'> | undefined): Map<st
     if (typeof parsed !== 'object' || parsed === null) return out;
     for (const [node, v] of Object.entries(parsed as Record<string, unknown>).slice(0, 64)) {
       const e = v as { kinds?: unknown; atMs?: unknown };
-      if (!Array.isArray(e?.kinds) || typeof e.atMs !== 'number') continue;
+      if (!Array.isArray(e?.kinds) || typeof e.atMs !== 'number' || !Number.isFinite(e.atMs) || e.atMs < 0) continue;
       out.set(node, { atMs: e.atMs, kinds: e.kinds.slice(0, MAX_KINDS).map(cleanKind).filter((k): k is KindInfo => !!k) });
     }
   } catch { /* Storage can be unavailable or hold something else; the list then simply has no last-known entry. */ }

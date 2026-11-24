@@ -487,7 +487,7 @@ fn fluent_id(s: &str) -> bool {
 /// `--dangerously-bypass-approvals-and-sandbox`, any `--dangerously-*`, `--yolo`, `--yolo-plus`, `--yolo-*`).
 pub fn skips_permissions_flag(arg: &str) -> bool {
     let a = arg.trim().to_ascii_lowercase();
-    a.contains("dangerously")
+    a.starts_with("--dangerously-")
         || a == "--yolo"
         || a.starts_with("--yolo-")
         || a.starts_with("--yolo=")
@@ -505,6 +505,11 @@ impl Resume {
     /// ADR-0060 Amendment A: `continue_argv` and `continue` go together; the sentence is one plain line that cannot be read as an option
     /// or as a placeholder; `continue_argv` carries both placeholders, `{continue}` as an argument of its own.
     fn validate(&self) -> Result<(), ManifestError> {
+        if self.argv.first().is_none_or(String::is_empty)
+            || !self.argv.iter().any(|a| a.contains("{session_id}"))
+        {
+            return Err(invalid("resume.argv"));
+        }
         if !self.fresh_argv.is_empty()
             && (self
                 .fresh_argv

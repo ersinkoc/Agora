@@ -88,11 +88,29 @@ impl fmt::Display for ProjectId {
 /// Handles `https://`, `http://`, `ssh://`, `git://`, and scp-like `user@host:path` forms.
 pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let url = url.trim();
-    let (host_part, path) = if let Some((_, rest)) = url.split_once("://") {
+    let (host_part, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "https" | "http" | "ssh" | "git") {
+            return Err(ProjectError::InvalidRemote);
+        }
         let (authority, path) = rest.split_once('/').ok_or(ProjectError::InvalidRemote)?;
         (authority.to_string(), path.to_string())
-    } else if let Some((authority, path)) = url.split_once(':') {
-        // scp-like: [user@]host:path (no slash before the colon)
+    } else if let Some((prefix, suffix)) = url.split_once(':') {
+        // scp-like: [user@]host:path, with the separator after any bracketed host.
+        let (authority, path) = if prefix
+            .rsplit('@')
+            .next()
+            .is_some_and(|h| h.starts_with('['))
+        {
+            let end = url.find(']').ok_or(ProjectError::InvalidRemote)? + 1;
+            let (authority, path) = url.split_at(end);
+            (
+                authority,
+                path.strip_prefix(':').ok_or(ProjectError::InvalidRemote)?,
+            )
+        } else {
+            (prefix, suffix)
+        };
         if authority.contains('/') {
             return Err(ProjectError::InvalidRemote);
         }
@@ -100,18 +118,41 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     } else {
         return Err(ProjectError::InvalidRemote);
     };
+    if host_part
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\\' | '?' | '#'))
+    {
+        return Err(ProjectError::InvalidRemote);
+    }
+    let valid_port = |port: &str| {
+        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+    };
     let host_port = host_part.rsplit('@').next().unwrap_or(&host_part);
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or(host_port)
-        .to_ascii_lowercase();
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']').ok_or(ProjectError::InvalidRemote)? + 1;
+        let (host, port) = host_port.split_at(end);
+        if !port.is_empty() && port.strip_prefix(':').is_none_or(|port| !valid_port(port)) {
+            return Err(ProjectError::InvalidRemote);
+        }
+        host
+    } else {
+        match host_port.split_once(':') {
+            Some((host, port)) if valid_port(port) && !host.contains(':') => host,
+            Some(_) => return Err(ProjectError::InvalidRemote),
+            None => host_port,
+        }
+    }
+    .to_ascii_lowercase();
     let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")
         .unwrap_or(path)
         .trim_end_matches('/');
-    if host.is_empty() || path.is_empty() {
+    if host.is_empty()
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+        || path.is_empty()
+        || path.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return Err(ProjectError::InvalidRemote);
     }
     Ok(format!("{host}/{path}"))

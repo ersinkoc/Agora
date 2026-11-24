@@ -456,6 +456,23 @@ pub fn safe_link(uri: &str) -> Option<&str> {
     if authority.is_empty() || authority.contains('@') || authority.starts_with(':') {
         return None;
     }
+    let port_ok = |port: &str| {
+        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+    };
+    if let Some(host) = authority.strip_prefix('[') {
+        let close = host.find(']')?;
+        if close == 0 {
+            return None;
+        }
+        let rest = &host[close + 1..];
+        if !rest.is_empty() && rest.strip_prefix(':').is_none_or(|p| !port_ok(p)) {
+            return None;
+        }
+    } else if let Some((host, port)) = authority.split_once(':') {
+        if host.is_empty() || host.contains(':') || !port_ok(port) {
+            return None;
+        }
+    }
     Some(uri)
 }
 

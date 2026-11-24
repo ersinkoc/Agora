@@ -48,10 +48,10 @@ const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean):
 const CATEGORIES: readonly ConfigCategory[] = ['', 'mode', 'model', 'model_config', 'thought_level', 'custom'];
 type ConfigWire = { id?: string | null; name?: string | null; description?: string | null; category?: number | null; type?: number | null; current?: string | null; choices?: readonly OptionWire[] | null; skipsPermissions?: boolean | null };
 export function configOf(list: readonly ConfigWire[] | null | undefined): ConfigOptionModel[] {
-  return (list ?? []).slice(0, 64).filter((o) => o.id).map((o) => ({
+  return (list ?? []).filter((o) => o.id).slice(0, 64).map((o) => ({
     id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', category: CATEGORIES[o.category ?? 0] ?? '',
     type: o.type === 2 ? 'boolean' as const : 'select' as const, current: o.current ?? '',
-    choices: (o.choices ?? []).slice(0, 64).map((c) => ({ id: c.id ?? '', name: c.name ?? '', description: c.description ?? '', skipsPermissions: !!c.skipsPermissions })).filter((c) => c.id),
+    choices: (o.choices ?? []).filter((c) => c.id).slice(0, 64).map((c) => ({ id: c.id ?? '', name: c.name ?? '', description: c.description ?? '', skipsPermissions: !!c.skipsPermissions })),
     skipsPermissions: !!o.skipsPermissions,
   }));
 }

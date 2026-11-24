@@ -44,7 +44,7 @@ export function pairTitle(r: PairRequestModel): string {
 
 /** Text a machine or browser sent about itself, made safe to show: no control character, no character that reorders text or hides. */
 export function peerText(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /**

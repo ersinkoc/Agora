@@ -98,7 +98,11 @@ export function enhancedKey(e: KeyLike, m: EnhancedKeys): string | undefined {
 export class CsiUFlags {
   private stack: number[] = [];
   flags = 0;
-  push(f: number) { if (this.stack.length < 32) this.stack.push(this.flags); this.flags = f & 31; }
+  push(f: number) {
+    if (this.stack.length === 32) this.stack.shift();
+    this.stack.push(this.flags);
+    this.flags = f & 31;
+  }
   pop(n = 1) { for (let i = 0; i < Math.max(1, n); i++) this.flags = this.stack.pop() ?? 0; }
   /** mode 1 sets the given bits, 2 adds them, 3 clears them. */
   set(f: number, mode: number) { f &= 31; this.flags = mode === 2 ? this.flags | f : mode === 3 ? this.flags & ~f : f; }

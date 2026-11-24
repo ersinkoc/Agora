@@ -30,7 +30,12 @@ pub enum Severity {
 /// Extract top-level message and term ids from Fluent source (`id = ...` at column 0).
 pub fn ftl_ids(src: &str) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
-    for line in src.lines() {
+    for (number, raw) in src.lines().enumerate() {
+        let line = if number == 0 {
+            raw.strip_prefix('\u{feff}').unwrap_or(raw)
+        } else {
+            raw
+        };
         let Some((lhs, _)) = line.split_once('=') else {
             continue;
         };
@@ -55,25 +60,273 @@ fn is_valid_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+fn char_literal_end(src: &str, start: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+    let mut i = start + 1;
+    if bytes.get(i) == Some(&b'\\') {
+        i += 1;
+        match bytes.get(i)? {
+            b'x' => i += 3,
+            b'u' if bytes.get(i + 1) == Some(&b'{') => {
+                i += 2;
+                while bytes.get(i).is_some_and(|b| *b != b'}') {
+                    i += 1;
+                }
+                i += usize::from(bytes.get(i) == Some(&b'}'));
+            }
+            _ => i += src[i..].chars().next()?.len_utf8(),
+        }
+    } else {
+        i += src[i..].chars().next()?.len_utf8();
+    }
+    (bytes.get(i) == Some(&b'\'')).then_some(i + 1)
+}
+
+fn decode_rust_string(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            'x' => {
+                let hex = [chars.next()?, chars.next()?]
+                    .into_iter()
+                    .collect::<String>();
+                out.push(char::from(u8::from_str_radix(&hex, 16).ok()?));
+            }
+            'u' if chars.next()? == '{' => {
+                let mut hex = String::new();
+                loop {
+                    let c = chars.next()?;
+                    if c == '}' {
+                        break;
+                    }
+                    if c != '_' {
+                        hex.push(c);
+                    }
+                }
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            '\n' => {
+                while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                    chars.next();
+                }
+            }
+            '\r' if chars.next() == Some('\n') => {
+                while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                    chars.next();
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn without_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut depth = 0_u32;
+    while i < bytes.len() {
+        if depth > 0 {
+            if bytes.get(i..i + 2) == Some(b"/*") {
+                depth += 1;
+                i += 2;
+            } else if bytes.get(i..i + 2) == Some(b"*/") {
+                depth -= 1;
+                i += 2;
+            } else {
+                if bytes[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes.get(i..i + 2) == Some(b"/*") {
+            depth = 1;
+            i += 2;
+            continue;
+        }
+        if bytes.get(i..i + 2) == Some(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'r' {
+            let mut quote = i + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'"') {
+                let hashes = quote - i - 1;
+                let start = i;
+                i = quote + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'"'
+                        && bytes.get(i + 1..i + 1 + hashes) == Some(&bytes[quote - hashes..quote])
+                    {
+                        i += 1 + hashes;
+                        break;
+                    }
+                    i += 1;
+                }
+                out.push_str(&src[start..i]);
+                continue;
+            }
+        }
+        if bytes[i] == b'\'' {
+            if let Some(end) = char_literal_end(src, i) {
+                out.push_str(&src[i..end]);
+                i = end;
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else {
+                    let end = bytes[i] == b'"';
+                    i += 1;
+                    if end {
+                        break;
+                    }
+                }
+            }
+            out.push_str(&src[start..i]);
+            continue;
+        }
+        let ch = src[i..].chars().next().unwrap_or_default();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Extract ids from `key!("id")` references in Rust source. Comment lines are skipped, as are
 /// files containing [`IGNORE_FILE_MARKER`].
 pub fn rust_keys(src: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if src.contains(IGNORE_FILE_MARKER) {
+    if src.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("//") && line.contains(IGNORE_FILE_MARKER)
+    }) {
         return out;
     }
-    for line in src.lines().filter(|l| !l.trim_start().starts_with("//")) {
-        let mut rest = line;
-        while let Some(pos) = rest.find("key!(") {
-            rest = &rest[pos + 5..];
-            if let Some(lit) = rest.trim_start().strip_prefix('"') {
-                if let Some(end) = lit.find('"') {
-                    if is_valid_id(&lit[..end]) {
-                        out.push(lit[..end].to_string());
-                    }
+    let source = without_comments(src)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bytes = source.as_bytes();
+    let quoted_end = |start: usize| {
+        let mut i = start + 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+            } else {
+                let end = bytes[i] == b'"';
+                i += 1;
+                if end {
+                    return Some(i);
                 }
             }
         }
+        None
+    };
+    let raw_literal = |start: usize| {
+        if bytes.get(start) != Some(&b'r') {
+            return None;
+        }
+        let mut quote = start + 1;
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if bytes.get(quote) != Some(&b'"') {
+            return None;
+        }
+        let hashes = quote - start - 1;
+        let content = quote + 1;
+        let mut i = content;
+        while i < bytes.len() {
+            if bytes[i] == b'"'
+                && bytes.get(i + 1..i + 1 + hashes) == Some(&bytes[quote - hashes..quote])
+            {
+                return Some((&source[content..i], i + 1 + hashes));
+            }
+            i += 1;
+        }
+        None
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if let Some(end) = char_literal_end(&source, i) {
+                i = end;
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            i = quoted_end(i).unwrap_or(bytes.len());
+            continue;
+        }
+        if let Some((_, end)) = raw_literal(i) {
+            i = end;
+            continue;
+        }
+        let token_start = source[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_ascii() && !c.is_alphanumeric() && c != '_');
+        if token_start && bytes.get(i..i + 4) == Some(b"key!") {
+            let mut p = i + 4;
+            while bytes.get(p).is_some_and(u8::is_ascii_whitespace) {
+                p += 1;
+            }
+            if bytes
+                .get(p)
+                .is_some_and(|b| matches!(b, b'(' | b'[' | b'{'))
+            {
+                p += 1;
+                while bytes.get(p).is_some_and(u8::is_ascii_whitespace) {
+                    p += 1;
+                }
+                let literal = if bytes.get(p) == Some(&b'"') {
+                    quoted_end(p).and_then(|end| {
+                        decode_rust_string(&source[p + 1..end - 1]).map(|id| (id, end))
+                    })
+                } else {
+                    raw_literal(p).map(|(id, end)| (id.to_string(), end))
+                };
+                if let Some((id, end)) = literal {
+                    if is_valid_id(&id) {
+                        out.push(id);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        let ch = source[i..].chars().next().unwrap_or_default();
+        i += ch.len_utf8();
     }
     out
 }
@@ -85,7 +338,7 @@ fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> io::Result<()> {
         let p = e.path();
         let name = e.file_name();
         if p.is_dir() {
-            if name != "target" && name != ".git" {
+            if name != "target" && name != ".git" && name != "node_modules" {
                 walk(&p, ext, out)?;
             }
         } else if p.extension().is_some_and(|x| x == ext) {
@@ -159,7 +412,7 @@ pub fn check(
 pub fn run(root: &Path) -> io::Result<Vec<Finding>> {
     let locales = load_locales(root)?;
     let mut files = Vec::new();
-    for sub in ["crates", "apps"] {
+    for sub in ["crates", "apps", "tools"] {
         if root.join(sub).is_dir() {
             walk(&root.join(sub), "rs", &mut files)?;
         }

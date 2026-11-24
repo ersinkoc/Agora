@@ -55,9 +55,12 @@ impl Worktree {
 /// A conservative subset of `git check-ref-format`.
 fn valid_branch(b: &str) -> bool {
     !b.is_empty()
-        && !b.starts_with(['/', '-', '.'])
+        && b != "@"
+        && !b.starts_with(['/', '-'])
         && !b.ends_with(['/', '.'])
-        && !b.ends_with(".lock")
+        && !b
+            .split('/')
+            .any(|component| component.starts_with('.') || component.ends_with(".lock"))
         && !b.contains("..")
         && !b.contains("//")
         && !b.contains("@{")
