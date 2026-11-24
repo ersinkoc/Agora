@@ -155,7 +155,19 @@ pub fn remove_in_background(root: PathBuf, names: Vec<OsString>) {
     }
 }
 
+/// Lets a later start run a cleaner again should this one end by a panic (none is expected on this path).
+struct ResetOnPanic;
+
+impl Drop for ResetOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            CLEANER.lock().unwrap_or_else(|e| e.into_inner()).running = false;
+        }
+    }
+}
+
 fn clean_queue() {
+    let _reset = ResetOnPanic;
     loop {
         let next = {
             let mut cleaner = CLEANER.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,16 +192,26 @@ fn clean_one(root: &Path, name: &OsStr) {
     let Ok(held) = ConfinedDir::open_root(root) else {
         return;
     };
+    // Never walked again once marked: the listing of earlier folders leaves `.left` names out.
+    let mark_left = || {
+        let mut left = name.to_os_string();
+        left.push(LEFT_SUFFIX);
+        let _ = std::fs::rename(root.join(name), root.join(&left));
+        left
+    };
     match remove_bounded(&held, name, Limits::default()) {
         Ok(Removal::Removed) => {}
         Ok(Removal::Partial) => {
-            // Never walked again: the listing of earlier folders leaves `.left` names out.
-            let mut left = name.to_os_string();
-            left.push(LEFT_SUFFIX);
-            let _ = std::fs::rename(root.join(name), root.join(&left));
+            let left = mark_left();
             eprintln!("package runner folder left in part: {left:?}");
         }
-        Err(e) => eprintln!("package runner folder not removed: {name:?}: {e}"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // A folder that cannot be removed at all (e.g. its agent took away the access to it) is marked as well, so it is not
+        // queued again at every later start, and `agora doctor` counts it.
+        Err(e) => {
+            let left = mark_left();
+            eprintln!("package runner folder not removed: {left:?}: {e}");
+        }
     }
 }
 
@@ -448,6 +470,36 @@ mod tests {
         };
         let name = PathBuf::from(marked);
         let _ = remove_bounded(&held, name.file_name().unwrap(), all);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Last review of #1181: a folder that cannot be removed at all (its agent took away the access to it) is marked `.left` too, so it
+    /// is counted and not queued again at every later start.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_marked_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("closed").join("runner");
+        let first = new_folder(&root, "agent-8").unwrap();
+        std::fs::write(first.join("f"), "").unwrap();
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A process that may open it anyway (root) has nothing to show here.
+        if std::fs::read_dir(&first).is_ok() {
+            std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let _ = std::fs::remove_dir_all(root.parent().unwrap());
+            return;
+        }
+        let current = new_folder(&root, "agent-8").unwrap();
+        let earlier = earlier_folders(&root, "agent-8", current.file_name().unwrap());
+        remove_in_background(root.clone(), earlier);
+        wait_idle();
+        let mut marked = first.clone().into_os_string();
+        marked.push(LEFT_SUFFIX);
+        let marked = PathBuf::from(marked);
+        assert!(!first.exists() && marked.exists());
+        assert_eq!(left_count(&root), 1);
+        assert!(earlier_folders(&root, "agent-8", current.file_name().unwrap()).is_empty());
+        std::fs::set_permissions(&marked, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 
