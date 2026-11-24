@@ -225,6 +225,55 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// ADR-0089 decision 7, review of #1103 (N9): a confined agent cannot read the chat transcripts in the node's data folder when that
+/// folder is outside every folder the agent may read, as the node's home under the user's home is (on Linux no grant reaches it;
+/// a data folder inside one refuses to start a confined agent, #1114).
+#[test]
+fn a_confined_agent_cannot_read_the_nodes_chat_transcripts() {
+    if !agora_platform::sandbox_supported() {
+        eprintln!("skipped: no confinement on this machine");
+        return;
+    }
+    // Not under the temporary folder (a confined agent may use `/tmp`): as the node's home is not.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("agora-sbx-transcripts-{}", std::process::id()));
+    let data = base.join("data");
+    let transcript = data.join("transcripts").join("agent-1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"n\":1,\"entry\":{\"entry_id\":1,\"text\":\"private-words\"}}\n",
+    )
+    .unwrap();
+    let script = format!(
+        "cat {} > copied 2>/dev/null; echo in > inside; sleep 30",
+        transcript.display()
+    );
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        protect: vec![data.clone()],
+        data_dir: Some(data.clone()),
+        ..Default::default()
+    };
+    let (mut sup, req, dir) = setup_with("transcripts", &script, policy);
+    sup.start(&req, Instant::now()).unwrap();
+    let inside = dir.join("worktrees/a/inside");
+    let end = Instant::now() + Duration::from_secs(10);
+    while !inside.exists() && Instant::now() < end {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(inside.exists(), "the agent did not run");
+    let copied = std::fs::read_to_string(dir.join("worktrees/a/copied")).unwrap_or_default();
+    assert!(
+        !copied.contains("private-words"),
+        "the agent read the transcript"
+    );
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(base);
+}
+
 /// #1114: the node's paths as `agora node` gives them to the supervisor (`node_private_paths`), for a data folder, a control socket
 /// with its manifests beside it, and a worktree folder.
 fn protected_policy(data: &Path, socket_dir: &Path, worktrees: &Path) -> SandboxPolicy {

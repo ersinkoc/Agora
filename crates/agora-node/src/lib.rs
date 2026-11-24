@@ -33,6 +33,7 @@ pub mod spawn;
 pub mod supervisor;
 pub mod task_dispatch;
 pub mod terminal;
+pub mod transcript;
 pub mod uplink;
 pub mod uplink_client;
 pub mod usage_files;

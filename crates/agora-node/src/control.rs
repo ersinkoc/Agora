@@ -1613,6 +1613,10 @@ pub(crate) fn resume_agent(
                 .ok_or_else(folder_changed)
         })
         .transpose()?;
+    // ADR-0089 decision 5, ADR-0104 C1: a resume continues the conversation its file holds, and a fresh start begins a new file,
+    // numbering on after the earlier session's ids. Read here, outside the supervisor's lock; applied only once the resume went through
+    // (below), so a refused one leaves both as they were.
+    let seed = ctx.chat.read_seed(&id, new_session);
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),
@@ -1646,12 +1650,18 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume_in(&id, Instant::now(), checked) {
-            Ok(events) => (
-                events,
-                sup.list(),
-                sup.terminal(&id).is_some(),
-                sup.carried_on(&id),
-            ),
+            // Still under the supervisor's lock: the new adapter's first words are recorded by the supervision tick, which needs it,
+            // so the transcript is seeded before any of them.
+            Ok(events) => {
+                ctx.chat
+                    .resumed(&id, seed, new_session, crate::daemon::now_ms());
+                (
+                    events,
+                    sup.list(),
+                    sup.terminal(&id).is_some(),
+                    sup.carried_on(&id),
+                )
+            }
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));
@@ -2033,6 +2043,15 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
+/// Whether `cmd` may arrive on a dynamic stream (3+): the commands that open one (protocol.md, "Terminal relay", "Chat transcript
+/// stream", `PreviewConnect`). Every other command belongs on stream 1, where the hub's commands pass the node's routed checks.
+pub(crate) fn opens_stream(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::TerminalSubscribe(_) | Cmd::ChatSubscribe(_) | Cmd::PreviewConnect(_)
+    )
+}
+
 fn handle_request(
     frame: &Frame,
     ctx: &Arc<ControlContext>,
@@ -2066,6 +2085,19 @@ fn handle_request(
             &req.request_id,
             Err(Error::new(ErrorCode::AuthUnauthenticated)),
         );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
+    // A dynamic stream carries only a command that opens one, and such a command needs a stream of its own (protocol.md, terminal
+    // relay). Before the idempotency claim, so a refused request stores nothing.
+    let dynamic = frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+    let misplaced = match &req.command {
+        Some(c) if opens_stream(c) => !dynamic,
+        Some(_) => dynamic,
+        None => dynamic,
+    };
+    if misplaced {
+        let resp = response(&req.request_id, Err(invalid("stream_id")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
