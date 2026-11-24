@@ -356,8 +356,9 @@ references are at main `9760e901`.
     unaffected), a tool call that finishes after the restart (one entry, updated in place) and an ACP agent that replays its session on
     two resumes (each turn once, on screen and on disk), in `hold_node_pipes`; a confined agent that cannot read a transcript
     (`sandboxed_agent`); node unit tests and `agora-bench transcript`.
-  - Not built: a forget at the hub (`agent.forget`, ADR-0053) is answered by the hub and never reaches the node, so it does not remove the
-    file (retention does); the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
+  - A forget at the hub (`agent.forget`, ADR-0053) reaches a node that offers `agent.forget.local` and removes the file (ADR-0108,
+    #1104; an older node leaves it to retention).
+  - Not built: the window's "resumed" and "earlier session" markers and paging stay ADR-0089's schema steps; a clean stop
     did not flush the last batch until step 5, now built; a kill loses the last batch and, while the node holds a secret value, the words
     held back (less than the longest value's length).
 - Step 5 (O2) is built, and with it the ADR: `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` on Unix (`agora_platform::catch_stop_requests`,
@@ -386,3 +387,11 @@ references are at main `9760e901`.
   hooks, which held the mesh in a cycle, so the next node there serves the agents' mesh endpoints. Tested in `hold_node_pipes` (a prompt,
   a queued prompt and a decision in flight; the next node on the mesh), `front_door` (a stop while starting, an ignored hangup) and
   `agora-adapters` (a waiting call answered `Detached`).
+  2026-11-23, second review of #1108 (#1119): a call is answered `Detached` only when its line was written; one never written is answered
+  `Exited` (not delivered) and is not written after. The stop waits at most 1 s for the supervisor's lock (`LOCK_WAIT`; a start or a resume
+  holds it while it launches an adapter, up to 30 s), writes the transcript, the usage and the ledger at once past it, and tries again
+  until 2 s; the transcript writer's sweep no longer waits for that lock once the node stops. The stop flag is set before the control
+  server ends, and the node's own resumes and helper starts are refused once it is set. A stop request less than 1 s after the first is
+  the same stop reaching the node again (Ctrl-C on a foreground `agora supervise node`). An adapter that really ended just before the
+  stop is not recorded ended by it; the next node learns it from the holder and offers it for Resume. Tested in `hold_node_pipes`,
+  `agent_spawn`, `front_door` and `agora-adapters`.

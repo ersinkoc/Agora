@@ -830,11 +830,36 @@ static STOP_CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 static STOP_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// See [`catch_stop_requests_once`]: a second request ends the process at once.
 static STOP_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the first stop request came (the monotonic clock, in ms), for [`STOP_ECHO_MS`].
+static STOP_AT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// #1119 item 4: with [`catch_stop_requests_once`], a request less than this long after the first is the same stop reaching the process
+/// again, not a second one: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor (one process group), and
+/// the supervisor passes its own on; a service manager may signal the whole group as well as the supervisor. A deliberate second request
+/// comes later than this.
+const STOP_ECHO_MS: i64 = 1000;
+
+/// The monotonic clock in ms (`clock_gettime` is async-signal-safe).
+// `time_t` and `c_long` are 32 bits wide on some Unix targets: the conversions are not useless there.
+#[allow(clippy::useless_conversion)]
+fn monotonic_ms() -> i64 {
+    // SAFETY: an all-zero timespec is valid to be written into.
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid pointer to a timespec; `CLOCK_MONOTONIC` exists on every Unix this builds for.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    i64::from(ts.tv_sec)
+        .saturating_mul(1000)
+        .saturating_add(i64::from(ts.tv_nsec) / 1_000_000)
+}
 
 extern "C" fn on_stop_request(sig: libc::c_int) {
     use std::sync::atomic::Ordering::SeqCst;
-    // Only lock-free atomics, `kill`, `signal` and `raise`, all async-signal-safe.
+    // Only lock-free atomics, `clock_gettime`, `kill`, `signal` and `raise`, all async-signal-safe.
     if STOP_ONCE.load(SeqCst) && STOP_CAUGHT.load(SeqCst) {
+        if monotonic_ms().saturating_sub(STOP_AT_MS.load(SeqCst)) < STOP_ECHO_MS {
+            // The first request again (see STOP_ECHO_MS): the clean stop goes on.
+            return;
+        }
         // SAFETY: async-signal-safe calls on this process: the default action of `sig`, then `sig` itself, which ends it.
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
@@ -843,6 +868,8 @@ extern "C" fn on_stop_request(sig: libc::c_int) {
         return;
     }
     let _ = STOP_SIGNAL.compare_exchange(0, sig, SeqCst, SeqCst);
+    // Before the request is said caught, so a handler that sees it caught also sees when.
+    let _ = STOP_AT_MS.compare_exchange(0, monotonic_ms(), SeqCst, SeqCst);
     STOP_CAUGHT.store(true, SeqCst);
     let pid = STOP_TARGET.load(SeqCst);
     if pid > 0 {

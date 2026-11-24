@@ -1434,6 +1434,129 @@ fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
     );
 }
 
+/// Review of #1108 (#1119 item 2): a start or a resume launches its adapter under the supervisor's lock (an `initialize` may take 30 s).
+/// A stop that comes meanwhile still writes, within its deadline, what does not need that lock: the agent's words held back in its open
+/// turn and the usage of the turn before, still being gathered. Then, once the lock is free, it lets the adapter go, which keeps running.
+///
+/// The test holds the supervisor as such a launch does, until the stop has written both (or for 10 s: before, the stop waited for the
+/// lock and wrote nothing until then). The node holds a secret and the words end inside it: this stop writes twice (once while the lock
+/// is busy, again after the let-go), and no piece of the value is ever on disk, after the stop nor once the next node wrote the rest.
+#[test]
+fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_the_usage() {
+    let _serial = serial();
+    let rig = Rig::new("busy");
+    let value = "SECRETVALUE-ABCDEFGH-XYZ";
+    agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaked = |body: &str| -> Vec<String> {
+        pieces
+            .iter()
+            .filter(|p| body.contains(**p))
+            .map(|p| (*p).to_string())
+            .collect()
+    };
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    prompt(&node, &id, "counted");
+    wait_for("the answer", || agent_said(&node, &id, "counted"));
+    // The turn's usage is gathered for 5 s before it is logged: what follows is well within that.
+    assert_eq!(
+        logged_usage(&node, &id),
+        (0, 0),
+        "the usage was logged before the stop"
+    );
+    prompt(&node, &id, "hold:my token is SECRETVA|LUE-ABCDEFGH-XYZ ok");
+    // #1147: live, words that end in part of the value wait (at most 300 ms) and go with that part replaced.
+    wait_for("the first words", || {
+        chat(&node, &id)
+            .iter()
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text == "my token is <redacted>")
+    });
+    assert!(
+        chat(&node, &id).iter().all(|e| leaked(&e.text).is_empty()),
+        "{:#?}",
+        chat(&node, &id)
+    );
+    wait_for("the agent to work", || {
+        state_of(&node, &id) == Some(AgentState::Working)
+    });
+    assert!(
+        !on_disk(&rig, &id, "my token is"),
+        "written while the turn was open: the test no longer shows the stop's flush"
+    );
+    let (sup, events, file) = (
+        std::sync::Arc::clone(&node.supervisor),
+        std::sync::Arc::clone(&node.events),
+        transcript_file(&rig, &id),
+    );
+    let agent = id.clone();
+    let (locked, is_locked) = std::sync::mpsc::channel();
+    let launch = std::thread::spawn(move || {
+        let guard = sup.lock().unwrap();
+        locked.send(()).unwrap();
+        let usage = || {
+            events
+                .events_after(0)
+                .iter()
+                .filter_map(|e| match &e.body {
+                    Some(v1::event::Body::AgentUsageReported(u)) if u.agent_id == agent => {
+                        Some(u.input_tokens)
+                    }
+                    _ => None,
+                })
+                .sum::<u64>()
+        };
+        let written = || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t.contains("my token is")) && usage() > 0
+        };
+        let held_since = Instant::now();
+        while !written() && held_since.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let took = held_since.elapsed();
+        drop(guard);
+        (written(), took)
+    });
+    is_locked.recv().unwrap();
+    drop(node);
+    let (written, took) = launch.join().unwrap();
+    assert!(
+        written,
+        "the stop wrote nothing while the supervisor was held ({took:?})"
+    );
+    assert!(took < Duration::from_secs(4), "it took {took:?}");
+    assert!(alive(pid), "the adapter ended with its node");
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
+    assert!(
+        leaked(&body).is_empty(),
+        "{:?} on disk after the stop: {body}",
+        leaked(&body)
+    );
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    std::fs::write(rig.folder.join("go.txt"), "go").expect("go");
+    wait_for("the agent to be idle", || {
+        state_of(&node, &id) == Some(AgentState::Idle)
+    });
+    wait_for("the rest on disk", || on_disk(&rig, &id, " ok"));
+    let body = std::fs::read_to_string(transcript_file(&rig, &id)).unwrap();
+    assert!(
+        leaked(&body).is_empty(),
+        "{:?} on disk after the rest: {body}",
+        leaked(&body)
+    );
+    // The first turn's, which the stop wrote (the second turn's is still being gathered, or logged too on a slow runner).
+    let logged = logged_usage(&node, &id);
+    assert!(logged.0 >= 10, "{logged:?}");
+}
+
 /// ADR-0104 O2: a holder that does not answer (stopped here) leaves the adapter's reader waiting for the link's frame time (5 s);
 /// the node's stop waits for it at most `DRAIN_WAIT` and still stops in time. The agent keeps running, and once its holder answers
 /// again the next node takes it up.
@@ -1751,7 +1874,15 @@ fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value
     let id = started(&rig, &node);
     let words = format!("my token is {value} ok");
     prompt(&node, &id, &format!("hold:{words}"));
-    wait_for("the words", || said(&node, &id, &words));
+    // #1147: what the node shows live is redacted as the file is.
+    wait_for("the words", || {
+        said(&node, &id, "my token is <redacted> ok")
+    });
+    assert!(
+        chat(&node, &id).iter().all(|e| !e.text.contains(value)),
+        "{:#?}",
+        chat(&node, &id)
+    );
     wait_for("the agent to work", || {
         state_of(&node, &id) == Some(AgentState::Working)
     });
@@ -1797,11 +1928,17 @@ fn a_stop_in_the_middle_of_a_secret_value_leaves_no_piece_of_it_on_disk() {
     let id = started(&rig, &node);
     let pid = pid_of(&node, &id);
     prompt(&node, &id, "hold:my token is SECRETVA|LUE-ABCDEFGH-XYZ ok");
+    // #1147: live, words that end in part of the value wait (at most 300 ms) and go with that part replaced.
     wait_for("the first words", || {
         chat(&node, &id)
             .iter()
-            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text.ends_with("SECRETVA"))
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text == "my token is <redacted>")
     });
+    assert!(
+        chat(&node, &id).iter().all(|e| leaked(&e.text).is_empty()),
+        "{:#?}",
+        chat(&node, &id)
+    );
     wait_for("the agent to work", || {
         state_of(&node, &id) == Some(AgentState::Working)
     });

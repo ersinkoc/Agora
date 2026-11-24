@@ -118,7 +118,7 @@ describe('4. choosing a slash command replaces only the command word', () => {
   });
   it('in the composer: Enter on the highlighted command keeps the rest of the box', () => {
     const s: SessionModel = { ...base, commands: [{ name: 'review', description: 'd', inputHint: '' }] };
-    act(() => root.render(<PromptBox agent={agent({ session: s })} />));
+    act(() => root.render(<PromptBox agent={agent({ session: s })} send={async () => true} />));
     const box = host.querySelector('textarea') as HTMLTextAreaElement;
     act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, '/re keep this'); box.setSelectionRange(3, 3); box.dispatchEvent(new Event('input', { bubbles: true })); });
     act(() => { box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
@@ -132,7 +132,7 @@ describe('5. a command name that repeats is one row', () => {
     expect(commandsOf([c('a', '1'), c('/A', '2'), c('b')]).map((x) => x.description || x.name)).toEqual(['1', 'b']);
     expect(uniqueCommands([c('a'), c('a'), c('b')]).map((x) => x.name)).toEqual(['a', 'b']);
     const s: SessionModel = { ...base, commands: [c('dup', 'first'), c('dup', 'second')] };
-    act(() => root.render(<PromptBox agent={agent({ session: s })} />));
+    act(() => root.render(<PromptBox agent={agent({ session: s })} send={async () => true} />));
     const box = host.querySelector('textarea') as HTMLTextAreaElement;
     act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, '/'); box.setSelectionRange(1, 1); box.dispatchEvent(new Event('input', { bubbles: true })); });
     expect(host.querySelectorAll('[data-slash-option]')).toHaveLength(1);

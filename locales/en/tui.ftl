@@ -77,6 +77,8 @@ tui-chat-plan = Plan
 tui-chat-diff = changed { $path }
 tui-chat-input = ›
 tui-chat-hint = Type a request and press Enter · /mode or /model followed by a name switches · Ctrl-] goes back
+# ADR-0106: in place of the hint and the line to type on, in a viewer's window (the hub refuses a viewer's request or switch).
+tui-chat-watching = You can watch here. Sending requests and switching the mode or model need a member's role · Ctrl-] goes back
 tui-chat-mode = mode { $mode }
 tui-chat-model = model { $model }
 tui-chat-context = context { $percent }%
@@ -101,6 +103,7 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-pick-page = Start which agent on { $machine }? Press its number, n for the next page ({ $page } of { $pages }), any other key cancels.
 tui-start-item = { $n }  { $name }
+tui-start-group-untested = Untested (from the ACP registry, not yet tried in Agora)
 tui-start-none = No agent is installed on { $machine }.
 tui-start-signed-only = { $name } downloads its program when it starts, so the machine starts it only when this device signs the start: press f and choose its folder.
 tui-start-missing-item = { $name } (`{ $program }`)

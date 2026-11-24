@@ -8,6 +8,7 @@ pub mod devices;
 pub mod discovery;
 pub mod dispatch;
 pub mod enroll;
+pub mod forgets;
 pub mod hub;
 pub mod leaf;
 pub mod metrics;

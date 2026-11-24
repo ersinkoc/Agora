@@ -85,6 +85,8 @@ pub struct Hub {
     /// #996: whether a task is retrying the presence facts the store refused (at most one per hub).
     pub(crate) recording_later: std::sync::atomic::AtomicBool,
     router: std::sync::Arc<crate::router::Router>,
+    /// ADR-0108: the forgets owed to each node, kept in the store.
+    forgets: Arc<crate::forgets::Forgets>,
     inner: Mutex<Inner>,
 }
 
@@ -167,6 +169,7 @@ impl Hub {
     pub fn open_at(store: SqliteStore, now_ms: u64) -> Result<Self, StoreError> {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
+        let store = Arc::new(store);
         let hub = Self {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
@@ -174,7 +177,8 @@ impl Hub {
             boards: crate::board::Boards::new(),
             pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
-            store: Arc::new(store),
+            forgets: Arc::new(crate::forgets::Forgets::new(Arc::clone(&store))),
+            store,
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             recording_later: std::sync::atomic::AtomicBool::new(false),
             router: crate::router::Router::new(),
@@ -292,6 +296,11 @@ impl Hub {
         &self.store
     }
 
+    /// ADR-0108: the forgets owed to each node.
+    pub fn forgets(&self) -> &Arc<crate::forgets::Forgets> {
+        &self.forgets
+    }
+
     pub(crate) fn shared_store(&self) -> Arc<SqliteStore> {
         Arc::clone(&self.store)
     }
@@ -362,6 +371,16 @@ impl Hub {
         (target, g.view.nodes.contains_key(&req.target_node))
     }
 
+    /// ADR-0108: the project of `node`'s agent `agent` (its own id), for the audit row of a forget passed on to it; empty when not known.
+    pub(crate) fn agent_project(&self, node: &str, agent: &str) -> String {
+        self.lock()
+            .view
+            .agents
+            .get(&crate::projection::qualified(node, agent))
+            .map(|a| a.project_id.clone())
+            .unwrap_or_default()
+    }
+
     /// The current view and the log position it reflects.
     pub fn view(&self) -> (View, u64) {
         let g = self.lock();
@@ -426,25 +445,43 @@ impl Hub {
 
     /// ADR-0053: the hub stops listing a closed agent. `agent` is the hub-wide key. Refused while it runs; its earlier events stay in
     /// the store, and its tokens and cost still count.
-    pub fn forget_agent(&self, agent: &str, now_ms: u64) -> Result<(), agora_protocol::Error> {
+    ///
+    /// ADR-0108: the forget is then owed to the agent's node (also for an agent forgotten before, so a forget the node refused while
+    /// the agent still ran there can be made again), which removes the saved conversation and the Resume offer once it hears of it
+    /// (`server.rs` sends it). Returns the node and the node's own id of the agent.
+    pub fn forget_agent(
+        &self,
+        agent: &str,
+        now_ms: u64,
+    ) -> Result<(String, String), agora_protocol::Error> {
         use agora_protocol::{Error, ErrorCode};
         let mut g = self.lock();
-        match g.view.agents.get(agent) {
+        let forgotten = match g.view.agents.get(agent) {
             None => return Err(Error::new(ErrorCode::AgentNotFound).with("agent_id", agent)),
             Some(a) if a.running => {
                 return Err(Error::new(ErrorCode::AgentRunning).with("agent_id", agent))
             }
-            Some(a) if a.forgotten => return Ok(()),
-            Some(_) => {}
+            Some(a) => a.forgotten,
+        };
+        if !forgotten {
+            self.emit(
+                &mut g,
+                Body::AgentForgotten(agora_protocol::v1::AgentForgotten {
+                    agent_id: agent.to_string(),
+                }),
+                now_ms,
+            )
+            .map_err(|_| Error::new(ErrorCode::Internal))?;
         }
-        self.emit(
-            &mut g,
-            Body::AgentForgotten(agora_protocol::v1::AgentForgotten {
-                agent_id: agent.to_string(),
-            }),
-            now_ms,
-        )
-        .map_err(|_| Error::new(ErrorCode::Internal))
+        drop(g);
+        let (node, local) = agent.split_once('/').unwrap_or((agent, ""));
+        if !local.is_empty() {
+            if let Err(e) = self.forgets.add(node, local) {
+                // Operational log, not UI text: the hub has forgotten the agent; its node keeps the file until retention removes it.
+                eprintln!("agent.forget: {agent}: not owed to its node: {e}");
+            }
+        }
+        Ok((node.to_string(), local.to_string()))
     }
 
     /// ADR-0073: the hub stops listing an offline machine and what it ran. With `refuse_return`, every certificate enrolled under it
@@ -481,7 +518,14 @@ impl Hub {
             }),
             now_ms,
         )
-        .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))
+        .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
+        drop(g);
+        // ADR-0108: nothing is owed to a machine the owner forgot (its files go by retention, as before).
+        if let Err(e) = self.forgets.drop_node(node) {
+            // Operational log, not UI text.
+            eprintln!("node.forget: {node}: its pending forgets stay: {e}");
+        }
+        Ok(())
     }
 
     /// A node's connection ended without it saying goodbye: record that it is offline.
@@ -1172,6 +1216,56 @@ mod tests {
         let (view, _) = hub.view();
         assert!(view.agents["n1/a"].forgotten);
         assert!(!view.agents["n1/a"].running);
+    }
+
+    /// ADR-0108: a forget is owed to the agent's node in the store, so a hub restart keeps it; a second forget is owed once; forgetting
+    /// the machine drops what it was owed.
+    #[test]
+    fn a_forget_is_owed_to_the_agents_node_across_a_restart_until_the_machine_is_forgotten() {
+        use agora_protocol::v1::AgentExited;
+        let path =
+            std::env::temp_dir().join(format!("agora-hub-forgets-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let sup = support();
+        {
+            let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+            let mut s = open_session(&hub, &sup, "n1");
+            hub.ingest(&mut s, &online("n1", 1)).unwrap();
+            hub.ingest(&mut s, &agent("n1", 2, "agent-3")).unwrap();
+            assert!(hub.forget_agent("n1/agent-3", 3).is_err(), "it runs");
+            assert!(
+                hub.forgets().pending("n1").is_empty(),
+                "a refused forget is owed to nobody"
+            );
+            let exited = Event {
+                producer_id: "n1".into(),
+                seq: 3,
+                at_ms: 3,
+                body: Some(Body::AgentExited(AgentExited {
+                    agent_id: "agent-3".into(),
+                    exit_code: 0,
+                })),
+            };
+            hub.ingest(&mut s, &exited.encode_to_vec()).unwrap();
+            assert_eq!(
+                hub.forget_agent("n1/agent-3", 4).unwrap(),
+                ("n1".to_string(), "agent-3".to_string())
+            );
+            hub.forget_agent("n1/agent-3", 5).unwrap();
+            assert_eq!(hub.forgets().pending("n1"), vec!["agent-3"]);
+        }
+        // A new hub process on the same store: still owed.
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert_eq!(hub.forgets().pending("n1"), vec!["agent-3"]);
+        hub.forgets().answered("n1", "agent-3").unwrap();
+        assert!(hub.forgets().pending("n1").is_empty());
+        // The machine is forgotten: what it was owed goes.
+        hub.forget_agent("n1/agent-3", 6).unwrap();
+        assert_eq!(hub.forgets().pending("n1"), vec!["agent-3"]);
+        hub.forget_node("n1", false, 7).unwrap();
+        assert!(hub.forgets().pending("n1").is_empty());
+        drop(hub);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

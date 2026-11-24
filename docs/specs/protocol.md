@@ -353,7 +353,7 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | --- | --- |
 | `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
 | `directory.list` / `DirectoryList` (84) | `path` (empty: the user's home folder), `authorization` → `DirectoryEntries` (Ok tag 21): canonical `path`, `parent` (empty at a root), `entries[]` of `{name, is_git}`, `truncated`. Folders only, sorted by name, at most 500 per answer; folders ADR-0052 refuses to launch in are not listed; capability `directory.list` (ADR-0053) |
-| `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053) |
+| `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053). ADR-0108: the hub then passes it on, as `AgentForget` with the node's own id (`agent-7`), to a node that offers the capability `agent.forget.local` (never to one that does not): at once when the node is connected, otherwise after its next `Welcome`. It keeps the forgets each node owes in its settings (`forget.<node>`, at most 1000 per node, oldest dropped first; a hub restart keeps them, forgetting the machine drops them) and drops one when the node answers, whatever the answer. The node refuses `protocol.invalid_message` (`field: agent_id`) for an id that is not a plain name (letters, digits, `-`, `_`), and `agent.running` while the agent runs there (also in the holder, waiting for a restart, or being resumed), touching nothing; otherwise it removes `<id>.jsonl` and `<id>.earlier.jsonl` through its transcript writer, empties the agent's ring and no longer offers it for Resume, and answers `ok` (also for an agent it does not know). Not signed; it passes the node's grant gate (ADR-0041) like any routed command. A client's `AgentForget` with a `target_node` is still refused |
 | `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` (or `NodeOnline`) of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. A client that joined while the machine was hidden holds none of its records and no event repeats them, so when it comes back the hub lets every live client go, and a client resuming from a position before that return gets a snapshot instead of a replay (`View::remembered_at`, rebuilt at start). History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
@@ -482,6 +482,23 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+What the stream carries is redacted (ADR-0089 Amendment A, #1147): the node replaces the values of the secrets it holds (8 bytes or
+more: its secret store and the environment variables its policy passes to agents) by `<redacted>` in every entry and every version
+it sends and in the snapshot, by the same rule and code as the file below. A field is redacted before it is first sent; never an
+unredacted version first. What it does not cover is listed in the threat model (T61): a value's first 3 bytes or fewer can go before
+the next words show the value goes on, and text sent before a value was added to the store stays as it was sent on streams already
+open (a later snapshot replaces it). The agent's words (text and thinking)
+are one stream: a value split between two entries is found whole, and words whose end is a part of a value (4 bytes or more) wait
+until the next words show it is not one, until any other entry of the agent (so ids still increase on the stream), until its turn
+ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
+part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
+brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: on an approval
+card, before it is queued (so the card and the signature over it hold the same words), an adapter's action, detail and always-option
+label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a task's title, a
+handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids are kept; paths in
+other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted (T61).
+
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
 secret values of 8 bytes or more replaced: whole anywhere, also when an agent's streamed text splits one between pieces, and as a piece of 4 bytes or more at a place the node cut a text; ids are never changed; see the threat model, T61). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
@@ -496,8 +513,8 @@ node shows that replay only when it holds none of the conversation, so every tur
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
 changes neither. A node that stops cleanly writes everything first, the words it held back included, with a secret value's start at
 their end masked (ADR-0104 O2: `agora node` on `SIGTERM`, Unix). A node killed loses at most the last batch (up to a second), and while
-it holds a secret value the agent's newest words it held back in a turn: those entries were shown live and are not in the
-file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+it holds a secret value the agent's newest words it held back in a turn: those entries may have been shown live (redacted) and are
+not in the file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
 `chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
@@ -650,8 +667,9 @@ All additions; nothing published changed.
   hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
   `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
   local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
-  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
-  command (action `AgentResume`).
+  anything by itself. The local owner-only socket needs no signature (`agora agent resume AGENT_ID` sends it there, and with
+  `--again` Start again, `new_session`; #1137). Viewers cannot send it, and the hub audits it like every routed command (action
+  `AgentResume`).
 - **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
   (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
   of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
@@ -1192,7 +1210,7 @@ forwards either to a node that did not offer it.
   fresh snapshot instead of keeping a transcript with a hole in it. Direction marks: the override and embedding controls (U+202A to
   U+202E) are always removed; in prose (thinking, output, plan steps) LRM, RLM, ALM and balanced isolates stay, as Arabic and Hebrew
   text needs them; in names, paths, labels and arguments every direction control goes. A lone carriage return is a line break (a space
-  in a one-line field); an escape sequence that is never closed swallows at most to the next line break or 4096 characters.
+  in a one-line field); an escape sequence that is never closed (CSI, OSC, DCS, ...) swallows at most to the next line break, which stays, or 4096 characters.
 - **Coalescing.** At most one version of an entry is sent per 150 ms, repeats of a final status included (the first `completed` goes at once); a version held back is stored (a new subscriber sees it) and sent by
   the node's tick once 150 ms have passed; a final tool status is never held back. A client therefore may see fewer versions than the
   agent sent, never a stale last one.

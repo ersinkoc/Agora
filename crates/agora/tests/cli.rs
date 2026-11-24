@@ -544,6 +544,217 @@ fn a_node_with_only_an_interrupted_agent_does_not_say_it_has_none() {
     }
 }
 
+/// `agora-fake-agent` next to the `agora` under test, built once per test binary (a binary left from an older checkout may lack what
+/// the tests need).
+fn fake_agent() -> String {
+    let mut p = PathBuf::from(AGORA);
+    p.pop();
+    let target = p.parent().map(Path::to_path_buf).unwrap_or_default();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut build = Command::new(cargo);
+        build
+            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+            .arg(&target);
+        if p.parent().is_some_and(|d| d.ends_with("release")) {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().expect("run cargo").success(),
+            "building agora-fake-agent failed"
+        );
+    });
+    p.to_string_lossy().into_owned()
+}
+
+/// Kills the node and starts a new one on the same home; its agents were not stopped.
+fn restart_node(s: &Setup, node: NodeProc) -> NodeProc {
+    drop(node);
+    let _ = std::fs::remove_file(s.home.join("node.sock"));
+    start_node(s)
+}
+
+/// The fifth column of `id`'s line in `agora agent list` once its process from before the restart is gone: an agent whose process
+/// outlived the node (`still-running`) is stopped first, as the list says.
+fn interrupted_action(s: &Setup, id: &str) -> String {
+    let line = |lines: &[String]| {
+        lines
+            .iter()
+            .find(|l| l.starts_with(&format!("{id}\t")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut row = line(&agent_list_lines(s));
+    if row.ends_with("\tstill-running") {
+        let (code, _, err) = cli(s, &["agent", "stop", id]);
+        assert_eq!(code, 0, "{err}");
+        row = line(&agent_list_lines(s));
+    }
+    let cols: Vec<&str> = row.split('\t').collect();
+    assert_eq!(cols.len(), 5, "{row:?}");
+    assert_eq!(cols[3], "interrupted", "{row:?}");
+    cols[4].to_string()
+}
+
+/// #1137: `agora agent resume` brings back an agent `agora agent list` shows as interrupted with `resume`: the same id, running again,
+/// with its own session (the kind's `[resume]` command), and no longer listed as interrupted.
+#[test]
+fn agent_resume_brings_back_an_agent_a_restarted_node_found_interrupted() {
+    if !supported() {
+        return;
+    }
+    let s = setup("resume");
+    let q = |v: Vec<String>| serde_json::to_string(&v).unwrap();
+    let probe = |file: &str| {
+        vec![
+            fake_agent(),
+            "--probe-directory".into(),
+            s.home.join(file).to_string_lossy().into_owned(),
+        ]
+    };
+    let mut resume = probe("resume-{pid}.json");
+    resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+    std::fs::write(
+        s.home.join("manifests/probe.toml"),
+        format!(
+            "kind = \"probe\"\ndisplay_name = \"probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
+            q(probe("start-{pid}.json")),
+            q(resume)
+        ),
+    )
+    .unwrap();
+    let node = start_node(&s);
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "probe", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    // The node chose the session id at the start; it is in the ledger before the node is killed, so Resume is offered.
+    let end = Instant::now() + Duration::from_secs(30);
+    while !ledger_entry(&s, "agent-1")
+        .is_some_and(|e| e["session_id"].as_str().is_some_and(|id| !id.is_empty()))
+    {
+        assert!(
+            Instant::now() < end,
+            "the ledger never recorded the session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _node = restart_node(&s, node);
+    assert_eq!(interrupted_action(&s, "agent-1"), "resume");
+
+    let (code, out, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Resumed agent agent-1 in "), "{out}");
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let cols: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(cols.len(), 4, "no longer interrupted: {lines:?}");
+    assert_eq!(
+        (cols[0], cols[1], cols[3]),
+        ("agent-1", "probe", "running"),
+        "{lines:?}"
+    );
+    // With its own session: the kind's resume command, with the session id the node chose at the start.
+    let session = ledger_entry(&s, "agent-1").unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let end = Instant::now() + Duration::from_secs(30);
+    let resumed = loop {
+        let found = std::fs::read_dir(&s.home)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("resume-"))
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .find_map(|e| {
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok()
+            });
+        if let Some(v) = found {
+            break v;
+        }
+        assert!(Instant::now() < end, "the resumed agent never started");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let args: Vec<&str> = resumed["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert!(
+        args.windows(2).any(|w| w == ["--resume", session.as_str()]),
+        "{args:?}"
+    );
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// #1137: what `agora agent resume` refuses, each in words from the node's code, and Start again (`--again`) for an agent with no
+/// session to continue (`start-again` in the list).
+#[test]
+fn agent_resume_refuses_what_it_cannot_resume_and_starts_again() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("resume-refused");
+    let node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "resume"]);
+    assert_eq!(code, 2, "an id is needed: {err}");
+    // An id this node never knew.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-9"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("agent.not_interrupted")
+            && err.contains("agent-9 was not interrupted, or it is no longer offered to resume."),
+        "{err}"
+    );
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let end = Instant::now() + Duration::from_secs(30);
+    while ledger_entry(&s, "agent-1").is_none() {
+        assert!(Instant::now() < end, "the ledger never recorded the agent");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A running agent was not interrupted.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("agent.not_interrupted"), "{err}");
+
+    let _node = restart_node(&s, node);
+    assert_eq!(interrupted_action(&s, "agent-1"), "start-again");
+    // A shell has no session to continue: only Start again.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("agent.session_missing")
+            && err.contains("agent-1 cannot continue its own session. Start it again instead."),
+        "{err}"
+    );
+    let (code, out, err) = cli(&s, &["agent", "resume", "agent-1", "--again"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Started agent agent-1 again in "), "{out}");
+    let lines = agent_list_lines(&s);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let cols: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(
+        (cols.len(), cols[0], cols[1], cols[3]),
+        (4, "agent-1", "shell", "running"),
+        "{lines:?}"
+    );
+    // Running again, so it is no longer offered.
+    let (code, _, err) = cli(&s, &["agent", "resume", "agent-1", "--again"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("agent.not_interrupted"), "{err}");
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "{err}");
+}
+
 /// RM-19 (#903): `agora agent start` for a kind whose program this machine cannot find says so in words, with the program, for a
 /// terminal kind and for an ACP kind (started through the bridge, which ends at once), as `agora agent kinds` already marks it missing.
 #[test]

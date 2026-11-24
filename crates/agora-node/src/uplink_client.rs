@@ -54,6 +54,9 @@ pub const CAPABILITIES: &[&str] = &[
     "task.dispatch",
     // ADR-0060
     "agent.resume",
+    // ADR-0108: the hub passes a person's forget of a closed agent on (`AgentForget` with the node's own id); the node removes the
+    // agent's saved conversation and its Resume offer, and refuses while the agent runs here.
+    "agent.forget.local",
     // ADR-0059
     "agent.launch_options",
     // ADR-0066: verifies a launch's settings (model, effort) under `directory-action-v4`, and an `agent.start` approval's under

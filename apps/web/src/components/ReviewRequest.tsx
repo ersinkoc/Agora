@@ -134,7 +134,7 @@ function ReviewStart({ approval: x, agent, busy, stale, onResolve, titleWrap, le
   const sent = g.status(x.id) === 'sent';
   return (
     <StartApproval key={`${x.id}:${x.detail}`} approval={x} start={start} density="full" titleWrap={titleWrap} lead={lead}
-      busy={busy || !onResolve || !g.canAnswer(x.id)} onResolve={(ok, choice) => { if (onResolve) g.answer(x.id, () => onResolve(ok, choice)); }}
+      busy={busy || !g.canAnswer(x.id)} onResolve={onResolve ? (ok, choice) => g.answer(x.id, () => onResolve(ok, choice)) : undefined}
       foot={onResolve && (stale || sent) ? <p role={sent ? 'status' : undefined} className="m-0 text-xs text-muted">{t(sent ? 'approval-sent' : 'fleet-stale-no-answer')}</p> : undefined} />
   );
 }

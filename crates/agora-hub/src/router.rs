@@ -658,6 +658,8 @@ impl Router {
             Some(command_request::Command::AgentCancelTurn(_)) => Some("agent.cancel_turn"),
             // ADR-0095: a node that cannot dispatch a task is never sent the command.
             Some(command_request::Command::TaskDispatch(_)) => Some("task.dispatch"),
+            // ADR-0108: only the hub passes a forget on, and only to a node that removes what it keeps of the agent.
+            Some(command_request::Command::AgentForget(_)) => Some("agent.forget.local"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
@@ -874,6 +876,26 @@ mod tests {
         assert!(old_rx.try_recv().is_err());
         let mut request = req("new");
         request.command = resume;
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    /// ADR-0108: the hub passes a forget only to a node that offers `agent.forget.local`; an older one is never sent it.
+    #[test]
+    fn a_forget_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register_with_capabilities("old", vec!["agent.resume".into()]);
+        let (_new, mut new_rx) =
+            r.register_with_capabilities("new", vec!["agent.forget.local".into()]);
+        let forget = Some(command_request::Command::AgentForget(v1::AgentForget {
+            agent_id: "agent-3".into(),
+        }));
+        let mut request = req("");
+        request.command = forget.clone();
+        let refused = r.send("old", request.clone()).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        request.command = forget;
         assert!(r.send("new", request).is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }

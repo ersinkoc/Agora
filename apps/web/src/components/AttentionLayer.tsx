@@ -232,7 +232,8 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             where={machine ? <Tag>{machine}</Tag> : undefined}
             actions={<>
               <Button onClick={onLater}>{t('attention-later')}</Button>
-              {kind === 'answer' && x && <AnswerButtons approval={x} off={{ 'aria-disabled': !canAnswer, 'aria-describedby': stale ? why : undefined }} alwaysNote={alwaysNoteId(x, 'attention')}
+              {/* ADR-0106: a viewer's window (no `onResolve`) shows the request with no answers: the hub would refuse them. */}
+              {kind === 'answer' && x && onResolve && <AnswerButtons approval={x} off={{ 'aria-disabled': !canAnswer, 'aria-describedby': stale ? why : undefined }} alwaysNote={alwaysNoteId(x, 'attention')}
                 onDeny={() => answer(false)} onAllow={() => answer(true)}
                 // ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`).
                 onAlways={x.always && !x.always.only ? () => answer(true, true) : undefined} />}
@@ -253,7 +254,8 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             </div>
             {more > 0 && <p className="m-0 text-xs text-muted">{t('attention-more', { count: more })}</p>}
             {kind === 'answer' && sentHere && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
-            {stale && kind === 'answer' && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
+            {stale && kind === 'answer' && onResolve && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
+            {kind === 'answer' && !onResolve && <p className="m-0 text-sm text-muted" data-watching>{t('approval-watching')}</p>}
           </ApprovalRequest>
         </Dialog.Content>
       </Dialog.Portal>

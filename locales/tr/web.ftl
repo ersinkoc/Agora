@@ -465,6 +465,7 @@ filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
 console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
 prompt-intro = Bu ajan terminalle değil, isteklerle çalışır. Ona ne yapacağını söyleyin.
+prompt-intro-watching = Bu ajan terminalle değil, isteklerle çalışır.
 prompt-label = Ne yapmalı?
 prompt-send = Gönder
 prompt-sent = Gönderildi.
@@ -475,6 +476,7 @@ history-none = Burada henüz commit yapılmadı.
 history-failed = Geçmiş o makineden okunamadı.
 history-no-subject = (mesaj yok)
 chat-empty = Henüz bir şey söylenmedi. Aşağıdan ona ne yapacağını söyleyin.
+chat-empty-watching = Henüz bir şey söylenmedi.
 chat-log = Konuşma
 chat-plan = Plan
 chat-plan-steps =
@@ -1210,6 +1212,7 @@ notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
 attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
 # A request card in the side panel or a pane, after its answer went (it has no Review button: the card is the request).
 approval-sent = Yanıt gönderildi.
+approval-watching = Burada izleyebilirsiniz. İstekleri bir üye ya da sahibi yanıtlar.
 attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.
 
 # Usage (no money: tokens, context and time)
@@ -1249,6 +1252,7 @@ chat-files-more = Ve { $count } tane daha
 chat-plan-label = Plan
 chat-error-label = Bir şey ters gitti
 prompt-hint = Enter gönderir, Shift+Enter yeni satır açar.
+prompt-watching = Burada izleyebilirsiniz. Bu ajanla bir üye ya da sahibi konuşur.
 session-started-with = { $name }: { $value }
 session-started-hint = Bu ajan başlatılırken seçildi. Ajan bunu bildirmez, bu yüzden sonradan değişmiş olabilir.
 empty-changes-title = Her şey temiz

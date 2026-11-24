@@ -99,8 +99,8 @@ pub struct ControlContext {
     running: AtomicU64,
 }
 
-/// Counts one command as running while it lives.
-struct Running<'a>(&'a AtomicU64);
+/// Counts one command as running while it lives ([`ControlContext::admit`]).
+pub(crate) struct Running<'a>(&'a AtomicU64);
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
@@ -213,6 +213,19 @@ impl ControlContext {
     /// ADR-0104 O2: how many commands are being run now (one that began before the node's stop flag was set runs to its end).
     pub fn commands_running(&self) -> u64 {
         self.running.load(Ordering::Acquire)
+    }
+
+    /// ADR-0104 O2: lets one piece of work in (a command, or an agent the node resumes by itself, #1119 item 3): counted as running
+    /// while the result lives, so a stop that waits for the running commands never misses one that began; `None` once the node is
+    /// stopping (counted before the flag is read).
+    pub(crate) fn admit(&self) -> Option<Running<'_>> {
+        self.running.fetch_add(1, Ordering::AcqRel);
+        let running = Running(&self.running);
+        let stopping = self
+            .stopping
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Acquire));
+        (!stopping).then_some(running)
     }
 
     /// ADR-0104 O2: the node's stop flag; once it is set every command is refused with `node.offline`.
@@ -500,7 +513,11 @@ fn switch(
 }
 
 /// Raises the approval for `ask` (or finds the one already waiting) and returns the error that tells the window to show it.
-fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
+fn raise_skip(ctx: &ControlContext, mut ask: SkipAsk) -> Error {
+    // #1147 (audit of #1157): the agent's names for the option and the value, as its card (and the signature over it) shows them,
+    // with the node's secret values replaced; the ids the decision applies are kept.
+    ask.option_name = ctx.chat.redact_text(&ask.option_name);
+    ask.value_name = ctx.chat.redact_text(&ask.value_name);
     let Some(approvals) = &ctx.approvals else {
         // A node without an approvals queue cannot ask anyone: the switch stays refused, as it was before the approval existed.
         let option = match ask.kind {
@@ -644,17 +661,10 @@ pub(crate) fn record_always_answer(
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
-    // ADR-0104 O2: counted before the stop flag is read, so a stop that waits for the running commands never misses one that began.
-    ctx.running.fetch_add(1, Ordering::AcqRel);
-    let _running = Running(&ctx.running);
-    // A node that is stopping runs nothing more; it is going offline.
-    if ctx
-        .stopping
-        .as_ref()
-        .is_some_and(|s| s.load(Ordering::Acquire))
-    {
+    // ADR-0104 O2: a node that is stopping runs nothing more; it is going offline.
+    let Some(_running) = ctx.admit() else {
         return Err(Error::new(ErrorCode::NodeOffline).with("node_id", ctx.node_id.as_str()));
-    }
+    };
     if matches!(
         cmd,
         Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_) | Cmd::AgentResume(_)
@@ -1544,7 +1554,67 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::FilesRead(v1::FilesReadResult { data })),
             })
         }
+        Cmd::AgentForget(f) => forget_agent(ctx, &f.agent_id),
         other => Err(capability_missing(command_name(other))),
+    }
+}
+
+/// ADR-0108: the longest a forget waits for the transcript writer to remove the files (it is woken at once; it may be writing a
+/// batch). Well under the uplink's own deadline for a routed command (`ROUTED_DEADLINE`, 25 s).
+const FORGET_WAIT: Duration = Duration::from_secs(10);
+
+/// ADR-0108: the person forgot a closed agent in the window and the hub passed it on (capability `agent.forget.local`). Decided from
+/// this node's own state, not the hub's view: an agent that runs here (in this node or in the holder, waiting for a restart, its
+/// process outliving an earlier node, a resume under way, or running as far as the ledger knows) is refused with `agent.running` and
+/// nothing is touched. Otherwise its ring and unsaved marks go, it is no longer offered for Resume, and the transcript writer removes
+/// `<id>.jsonl` and `<id>.earlier.jsonl` after any batch it took. An agent this node does not know is fine (a forget is idempotent).
+/// The agent tool's own session files, the terminal's scrollback and the worktree stay (ADR-0053).
+fn forget_agent(ctx: &ControlContext, agent_id: &str) -> Result<v1::CommandOk, Error> {
+    if !crate::transcript::plain_id(agent_id) {
+        return Err(invalid("agent_id"));
+    }
+    let id = AgentId::new(agent_id);
+    let running = || Error::new(ErrorCode::AgentRunning).with("agent_id", agent_id);
+    let entry = ctx.ledger.as_ref().and_then(|l| l.get(agent_id));
+    // Read before the supervisor's lock (it asks the system about a process).
+    if entry
+        .as_ref()
+        .is_some_and(crate::ledger::Entry::still_running)
+    {
+        return Err(running());
+    }
+    {
+        let sup = ctx.sup();
+        let known = sup.list().iter().any(|v| v.id == id);
+        let live = sup.live(&id)
+            // Started and not ended, and not found interrupted: it runs as far as the ledger knows.
+            || entry.as_ref().is_some_and(|e| !e.ended && !e.interrupted())
+            // Interrupted, and the supervisor holds it again: a resume is under way.
+            || (known && entry.as_ref().is_some_and(crate::ledger::Entry::interrupted));
+        if live {
+            return Err(running());
+        }
+        // Under the supervisor's lock, in memory only: a resume checks the ledger again under this lock before it brings the agent
+        // back, so one that read the entry before now is refused (`agent.not_interrupted`), and none comes between the check above
+        // and this.
+        if let Some(ledger) = &ctx.ledger {
+            ledger.forget(agent_id);
+        }
+    };
+    // Written, and the files removed, after the lock is let go (no disk work under the supervisor's lock). No take-up comes meanwhile
+    // (that happens only as the node starts) and no resume (the ledger no longer offers the agent).
+    if let Some(ledger) = &ctx.ledger {
+        let _ = ledger.flush_all();
+    }
+    let answer = ctx.chat.forget(&id);
+    match answer.recv_timeout(FORGET_WAIT) {
+        Ok(true) => {
+            // Operational log (codes only, never the conversation).
+            eprintln!("agent.forget: {agent_id}: conversation removed");
+            Ok(ok_empty())
+        }
+        Ok(false) => Err(Error::new(ErrorCode::Internal).with("incident_id", "agent.forget")),
+        Err(_) => Err(Error::new(ErrorCode::NodeTimeout).with("node_id", ctx.node_id.as_str())),
     }
 }
 
@@ -1677,6 +1747,11 @@ pub(crate) fn resume_agent(
     };
     let (events, views, has_terminal, carried) = {
         let mut sup = ctx.sup();
+        // ADR-0108: checked again under the supervisor's lock, under which a forget drops the agent from the ledger: a forget that came
+        // after the check above is not undone by bringing the agent back (with the conversation it removed in its ring).
+        if !ledger.get(agent_id).is_some_and(|e| e.interrupted()) {
+            return Err(not_interrupted());
+        }
         if !sup.sandbox_policy().enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 entry.kind.clone(),
@@ -2793,6 +2868,323 @@ mod idempotency_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(started.len(), 1, "the retry started a second agent");
         assert_eq!(a, b, "both attempts get the one answer");
+    }
+
+    /// ADR-0108: a node with a ledger and a saving chat board, its transcript writer running.
+    struct Forgetting {
+        ctx: ControlContext,
+        ledger: Arc<crate::ledger::Ledger>,
+        store: Arc<crate::transcript::Store>,
+        stop: Arc<AtomicBool>,
+        writer: Option<JoinHandle<()>>,
+        dir: PathBuf,
+    }
+
+    impl Forgetting {
+        fn new(
+            tag: &str,
+            sup: Supervisor,
+            projects: Vec<ProjectEntry>,
+            ledger: crate::ledger::Ledger,
+            dir: PathBuf,
+        ) -> Self {
+            let data = dir.join("data");
+            let store = Arc::new(crate::transcript::Store::new(
+                &data,
+                crate::transcript::Limits::default(),
+                None,
+            ));
+            let chat = Arc::new(crate::chat::ChatBoard::saving(Arc::clone(&store)));
+            let stop = Arc::new(AtomicBool::new(false));
+            let writer = crate::transcript::spawn_writer(
+                Arc::clone(&chat),
+                Box::new(|_: &[String]| HashMap::new()),
+                Arc::clone(&stop),
+            )
+            .unwrap();
+            let ledger = Arc::new(ledger);
+            let ctx = ControlContext::new(
+                Arc::new(Mutex::new(sup)),
+                projects,
+                dir.join(format!("worktrees-{tag}")),
+                "n".into(),
+                None,
+                None,
+                None,
+                chat,
+            )
+            .with_ledger(Arc::clone(&ledger));
+            Self {
+                ctx,
+                ledger,
+                store,
+                stop,
+                writer,
+                dir,
+            }
+        }
+
+        /// The agent's two files, written as a node that ran it left them.
+        fn files(&self, agent: &str) -> (PathBuf, PathBuf) {
+            let path = self.store.path(agent).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{\"format\":\"chat-transcript\",\"version\":1}\n").unwrap();
+            let earlier = path.with_file_name(format!("{agent}.earlier.jsonl"));
+            std::fs::write(&earlier, b"{}\n").unwrap();
+            (path, earlier)
+        }
+
+        fn forget(&self, agent: &str) -> Result<v1::CommandOk, Error> {
+            execute(
+                &self.ctx,
+                &Cmd::AgentForget(v1::AgentForget {
+                    agent_id: agent.into(),
+                }),
+            )
+        }
+    }
+
+    impl Drop for Forgetting {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(w) = self.ctx.chat.wake() {
+                w.notify();
+            }
+            if let Some(w) = self.writer.take() {
+                let _ = w.join();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn bare_supervisor() -> Supervisor {
+        Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        })
+    }
+
+    fn forget_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("agora-ctl-forget-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn started(id: &str) -> v1::event::Body {
+        v1::event::Body::AgentStarted(v1::AgentStarted {
+            agent_id: id.into(),
+            project_id: "p".into(),
+            node_id: "n".into(),
+            worktree_id: "/wt/x".into(),
+            kind: "fake".into(),
+            level: 2,
+            ..Default::default()
+        })
+    }
+
+    /// ADR-0108: forgetting an interrupted agent removes both of its files, empties its ring and drops its Resume offer; a batch the
+    /// writer had not written yet never brings the file back.
+    #[test]
+    fn a_forget_removes_the_conversation_and_the_resume_offer() {
+        use agora_adapters::host::ChatItem;
+        let dir = forget_dir("ok");
+        let data = dir.join("data");
+        let ledger = crate::ledger::Ledger::open(&data, 1).unwrap();
+        ledger.observe(&started("agent-3"), 1);
+        drop(ledger);
+        // The node started again: agent-3 is interrupted, offered for Resume.
+        let ledger = crate::ledger::Ledger::open(&data, 20).unwrap();
+        assert!(ledger.get("agent-3").is_some_and(|e| e.interrupted()));
+        let n = Forgetting::new("ok", bare_supervisor(), Vec::new(), ledger, dir);
+        let (path, earlier) = n.files("agent-3");
+        let id = AgentId::new("agent-3");
+        n.ctx
+            .chat
+            .push_item(&id, &ChatItem::Text("not written yet".into()), 30);
+        assert!(!n.ctx.chat.snapshot(&id).is_empty());
+
+        let r = n.forget("agent-3");
+        assert!(r.is_ok(), "{r:?}");
+        assert!(!path.exists(), "the conversation is gone");
+        assert!(!earlier.exists(), "the earlier session's too");
+        assert!(n.ctx.chat.snapshot(&id).is_empty(), "the ring is empty");
+        assert!(n.ledger.get("agent-3").is_none());
+        assert!(n.ledger.interrupted().is_empty(), "no longer offered");
+        let resume = execute(
+            &n.ctx,
+            &Cmd::AgentResume(v1::AgentResume {
+                agent_id: "agent-3".into(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            resume.err().map(|e| e.code),
+            Some(ErrorCode::AgentNotInterrupted)
+        );
+        // Longer than a batch interval: nothing writes the file again.
+        std::thread::sleep(crate::transcript::BATCH_INTERVAL * 2);
+        assert!(!path.exists(), "no later batch brings it back");
+        // Forgetting it again, or an agent this node never knew, is fine and touches nothing.
+        assert!(n.forget("agent-3").is_ok());
+        assert!(n.forget("agent-77").is_ok());
+    }
+
+    /// ADR-0108: the node decides from its own state: an agent that runs as far as its ledger knows (whatever the hub thinks) is
+    /// refused with `agent.running`, and nothing of it is touched.
+    #[test]
+    fn a_forget_of_an_agent_the_ledger_holds_as_running_is_refused_and_touches_nothing() {
+        use agora_adapters::host::ChatItem;
+        let dir = forget_dir("ledger-running");
+        let ledger = crate::ledger::Ledger::open(&dir.join("data"), 1).unwrap();
+        ledger.observe(&started("agent-2"), 1);
+        let n = Forgetting::new("lr", bare_supervisor(), Vec::new(), ledger, dir);
+        let (path, earlier) = n.files("agent-2");
+        let id = AgentId::new("agent-2");
+        n.ctx
+            .chat
+            .push_item(&id, &ChatItem::Text("hello".into()), 2);
+        let e = n.forget("agent-2").unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert!(path.exists() && earlier.exists());
+        assert_eq!(n.ctx.chat.snapshot(&id).len(), 1);
+        assert!(n.ledger.get("agent-2").is_some());
+    }
+
+    /// ADR-0108: an agent the supervisor runs is refused, its file kept; once it is stopped the forget goes through.
+    #[test]
+    fn a_forget_of_a_running_agent_is_refused_until_it_has_stopped() {
+        if !agora_platform::PTY_SUPPORTED || !sh_on_path() {
+            return;
+        }
+        let dir = forget_dir("running");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let mut sup = bare_supervisor();
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let projects = vec![ProjectEntry {
+            id: "p".into(),
+            name: "proj".into(),
+            root: repo,
+        }];
+        let n = Forgetting::new(
+            "run",
+            sup,
+            projects,
+            crate::ledger::Ledger::in_memory(),
+            dir,
+        );
+        let started = execute(
+            &n.ctx,
+            &Cmd::AgentStart(v1::AgentStart {
+                kind: "shell".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+            panic!("not a start");
+        };
+        let (path, _) = n.files(&s.agent_id);
+        let e = n.forget(&s.agent_id).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert!(path.exists());
+        n.ctx.sup().stop(&AgentId::new(&s.agent_id)).unwrap();
+        assert!(n.forget(&s.agent_id).is_ok());
+        assert!(!path.exists());
+    }
+
+    /// ADR-0108: a resume that read the agent's ledger entry before a forget dropped it is refused when it takes the supervisor's lock
+    /// (`agent.not_interrupted`), so it never brings back an agent whose conversation the forget removed. The resume is held at the
+    /// lock while the forget's ledger change is made (as `forget_agent` makes it, under that lock).
+    #[test]
+    fn a_resume_that_read_the_entry_before_a_forget_is_refused() {
+        if !agora_platform::PTY_SUPPORTED || !sh_on_path() {
+            return;
+        }
+        let dir = forget_dir("race");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let project = git::discover_checkout(&repo).unwrap().project.to_string();
+        let data = dir.join("data");
+        let ledger = crate::ledger::Ledger::open(&data, 1).unwrap();
+        ledger.observe(
+            &v1::event::Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-6".into(),
+                project_id: project,
+                node_id: "n".into(),
+                worktree_id: repo.to_string_lossy().into_owned(),
+                kind: "shell".into(),
+                level: 1,
+                ..Default::default()
+            }),
+            1,
+        );
+        drop(ledger);
+        let ledger = crate::ledger::Ledger::open(&data, 20).unwrap();
+        let mut sup = bare_supervisor();
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let n = Arc::new(Forgetting::new("race", sup, Vec::new(), ledger, dir));
+        let held = n.ctx.supervisor.lock().unwrap();
+        let resuming = {
+            let n = Arc::clone(&n);
+            // "Start again" (a new session), so no session of the kind's own is needed.
+            std::thread::spawn(move || resume_agent(&n.ctx, "agent-6", true, false))
+        };
+        // Long enough for the resume to have read the entry and checked the folder, and to wait for the lock.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(n.ledger.forget("agent-6"));
+        drop(held);
+        let r = resuming.join().unwrap();
+        let running: Vec<AgentId> = n.ctx.sup().list().into_iter().map(|v| v.id).collect();
+        for id in &running {
+            let _ = n.ctx.sup().stop(id);
+        }
+        assert_eq!(
+            r.err().map(|e| e.code),
+            Some(ErrorCode::AgentNotInterrupted)
+        );
+        assert!(running.is_empty(), "nothing was brought back: {running:?}");
+    }
+
+    /// ADR-0108: an id that is not a plain name is refused before anything is touched.
+    #[test]
+    fn a_forget_with_an_invalid_id_is_refused_and_touches_nothing() {
+        let dir = forget_dir("invalid");
+        let n = Forgetting::new(
+            "inv",
+            bare_supervisor(),
+            Vec::new(),
+            crate::ledger::Ledger::in_memory(),
+            dir,
+        );
+        let (path, _) = n.files("x");
+        for bad in ["", "../x", "a/b", "x.earlier", "x y"] {
+            let e = n.forget(bad).unwrap_err();
+            assert_eq!(e.code, ErrorCode::ProtocolInvalidMessage, "{bad:?}");
+        }
+        assert!(path.exists());
     }
 }
 
