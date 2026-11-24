@@ -49,6 +49,22 @@ fn runtime() -> Result<tokio::runtime::Runtime, ClientError> {
         .map_err(|_| ClientError::Unreachable)
 }
 
+/// Runs `fut` on `rt` and hands the runtime back with the answer, for a session to keep. On a failure the runtime is shut down
+/// without waiting for its blocking pool: a dial given up after its wait while the host name was still being looked up (`lookup_host`
+/// runs there and cannot be stopped) would otherwise keep the caller until the resolver gave up (#1150). That lookup ends on its own.
+fn run_on<T>(
+    rt: tokio::runtime::Runtime,
+    fut: impl std::future::Future<Output = Result<T, ClientError>>,
+) -> Result<(tokio::runtime::Runtime, T), ClientError> {
+    match rt.block_on(fut) {
+        Ok(v) => Ok((rt, v)),
+        Err(e) => {
+            rt.shutdown_background();
+            Err(e)
+        }
+    }
+}
+
 /// The names the hub's certificate may carry for this address: the host itself, and for an IP number also `localhost` (a hub
 /// started with no `--name` names only that). Each is tried in turn against the pinned CA.
 fn server_names(addr: &str) -> Vec<ServerName<'static>> {
@@ -101,7 +117,7 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
 
 /// Trades a one-time sign-in code (`agora hub login`) for a session token.
 pub fn sign_in(hub: &Hub, code: &str) -> Result<String, ClientError> {
-    runtime()?.block_on(async {
+    run_on(runtime()?, async {
         let mut s = tls(hub).await?;
         let body = serde_json::json!({ "code": code }).to_string();
         let host = hub.addr.clone();
@@ -128,6 +144,7 @@ pub fn sign_in(hub: &Hub, code: &str) -> Result<String, ClientError> {
             _ => Err(ClientError::Unreachable),
         }
     })
+    .map(|(_, token)| token)
 }
 
 /// A live connection: one snapshot, then the positions of the events that follow.
@@ -423,8 +440,7 @@ pub enum Update {
 impl Session {
     /// Connects and subscribes; the first update is the snapshot.
     pub fn connect(hub: &Hub, token: &str) -> Result<Session, ClientError> {
-        let rt = runtime()?;
-        let conn = rt.block_on(async {
+        let (rt, conn) = run_on(runtime()?, async {
             let stream = tls(hub).await?;
             let host = hub
                 .addr
@@ -3000,5 +3016,29 @@ mod start_kinds_tests {
         assert!(!is_registry_kind("gemini"));
         assert!(!is_registry_kind("my-registry-gemini"));
         assert!(!is_registry_kind("registry"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod runtime_tests {
+    use super::*;
+
+    /// #1150: a sign-in or a connection whose wait ran out while a blocking task (a host name lookup) was still running fails when
+    /// the wait does; the runtime used to wait for the task on its way out, so the terminal client outlasted its 10 s dial wait by
+    /// the resolver's own timeout.
+    #[test]
+    fn a_failure_does_not_wait_for_a_lookup_still_running() {
+        let start = std::time::Instant::now();
+        let got = run_on(runtime().unwrap(), async {
+            let slow = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+            tokio::time::timeout(Duration::from_millis(200), slow)
+                .await
+                .map_err(|_| ClientError::Unreachable)?
+                .map_err(|_| ClientError::Unreachable)
+        });
+        assert!(matches!(got, Err(ClientError::Unreachable)));
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "took {took:?}");
     }
 }
