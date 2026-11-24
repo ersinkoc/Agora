@@ -4,10 +4,13 @@
 //! Every start gets a new folder of its own, `<root>/<agent id>.<16 random hex digits>`, made with `create_dir` (an existing name
 //! fails the start, never reuses it), so nothing a running or earlier agent left anywhere is in it, and nothing an old process of the
 //! same agent still writes reaches it. Nothing is walked on the start path: the agent's earlier folders (their names read under the
-//! supervisor's lock, at most [`MAX_LISTED`] of the root's entries) are removed afterwards on a thread of their own, outside the
-//! lock, by [`remove_bounded`]: iterative (no recursion, so the depth an agent chooses cannot exhaust a stack), relative to held
-//! folder handles (no link is followed: `agora_platform::ConfinedDir`), and bounded in depth ([`MAX_DEPTH`], the open folder handles
-//! it holds at once) and in entries ([`MAX_ENTRIES`]); what lies beyond is left, and the node's log says so once per folder.
+//! supervisor's lock, at most [`MAX_LISTED`] of the root's entries) are queued for the node's one cleaner thread
+//! ([`remove_in_background`]: a start only queues, a name already queued is not queued twice, one thread at a time), which removes
+//! them outside the lock with [`remove_bounded`]: iterative (no recursion, so the depth an agent chooses cannot exhaust a stack),
+//! relative to held folder handles (no link is followed: `agora_platform::ConfinedDir`), and bounded in depth ([`MAX_DEPTH`], the
+//! open folder handles it holds at once) and in entries ([`MAX_ENTRIES`]). A folder it cannot finish is renamed `<name>.left`
+//! ([`LEFT_SUFFIX`]), which no later listing picks up, so it is walked once; the node's log says so once, and `agora doctor` counts
+//! them ([`left_count`]).
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -16,6 +19,9 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use agora_platform::{not_confined, ConfinedDir, EntryKind};
+
+/// The name ending of a folder [`remove_bounded`] could not finish: left where it is, never walked again.
+pub const LEFT_SUFFIX: &str = ".left";
 
 /// The deepest folder [`remove_bounded`] goes into below the one it removes (one open folder handle per level).
 pub const MAX_DEPTH: usize = 64;
@@ -79,7 +85,8 @@ pub fn earlier_folders(root: &Path, id: &str, keep: &OsStr) -> Vec<OsString> {
     let mut out = Vec::new();
     let _ = held.visit(|item| {
         seen += 1;
-        if item.name != keep && owner(&item.name) == Some(id) {
+        let left = item.name.to_str().is_some_and(|n| n.ends_with(LEFT_SUFFIX));
+        if item.name != keep && !left && owner(&item.name) == Some(id) {
             out.push(item.name);
         }
         if seen >= MAX_LISTED {
@@ -91,30 +98,117 @@ pub fn earlier_folders(root: &Path, id: &str, keep: &OsStr) -> Vec<OsString> {
     out
 }
 
-/// Removes `names` below `root` with [`remove_bounded`] on a thread of its own (never the caller's: it holds no lock and blocks
-/// nothing), saying in the node's log, once per folder, when one is left in part.
+/// How many folders below `root` were left in part ([`LEFT_SUFFIX`]), from at most [`MAX_LISTED`] entries.
+pub fn left_count(root: &Path) -> usize {
+    let Ok(held) = ConfinedDir::open_root(root) else {
+        return 0;
+    };
+    let (mut seen, mut left) = (0, 0);
+    let _ = held.visit(|item| {
+        seen += 1;
+        if item.name.to_str().is_some_and(|n| n.ends_with(LEFT_SUFFIX)) {
+            left += 1;
+        }
+        if seen >= MAX_LISTED {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    left
+}
+
+/// The node's one cleaner: folders waiting to be removed, and whether its thread runs.
+struct Cleaner {
+    queue: std::collections::VecDeque<(PathBuf, OsString)>,
+    queued: std::collections::BTreeSet<(PathBuf, OsString)>,
+    running: bool,
+}
+
+static CLEANER: std::sync::Mutex<Cleaner> = std::sync::Mutex::new(Cleaner {
+    queue: std::collections::VecDeque::new(),
+    queued: std::collections::BTreeSet::new(),
+    running: false,
+});
+
+/// Queues `names` below `root` for the node's one cleaner thread, which removes them with [`remove_bounded`] (never on the caller's
+/// thread: it holds no lock of the caller's and blocks nothing). A name already waiting is not queued again; one thread runs at a
+/// time and ends when nothing waits. A folder it cannot finish is renamed `<name>.left` and the node's log says so once.
 pub fn remove_in_background(root: PathBuf, names: Vec<OsString>) {
-    if names.is_empty() {
+    let mut cleaner = CLEANER.lock().unwrap_or_else(|e| e.into_inner());
+    for name in names {
+        let key = (root.clone(), name);
+        if cleaner.queued.insert(key.clone()) {
+            cleaner.queue.push_back(key);
+        }
+    }
+    if cleaner.running || cleaner.queue.is_empty() {
         return;
     }
+    cleaner.running = true;
     let spawned = std::thread::Builder::new()
         .name("agora-runner-clean".into())
-        .spawn(move || {
-            let Ok(held) = ConfinedDir::open_root(&root) else {
-                return;
-            };
-            for name in names {
-                match remove_bounded(&held, &name, Limits::default()) {
-                    Ok(Removal::Removed) => {}
-                    Ok(Removal::Partial) => {
-                        eprintln!("package runner folder left in part: {name:?}");
-                    }
-                    Err(e) => eprintln!("package runner folder not removed: {name:?}: {e}"),
+        .spawn(clean_queue);
+    if let Err(e) = spawned {
+        cleaner.running = false;
+        eprintln!("package runner folders not removed: {e}");
+    }
+}
+
+fn clean_queue() {
+    loop {
+        let next = {
+            let mut cleaner = CLEANER.lock().unwrap_or_else(|e| e.into_inner());
+            match cleaner.queue.pop_front() {
+                Some(key) => key,
+                None => {
+                    cleaner.running = false;
+                    return;
                 }
             }
-        });
-    if let Err(e) = spawned {
-        eprintln!("package runner folders not removed: {e}");
+        };
+        clean_one(&next.0, &next.1);
+        CLEANER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queued
+            .remove(&next);
+    }
+}
+
+fn clean_one(root: &Path, name: &OsStr) {
+    let Ok(held) = ConfinedDir::open_root(root) else {
+        return;
+    };
+    match remove_bounded(&held, name, Limits::default()) {
+        Ok(Removal::Removed) => {}
+        Ok(Removal::Partial) => {
+            // Never walked again: the listing of earlier folders leaves `.left` names out.
+            let mut left = name.to_os_string();
+            left.push(LEFT_SUFFIX);
+            let _ = std::fs::rename(root.join(name), root.join(&left));
+            eprintln!("package runner folder left in part: {left:?}");
+        }
+        Err(e) => eprintln!("package runner folder not removed: {name:?}: {e}"),
+    }
+}
+
+/// Waits until the cleaner has nothing queued and no thread runs (tests).
+#[cfg(test)]
+fn wait_idle() {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        {
+            let c = CLEANER.lock().unwrap_or_else(|e| e.into_inner());
+            if !c.running && c.queue.is_empty() {
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "the cleaner did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -324,6 +418,37 @@ mod tests {
             "a link's target is never touched"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Re-review of #1181: one cleaner for the node; a folder it cannot finish is renamed `.left`, counted, and not picked up again.
+    #[test]
+    fn a_folder_left_in_part_is_marked_and_never_queued_again() {
+        let root = tmp("left").join("runner");
+        let first = new_folder(&root, "agent-7").unwrap();
+        chain(&first, MAX_DEPTH + 10);
+        let plain = new_folder(&root, "agent-7").unwrap();
+        std::fs::write(plain.join("f"), "").unwrap();
+        let current = new_folder(&root, "agent-7").unwrap();
+        let earlier = earlier_folders(&root, "agent-7", current.file_name().unwrap());
+        assert_eq!(earlier.len(), 2);
+        // Queued twice (two starts at once): still one walk each.
+        remove_in_background(root.clone(), earlier.clone());
+        remove_in_background(root.clone(), earlier);
+        wait_idle();
+        assert!(!plain.exists());
+        let mut marked = first.clone().into_os_string();
+        marked.push(LEFT_SUFFIX);
+        assert!(!first.exists() && PathBuf::from(&marked).exists());
+        assert_eq!(left_count(&root), 1);
+        assert!(earlier_folders(&root, "agent-7", current.file_name().unwrap()).is_empty());
+        let held = ConfinedDir::open_root(&root).unwrap();
+        let all = Limits {
+            depth: 1000,
+            entries: 1_000_000,
+        };
+        let name = PathBuf::from(marked);
+        let _ = remove_bounded(&held, name.file_name().unwrap(), all);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 
     /// Review of #1181 (B1): an agent chooses the depth and width of what it leaves in its folder. A chain far deeper than a small

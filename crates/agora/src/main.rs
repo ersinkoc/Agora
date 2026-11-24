@@ -678,6 +678,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("registry-kinds", _) => key!("doctor-registry-kinds"),
             ("registry-off", _) => key!("doctor-registry-off"),
             ("registry-denied", _) => key!("doctor-registry-denied"),
+            ("runner-folders-left", _) => key!("doctor-runner-folders-left"),
             ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
@@ -726,8 +727,15 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
             (
-                "manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub"
-                | "holder-old" | "registry-kinds" | "registry-denied",
+                "manifests"
+                | "devices"
+                | "policy-problems"
+                | "cert-node"
+                | "cert-hub"
+                | "holder-old"
+                | "registry-kinds"
+                | "registry-denied"
+                | "runner-folders-left",
                 Ok(n),
             ) => Arg::Num(n),
             _ => c.detail.as_str().into(),
