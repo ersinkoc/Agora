@@ -27,6 +27,8 @@
 //!   arguments) and no operation can forget to send. With no value held, every entry goes as it is, as before.
 //! - **Other entries.** A tool call (each version), plan, notice, permission entry, diff or prompt goes as the writer redacts its line:
 //!   whole values, and fragments at its cuts, the bridge's marks, a notice parameter's ends and the end of a version not final.
+//!   Its cuts include those an adapter that declared `chat.cuts` reported (ADR-0111, [`ChatBoard::push_item_cut`]), recorded as the
+//!   node's own; in the agent's words they are edges of the stream too.
 //! - **The agent's words** (text and thinking) are one stream, as in the file. A piece goes once the stream after it cannot end inside
 //!   a value that started in it: while the stream ends in a part of a value of 4 bytes or more (what mechanism (b) would replace were
 //!   the end an edge; `Transcript::releasable`), the pieces that hold that part wait in `Live::unsent`. Words that cannot end in such a
@@ -58,7 +60,7 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use agora_adapters::host::{ChatItem, PlanItem, ToolItem};
+use agora_adapters::host::{ChatItem, CutField, PlanItem, ReportedCut, ToolItem};
 use agora_core::AgentId;
 use agora_protocol::v1::{
     ChatEntry, ChatKind, ChatRole, PermissionOutcome, PlanPriority, PlanStep, ToolKind,
@@ -470,6 +472,28 @@ fn notice_cuts(code: &str, params: &[(String, String)]) -> Option<(String, Param
     Some((code.to_string(), params, cuts))
 }
 
+/// ADR-0111: the places an adapter reported in one of an item's strings.
+fn reported(cuts: &[ReportedCut], field: &CutField) -> Vec<usize> {
+    cuts.iter()
+        .filter(|c| c.field == *field)
+        .map(|c| c.at)
+        .collect()
+}
+
+/// ADR-0111: where a place an adapter reported in a call's tool name or arguments lands in the text [`describe`] makes of the call
+/// (`{"tool":<the name as JSON>,"arguments":<the arguments>}`).
+fn call_text_cut(tool: &str, arguments_json: &str, c: &ReportedCut) -> Option<usize> {
+    const HEAD: usize = "{\"tool\":".len();
+    match c.field {
+        // The name's characters before the place, escaped as JSON, after its opening quote.
+        CutField::Tool => Some(HEAD + json_string(tool.get(..c.at)?).len() - 1),
+        CutField::Arguments if !arguments_json.is_empty() => {
+            Some(HEAD + json_string(tool).len() + ",\"arguments\":".len() + c.at)
+        }
+        _ => None,
+    }
+}
+
 fn json_string(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -499,50 +523,97 @@ fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
 /// known however much cleaning took away; then the `max` cut. The isolates are balanced last, in each part between two places
 /// apart, so the places recorded are exact.
 fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>) {
+    tidy_cuts_at(text, max, style, &[])
+}
+
+/// [`tidy_cuts`], with the places an adapter reported it cut `text` (ADR-0111: byte offsets in `text` as sent, character boundaries,
+/// its end included). Each is a seam as the `PRE_BOUND` cut is: the text is cleaned apart on each side of it, so where it lands in the
+/// result is known, and it is recorded like the node's own places (also at the very end of the result, where the node's are not). One
+/// in the middle a cut dropped is gone with it (that cut is a place itself). The `bool` says only whether the node cut something.
+fn tidy_cuts_at(
+    text: &str,
+    max: usize,
+    style: Style,
+    reported: &[usize],
+) -> (String, bool, Vec<usize>) {
     let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);
-    let (cleaned, mut seams) = match first {
-        Some((h, _)) => {
-            let head = strip_core(&bounded[..h], style);
-            let seam = head.len();
-            (head + &strip_core(&bounded[h..], style), vec![seam])
+    // Where the text is cleaned apart, in `bounded`, and whether an adapter reported the place.
+    let mut parts: Vec<(usize, bool)> = reported
+        .iter()
+        .filter_map(|&r| match first {
+            Some((h, tail)) if r > h && r < tail => None,
+            Some((h, tail)) if r >= tail => Some(r - tail + h),
+            _ => Some(r),
+        })
+        .filter(|&r| bounded.is_char_boundary(r))
+        .map(|r| (r, true))
+        .chain(first.map(|(h, _)| (h, false)))
+        .collect();
+    let mut seams = Vec::with_capacity(parts.len());
+    let cleaned = if parts.is_empty() {
+        strip_core(&bounded, style)
+    } else {
+        parts.sort_unstable();
+        parts.dedup_by(|b, a| {
+            a.0 == b.0 && {
+                a.1 |= b.1;
+                true
+            }
+        });
+        // The first part's own string grows into the whole, as the head of the `PRE_BOUND` cut always did (no copy of it).
+        let mut cleaned = String::new();
+        let mut from = 0;
+        for &(to, reported) in &parts {
+            let part = strip_core(&bounded[from..to], style);
+            if from == 0 {
+                cleaned = part;
+            } else {
+                cleaned.push_str(&part);
+            }
+            seams.push((cleaned.len(), reported));
+            from = to;
         }
-        None => (strip_core(&bounded, style), Vec::new()),
+        cleaned.push_str(&strip_core(&bounded[from..], style));
+        cleaned
     };
     let (out, last) = cap_middle(cleaned, max);
     if let Some((h, dropped)) = last {
         // A place in the dropped middle is gone; one in the kept tail moves with it.
         seams = seams
             .into_iter()
-            .filter_map(|s| match s {
-                s if s < h => Some(s),
-                s if s >= dropped => Some(s - dropped + h),
+            .filter_map(|(s, r)| match s {
+                s if s < h => Some((s, r)),
+                s if s >= dropped => Some((s - dropped + h, r)),
                 _ => None,
             })
-            .chain(std::iter::once(h))
+            .chain(std::iter::once((h, false)))
             .collect();
-        seams.sort_unstable();
-        seams.dedup();
     }
+    seams.sort_unstable();
+    seams.dedup_by(|b, a| {
+        a.0 == b.0 && {
+            a.1 |= b.1;
+            true
+        }
+    });
     // Isolates are balanced last, in each part between two places apart (review of #1103, B6): what the balance removes cannot move a
     // place, and the whole is balanced as each part is.
+    let node_cut = first.is_some() || last.is_some();
     if seams.is_empty() {
-        return (
-            balanced(out, style),
-            first.is_some() || last.is_some(),
-            seams,
-        );
+        return (balanced(out, style), node_cut, Vec::new());
     }
     let mut joined = String::with_capacity(out.len());
     let mut kept = Vec::with_capacity(seams.len());
     let mut at = 0;
-    for &seam in seams.iter().chain(std::iter::once(&out.len())) {
+    for (seam, reported) in seams.into_iter().chain(std::iter::once((out.len(), false))) {
         joined.push_str(&balanced(out[at..seam].to_string(), style));
-        if seam < out.len() {
+        // The node's own place at the very end is no place (the text goes on nowhere); a reported one there is (an end dropped).
+        if seam < out.len() || reported {
             kept.push(joined.len());
         }
         at = seam;
     }
-    (joined, true, kept)
+    (joined, node_cut, kept)
 }
 
 /// ACP `ToolKind` as the protocol's; a word this build does not know is `UNSPECIFIED`.
@@ -1452,13 +1523,18 @@ impl ChatBoard {
     /// conversation, so the replay is dropped: shown again it would be every turn twice, and written again a copy on every resume.
     /// An agent with an empty transcript (no file: purged, `chat.history_max_bytes = 0`, or a first resume after an upgrade) shows
     /// the replay as before. Returns whether it was kept.
-    pub fn replayed(&self, agent: &AgentId, items: &[ChatItem], now_ms: u64) -> bool {
+    pub fn replayed(
+        &self,
+        agent: &AgentId,
+        items: &[(ChatItem, Vec<ReportedCut>)],
+        now_ms: u64,
+    ) -> bool {
         let holds = self.lock().get(agent).is_some_and(|t| t.next_id > 0);
         if holds {
             return false;
         }
-        for item in items {
-            self.push_item(agent, item, now_ms);
+        for (item, cuts) in items {
+            self.push_item_cut(agent, item, cuts, now_ms);
         }
         true
     }
@@ -1750,15 +1826,42 @@ impl ChatBoard {
 
     /// What an adapter said. A notice whose code has the wrong shape is dropped (ADR-0058).
     pub fn push_item(&self, agent: &AgentId, item: &ChatItem, at_ms: u64) {
+        self.push_item_cut(agent, item, &[], at_ms);
+    }
+
+    /// [`Self::push_item`], with the places the adapter reported it cut the item's text (ADR-0111: from an adapter that declared
+    /// `chat.cuts`, each checked by the host against the item as sent). Each one is recorded where the node records its own cuts, as
+    /// a place a value may have been cut, for the live stream and the file alike.
+    pub fn push_item_cut(
+        &self,
+        agent: &AgentId,
+        item: &ChatItem,
+        cuts: &[ReportedCut],
+        at_ms: u64,
+    ) {
         match item {
             ChatItem::Notice { code, params } => {
                 // The node's own notices are not the adapter's to make.
                 if NODE_NOTICES.contains(&code.as_str()) {
                     return;
                 }
-                let Some((code, params, cuts)) = notice_cuts(code, params) else {
+                let Some((code, params, mut cuts_at)) = notice_cuts(code, params) else {
                     return;
                 };
+                // A parameter is only cut at its end by the node, so a place the adapter reported is where it was, if still kept.
+                for c in cuts {
+                    let CutField::Param(k) = &c.field else {
+                        continue;
+                    };
+                    if !params.get(k).is_some_and(|v| c.at <= v.len()) {
+                        continue;
+                    }
+                    match cuts_at.iter_mut().find(|(key, _)| key == k) {
+                        Some((_, at)) => at.push(c.at),
+                        None => cuts_at.push((k.clone(), vec![c.at])),
+                    }
+                }
+                let cuts = cuts_at;
                 let mut e = entry(ChatRole::Agent, ChatKind::Notice, String::new(), at_ms);
                 e.code = code;
                 e.params = params;
@@ -1771,18 +1874,62 @@ impl ChatBoard {
             }
             ChatItem::Thought(text) => {
                 // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
-                let (text, _, cuts) = tidy_cuts(text, MAX_THOUGHT_BYTES, Style::Prose);
+                let reported = reported(cuts, &CutField::Text);
+                let (text, _, cuts) =
+                    tidy_cuts_at(text, MAX_THOUGHT_BYTES, Style::Prose, &reported);
                 self.insert_cut(
                     agent,
                     entry(ChatRole::Agent, ChatKind::Thought, text, at_ms),
                     cuts,
                 );
             }
-            ChatItem::Tool(tool) => self.upsert_tool(agent, tool, at_ms),
-            ChatItem::PlanSteps(steps) => self.upsert_plan(agent, steps, at_ms),
+            ChatItem::Tool(tool) => self.upsert_tool(agent, tool, cuts, at_ms),
+            ChatItem::PlanSteps(steps) => self.upsert_plan(agent, steps, cuts, at_ms),
             other => {
                 let (kind, text, path) = describe(other);
-                self.push(agent, ChatRole::Agent, kind, text, path, at_ms);
+                // The places in the entry's text (as `describe` made it) and its path; the node only cuts the text's end.
+                let at: Vec<usize> = match other {
+                    ChatItem::Text(_) => reported(cuts, &CutField::Text),
+                    ChatItem::Diff { .. } if !text.is_empty() => reported(cuts, &CutField::Text),
+                    ChatItem::ToolCall {
+                        tool,
+                        arguments_json,
+                    } => cuts
+                        .iter()
+                        .filter_map(|c| call_text_cut(tool, arguments_json, c))
+                        .collect(),
+                    ChatItem::Plan(lines) => cuts
+                        .iter()
+                        .filter_map(|c| match c.field {
+                            CutField::Step(i) if i < lines.len() => Some(
+                                lines.iter().take(i).map(|l| l.len() + 1).sum::<usize>() + c.at,
+                            ),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let path_at: Vec<usize> = reported(cuts, &CutField::DiffPath)
+                    .into_iter()
+                    .filter(|&a| a <= path.len())
+                    .collect();
+                let (text, end) = cut_at(text);
+                let text_at: Vec<usize> = at
+                    .into_iter()
+                    .filter(|&a| a <= text.len())
+                    .chain(end)
+                    .collect();
+                let mut e = entry(ChatRole::Agent, kind, text, at_ms);
+                e.path = path;
+                let mut g = self.lock();
+                let t = slot(&mut g, agent, self.wake.as_ref());
+                let id = t.add(e, at_ms);
+                if !text_at.is_empty() || !path_at.is_empty() {
+                    t.note_cuts(id, |c| {
+                        c.text = text_at;
+                        c.path = path_at;
+                    });
+                }
             }
         }
     }
@@ -1791,7 +1938,7 @@ impl ChatBoard {
     /// field the item carries replaces the field, one it leaves out keeps it. The duration is the node's own: `started_ms` is when
     /// the call was first seen and `ended_ms` when it first reached `completed` or `failed`. Paths are cut to 64; output keeps
     /// its head and tail within 16 KiB; and what a tool printed about a secret file (ADR-0080) is not kept at all.
-    fn upsert_tool(&self, agent: &AgentId, item: &ToolItem, now_ms: u64) {
+    fn upsert_tool(&self, agent: &AgentId, item: &ToolItem, cuts: &[ReportedCut], now_ms: u64) {
         // An id that does not fit would, cut, name another call: such an item is dropped.
         if item.call_id.is_empty() || item.call_id.len() > MAX_CALL_ID {
             return;
@@ -1799,14 +1946,24 @@ impl ChatBoard {
         // Everything that costs work in proportion to the text (cleaning, cutting, formatting, cloning) is done here, before the lock.
         let (tool_in, tool_cuts) = match item.tool.as_ref() {
             Some(x) => {
-                let (t, _, c) = tidy_cuts(x, MAX_PATH_BYTES, Style::Label);
+                let (t, _, c) = tidy_cuts_at(
+                    x,
+                    MAX_PATH_BYTES,
+                    Style::Label,
+                    &reported(cuts, &CutField::Tool),
+                );
                 (Some(t), Some(c))
             }
             None => (None, None),
         };
         let (args_in, args_cuts) = match item.arguments_json.as_ref() {
             Some(x) => {
-                let (a, _, c) = tidy_cuts(x, MAX_ENTRY_BYTES, Style::Code);
+                let (a, _, c) = tidy_cuts_at(
+                    x,
+                    MAX_ENTRY_BYTES,
+                    Style::Code,
+                    &reported(cuts, &CutField::Arguments),
+                );
                 (Some(a), Some(c))
             }
             None => (None, None),
@@ -1817,8 +1974,14 @@ impl ChatBoard {
         let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
             l.iter()
                 .take(MAX_PATHS)
-                .map(|(path, line)| {
-                    let (path, _, c) = tidy_cuts(path, MAX_PATH_BYTES, Style::Label);
+                .enumerate()
+                .map(|(i, (path, line))| {
+                    let (path, _, c) = tidy_cuts_at(
+                        path,
+                        MAX_PATH_BYTES,
+                        Style::Label,
+                        &reported(cuts, &CutField::Path(i)),
+                    );
                     path_cuts.push(c);
                     ToolLocation { path, line: *line }
                 })
@@ -1831,7 +1994,12 @@ impl ChatBoard {
         });
         let (output, output_cuts) = match item.output.as_ref() {
             Some(o) => {
-                let (o, truncated, c) = tidy_cuts(o, MAX_OUTPUT_BYTES, Style::Prose);
+                let (o, truncated, c) = tidy_cuts_at(
+                    o,
+                    MAX_OUTPUT_BYTES,
+                    Style::Prose,
+                    &reported(cuts, &CutField::Output),
+                );
                 (Some((o, truncated)), Some(c))
             }
             None => (None, None),
@@ -1948,13 +2116,19 @@ impl ChatBoard {
 
     /// ADR-0090: the plan with each step's status. A plan replaces the earlier one in the same entry while that is still in the ring;
     /// at most 64 steps of 512 bytes; `text` stays the step lines joined for old clients.
-    fn upsert_plan(&self, agent: &AgentId, steps: &[PlanItem], now_ms: u64) {
+    fn upsert_plan(&self, agent: &AgentId, steps: &[PlanItem], cuts: &[ReportedCut], now_ms: u64) {
         let mut step_cuts = Vec::new();
         let steps: Vec<PlanStep> = steps
             .iter()
             .take(MAX_PLAN_STEPS)
-            .map(|s| {
-                let (text, _, cuts) = tidy_cuts(&s.text, MAX_PLAN_STEP_BYTES, Style::Step);
+            .enumerate()
+            .map(|(i, s)| {
+                let (text, _, cuts) = tidy_cuts_at(
+                    &s.text,
+                    MAX_PLAN_STEP_BYTES,
+                    Style::Step,
+                    &reported(cuts, &CutField::Step(i)),
+                );
                 step_cuts.push(cuts);
                 PlanStep {
                     text,
@@ -3618,7 +3792,10 @@ mod tests {
     fn a_replay_is_shown_only_when_the_transcript_is_empty() {
         let b = ChatBoard::new();
         let (fresh, kept) = (AgentId::new("fresh"), AgentId::new("kept"));
-        let replay = [ChatItem::Text("one".into()), ChatItem::Text("two".into())];
+        let replay = [
+            (ChatItem::Text("one".into()), Vec::new()),
+            (ChatItem::Text("two".into()), Vec::new()),
+        ];
         assert!(b.replayed(&fresh, &replay, 1));
         assert_eq!(b.snapshot(&fresh).len(), 2);
         b.push_item(&kept, &ChatItem::Text("one".into()), 1);
@@ -5458,8 +5635,9 @@ mod every_cut {
                 ("let (out, cut, _) = tidy_cuts(text, max, style);", "the place is recorded"),
                 ("(out, cut)", "the seeding helper"),
                 ("let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);", "the place is recorded"),
-                ("let head = strip_core(&bounded[..h], style);", "the place is recorded"),
-                ("(head + &strip_core(&bounded[h..], style), vec![seam])", "the place is recorded"),
+                ("let part = strip_core(&bounded[from..to], style);", "the place is recorded"),
+                ("cleaned.push_str(&strip_core(&bounded[from..], style));", "the place is recorded"),
+                ("CutField::Tool => Some(HEAD + json_string(tool.get(..c.at)?).len() - 1),", "ADR-0111: a place measured; nothing of a text is dropped"),
                 ("let (out, last) = cap_middle(cleaned, max);", "the place is recorded"),
                 ("joined.push_str(&balanced(out[at..seam].to_string(), style));", "the place is recorded"),
                 ("self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);", "the carry: kept in memory, never written"),
@@ -6371,5 +6549,300 @@ mod live {
             .snapshot(&a)
             .iter()
             .all(|e| !e.text.contains(&SECRET[..8])));
+    }
+
+    /// ADR-0111: a value an adapter cuts in the middle of one of an item's strings (letters only, so no number the file holds
+    /// matches a piece of it by chance).
+    const CUT_VALUE: &str = "sk-CUTS-qwertyuiopASDFGHJKLzxcvbnmPOIUYT";
+
+    /// `whole` with 6 bytes taken out of the middle of [`CUT_VALUE`] in it, and where they were.
+    fn cut_value(whole: &str) -> (String, usize) {
+        let at = whole.find(CUT_VALUE).unwrap() + CUT_VALUE.len() / 2 - 3;
+        (format!("{}{}", &whole[..at], &whole[at + 6..]), at)
+    }
+
+    /// Each string of each item an adapter may report a cut in, as the adapter sends it once cut, with that cut.
+    fn cut_items() -> Vec<(&'static str, ChatItem, ReportedCut)> {
+        let whole = format!("the key is {CUT_VALUE} and more words");
+        let (kept, at) = cut_value(&whole);
+        let rc = |field| ReportedCut { field, at };
+        let tool = |t: ToolItem| {
+            ChatItem::Tool(ToolItem {
+                call_id: "c1".into(),
+                status: "completed".into(),
+                ..t
+            })
+        };
+        let k = || kept.clone();
+        vec![
+            ("text", ChatItem::Text(k()), rc(CutField::Text)),
+            ("thought", ChatItem::Thought(k()), rc(CutField::Text)),
+            (
+                "output",
+                tool(ToolItem {
+                    tool: Some("sh".into()),
+                    output: Some(k()),
+                    ..ToolItem::default()
+                }),
+                rc(CutField::Output),
+            ),
+            (
+                "arguments",
+                tool(ToolItem {
+                    tool: Some("sh".into()),
+                    arguments_json: Some(k()),
+                    ..ToolItem::default()
+                }),
+                rc(CutField::Arguments),
+            ),
+            (
+                "tool",
+                tool(ToolItem {
+                    tool: Some(k()),
+                    ..ToolItem::default()
+                }),
+                rc(CutField::Tool),
+            ),
+            (
+                "path",
+                tool(ToolItem {
+                    tool: Some("sh".into()),
+                    locations: Some(vec![("a.rs".into(), 1), (k(), 2)]),
+                    ..ToolItem::default()
+                }),
+                rc(CutField::Path(1)),
+            ),
+            (
+                "step",
+                ChatItem::PlanSteps(vec![
+                    PlanItem {
+                        text: "first".into(),
+                        ..PlanItem::default()
+                    },
+                    PlanItem {
+                        text: k(),
+                        ..PlanItem::default()
+                    },
+                ]),
+                rc(CutField::Step(1)),
+            ),
+            (
+                "planline",
+                ChatItem::Plan(vec!["first".into(), k()]),
+                rc(CutField::Step(1)),
+            ),
+            (
+                "callargs",
+                ChatItem::ToolCall {
+                    tool: "sh".into(),
+                    arguments_json: k(),
+                },
+                rc(CutField::Arguments),
+            ),
+            (
+                "callname",
+                ChatItem::ToolCall {
+                    tool: k(),
+                    arguments_json: "{}".into(),
+                },
+                rc(CutField::Tool),
+            ),
+            (
+                "diff",
+                ChatItem::Diff {
+                    path: "a.rs".into(),
+                    unified_diff: k(),
+                },
+                rc(CutField::Text),
+            ),
+            (
+                "diffpath",
+                ChatItem::Diff {
+                    path: k(),
+                    unified_diff: "+x".into(),
+                },
+                rc(CutField::DiffPath),
+            ),
+            (
+                "notice",
+                ChatItem::Notice {
+                    code: "adapter.turn_failed".into(),
+                    params: vec![("detail".into(), k())],
+                },
+                rc(CutField::Param("detail".into())),
+            ),
+        ]
+    }
+
+    /// A piece of `v` (4 bytes or more) in any field of the entries the file holds, or in a call's tool name and arguments.
+    fn saved_leak(store: &Store, agent: &str, v: &str) -> Option<String> {
+        for (e, side) in store.read(agent).entries {
+            let mut f = fields(&e);
+            if let Some((tool, args)) = &side.tool {
+                f.extend([tool.as_str(), args.as_str()]);
+            }
+            for p in pieces_of(v) {
+                if let Some(x) = f.iter().find(|x| x.contains(p)) {
+                    return Some(format!("{p:?} in entry {}: {x:?}", e.entry_id));
+                }
+            }
+        }
+        None
+    }
+
+    /// ADR-0111: an adapter cuts a held value in the middle of each kind of string it sends and reports the cut: neither a follower
+    /// nor the file holds a piece of it (4 bytes or more). The same cut not reported leaves pieces in both: the residual of an
+    /// adapter without `chat.cuts` (and of one that declared it but did not report), which this test documents.
+    #[test]
+    fn a_value_an_adapter_cut_and_reported_never_reaches_a_follower_or_the_file() {
+        for (name, item, cut) in cut_items() {
+            for report in [true, false] {
+                let (_d, store, b) = board(
+                    &format!("adr0111-{name}-{report}"),
+                    &[CUT_VALUE],
+                    Limits::default(),
+                );
+                let a = AgentId::new("a");
+                let mut f = Follower::of(&b, &a);
+                let cuts = if report {
+                    std::slice::from_ref(&cut)
+                } else {
+                    &[]
+                };
+                b.push_item_cut(&a, &item, cuts, 1);
+                for batch in b.take_unsaved() {
+                    store.write(&batch).unwrap();
+                }
+                let (live, file) = (leak(&mut f, CUT_VALUE), saved_leak(&store, "a", CUT_VALUE));
+                if report {
+                    assert_eq!((&live, &file), (&None, &None), "{name}");
+                } else {
+                    assert!(
+                        live.is_some() && file.is_some(),
+                        "{name}: an unreported cut leaves a piece ({live:?}, {file:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ADR-0111: a reported cut in the agent's words is a place in their stream too: the next piece, which goes on with the value,
+    /// starts at no edge of its own, but the cut before it is one.
+    #[test]
+    fn a_reported_cut_in_the_agents_words_is_an_edge_of_their_stream() {
+        let (_d, store, b) = board("adr0111-stream", &[CUT_VALUE], Limits::default());
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        let mut f = Follower::of(&b, &a);
+        // The adapter dropped 6 bytes inside the value at the end of one piece; the next piece goes on with the rest.
+        let head = format!("say {}", &CUT_VALUE[..12]);
+        let cut = ReportedCut {
+            field: CutField::Text,
+            at: head.len(),
+        };
+        b.push_item_cut(&a, &ChatItem::Text(head.clone()), &[cut], 1);
+        b.push_item(&a, &ChatItem::Text(format!("{} done", &CUT_VALUE[18..])), 2);
+        b.set_working(&a, false);
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+        assert_eq!(leak(&mut f, CUT_VALUE), None);
+        assert_eq!(saved_leak(&store, "a", CUT_VALUE), None);
+        assert!(f.words().ends_with(" done"), "{:?}", f.words());
+    }
+
+    /// ADR-0111: where a reported place lands through the node's own cleaning and cuts: it moves with what cleaning removes before
+    /// it, one in a dropped middle is gone, one at the very end is kept (the node's own is not), and a place reported alone does
+    /// not make the text count as cut by the node.
+    #[test]
+    fn reported_places_move_through_cleaning_and_the_nodes_cuts() {
+        let esc = "\u{1b}[31m";
+        let text = format!("ab{esc}cd{esc}ef");
+        let at = 2 + esc.len() + 2;
+        let (out, node_cut, places) = tidy_cuts_at(&text, 100, Style::Prose, &[at, 0, text.len()]);
+        assert_eq!((out.as_str(), node_cut), ("abcdef", false));
+        assert_eq!(places, [0, 4, 6]);
+        // Without a report the result is the node's alone, as before.
+        assert_eq!(
+            tidy_cuts_at(&text, 100, Style::Prose, &[]),
+            tidy_cuts(&text, 100, Style::Prose)
+        );
+        assert_eq!(tidy_cuts(&text, 100, Style::Prose).2, Vec::<usize>::new());
+        // The node keeps 4 + 4 of 20 bytes: a place in the dropped middle is gone, one in the kept tail moves with it.
+        let long = "abcdefghijklmnopqrst";
+        let (out, node_cut, places) = tidy_cuts_at(long, 8, Style::Prose, &[2, 10, 18]);
+        assert_eq!((out.as_str(), node_cut), ("abcdqrst", true));
+        assert_eq!(places, [2, 4, 6]);
+        // A place inside a character (never from the host, which checks) is left out rather than cut through.
+        let (out, _, places) = tidy_cuts_at("aé", 100, Style::Prose, &[2]);
+        assert_eq!((out.as_str(), places), ("aé", Vec::new()));
+    }
+
+    /// ADR-0111 (ADR-0022): the cost of reported places on the chat path: a 64 KiB tool output cleaned and capped with none and with
+    /// 64, and a board taking the item and writing it with the value held.
+    #[test]
+    #[ignore = "a measurement (ADR-0111): cargo test -p agora-node --lib -- --ignored adr0111_perf"]
+    fn adr0111_perf() {
+        let raw: String = (0..1600)
+            .map(|i| format!("line {i} \u{1b}[32mok\u{1b}[0m words\n"))
+            .collect::<String>()
+            .chars()
+            .take(64 * 1024)
+            .collect();
+        let none: Vec<usize> = Vec::new();
+        let many: Vec<usize> = (1..=64)
+            .map(|i| i * raw.len() / 65)
+            .filter(|&i| raw.is_char_boundary(i))
+            .collect();
+        for (label, cuts) in [("0 places", &none), ("64 places", &many)] {
+            let n = 2_000u32;
+            let start = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(tidy_cuts_at(
+                    std::hint::black_box(&raw),
+                    MAX_OUTPUT_BYTES,
+                    Style::Prose,
+                    cuts,
+                ));
+            }
+            eprintln!(
+                "tidy 64 KiB output, {label}: {:?} each",
+                start.elapsed() / n
+            );
+        }
+        for (label, cuts) in [("0 places", &none), ("64 places", &many)] {
+            let (_d, store, b) = board(
+                &format!("adr0111-perf-{}", cuts.len()),
+                &[CUT_VALUE],
+                Limits::default(),
+            );
+            let a = AgentId::new("a");
+            let reported: Vec<ReportedCut> = cuts
+                .iter()
+                .map(|&at| ReportedCut {
+                    field: CutField::Output,
+                    at,
+                })
+                .collect();
+            let n = 500u32;
+            let start = std::time::Instant::now();
+            for i in 0..n {
+                let item = ChatItem::Tool(ToolItem {
+                    call_id: format!("c{i}"),
+                    tool: Some("sh".into()),
+                    status: "completed".into(),
+                    output: Some(raw.clone()),
+                    ..ToolItem::default()
+                });
+                b.push_item_cut(&a, &item, &reported, u64::from(i));
+                for batch in b.take_unsaved() {
+                    store.write(&batch).unwrap();
+                }
+            }
+            eprintln!(
+                "push + redact + write, {label}: {:?} each",
+                start.elapsed() / n
+            );
+        }
     }
 }

@@ -93,6 +93,41 @@ pub struct PlanItem {
     pub priority: String,
 }
 
+/// ADR-0111: the capability an adapter declares in `initialize` when it reports every cut it makes in a `chat/append` item's text.
+pub const CHAT_CUTS: &str = "chat.cuts";
+
+/// ADR-0111: the most `cuts` entries read of one `chat/append` item; the rest are ignored.
+pub const MAX_ITEM_CUTS: usize = 64;
+
+/// ADR-0111: the string of a chat item a reported cut is in (the `field` of a `cuts` entry, a JSON pointer into the item's params).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CutField {
+    /// The item's own text: `/text/text`, `/thought/text` or `/diff/unifiedDiff`.
+    Text,
+    /// `/toolCall/tool`.
+    Tool,
+    /// `/toolCall/argumentsJson`.
+    Arguments,
+    /// `/toolCall/output`.
+    Output,
+    /// `/toolCall/locations/N/path`: the index among the locations the item keeps (one without a path is not kept).
+    Path(usize),
+    /// `/plan/steps/N` or `/plan/entries/N/text`: the index among the steps the item keeps.
+    Step(usize),
+    /// `/diff/path`.
+    DiffPath,
+    /// `/notice/params/KEY`.
+    Param(String),
+}
+
+/// ADR-0111: a place where the adapter removed text from one of the item's strings: `at` is a byte offset in that string as sent,
+/// on a character boundary and at most its length (checked when the item is read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedCut {
+    pub field: CutField,
+    pub at: usize,
+}
+
 /// ADR-0090: one option of the agent's session the user may change (`session/config`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigOption {
@@ -170,6 +205,12 @@ pub enum AdapterEvent {
     Chat {
         session_id: String,
         item: ChatItem,
+        /// ADR-0111: where the adapter says it cut the item's text (valid entries only). The node uses them only from an adapter
+        /// that declared [`CHAT_CUTS`].
+        cuts: Vec<ReportedCut>,
+        /// ADR-0111: how many `cuts` entries were ignored (past [`MAX_ITEM_CUTS`], an unknown field, a target that is not a string,
+        /// an offset past its end or inside a character).
+        cuts_ignored: usize,
     },
     ApprovalRequest {
         session_id: String,
@@ -655,6 +696,78 @@ fn options(v: Option<&Value>) -> Vec<SessionOption> {
         .unwrap_or_default()
 }
 
+/// ADR-0111: the item's `cuts` entries that name a string the item keeps and a place in it, and how many entries were ignored. At most
+/// [`MAX_ITEM_CUTS`] entries are read; each one that does not hold is ignored on its own, never the item.
+fn reported_cuts(p: &Value, item: &ChatItem) -> (Vec<ReportedCut>, usize) {
+    let list = match p.get("cuts") {
+        None | Some(Value::Null) => return (Vec::new(), 0),
+        Some(Value::Array(a)) => a,
+        Some(_) => return (Vec::new(), 1),
+    };
+    let mut cuts = Vec::new();
+    let mut ignored = list.len().saturating_sub(MAX_ITEM_CUTS);
+    for c in list.iter().take(MAX_ITEM_CUTS) {
+        match reported_cut(p, item, c) {
+            Some(c) => cuts.push(c),
+            None => ignored += 1,
+        }
+    }
+    (cuts, ignored)
+}
+
+/// ADR-0111: one `cuts` entry `{field, at}`, when `field` points at a string of the item this host reads and `at` is a character
+/// boundary in it (its end included).
+fn reported_cut(p: &Value, item: &ChatItem, c: &Value) -> Option<ReportedCut> {
+    let pointer = c.get("field")?.as_str()?;
+    let at = usize::try_from(c.get("at")?.as_u64()?).ok()?;
+    let target = p.pointer(pointer)?.as_str()?;
+    if !target.is_char_boundary(at) {
+        return None;
+    }
+    let field = cut_field(p, item, pointer)?;
+    Some(ReportedCut { field, at })
+}
+
+/// ADR-0111: which string of `item` a JSON pointer into its params names, or `None` for one the host does not read into that item.
+fn cut_field(p: &Value, item: &ChatItem, pointer: &str) -> Option<CutField> {
+    let tokens: Vec<String> = pointer
+        .strip_prefix('/')?
+        .split('/')
+        .map(|t| t.replace("~1", "/").replace("~0", "~"))
+        .collect();
+    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    // An array index as a JSON pointer writes it (no sign, no leading zero), as the index among the elements the item keeps.
+    let kept = |list: &str, i: &str, keeps: fn(&Value) -> bool| -> Option<usize> {
+        let n: usize = i.parse().ok().filter(|n: &usize| n.to_string() == i)?;
+        let a = p.pointer(list)?.as_array()?;
+        keeps(a.get(n)?).then(|| a.iter().take(n).filter(|v| keeps(v)).count())
+    };
+    Some(match (item, tokens.as_slice()) {
+        (ChatItem::Text(_), ["text", "text"])
+        | (ChatItem::Thought(_), ["thought", "text"])
+        | (ChatItem::Diff { .. }, ["diff", "unifiedDiff"]) => CutField::Text,
+        (ChatItem::Tool(_) | ChatItem::ToolCall { .. }, ["toolCall", "tool"]) => CutField::Tool,
+        (ChatItem::Tool(_) | ChatItem::ToolCall { .. }, ["toolCall", "argumentsJson"]) => {
+            CutField::Arguments
+        }
+        (ChatItem::Tool(_), ["toolCall", "output"]) => CutField::Output,
+        (ChatItem::Tool(_), ["toolCall", "locations", i, "path"]) => {
+            CutField::Path(kept("/toolCall/locations", i, |l| {
+                l.get("path").is_some_and(Value::is_string)
+            })?)
+        }
+        (ChatItem::PlanSteps(_), ["plan", "entries", i, "text"]) => {
+            CutField::Step(kept("/plan/entries", i, Value::is_object)?)
+        }
+        (ChatItem::Plan(_), ["plan", "steps", i]) => {
+            CutField::Step(kept("/plan/steps", i, Value::is_string)?)
+        }
+        (ChatItem::Diff { .. }, ["diff", "path"]) => CutField::DiffPath,
+        (ChatItem::Notice { .. }, ["notice", "params", key]) => CutField::Param((*key).to_string()),
+        _ => return None,
+    })
+}
+
 /// Notification → event. `None` for methods this host does not know: adapters must be free to send more than the
 /// node understands (forward compatibility), so that is not an error.
 fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
@@ -741,9 +854,12 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
                         .unwrap_or_default(),
                 }
             };
+            let (cuts, cuts_ignored) = reported_cuts(p, &item);
             AdapterEvent::Chat {
                 session_id: s(p, "sessionId"),
                 item,
+                cuts,
+                cuts_ignored,
             }
         }
         "approval/request" => AdapterEvent::ApprovalRequest {
@@ -2376,7 +2492,9 @@ mod tests {
                 item: ChatItem::Notice {
                     code: "adapter.turn_empty".into(),
                     params: vec![("a".into(), "1".into())]
-                }
+                },
+                cuts: Vec::new(),
+                cuts_ignored: 0,
             })
         );
         let e = to_event(
@@ -2394,5 +2512,140 @@ mod tests {
         );
         assert!(to_event("future/method", &json!({})).is_none());
         assert!(to_event("chat/append", &json!({"sessionId": "s"})).is_none());
+    }
+
+    /// The item and its reported cuts, as the host reads a `chat/append` with these params.
+    fn chat_cuts(p: Value) -> (ChatItem, Vec<ReportedCut>, usize) {
+        match to_event("chat/append", &p) {
+            Some(AdapterEvent::Chat {
+                item,
+                cuts,
+                cuts_ignored,
+                ..
+            }) => (item, cuts, cuts_ignored),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn cut(field: CutField, at: usize) -> ReportedCut {
+        ReportedCut { field, at }
+    }
+
+    /// ADR-0111: each string of each item a cut may name, by its JSON pointer; an index names the element the item keeps.
+    #[test]
+    fn reported_cuts_name_the_strings_the_item_keeps() {
+        let (_, c, n) = chat_cuts(json!({"sessionId": "s", "text": {"text": "abcdef"},
+            "cuts": [{"field": "/text/text", "at": 3}, {"field": "/text/text", "at": 0}, {"field": "/text/text", "at": 6}]}));
+        assert_eq!(
+            (c, n),
+            (
+                vec![
+                    cut(CutField::Text, 3),
+                    cut(CutField::Text, 0),
+                    cut(CutField::Text, 6)
+                ],
+                0
+            )
+        );
+        let (_, c, n) = chat_cuts(json!({"sessionId": "s", "thought": {"text": "abcdef"},
+            "cuts": [{"field": "/thought/text", "at": 2}]}));
+        assert_eq!((c, n), (vec![cut(CutField::Text, 2)], 0));
+        let (item, c, n) = chat_cuts(
+            json!({"sessionId": "s", "toolCall": {"callId": "c", "tool": "sh", "argumentsJson": "{}",
+            "output": "out put", "locations": [{"line": 1}, {"path": "a/b"}]},
+            "cuts": [{"field": "/toolCall/tool", "at": 1}, {"field": "/toolCall/argumentsJson", "at": 1},
+                     {"field": "/toolCall/output", "at": 3}, {"field": "/toolCall/locations/1/path", "at": 2}]}),
+        );
+        assert!(matches!(item, ChatItem::Tool(_)));
+        assert_eq!(
+            (c, n),
+            (
+                vec![
+                    cut(CutField::Tool, 1),
+                    cut(CutField::Arguments, 1),
+                    cut(CutField::Output, 3),
+                    // The first location has no path and is not kept: the second is the item's first.
+                    cut(CutField::Path(0), 2),
+                ],
+                0
+            )
+        );
+        let (_, c, n) = chat_cuts(
+            json!({"sessionId": "s", "toolCall": {"tool": "sh", "argumentsJson": "{}"},
+            "cuts": [{"field": "/toolCall/tool", "at": 2}, {"field": "/toolCall/argumentsJson", "at": 2},
+                     {"field": "/toolCall/output", "at": 0}]}),
+        );
+        assert_eq!(
+            (c, n),
+            (vec![cut(CutField::Tool, 2), cut(CutField::Arguments, 2)], 1)
+        );
+        let (_, c, n) = chat_cuts(json!({"sessionId": "s", "plan": {"steps": ["a", 3, "bcd"],
+            "entries": [7, {"text": "xy"}]},
+            "cuts": [{"field": "/plan/entries/1/text", "at": 1}, {"field": "/plan/steps/2", "at": 1}]}));
+        assert_eq!((c, n), (vec![cut(CutField::Step(0), 1)], 1));
+        let (_, c, n) = chat_cuts(json!({"sessionId": "s", "plan": {"steps": ["a", 3, "bcd"]},
+            "cuts": [{"field": "/plan/steps/2", "at": 1}, {"field": "/plan/steps/02", "at": 1}]}));
+        assert_eq!((c, n), (vec![cut(CutField::Step(1), 1)], 1));
+        let (_, c, n) = chat_cuts(
+            json!({"sessionId": "s", "diff": {"path": "a.rs", "unifiedDiff": "-x\n+y"},
+            "cuts": [{"field": "/diff/path", "at": 1}, {"field": "/diff/unifiedDiff", "at": 3}]}),
+        );
+        assert_eq!(
+            (c, n),
+            (vec![cut(CutField::DiffPath, 1), cut(CutField::Text, 3)], 0)
+        );
+        let (_, c, n) = chat_cuts(
+            json!({"sessionId": "s", "notice": {"code": "a.b", "params": {"x/y": "123", "n": 4}},
+            "cuts": [{"field": "/notice/params/x~1y", "at": 1}, {"field": "/notice/params/n", "at": 0}]}),
+        );
+        assert_eq!((c, n), (vec![cut(CutField::Param("x/y".into()), 1)], 1));
+    }
+
+    /// ADR-0111 bounds: a list longer than 64, an unknown field, a target that is not a string, an offset past the end or inside a
+    /// character: each entry is ignored on its own and counted, and the item is read as it would be without them.
+    #[test]
+    fn a_bad_cut_entry_is_ignored_on_its_own_and_never_the_item() {
+        let base = json!({"sessionId": "s", "toolCall": {"callId": "c", "tool": "sh", "output": "aé b", "kind": "read"}});
+        let (plain, none, zero) = chat_cuts(base.clone());
+        assert_eq!((none.len(), zero), (0, 0));
+        let with = |cuts: Value| {
+            let mut p = base.clone();
+            p["cuts"] = cuts;
+            chat_cuts(p)
+        };
+        let ok = json!({"field": "/toolCall/output", "at": 1});
+        // 65 entries: the first 64 are read, the 65th is ignored.
+        let (item, c, n) = with(Value::Array(vec![ok.clone(); 65]));
+        assert_eq!((&item, c.len(), n), (&plain, 64, 1));
+        for bad in [
+            json!({"field": "/toolCall/nothing", "at": 0}),
+            json!({"field": "/sessionId", "at": 0}),
+            json!({"field": "toolCall/output", "at": 0}),
+            json!({"field": "/toolCall/kind", "at": 0}),
+            json!({"field": "/toolCall", "at": 0}),
+            json!({"field": "/toolCall/output", "at": 2}),
+            json!({"field": "/toolCall/output", "at": 7}),
+            json!({"field": "/toolCall/output", "at": -1}),
+            json!({"field": "/toolCall/output", "at": "1"}),
+            json!({"field": "/toolCall/output"}),
+            json!({"at": 1}),
+            json!(3),
+        ] {
+            let (item, c, n) = with(json!([ok.clone(), bad.clone(), ok.clone()]));
+            assert_eq!(
+                (&item, c, n),
+                (
+                    &plain,
+                    vec![cut(CutField::Output, 1), cut(CutField::Output, 1)],
+                    1
+                ),
+                "{bad}"
+            );
+        }
+        // The end of the string is a place in it; `cuts` that is not a list is one ignored entry, and `null` none.
+        let (_, c, _) = with(json!([{"field": "/toolCall/output", "at": 5}]));
+        assert_eq!(c, vec![cut(CutField::Output, 5)]);
+        assert_eq!(with(json!({"a": 1})), (plain.clone(), Vec::new(), 1));
+        assert_eq!(with(Value::Null), (plain, Vec::new(), 0));
     }
 }
