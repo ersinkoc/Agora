@@ -1136,10 +1136,15 @@ impl ChatBoard {
                         t.carry_edges = vec![0];
                     }
                     run.edges.extend(t.carry_edges.iter().copied());
+                    // Where the node cut a piece of words (a text at 16 KiB, a thought in its middle) is a place cut in the stream
+                    // too: the next piece may continue the value whose end was dropped (review of #1103, round 5). Kept with the
+                    // carry, so a later batch still knows it.
+                    let mut cut_edges = Vec::new();
                     for &(_, line) in &words {
                         let at = run.text.len();
-                        if let Some(Line::Entry(e, _)) = lines.get(line) {
+                        if let Some(Line::Entry(e, side)) = lines.get(line) {
                             run.text.push_str(&e.text);
+                            cut_edges.extend(side.cuts.text.iter().map(|c| at + c));
                         }
                         run.parts.push(RunPart {
                             line: Some(line),
@@ -1160,6 +1165,9 @@ impl ChatBoard {
                         let at = run.text.len();
                         run.text.push_str(&e.text);
                         ahead += e.text.len();
+                        if let Some(c) = t.cuts.get(&e.entry_id) {
+                            run.edges.extend(c.text.iter().map(|c| at + c));
+                        }
                         run.parts.push(RunPart {
                             line: None,
                             start: at,
@@ -1173,12 +1181,15 @@ impl ChatBoard {
                     if ahead < reach {
                         run.edges.push(written);
                     }
+                    run.edges.extend(cut_edges.iter().copied());
                     t.carry = tail_of(&run.text[..written], reach);
-                    // The earlier node's edge stays while the carry reaches back to it (review of #1103, round 3).
+                    // The earlier node's edge stays while the carry reaches back to it (review of #1103, round 3), and so do the
+                    // places the node cut the words written now.
                     let from = written - t.carry.len();
                     t.carry_edges = t
                         .carry_edges
                         .iter()
+                        .chain(&cut_edges)
                         .filter_map(|e| e.checked_sub(from))
                         .collect();
                     t.carry_open = false;
@@ -4112,8 +4123,9 @@ mod property {
         "a text over 16 KiB or a thought over 8 KiB",
         "a legacy tool call, plan or diff",
         "a secret of digits",
+        "a text cut at 16 KiB inside a value the next piece continues",
     ];
-    const N: usize = 19;
+    const N: usize = 20;
     static HITS: [std::sync::atomic::AtomicUsize; N] =
         [const { std::sync::atomic::AtomicUsize::new(0) }; N];
 
@@ -4415,14 +4427,31 @@ mod property {
                         (1, MAX_THOUGHT_BYTES / 2 - r.below(40))
                     };
                     let pre = filler(&mut r, n);
-                    let post = filler(&mut r, MAX_ENTRY_BYTES);
-                    let text = format!("{pre}{m}{post}");
-                    let item = if item == 0 {
-                        ChatItem::Text(text)
+                    if item == 0 && r.chance(50) {
+                        // One chunk over 16 KiB that ends inside a value, and the next that goes on with it (review of #1103,
+                        // round 5): the node cuts the first, and the value's end is in the second.
+                        hit(&mut seen, 19);
+                        let bounds: Vec<usize> = m.char_indices().map(|(i, _)| i).collect();
+                        let k = bounds[r.below(bounds.len())];
+                        c.board
+                            .push_item(&a, &ChatItem::Text(format!("{pre}{}", &m[..k])), 1);
+                        if r.chance(50) {
+                            c.write(false);
+                        }
+                        let n = r.below(40);
+                        let post = filler(&mut r, n);
+                        c.board
+                            .push_item(&a, &ChatItem::Text(format!("{}{post}", &m[k..])), 1);
                     } else {
-                        ChatItem::Thought(text)
-                    };
-                    c.board.push_item(&a, &item, 1);
+                        let post = filler(&mut r, MAX_ENTRY_BYTES);
+                        let text = format!("{pre}{m}{post}");
+                        let item = if item == 0 {
+                            ChatItem::Text(text)
+                        } else {
+                            ChatItem::Thought(text)
+                        };
+                        c.board.push_item(&a, &item, 1);
+                    }
                 }
                 // The legacy items: a tool call without an id, a plan of lines, a diff.
                 15 => {
@@ -4855,6 +4884,10 @@ mod every_cut {
             include_str!("transcript.rs"),
             &[
                 (
+                    "let by = self.by.get(a..z)?;",
+                    "the matcher's own table of moves, not a text",
+                ),
+                (
                     ".find(|&k| e >= k && b.get(e - k..e) == m.get(..k))",
                     "bytes beside an edge compared with a bridge mark's: nothing is cut",
                 ),
@@ -5065,6 +5098,37 @@ mod review4 {
         let _ = std::fs::remove_dir_all(dir);
         assert!(f.contains("and more"), "{f}");
         clean_of(&f, v).unwrap();
+    }
+
+    /// Round 5: a text cut at 16 KiB inside a value, whose dropped end the next piece continues. The cut is a place in the stream,
+    /// in or out of a turn, with or without a batch between the two pieces.
+    #[test]
+    fn the_piece_after_a_text_cut_at_16_kib_starts_at_an_edge() {
+        let v = "hunter2!hunter2!xy";
+        for (n, (working, between)) in [(false, false), (false, true), (true, false), (true, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let (dir, s, b) = board(&format!("cut16-{n}"), v);
+            let a = AgentId::new("a");
+            b.set_working(&a, working);
+            b.push_item(
+                &a,
+                &ChatItem::Text(format!("{}hunter2!h", "a ".repeat(8191))),
+                1,
+            );
+            if between {
+                write(&s, &b, false);
+            }
+            b.push_item(&a, &ChatItem::Text("unter2!xy and the rest".into()), 2);
+            b.set_working(&a, false);
+            write(&s, &b, false);
+            write(&s, &b, true);
+            let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+            assert!(f.contains("and the rest"), "variant {n}");
+            clean_of(&f, v).unwrap_or_else(|e| panic!("variant {n}: {e}"));
+        }
     }
 
     /// The agent's words in the file, joined in order.

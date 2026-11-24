@@ -172,6 +172,7 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         secrets
             .set("BENCH", &secret)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        settled(secrets.dir())?;
         let st = std::sync::Arc::new(Store::new(
             &home,
             Limits::default(),
@@ -210,9 +211,11 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         let value = format!("Q{}", "abcdefghij".repeat(800));
         let secret = agora_node::credentials::Secret::new(&value)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        agora_node::credentials::SecretStore::in_data(&home)
+        let secrets = agora_node::credentials::SecretStore::in_data(&home);
+        secrets
             .set("BENCH", &secret)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        settled(secrets.dir())?;
         let st = std::sync::Arc::new(Store::new(
             &home,
             Limits::default(),
@@ -282,4 +285,17 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         seed_p50_ms: ms(percentile(&mut seed, 0.5)),
         seed_max_ms: ms(percentile(&mut seed, 1.0)),
     })
+}
+
+/// The secrets folder as a node sees it once a value has been there a while: its times a minute old, so the store reads its values
+/// once (it reads them at every write while a time is under 2 s old).
+fn settled(dir: &std::path::Path) -> std::io::Result<()> {
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for entry in std::fs::read_dir(dir)? {
+        std::fs::File::options()
+            .write(true)
+            .open(entry?.path())?
+            .set_modified(old)?;
+    }
+    std::fs::File::open(dir)?.set_modified(old)
 }
