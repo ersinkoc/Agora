@@ -265,6 +265,11 @@ pub const MAX_QUEUED_PROMPT_BYTES: usize = 64 * 1024;
 /// ignores `session/cancel` must not hold the agent, and what waits behind its turn, for good).
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// ADR-0110 decision 6 (security review of PR #1190, N1): the most threads that follow an approval answer's adapter call after the
+/// node's wait ran out, node-wide; past it a timed-out answer is handled as before decision 6.
+pub const LATE_WATCHERS_MAX: usize = 32;
+static LATE_WATCHERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// How long [`AdapterCall::run`] waits for an adapter's answer. A prompt or an approval answer that runs it out is answered
 /// `adapter.no_answer` with this wait (ADR-0110).
 const ADAPTER_CALL_WAIT: Duration = Duration::from_secs(10);
@@ -340,8 +345,10 @@ impl AdapterCall {
     /// The call is made on a thread of its own that waits up to `late_wait` (at least twice the node's wait); the caller waits the
     /// node's wait for it. When that runs out, `give_up` runs (the caller keeps the request pending) and the caller gets
     /// [`SupervisorError::NoAnswer`]; the call's own result, when it comes, then goes to `late` instead. `give_up` runs before
-    /// `late` can, so a late answer always finds what `give_up` kept. When no thread can be started, the call is made as by
-    /// [`run`](Self::run).
+    /// `late` can, so a late answer always finds what `give_up` kept. When no thread can be started, or [`LATE_WATCHERS_MAX`] already
+    /// wait, the call is made as by [`run`](Self::run) and `give_up` never runs (security review of PR #1190, N1: the threads are
+    /// bounded). A request that was never given to the adapter ([`SupervisorError::NoAnswer`] with `given` false) comes back at
+    /// once, without `give_up` either.
     pub fn run_keeping_late(
         self,
         late_wait: Duration,
@@ -353,6 +360,22 @@ impl AdapterCall {
             result: Option<Result<(), SupervisorError>>,
             gave_up: bool,
         }
+        /// Holds one of the [`LATE_WATCHERS_MAX`] places while a watching thread lives.
+        struct Place;
+        impl Drop for Place {
+            fn drop(&mut self) {
+                LATE_WATCHERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+        let taken = LATE_WATCHERS.try_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |n| (n < LATE_WATCHERS_MAX).then_some(n + 1),
+        );
+        if taken.is_err() {
+            return self.run();
+        }
+        let place = Place;
         let (kind, call) = (self.kind.clone(), self.call_name());
         let shared = Arc::new((Mutex::new(Slot::default()), std::sync::Condvar::new()));
         let theirs = Arc::clone(&shared);
@@ -363,6 +386,7 @@ impl AdapterCall {
         let spawned = std::thread::Builder::new()
             .name("agora-approval-answer".into())
             .spawn(move || {
+                let _place = place;
                 let taken = their_cell.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let Some(call) = taken else { return };
                 let r = call.run_for(wait);
@@ -399,6 +423,7 @@ impl AdapterCall {
             kind,
             call,
             waited_ms: u64::try_from(ADAPTER_CALL_WAIT.as_millis()).unwrap_or(u64::MAX),
+            given: true,
         })
     }
 
@@ -489,11 +514,13 @@ pub enum SupervisorError {
     /// only. The caller gets `internal` with the reference `approval.resolve`.
     Approval(String),
     /// ADR-0110: the adapter of an agent of `kind` did not answer a call made for a client (`call`: `prompt` or `approval`) within
-    /// `waited_ms`. The caller gets `adapter.no_answer`.
+    /// `waited_ms`. The caller gets `adapter.no_answer`. `given` (security review of PR #1190, B1): the request was written to the
+    /// adapter, which may act on it; false when its input was full ([`HostError::Busy`]), so it was never given (`waited_ms` 0).
     NoAnswer {
         kind: String,
         call: &'static str,
         waited_ms: u64,
+        given: bool,
     },
     /// #1150: a cancel or a switch (`call`: `cancel`, `set_config`, `set_option`) failed without one of the adapter's stable reasons;
     /// the text is for logs only. The node's log names the call; the caller gets `internal`, as before.
@@ -593,6 +620,7 @@ impl SupervisorError {
                 kind,
                 call,
                 waited_ms,
+                ..
             } => {
                 // The node's log names the call, as for the failures above.
                 eprintln!(
@@ -4732,8 +4760,12 @@ fn begin_send(
                 Err(e) => {
                     log_call_failure("prompt", &agent, &e);
                     match e {
+                        // B1: only a prompt that was given may be held by the adapter.
                         SupervisorError::NoAnswer {
-                            kind, waited_ms, ..
+                            kind,
+                            waited_ms,
+                            given: true,
+                            ..
                         } => SendOutcome::NoAnswer { kind, waited_ms },
                         _ => SendOutcome::NotSent,
                     }
@@ -4881,6 +4913,14 @@ fn client_call_error<'a>(
             kind: kind.to_string(),
             call,
             waited_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            given: true,
+        },
+        // Security review of PR #1190, B1: the adapter's input is full, so the request was never written; said at once.
+        HostError::Busy => SupervisorError::NoAnswer {
+            kind: kind.to_string(),
+            call,
+            waited_ms: 0,
+            given: false,
         },
         e => {
             reason_among(e, &[agora_protocol::ErrorCode::AdapterAgentExited]).unwrap_or_else(|e| {

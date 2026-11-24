@@ -344,7 +344,10 @@ fn submit_to_adapter(
                     // ADR-0110 decision 6: a prompt the adapter did not answer in time may be held by it: it stays, marked as not
                     // confirmed. Any other failure takes it back.
                     if let crate::supervisor::SupervisorError::NoAnswer {
-                        kind, waited_ms, ..
+                        kind,
+                        waited_ms,
+                        given: true,
+                        ..
                     } = &e
                     {
                         ctx.chat
@@ -671,6 +674,20 @@ struct Settle {
 }
 
 impl Settle {
+    /// The request ended and no answer reached the agent: the entry shows it cancelled, and the hub is told as for a cancelled turn
+    /// (unsigned, not approved), or it would keep showing an approval the node no longer holds.
+    fn cancelled(&self) {
+        self.chat.set_permission(
+            &self.agent,
+            &self.approval_id,
+            v1::PermissionOutcome::Cancelled,
+            crate::daemon::now_ms(),
+        );
+        if let Some(ev) = &self.events {
+            ev.approval_resolved(&self.approval_id, false, "");
+        }
+    }
+
     fn settled(&self) {
         // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
         self.chat.set_permission_as(
@@ -1484,54 +1501,94 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 run,
             };
             // ADR-0110 decision 6: a decision whose answer the adapter did not take within the node's wait keeps its card pending
-            // (`kept`), and the adapter's late answer, if it comes, settles it once (only while it still waits: an answer given again
-            // meanwhile settles it instead).
-            let mut kept = false;
-            let delivered = call.and_then(|c| {
+            // (`kept`), and the adapter's late answer, if it comes, settles it. Security review of PR #1190, S2: every answer call of
+            // the request is counted (`flight_*`), so the request is recorded once, with the first answer that reached the agent,
+            // and as cancelled only when no call that may still deliver one runs.
+            let id = r.approval_id.clone();
+            let call = match call {
+                Ok(c) => c,
+                Err(e) => {
+                    if approvals.flight_ended(&id) {
+                        settle.cancelled();
+                    }
+                    return Err(sup_err(e));
+                }
+            };
+            let may_watch = approvals.flight_begin(&id);
+            let mut kept: Option<bool> = None;
+            let delivered = if may_watch {
                 let late_wait =
                     Duration::from_millis(resolution.request.expires_ms.saturating_sub(now))
                         .min(LATE_ANSWER_MAX);
                 let (late_approvals, late_settle) = (Arc::clone(approvals), settle.clone());
-                c.run_keeping_late(
+                call.run_keeping_late(
                     late_wait,
-                    || kept = approvals.restore(&resolution, crate::daemon::now_ms()),
+                    || {
+                        approvals.flight_watched(&id);
+                        kept = Some(approvals.restore(&resolution, crate::daemon::now_ms()));
+                    },
                     move |answered| {
-                        if answered.is_ok() && late_approvals.take_pending(&late_settle.approval_id)
-                        {
-                            late_settle.settled();
+                        let id = late_settle.approval_id.clone();
+                        if answered.is_ok() {
+                            if late_approvals.flight_delivered(&id, true) {
+                                late_approvals.take_pending(&id);
+                                late_settle.settled();
+                            }
+                        } else if late_approvals.flight_undelivered(&id, false, true) {
+                            late_settle.cancelled();
                         }
                     },
                 )
-            });
+            } else {
+                // N1: another call of this request is already followed: this one is made as before decision 6.
+                call.run()
+            };
             // The adapter answers only once the answer was written to the agent (the ACP bridge waits for its writer), so a success
             // here means the agent was given it.
-            if let Err(e) = delivered {
-                let no_answer = matches!(e, crate::supervisor::SupervisorError::NoAnswer { .. });
-                // A kept card whose agent's run ended during the wait would never be cancelled by that end (it was not in the queue
-                // then): it is cancelled here, unless an answer settled it first.
-                let gone = kept
-                    && !run.is_some_and(|run| ctx.sup().runs(&agent, run))
-                    && approvals.take_pending(&r.approval_id);
-                if !no_answer || gone {
-                    // The decision was verified but the adapter could not be told (it is gone, or no longer holds the request, as when
-                    // an ACP bridge already answered it `cancelled`): the request is over, and the entry in the conversation must not
-                    // stay pending for good.
-                    ctx.chat.set_permission(
-                        &agent,
-                        &r.approval_id,
-                        v1::PermissionOutcome::Cancelled,
-                        crate::daemon::now_ms(),
-                    );
-                    // The request already left the queue: the hub is told as for a cancelled turn (unsigned, not approved), or it
-                    // would keep showing an approval the node no longer holds.
-                    if let Some(ev) = &ctx.events {
-                        ev.approval_resolved(&r.approval_id, false, "");
+            let e = match delivered {
+                Ok(()) => {
+                    if approvals.flight_delivered(&id, false) {
+                        settle.settled();
                     }
+                    return Ok(ok_empty());
                 }
-                return Err(sup_err(e));
+                Err(e) => e,
+            };
+            let keep = match (&e, kept) {
+                // Followed by its thread: the card was put back (or handed to the expiry sweep) under that thread's lock.
+                (crate::supervisor::SupervisorError::NoAnswer { .. }, Some(_)) => false,
+                // B1: never given (the adapter's input is full), or not followed while another call of the request is: nothing
+                // can reach the agent from this call, so the card is put back for another answer.
+                (crate::supervisor::SupervisorError::NoAnswer { given, .. }, None)
+                    if !*given || approvals.flight_is_watched(&id) =>
+                {
+                    true
+                }
+                _ => {
+                    // The decision was verified but the adapter could not be told (it is gone, or no longer holds the request, as
+                    // when an ACP bridge already answered it `cancelled`; or no thread could follow it): the request is over, and
+                    // the entry in the conversation must not stay pending for good. Recorded now unless a followed call may still
+                    // deliver an answer.
+                    if approvals.flight_undelivered(&id, true, false) {
+                        settle.cancelled();
+                    }
+                    return Err(sup_err(e));
+                }
+            };
+            if keep {
+                approvals.flight_undelivered(&id, false, false);
+                kept = Some(approvals.restore(&resolution, crate::daemon::now_ms()));
             }
-            settle.settled();
-            Ok(ok_empty())
+            // A kept card whose agent's run ended during the wait would never be cancelled by that end (it was not in the queue
+            // then): it is ended here, unless an answer took it first.
+            if kept == Some(true)
+                && !run.is_some_and(|run| ctx.sup().runs(&agent, run))
+                && approvals.take_pending(&id)
+                && approvals.flight_ended(&id)
+            {
+                settle.cancelled();
+            }
+            Err(sup_err(e))
         }
         Cmd::GitStatus(g) => {
             let wt = agent_worktree(ctx, &g.worktree_id)?;

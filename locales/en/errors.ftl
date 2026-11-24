@@ -108,7 +108,7 @@ adapter-option_refused = The agent did not switch to { $id }.
 adapter-permission_unanswerable = The agent asked for “{ $action }” without offering a way to allow it, so it was refused.
 adapter-no_answer = { $call ->
         [approval] { $kind } did not take your answer within { $waited_ms } ms. The request is still open: wait a moment and answer again.
-       *[prompt] { $kind } did not confirm your request within { $waited_ms } ms and may still be working on it. Wait a moment, and send it again only if nothing happens.
+       *[prompt] { $kind } did not confirm your request within { $waited_ms } ms. Wait a moment, and send it again only if nothing happens.
     }
 pair-closed = This hub is not open for new machines right now.
 pair-limit = Too many pairing attempts. Try again in { $seconds } seconds.

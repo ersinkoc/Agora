@@ -50,7 +50,7 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 | --- | --- | --- |
 | node → adapter | `session/prompt` | Send user or mesh input |
 | node → adapter | `session/cancel` | Interrupt current turn |
-| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing. A result means the answer was given to the agent (the ACP bridge answers only once its writer wrote it to the agent's stdin and flushed it); one it could not give, or whose delivery it could not confirm within 5 s (the bridge then ends the agent before answering), is an error (`adapter.approval_undelivered`), and the node then records the request cancelled |
+| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing. A result means the answer was given to the agent (the ACP bridge answers only once its writer wrote it to the agent's stdin and flushed it); one it could not give, or whose delivery it could not confirm within 5 s (the bridge then ends the agent before answering), is an error (`adapter.approval_undelivered`), and the node then records the request cancelled. ADR-0110 decision 6: the node may send a second `approval/resolve` for one `approvalId` (the person answered again after the first got no answer in time). An adapter must refuse an answer to a request it no longer holds (it already took an answer, or the request ended) with an error, and send the agent nothing; the ACP bridge does (`-32602`, `unknown approval`) |
 | node → adapter | `mesh/deliver` | Deliver a mesh message |
 | node → adapter | `session/set_config` | ADR-0090, capability `config`: `{sessionId, configId, value}`, one of the ids and values the adapter reported in `session/config` (`value` is a choice id for a select, `"true"` or `"false"` for a boolean). Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | node → adapter | `session/set_option` | ADR-0058: `{kind: SESSION_OPTION_KIND_MODE \| SESSION_OPTION_KIND_MODEL, id}`, one of the ids the adapter reported in `session/options`. Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
@@ -98,11 +98,15 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
   none or another code) is `internal`, with `incident_id` `agent.prompt` or `approval.resolve` (#1150). An L3 adapter may send
   `adapter.agent_exited` for these calls; the ACP bridge does not: it answers a node's `session/prompt` as soon as it has passed it to
   the agent, so an ACP agent that exits during its turn is reported by the notice and the `log` line, not as the prompt's error.
-  ADR-0110 decision 6, after `adapter.no_answer`: a decision keeps its approval card pending (it can be answered again; the node
-  keeps waiting for the adapter's answer until the request expires, at most 30 minutes, and a late success settles the card once,
-  with the decision it was given, unless another answer settled it first), and a prompt stays in the conversation (a queued one is
-  shown sent) with the node's notice `adapter.no_answer` naming its entry instead of being taken back. Other failures are handled as
-  before (the card is cancelled, the prompt taken back or, queued, dropped with `adapter.queue_dropped`).
+  ADR-0110 decision 6, after `adapter.no_answer`: a decision keeps its approval card pending (it can be answered again with a new
+  signature: the same signed answer is refused, so a hub cannot replay it). The node keeps following that answer's call until the
+  request expires (at most 30 minutes; one such call per request and 32 per node, past which the card is cancelled as before), and
+  the request is recorded once, with the first answer an adapter took (made at once or late); it is recorded as cancelled (an answer
+  refused, the expiry, the agent's end) only when no call that may still deliver an answer runs. A prompt stays in the conversation
+  (a queued one is shown sent) with the node's notice `adapter.no_answer` naming its entry instead of being taken back. A request
+  that finds the adapter's input full (it stopped reading) was never written: it is answered `adapter.no_answer` at once with
+  `waited_ms` 0, the card stays pending, and a prompt is taken back without the notice. Other failures are handled as before (the
+  card is cancelled, the prompt taken back or, queued, dropped with `adapter.queue_dropped`).
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
 

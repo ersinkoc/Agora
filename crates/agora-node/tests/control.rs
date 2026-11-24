@@ -2210,21 +2210,48 @@ fn a_prompt_refused_because_the_agent_exited_reaches_the_client_with_its_reason(
     );
 }
 
-/// ADR-0110 decision 6: a node with an adapter agent that was given `prompt` and asked for approval `ap-1` (one of the fake adapter's
-/// `ask` prompts): the node, a client, the agent and the node's id of the request.
+/// Security review of PR #1190, S1: a test scheme in which every signature differs, as the real signers' do (a random nonce): a
+/// device "signs" by appending a nonce byte to the message.
+struct NonceVerifier;
+
+impl agora_node::approvals::Verifier for NonceVerifier {
+    fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+        device == "phone" && signature.len() == message.len() + 1 && signature.starts_with(message)
+    }
+}
+
+fn signed_with(message: Vec<u8>, nonce: u8) -> Vec<u8> {
+    let mut s = message;
+    s.push(nonce);
+    s
+}
+
+/// ADR-0110 decision 6: a node with an adapter agent (`agora-fake-agent --adapter` and `args`) that was given `prompt` and asked for
+/// approval `ap-1` (one of the fake adapter's `ask` prompts): the node, a client, the agent and the request as announced.
 fn asked_over_control(
     name: &str,
     prompt: &str,
-) -> (Env, Node, Client, agora_core::AgentId, String) {
+    args: &[&str],
+) -> (
+    Env,
+    Node,
+    Client,
+    agora_core::AgentId,
+    v1::ApprovalRequested,
+) {
     use v1::event::Body;
     let e = env(name);
+    let mut command = format!("{:?}, \"--adapter\"", fake_adapter_path());
+    for a in args {
+        command.push_str(&format!(", {a:?}"));
+    }
     add_manifest(
         &e,
         "ad.toml",
-        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{command}]\n"),
     );
     let n = node(&e, NodeLimits::default());
-    n.approvals.set_verifier(Box::new(EchoVerifier));
+    n.approvals.set_verifier(Box::new(NonceVerifier));
     let mut c = Client::connect(n.socket().unwrap()).unwrap();
     let s = started(ok(c.call(start_cmd("adapted"))));
     let agent = agora_core::AgentId::new(s.agent_id.clone());
@@ -2233,7 +2260,7 @@ fn asked_over_control(
         text: prompt.into(),
     })));
     let end = Instant::now() + Duration::from_secs(15);
-    let id = loop {
+    let asked = loop {
         if let Some(a) = n
             .events
             .events_after(0)
@@ -2243,21 +2270,64 @@ fn asked_over_control(
                 _ => None,
             })
         {
-            break a.approval_id;
+            break a;
         }
         assert!(Instant::now() < end, "no approval request announced");
         std::thread::sleep(Duration::from_millis(50));
     };
-    (e, n, c, agent, id)
+    (e, n, c, agent, asked)
 }
 
-fn answer(c: &mut Client, id: &str, approved: bool) -> Result<v1::CommandOk, v1::ErrorInfo> {
+/// A single answer to `id`, signed with `nonce` (a new signature for each nonce).
+fn answer(
+    c: &mut Client,
+    id: &str,
+    approved: bool,
+    nonce: u8,
+) -> Result<v1::CommandOk, v1::ErrorInfo> {
     use agora_node::approvals::signed_message;
     c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
         approval_id: id.to_string(),
         approved,
         signer_device_id: "phone".into(),
-        signature: signed_message("node-test", id, approved),
+        signature: signed_with(signed_message("node-test", id, approved), nonce),
+        ..Default::default()
+    }))
+    .expect("io")
+}
+
+/// ADR-0101: an "always" answer to the request `r` announced, signed with `nonce`.
+fn answer_always(
+    c: &mut Client,
+    r: &v1::ApprovalRequested,
+    nonce: u8,
+) -> Result<v1::CommandOk, v1::ErrorInfo> {
+    use agora_node::approvals::{always_signed_message, AlwaysOption, Offer, Pending};
+    let pending = Pending {
+        id: r.approval_id.clone(),
+        agent_id: r.agent_id.clone(),
+        action: r.action.clone(),
+        detail: r.detail.clone(),
+        requested_ms: 0,
+        expires_ms: r.expires_at_ms,
+        binding: None,
+        offer: Offer {
+            once: r.scopes.contains(&(v1::ApprovalScope::Once as i32)),
+            always: (!r.always_option_id.is_empty()).then(|| AlwaysOption {
+                label: r.always_label.clone(),
+                option_id: r.always_option_id.clone(),
+            }),
+        },
+    };
+    c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: r.approval_id.clone(),
+        approved: true,
+        signer_device_id: "phone".into(),
+        signature: signed_with(
+            always_signed_message("node-test", &r.approval_id, &pending),
+            nonce,
+        ),
+        scope: v1::ApprovalScope::Always as i32,
         ..Default::default()
     }))
     .expect("io")
@@ -2282,8 +2352,8 @@ fn resolved_events(n: &Node) -> Vec<v1::ApprovalResolved> {
         .collect()
 }
 
-/// `info` is `adapter.no_answer` for `call` after the node's 10 s wait.
-fn is_no_answer(info: &v1::ErrorInfo, call: &str) {
+/// `info` is `adapter.no_answer` for `call` after `waited_ms` (the node's 10 s wait; 0 for a request never given).
+fn no_answer_after(info: &v1::ErrorInfo, call: &str, waited_ms: i64) {
     use v1::param_value::Value;
     assert_eq!(info.code, "adapter.no_answer", "{info:?}");
     assert_eq!(info.params["call"].value, Some(Value::Str(call.into())));
@@ -2291,27 +2361,50 @@ fn is_no_answer(info: &v1::ErrorInfo, call: &str) {
         info.params["kind"].value,
         Some(Value::Str("adapted".into()))
     );
-    assert_eq!(info.params["waited_ms"].value, Some(Value::Int(10_000)));
+    assert_eq!(info.params["waited_ms"].value, Some(Value::Int(waited_ms)));
+}
+
+fn is_no_answer(info: &v1::ErrorInfo, call: &str) {
+    no_answer_after(info, call, 10_000);
+}
+
+/// Waits until the card of `id` is no longer pending; its outcome.
+fn settled(n: &Node, agent: &agora_core::AgentId, id: &str) -> Option<i32> {
+    let end = Instant::now() + Duration::from_secs(20);
+    while outcome_of(n, agent, id) == Some(v1::PermissionOutcome::Pending as i32) {
+        assert!(Instant::now() < end, "the card was never settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Anything that would record it a second time has had its chance.
+    std::thread::sleep(Duration::from_millis(500));
+    outcome_of(n, agent, id)
 }
 
 /// ADR-0110 decision 6: a decision whose answer the adapter does not take within the node's wait is answered `adapter.no_answer`, and
-/// its card stays pending (no `ApprovalResolved`, the entry still pending), so the person can answer again: a second answer is
-/// accepted and settles it once, signed.
+/// its card stays pending (no `ApprovalResolved`, the entry still pending), so the person can answer again. S1: the same signed answer
+/// sent again (a hub replaying it) is refused and changes nothing; a new answer is accepted and settles it once, signed.
 #[test]
 fn a_decision_the_adapter_does_not_take_in_time_keeps_its_card_and_can_be_answered_again() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return;
     }
-    let (_e, n, mut c, agent, id) = asked_over_control("decision-no-answer", "ask-hang");
-    let info = answer(&mut c, &id, true).expect_err("the adapter did not take the answer");
+    let (_e, n, mut c, agent, asked) = asked_over_control("decision-no-answer", "ask-hang", &[]);
+    let id = asked.approval_id;
+    let info = answer(&mut c, &id, true, 1).expect_err("the adapter did not take the answer");
     is_no_answer(&info, "approval");
     assert_eq!(
         outcome_of(&n, &agent, &id),
         Some(v1::PermissionOutcome::Pending as i32)
     );
     assert!(resolved_events(&n).is_empty(), "{:?}", resolved_events(&n));
-    // A fresh command (its own request id): accepted, and the adapter takes this one.
-    answer(&mut c, &id, true).expect("the second answer is accepted");
+    let replay = answer(&mut c, &id, true, 1).expect_err("the same signed answer again");
+    assert_eq!(replay.code, "approval.signature_invalid", "{replay:?}");
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Pending as i32)
+    );
+    // A new answer (its own signature, its own request id): accepted, and the adapter takes this one.
+    answer(&mut c, &id, true, 2).expect("the second answer is accepted");
     assert_eq!(
         outcome_of(&n, &agent, &id),
         Some(v1::PermissionOutcome::Approved as i32)
@@ -2335,23 +2428,16 @@ fn a_late_answer_from_the_adapter_settles_the_kept_card_once() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return;
     }
-    let (_e, n, mut c, agent, id) = asked_over_control("decision-late", "ask-late");
-    let info = answer(&mut c, &id, false).expect_err("the adapter answered after the wait");
+    let (_e, n, mut c, agent, asked) = asked_over_control("decision-late", "ask-late", &[]);
+    let id = asked.approval_id;
+    let info = answer(&mut c, &id, false, 1).expect_err("the adapter answered after the wait");
     is_no_answer(&info, "approval");
     assert_eq!(
         outcome_of(&n, &agent, &id),
         Some(v1::PermissionOutcome::Pending as i32)
     );
-    let end = Instant::now() + Duration::from_secs(15);
-    while outcome_of(&n, &agent, &id) == Some(v1::PermissionOutcome::Pending as i32) {
-        assert!(
-            Instant::now() < end,
-            "the late answer did not settle the card"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
     assert_eq!(
-        outcome_of(&n, &agent, &id),
+        settled(&n, &agent, &id),
         Some(v1::PermissionOutcome::Denied as i32)
     );
     let resolved = resolved_events(&n);
@@ -2360,10 +2446,196 @@ fn a_late_answer_from_the_adapter_settles_the_kept_card_once() {
         (resolved[0].approved, resolved[0].signer_device_id.as_str()),
         (false, "phone")
     );
-    let again = answer(&mut c, &id, true).expect_err("the request is over");
+    let again = answer(&mut c, &id, true, 2).expect_err("the request is over");
     assert_eq!(again.code, "protocol.invalid_message", "{again:?}");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(resolved_events(&n).len(), 1);
+}
+
+/// Security review of PR #1190, S2 (a): the person answers again while the first answer's call is still followed; the adapter then
+/// takes the first answer late and refuses the second (a request it no longer holds). What is recorded is what reached the agent:
+/// the first answer, once, never "cancelled".
+#[test]
+fn a_late_answer_that_reached_the_agent_wins_over_a_second_answer_it_refused() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, asked) = asked_over_control("decision-late-second", "ask-late", &[]);
+    let id = asked.approval_id;
+    is_no_answer(&answer(&mut c, &id, true, 1).expect_err("late"), "approval");
+    let second = answer(&mut c, &id, false, 2)
+        .expect_err("the adapter refuses an answer to a request it no longer holds");
+    assert_eq!(second.code, "internal", "{second:?}");
+    assert_eq!(
+        settled(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Approved as i32)
+    );
+    let resolved = resolved_events(&n);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        (resolved[0].approved, resolved[0].signer_device_id.as_str()),
+        (true, "phone")
+    );
+}
+
+/// S2 (c): an "always" answer the adapter takes late is recorded as one the agent holds (ADR-0101: `ApprovalResolved` with ALWAYS
+/// and `AgentAlwaysAllowed`), also when a second answer it refused came in between.
+#[test]
+fn an_always_answer_taken_late_is_recorded_as_one_the_agent_holds() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, asked) =
+        asked_over_control("decision-late-always", "ask-late", &["--scopes"]);
+    let id = asked.approval_id.clone();
+    assert!(!asked.always_option_id.is_empty(), "{asked:?}");
+    is_no_answer(
+        &answer_always(&mut c, &asked, 1).expect_err("late"),
+        "approval",
+    );
+    answer(&mut c, &id, false, 2).expect_err("refused: the agent already holds the first answer");
+    assert_eq!(
+        settled(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Approved as i32)
+    );
+    let resolved = resolved_events(&n);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        resolved[0].scope,
+        v1::ApprovalScope::Always as i32,
+        "{resolved:?}"
+    );
+    assert!(n
+        .events
+        .events_after(0)
+        .into_iter()
+        .any(|e| matches!(e.body, Some(Body::AgentAlwaysAllowed(_)))));
+}
+
+/// N5: the agent stops while its card is kept (after `adapter.no_answer`): the stop cancels the card, once; the followed call ending
+/// with the adapter records nothing more.
+#[test]
+fn a_kept_card_whose_agent_stops_is_cancelled_once() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, asked) = asked_over_control("decision-kept-stop", "ask-hang", &[]);
+    let id = asked.approval_id;
+    is_no_answer(
+        &answer(&mut c, &id, true, 1).expect_err("no answer"),
+        "approval",
+    );
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: agent.as_str().to_string(),
+        stop_helpers: false,
+    })));
+    assert_eq!(
+        settled(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Cancelled as i32)
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let resolved = resolved_events(&n);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        (resolved[0].approved, resolved[0].signer_device_id.as_str()),
+        (false, "")
+    );
+}
+
+/// Fills the input of `agent`'s adapter (one that stopped reading): a large prompt the writer blocks on and enough small ones to fill
+/// its queue, each on a thread of its own. Returns once a call found the queue full (`given` false).
+fn fill_adapter_input(n: &Node, agent: &agora_core::AgentId) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for i in 0..80 {
+        let call = n
+            .supervisor
+            .lock()
+            .unwrap()
+            .prepare_prompt(
+                agent,
+                &if i == 0 {
+                    "x".repeat(1 << 20)
+                } else {
+                    "y".into()
+                },
+                false,
+            )
+            .unwrap();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let full = matches!(
+                call.run(),
+                Err(agora_node::supervisor::SupervisorError::NoAnswer { given: false, .. })
+            );
+            let _ = tx.send(full);
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(_) => panic!("the adapter's input never filled"),
+        }
+    }
+}
+
+/// Security review of PR #1190, B1: an answer that finds its adapter's input full was never given to it: answered at once
+/// (`waited_ms` 0), and the card stays pending, never left taken without a record.
+#[test]
+fn an_answer_never_given_to_a_full_adapter_input_keeps_its_card() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, asked) = asked_over_control("decision-full", "ask-deaf", &[]);
+    let id = asked.approval_id;
+    fill_adapter_input(&n, &agent);
+    let begun = Instant::now();
+    let info = answer(&mut c, &id, true, 1).expect_err("never given");
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        begun.elapsed()
+    );
+    no_answer_after(&info, "approval", 0);
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Pending as i32)
+    );
+    assert!(resolved_events(&n).is_empty());
+    // It is still there to answer: the same check passes (the node did not spend it), only the adapter is still not reading.
+    let again = answer(&mut c, &id, true, 2).expect_err("still full");
+    no_answer_after(&again, "approval", 0);
+}
+
+/// B1: a prompt that finds its adapter's input full was never given: it is taken back (no "not confirmed" notice), at once.
+#[test]
+fn a_prompt_never_given_to_a_full_adapter_input_is_taken_back() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, _asked) = asked_over_control("prompt-full", "ask-deaf", &[]);
+    fill_adapter_input(&n, &agent);
+    let info = c
+        .call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: agent.as_str().to_string(),
+            text: "never given".into(),
+        }))
+        .expect("io")
+        .expect_err("never given");
+    no_answer_after(&info, "prompt", 0);
+    let entries = n.chat.snapshot(&agent);
+    assert!(
+        !entries.iter().any(|e| e.text == "never given"),
+        "taken back"
+    );
+    assert!(
+        !entries.iter().any(|e| e.code == "adapter.no_answer"),
+        "no mark"
+    );
 }
 
 /// ADR-0110 decision 6: a prompt the adapter does not answer within the node's wait stays in the conversation (the adapter may hold

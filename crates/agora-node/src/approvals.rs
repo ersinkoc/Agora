@@ -6,7 +6,10 @@
 //! - the signature must verify under a key the node already trusts for that device id (unknown signer: refused);
 //! - the signed message binds this node, this approval and the verdict, so a decision cannot be replayed on
 //!   another node, for another approval, or flipped from deny to allow;
-//! - approval ids are random and single use: a decision applies once, then the id is spent (replay refused);
+//! - approval ids are random and single use: a decision applies once, then the id is spent (replay refused). ADR-0110 decision 6:
+//!   a request whose answer the adapter did not take in time is put back so it can be answered again; the signatures of the
+//!   answers already taken for it are kept and an identical one is refused, so a hub cannot replay the person's earlier answer over
+//!   a newer one (every signer signs with a random nonce: WebCrypto ECDSA, and `ring` with `SystemRandom` in the terminal client);
 //! - requests expire: a decision that arrives late is refused and the agent is told it expired;
 //! - policy decides which actions need approval at all (`Policy::requires`), default allow only for what the user
 //!   did not list.
@@ -474,6 +477,9 @@ pub struct Approvals<V: Verifier> {
     generation: u64,
     pending: BTreeMap<String, Pending>,
     spent: VecDeque<String>,
+    /// ADR-0110 (security review of PR #1190, S1): the signature of each answer taken, by request id, so an answer to a request that
+    /// was put back ([`Self::restore`]) cannot be the same signed answer again. Bounded like `spent`.
+    answered: VecDeque<(String, Vec<u8>)>,
 }
 
 fn random_id() -> String {
@@ -494,6 +500,7 @@ impl<V: Verifier> Approvals<V> {
             generation: 0,
             pending: BTreeMap::new(),
             spent: VecDeque::new(),
+            answered: VecDeque::new(),
         }
     }
 
@@ -595,6 +602,14 @@ impl<V: Verifier> Approvals<V> {
         let Some(p) = self.pending.get(&r.approval_id) else {
             return Err(ApprovalError::Unknown);
         };
+        // S1: a request put back after its answer did not reach the adapter takes a new answer, never one already given.
+        if self
+            .answered
+            .iter()
+            .any(|(id, sig)| *id == r.approval_id && *sig == r.signature)
+        {
+            return Err(ApprovalError::BadSignature);
+        }
         if always {
             // An always answer is an Allow on an adapter's request, never a denial ("deny always" is reserved) and never a node-made
             // request (those have signed grants of their own); a grant means nothing here.
@@ -716,6 +731,11 @@ impl<V: Verifier> Approvals<V> {
             .remove(&r.approval_id)
             .ok_or(ApprovalError::Unknown)?;
         self.spend(&r.approval_id);
+        self.answered
+            .push_back((r.approval_id.clone(), r.signature.clone()));
+        while self.answered.len() > SPENT_MEMORY {
+            self.answered.pop_front();
+        }
         let verdict = if r.approved {
             Verdict::Approved
         } else {
@@ -935,6 +955,9 @@ pub struct NodeApprovals {
     /// Requests a late decision took out of the queue (refused as expired before the sweep saw them): the next
     /// [`Self::expire`] still tells their agents, which would otherwise wait for an answer forever.
     late: std::sync::Mutex<Vec<(String, agora_core::AgentId, String)>>,
+    /// ADR-0110 decision 6 (security review of PR #1190, S2): requests whose answers are being given to their adapters, so what is
+    /// recorded is what reached the agent: [`Self::flight_begin`].
+    flights: std::sync::Mutex<std::collections::HashMap<String, Flight>>,
     /// ADR-0057: live helper grants, kept here beside the approvals that made them so grant listing and revocation (which only
     /// have the approvals) see them too.
     helper_grants: std::sync::Mutex<Vec<LiveHelper>>,
@@ -942,6 +965,21 @@ pub struct NodeApprovals {
     devices: std::sync::Mutex<Option<std::sync::Arc<crate::device_trust::DeviceTrust>>>,
     /// ADR-0090 Amendment A: what each waiting `agent.skip_permissions` request will apply, as the node rendered it.
     skips: std::sync::Mutex<SkipState>,
+}
+
+/// ADR-0110 decision 6 (security review of PR #1190, S2): the answer calls of one request that have not ended. A request is recorded
+/// once: with the first answer an adapter took (made at once or late), or as cancelled only when no call that may still deliver one
+/// is running. An end owed while one runs (an answer the adapter refused, an expiry, the agent's end) waits for it.
+#[derive(Debug, Default)]
+struct Flight {
+    /// Calls made and not ended (a call followed after the node's wait counts until its thread ends).
+    calls: u32,
+    /// One of them is followed after the node's wait ran out (at most one per request, N1).
+    watched: bool,
+    /// The request was recorded.
+    settled: bool,
+    /// It ended without an answer reaching the agent; recorded as cancelled once no call runs.
+    owed: bool,
 }
 
 /// At most this many `agent.skip_permissions` requests wait on a node at once (a node has few agents a person switches by hand).
@@ -1271,6 +1309,7 @@ impl NodeApprovals {
             trust_file: std::sync::Mutex::new(None),
             limits: std::sync::Mutex::new(None),
             late: std::sync::Mutex::new(Vec::new()),
+            flights: std::sync::Mutex::new(std::collections::HashMap::new()),
             helper_grants: std::sync::Mutex::new(Vec::new()),
             devices: std::sync::Mutex::new(None),
             skips: std::sync::Mutex::new(SkipState::default()),
@@ -1672,7 +1711,20 @@ impl NodeApprovals {
             routes.remove(&p.id);
             withdrawn.push(p.id);
         }
+        drop(routes);
+        self.recorded_by_caller(&withdrawn);
         withdrawn
+    }
+
+    /// S2: the caller records these requests (as cancelled) itself: an answer call of one that is still followed records nothing
+    /// when it ends.
+    fn recorded_by_caller(&self, ids: &[String]) {
+        let mut f = self.fl();
+        for id in ids {
+            if let Some(e) = f.get_mut(id) {
+                e.settled = true;
+            }
+        }
     }
 
     /// ADR-0090: the agent's turn was cancelled: the permission requests its adapter asked for (the ones that have a route back to the
@@ -1705,7 +1757,93 @@ impl NodeApprovals {
         for id in &ids {
             self.withdraw(id);
         }
+        self.recorded_by_caller(&ids);
         ids
+    }
+
+    fn fl(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Flight>> {
+        self.flights.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// S2: an answer call for request `id` is about to be made. True when it may be followed after the node's wait (no other call
+    /// of the request is).
+    pub fn flight_begin(&self, id: &str) -> bool {
+        let mut f = self.fl();
+        let e = f.entry(id.to_string()).or_default();
+        e.calls += 1;
+        !e.watched
+    }
+
+    /// S2: the call is followed after the node's wait ran out ([`AdapterCall::run_keeping_late`]'s `give_up`).
+    ///
+    /// [`AdapterCall::run_keeping_late`]: crate::supervisor::AdapterCall::run_keeping_late
+    pub fn flight_watched(&self, id: &str) {
+        if let Some(e) = self.fl().get_mut(id) {
+            e.watched = true;
+        }
+    }
+
+    /// S2: whether a call of request `id` is followed after the node's wait.
+    pub fn flight_is_watched(&self, id: &str) -> bool {
+        self.fl().get(id).is_some_and(|e| e.watched)
+    }
+
+    /// S2: a call of `id` took its answer (`late`: the followed one). True when this answer is the one to record (nothing was).
+    pub fn flight_delivered(&self, id: &str, late: bool) -> bool {
+        self.flight_end(id, late, |e| {
+            let first = !e.settled;
+            e.settled = true;
+            first
+        })
+    }
+
+    /// S2: a call of `id` ended and its answer did not reach the agent. `owed`: the request is over (the adapter refused the answer,
+    /// as one it no longer holds); a followed call that ran out (`late`) owes nothing by itself. True when the request is to be
+    /// recorded as cancelled now: something owed it and no call that may still deliver an answer runs.
+    pub fn flight_undelivered(&self, id: &str, owed: bool, late: bool) -> bool {
+        self.flight_end(id, late, |e| {
+            e.owed |= owed;
+            Self::owed_now(e)
+        })
+    }
+
+    /// S2: request `id` ended without a call (it expired, or its agent's run ended while it was kept). True when it is to be
+    /// recorded as cancelled now; false when a call that may still deliver an answer runs (that call records it) or it was recorded.
+    pub fn flight_ended(&self, id: &str) -> bool {
+        let mut f = self.fl();
+        let Some(e) = f.get_mut(id) else {
+            return true;
+        };
+        e.owed = true;
+        let now = Self::owed_now(e);
+        if e.calls == 0 {
+            f.remove(id);
+        }
+        now
+    }
+
+    fn owed_now(e: &mut Flight) -> bool {
+        if e.settled || !e.owed || e.calls > 0 {
+            return false;
+        }
+        e.settled = true;
+        true
+    }
+
+    fn flight_end(&self, id: &str, late: bool, f: impl FnOnce(&mut Flight) -> bool) -> bool {
+        let mut all = self.fl();
+        let Some(e) = all.get_mut(id) else {
+            return false;
+        };
+        e.calls = e.calls.saturating_sub(1);
+        if late {
+            e.watched = false;
+        }
+        let out = f(e);
+        if e.calls == 0 && (e.settled || !e.owed) {
+            all.remove(id);
+        }
+        out
     }
 
     /// ADR-0110 decision 6: puts back the request of `resolution`, whose verified answer the adapter did not take within the node's
@@ -3420,6 +3558,151 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
+    }
+
+    /// Security review of PR #1190, S1: real signers sign with a random nonce; this stand-in accepts any one byte after the message.
+    struct Nonced;
+
+    impl Verifier for Nonced {
+        fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+            device == "phone"
+                && signature.len() == message.len() + 1
+                && signature.starts_with(message)
+        }
+    }
+
+    fn nonced(id: &str, approved: bool, nonce: u8) -> ApprovalResolve {
+        let mut signature = signed_message("node-1", id, approved);
+        signature.push(nonce);
+        ApprovalResolve {
+            approval_id: id.into(),
+            approved,
+            signer_device_id: "phone".into(),
+            signature,
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0110 decision 6, S1: a request put back after its answer did not reach the adapter takes a new answer, never the same
+    /// signed one again (a hub replaying the person's earlier answer over a newer one).
+    #[test]
+    fn a_request_put_back_takes_a_new_answer_never_the_same_signed_one_again() {
+        let n = NodeApprovals::new("node-1", Box::new(Nonced));
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "ap-1", "run_command", "ls", 1).unwrap();
+        let first = nonced(&p.id, true, 1);
+        let taken = n.resolve_request(&first, 2).unwrap();
+        assert!(n.restore(&taken, 3));
+        assert_eq!(
+            n.resolve_request(&first, 4).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        let second = n.resolve_request(&nonced(&p.id, false, 2), 5).unwrap();
+        assert_eq!(second.verdict, Verdict::Denied);
+        assert_eq!(second.adapter_approval_id, "ap-1");
+    }
+
+    /// S2: a request is recorded once, with the first answer that reached the agent; "cancelled" only when no call that may still
+    /// deliver an answer runs.
+    #[test]
+    fn a_request_is_recorded_once_with_the_first_answer_that_reached_the_agent() {
+        let n = NodeApprovals::new("node-1", Box::new(Nonced));
+        // (a) A followed call and a second answer the adapter refused, in either order: the followed call's answer is recorded.
+        for refused_first in [true, false] {
+            assert!(n.flight_begin("x"));
+            n.flight_watched("x");
+            assert!(!n.flight_begin("x"), "one followed call per request (N1)");
+            if refused_first {
+                assert!(
+                    !n.flight_undelivered("x", true, false),
+                    "waits for the followed call"
+                );
+                assert!(n.flight_delivered("x", true));
+            } else {
+                assert!(n.flight_delivered("x", true));
+                assert!(!n.flight_undelivered("x", true, false));
+            }
+            assert!(n.fl().is_empty(), "nothing kept once both ended");
+        }
+        // The followed call ends without an answer after the refusal: recorded as cancelled then, once.
+        n.flight_begin("y");
+        n.flight_watched("y");
+        n.flight_begin("y");
+        assert!(!n.flight_undelivered("y", true, false));
+        assert!(n.flight_undelivered("y", false, true));
+        // A followed call that runs out owes nothing by itself: the card stays.
+        n.flight_begin("z");
+        n.flight_watched("z");
+        assert!(!n.flight_undelivered("z", false, true));
+        assert!(n.fl().is_empty());
+    }
+
+    /// S2 (b), N5: a kept request that expires while its answer call is still followed is recorded by that call (with the answer when
+    /// it reached the agent), never by the sweep as well; one with no call is recorded by the sweep.
+    #[test]
+    fn a_kept_request_that_expires_while_its_answer_call_runs_is_recorded_by_that_call() {
+        let n = NodeApprovals::new("node-1", Box::new(Nonced));
+        let agent = agora_core::AgentId::new("agent-1");
+        for delivered in [true, false] {
+            let p = n.request(&agent, "ap-1", "run_command", "ls", 1).unwrap();
+            let taken = n.resolve_request(&nonced(&p.id, true, 1), 2).unwrap();
+            assert!(n.flight_begin(&p.id));
+            n.flight_watched(&p.id);
+            assert!(n.restore(&taken, 3));
+            let swept: Vec<String> = n
+                .expire(1 + DEFAULT_TTL_MS)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            assert_eq!(swept, std::slice::from_ref(&p.id));
+            assert!(
+                !n.flight_ended(&p.id),
+                "the call still runs: the sweep records nothing"
+            );
+            if delivered {
+                assert!(
+                    n.flight_delivered(&p.id, true),
+                    "the answer reached the agent"
+                );
+            } else {
+                assert!(n.flight_undelivered(&p.id, false, true), "cancelled, once");
+            }
+        }
+        // No call: the sweep records it.
+        assert!(n.flight_ended("never-answered"));
+    }
+
+    /// S2: a request its agent's stop (or a cancelled turn) withdrew is recorded by that stop: a followed call ending later records
+    /// nothing, even with an answer.
+    #[test]
+    fn a_kept_request_withdrawn_by_the_agents_stop_is_not_recorded_again() {
+        let n = NodeApprovals::new("node-1", Box::new(Nonced));
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "ap-1", "run_command", "ls", 1).unwrap();
+        let taken = n.resolve_request(&nonced(&p.id, true, 1), 2).unwrap();
+        n.flight_begin(&p.id);
+        n.flight_watched(&p.id);
+        assert!(n.restore(&taken, 3));
+        assert_eq!(n.cancel_agent(&agent), std::slice::from_ref(&p.id));
+        assert!(!n.flight_delivered(&p.id, true));
+    }
+
+    /// B1 and the restore of a request that ran out meanwhile: it is not put back but handed to the next sweep, once.
+    #[test]
+    fn a_request_that_expired_during_the_wait_is_handed_to_the_sweep() {
+        let n = NodeApprovals::new("node-1", Box::new(Nonced));
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "ap-1", "run_command", "ls", 1).unwrap();
+        let taken = n.resolve_request(&nonced(&p.id, true, 1), 2).unwrap();
+        assert!(!n.restore(&taken, 2 + DEFAULT_TTL_MS));
+        assert_eq!(n.pending_count(), 0);
+        let swept: Vec<String> = n
+            .expire(3 + DEFAULT_TTL_MS)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
+        assert_eq!(swept, [p.id]);
+        assert!(n.expire(4 + DEFAULT_TTL_MS).is_empty());
     }
 
     #[test]
