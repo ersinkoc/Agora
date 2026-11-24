@@ -70,7 +70,7 @@
 //! | bridge: tool output, cut to 64 KiB | head and tail kept | cleaned as the node cleans it and redacted before the cut, so its length does not change after it; the node keeps 8 + 8 KiB of it and never this place |
 //! | bridge: arguments (64 KiB), plan step (4 KiB), location path (4 KiB) | head and tail kept | cleaned as the node cleans that field first; the node keeps less of each (8 + 8 KiB, 256 + 256 bytes, 512 + 512 bytes), never this place |
 //! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place |
-//! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges, also of a mark a later cut (the stderr tail's, the node's) went through |
+//! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges, also of a mark a later cut (the stderr tail's, the node's) went through. Only tool output and stderr are shape-checked, never the agent's words |
 //! | bridge: stderr tail (400 bytes, cut at its front and marked `…`) | into a notice's parameters | (b): both ends of every notice parameter are edges, and the place just after a leading `…` (just before a trailing one) |
 //! | bridge: the stderr tail's home path (`/home/<name>` written `~`) | spliced | **not covered** across the splice |
 //! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) |
@@ -86,14 +86,14 @@
 //! | rotation | the newest whole lines kept | nothing split |
 //!
 //! Every cut in the node's chat code, the transcript writer, the bridge and the cut helpers goes through those helpers or is listed
-//! with why it needs no record (`chat::every_cut`, which looks for truncations, range slices and cut helpers named or passed), and
+//! with why it needs no record (`chat::every_cut`, which looks for truncations, drains and splits, range slices with or without brackets, and cut helpers named or passed), and
 //! a seeded random test drives the whole path (`chat::property`, 600 cases by default, `AGORA_PROPERTY_CASES` and
 //! `AGORA_PROPERTY_BASE` for more). Not covered: a value shorter than 8 bytes; a fragment shorter than 4 bytes; a part of 4 bytes or
 //! more of a value that stands at an edge only by chance is replaced too (a stop's flush, words said outside a turn, a turn's end, a
 //! take-up's boundaries); a value whose characters cleaning changes (`\r\n` written `\n`; line breaks and tabs as spaces in one-line
 //! fields) is not found; cuts another adapter makes on its own (#1123), the bridge's `fit_line` halving and the stderr tail's home
-//! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; words the ring dropped and
-//! that the carry no longer reaches; and a secret the node does not hold. The bridge cleans and redacts a tool's whole output before
+//! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
+//! hold. The bridge cleans and redacts a tool's whole output before
 //! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
 //! the agent chose and is written as it is. What the window is sent live is not redacted (#1147). The file is as sensitive as the
 //! terminal, and its mode is what protects it.

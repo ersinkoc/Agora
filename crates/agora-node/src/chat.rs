@@ -4641,7 +4641,8 @@ mod property {
 
 /// Review of #1103, rounds 3 and 4: every cut of an agent's text says where it cut (`agora_adapters::text::cap_end`, `cap_middle`,
 /// and `tidy_cuts`, which record the place for the transcript writer), or is listed here with why its place needs no record. A line
-/// cuts when it truncates (`.truncate(`), slices or indexes with a range (`[a..b]`), or names a cutting helper (called or passed by
+/// cuts when it truncates, drains or splits (`.truncate(`, `.drain(`, `.split_off(`, `.split_at(`, `.replace_range(`), takes a range
+/// with or without brackets (`[a..b]`, `.get(a..b)`), or names a cutting helper (called or passed by
 /// name). A new one in the node's chat code, its transcript writer, the bridge or the cut helpers fails this test until it is
 /// recorded or listed.
 #[cfg(test)]
@@ -4668,8 +4669,32 @@ mod every_cut {
 
     /// Whether a line (trimmed, not a comment) cuts text.
     pub(super) fn cutting(line: &str) -> bool {
-        if line.contains(".truncate(") {
+        const DROPPING: &[&str] = &[
+            ".truncate(",
+            ".split_off(",
+            ".split_at(",
+            ".drain(",
+            ".replace_range(",
+        ];
+        if DROPPING.iter().any(|d| line.contains(d)) {
             return true;
+        }
+        // `.get(a..b)`: a range taken without brackets.
+        for (i, m) in line.match_indices(".get(") {
+            let mut depth = 0usize;
+            for (j, c) in line[i + m.len()..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' if depth == 0 => {
+                        if line[i + m.len()..i + m.len() + j].contains("..") {
+                            return true;
+                        }
+                        break;
+                    }
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
         }
         let mut open = None;
         for (i, c) in line.char_indices() {
@@ -4706,6 +4731,12 @@ mod every_cut {
         assert!(cutting("let x = s[..3].to_string();"));
         assert!(cutting("let x = &tail[start..];"));
         assert!(cutting(".map(short)"));
+        assert!(cutting("let x = s.get(..3);"));
+        assert!(cutting("let x = b.get(e - k..e) == m.get(f(1)..);"));
+        assert!(cutting("let rest = s.split_off(3);"));
+        assert!(cutting("let (a, _) = s.split_at(3);"));
+        assert!(cutting("s.drain(..3);"));
+        assert!(!cutting("let x = map.get(&key);"));
         assert!(!cutting("let x = insert_cut(a);"));
         assert!(!cutting("let y = v[3];"));
     }
@@ -4717,6 +4748,7 @@ mod every_cut {
             include_str!("chat.rs"),
             &[
                 ("use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};", "an import"),
+                ("let params: Vec<(String, String)> = e.params.drain().collect();", "a map's whole items moved out: nothing of a text is dropped"),
                 ("fn cut(text: String) -> String {", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
                 ("cap_end(text, MAX_ENTRY_BYTES).0", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
                 ("cap_end(text, MAX_ENTRY_BYTES)", "the place is recorded"),
@@ -4755,6 +4787,10 @@ mod every_cut {
             include_str!("../../agora-adapters/src/acp.rs"),
             &[
                 ("fn short(v: &Value) -> String {", "an approval's detail, not chat text"),
+                ("let (head, tail) = rest.split_at(i + 3);", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("k.buf.drain(..over);", "stderr bytes collected, the oldest dropped: what stays begins the tail, and a notice parameter's start is an edge"),
+                ("let mut delivering: Vec<(u64, Delivering)> = self.delivering.drain().collect();", "a map's whole items moved out: nothing of a text is dropped"),
+                ("let mut waiting: Vec<(u64, Waiting)> = self.waiting.drain().collect();", "a map's whole items moved out: nothing of a text is dropped"),
                 ("format!(\"{}…\", &s[..end])", "an approval's detail, not chat text"),
                 ("fn clip(s: &str, max: usize) -> String {", "ids, names and words, not chat text"),
                 ("s[..end].to_string()", "ids, names and words, not chat text"),
@@ -4818,6 +4854,18 @@ mod every_cut {
             "transcript.rs",
             include_str!("transcript.rs"),
             &[
+                (
+                    ".find(|&k| e >= k && b.get(e - k..e) == m.get(..k))",
+                    "bytes beside an edge compared with a bridge mark's: nothing is cut",
+                ),
+                (
+                    ".find(|&k| b.get(e..e + k) == m.get(m.len() - k..))",
+                    "bytes beside an edge compared with a bridge mark's: nothing is cut",
+                ),
+                (
+                    "let e = e.get(1..e.len() - 1)?.to_string();",
+                    "a secret value's JSON form without its quotes: a needle, not written",
+                ),
                 (
                     "while let Some(i) = s[from..].find(k.as_str()) {",
                     "copying whole texts or reading the file's tail: nothing of a text is dropped",
