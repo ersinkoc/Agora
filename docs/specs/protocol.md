@@ -8,7 +8,7 @@ Encoding and transport: ADR-0009, ADR-0010, ADR-0011.
 ```
 connect (WSS + mTLS for nodes, session token for clients)
   → Hello      { role, protocol_generations[], capabilities[], build, locale? }
-  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time }
+  ← Welcome    { chosen_generation, capabilities[], peer_id, server_time, person_role }
   → Resume     { last_acked_seq? }         (nodes and clients reconnecting)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
@@ -22,6 +22,17 @@ connect (WSS + mTLS for nodes, session token for clients)
 `SnapshotRequired` (control stream 0, kind 4, empty payload) is direction-neutral (ADR-0026): the sender cannot replay from
 the requested point. From a node it means the events from the hub's `from_seq` up to its oldest retained event are gone; the
 node sends it before any further event and the hub takes the node's next new event as the new base (section 3, ADR-0054).
+
+**A window's connection** (the web window, the terminal client; ADR-0106). A window sends no `Hello`: it opens with
+`Subscribe` on the events stream ("Hub service" below). Since ADR-0106 the hub's first frame to it is an unasked `Welcome` on stream 0, before
+the snapshot or any event, whose `person_role` (`PersonRole`: `OWNER`, `MEMBER`, `VIEWER`) is the role of the person the window signed
+in as (ADR-0049), from the same access the hub checks every command against. A hub not in team mode sends `OWNER`. Nothing was
+negotiated, so `chosen_generation` is the hub's generation (1), `capabilities` is empty and `peer_id` is empty. The value holds for the
+connection: the hub ends a connection whose role or grants changed (checked once a second and on every command), and the window
+reconnects into a new `Welcome`; no event carries a role change. It is a hint for what the window shows and asks, never a permission:
+the hub still checks every command. A window that gets something else first is talking to an older hub (`PERSON_ROLE_UNSPECIFIED`) and
+keeps its earlier behaviour (learning the role from a refused `PairStatus`); an older window ignores the frame, as it ignores every
+control frame it does not use. A node's `Welcome` (the answer to its `Hello`) leaves `person_role` unspecified.
 
 Roles: `node`, `client`, `adapter`. Capability names are lowercase dotted strings (`terminal.raw`,
 `terminal.cells`, `acp`, `mesh`, `files.watch`, `debug.json`). Unknown capabilities are ignored.
@@ -110,9 +121,11 @@ holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline`
 session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`). Both say `AgentStarted.same_process`, so the hub
 keeps the agent's counters (section "A kept agent's counters", ADR-0104).
 
-SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
-a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
-control socket; the node's agents and policy are unchanged and nothing depends on the hub.
+SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a person or a
+tool can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local control
+socket, so whoever speaks them has the owner's own authority there (the routed-command checks, grants included, apply to the
+hub's connection only). It is not the hub's path (ADR-0032: the hub reaches an SSH-only node through a tunnel to its own TLS
+port); nothing depends on the hub.
 Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
 its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
@@ -180,7 +193,7 @@ Frame kinds on streams 0 and 2 are the ADR-0026 table.
 Hub service (`agora-hub::server`, ADR-0011/0026/0027): one TLS port. A client certificate from the hub CA that is not revoked makes the
 peer a **node** (named by the certificate): `Hello`/`Welcome`, `Resume`/`ResumeOk`, then `Event` frames; the hub answers with a cumulative
 `EventAck` after each batch and when idle, and a `ResumeOk { from_seq }` on a gap. A peer **without** a certificate is a client if its first
-frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (`Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
+frame is `Subscribe` and its `Authorization: Bearer` token (or, for browsers that cannot set headers, the subprotocols `agora.v1, agora.bearer.<token>`; the hub echoes only `agora.v1`) is accepted (a `Welcome` naming the person's role (ADR-0106, section 1), then the `Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
 resubscribe with the last position), or an enrolling node if its first frame is an `EnrollRequest` command (one command, nothing else).
 Enrollment answers are the same for a wrong, expired or used code (`auth.unauthenticated`), and guessing is locked out for everyone
 (`auth.forbidden`). Frame kinds are in `agora_protocol::frame::kinds`.
@@ -196,7 +209,10 @@ have 256 requests waiting. At most 1024 commands from all clients together wait 
 rules of a local command (the hub cannot widen them).
 
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
-other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
+other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`; the hub refuses it, and the node
+refuses it again on its hub connection, never relying on the hub, as it does a second subscription on a stream it still has
+open, and judges an allowed one by the grants it applies on stream 1).
+The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
 (kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
@@ -394,7 +410,9 @@ A node serves the same commands on a local socket (owner-only; `agora node run`,
 so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
-opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
+opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client (`ChatSubscribe` and `PreviewConnect` too; any
+other command on a dynamic stream but `ControlAuth`, which only proves the connection, and any of these three on stream 1, is
+`protocol.invalid_message` here as well). After the response the
 node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
 or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
 that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
@@ -510,8 +528,9 @@ A message goes to the ring of `<producer>/<from_agent_id>`'s project when that i
 to the ring of `<producer>/<to>`'s project when that is one (a receiver's copy, each `#channel` copy), else to a ring that only the
 owner reads; the hub never resolves an already-qualified `from` to another machine's agent. The rings are memory only, folded from the
 events the hub applies, so a hub rebuilds them from its log at start. A window is sent the newest 50 it may see, then fewer until they
-encode to at most 256 KiB together: the owner every ring, a member or viewer only the copies placed by their sender in a granted
-project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
+encode to at most 256 KiB together and fit in the space left in the 1 MiB snapshot frame after the other fields are encoded.
+If no message fits, the field is empty. The owner is eligible for every ring; a member or viewer sees only the copies placed by their
+sender in a granted project (the copies the live stream gives them); no message whose sender is a forgotten agent or under a forgotten machine, or that a
 forgotten machine recorded (they come back with the machine). Copies are sent as stored: the window pairs the two copies of a message
 between machines as it does live. A client folds them in as it folds a live `MessagePosted`, not by the position rule (their
 positions are not after the snapshot's), each position once, and ignores any other body. No capability: an older window ignores the
@@ -564,7 +583,10 @@ All additions; nothing published changed.
   process of the node ran, as that process listed them: `running` false, the ledger's last state, its folder as `worktree_id`, no
   terminal and no restarts, whatever folder they ran in (a project worktree, a directory agent's folder or its separate worktree).
   An agent the supervisor knows is listed from the supervisor. Nothing is announced to the hub for them: the hub keeps its own closed
-  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is not listed. The list is in id order. An ended agent
+  agents. An interrupted agent is reported with `AgentInterrupted` (below) and is also listed in `AgentListResult.interrupted`
+  (ADR-0107, field 2: each entry the `AgentInterrupted` the node announces for it, built by the same code, so `resumable` and
+  `still_running` are what the window shows; oldest id first; an id the supervisor holds, one being resumed or started again, is in
+  `agents` only; old nodes send none and old readers skip it). The list is in id order. An ended agent
   listed only from the ledger cannot be addressed: `agent.stop`, prompts and the other agent commands answer `agent.not_found`, and its
   folder is not a `worktree_id` the node accepts.
 - **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event

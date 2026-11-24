@@ -7,6 +7,7 @@ attention-title = Needs you
 attention-empty = All calm. Nothing needs you.
 fleet-title = Your agents
 fleet-empty = No agents yet. Start one to see it here.
+fleet-watch-empty = No agents running yet.
 
 state-working = Working
 state-needs-you = Needs you
@@ -565,6 +566,7 @@ grant-title-stop = Allow stopping { $agent } for 1 hour?
 grant-title-interrupt = Allow interrupting the current turn of { $agent } for 1 hour?
 grant-title-settings = Allow changing the mode, model or settings of { $agent } for 1 hour?
 grant-title-resize = Allow resizing the terminal of { $agent } for 1 hour?
+grant-title-watch = Allow watching { $agent } for 1 hour?
 grant-title-start = Allow starting agents in this project for 1 hour?
 grant-title-task = Allow giving tasks to { $agent } for 1 hour?
 grant-title-other = Allow this window to act on { $machine } for 1 hour?
@@ -1189,6 +1191,9 @@ fleet-firstrun-title = Your machines are ready. Start the first agent.
 fleet-firstrun-text = Pick a machine and a folder. The agent shows up here and tells you when it needs you.
 fleet-firstrun-cli = Or from a terminal on that machine
 fleet-firstrun-offline = Every machine is offline right now. Start Agora on one of them and it appears here.
+# ADR-0106: a viewer's window, when nothing runs yet.
+fleet-watch-title = Nothing is running yet
+fleet-watch-text = You can watch here. Agents that members or the owner start show up here, with what they need.
 fleet-offline-title = Cannot reach your Agora
 fleet-offline-text = Your agents keep running on their machines and keep track of what they do. They show up here again as soon as the connection is back.
 fleet-offline-stale = The connection to Agora is down. What you see is the last this window knew and may be out of date. Agents keep running on their machines.
