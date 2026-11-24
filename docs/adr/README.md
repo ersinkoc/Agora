@@ -122,3 +122,7 @@ Date: YYYY-MM-DD
 | 0103 | A window gets recent Team chat history | Accepted |
 | 0104 | A kept agent keeps its conversation, usage and options across a node restart | Accepted |
 | 0105 | Confined Node.js agents on Windows: keep the restricted token, fix the stdio pipe in libuv | Accepted |
+| 0106 | A window is told the role of the person it signed in as | Accepted |
+| 0107 | `agent.list` lists the agents a node found interrupted | Accepted |
+| 0108 | Forgetting an agent in the window reaches its node, which deletes its saved conversation | Accepted |
+| 0109 | Recover a cross-node task handoff after a hub restart | Accepted |

@@ -514,6 +514,24 @@ impl Entry {
         !self.ended && self.interrupted_at_ms != 0
     }
 
+    /// ADR-0060: the `AgentInterrupted` the node says for this entry, the one builder for the event announced to the hub and the row
+    /// `agent.list` gives (ADR-0107), so the two never differ. `resumable`: [`Supervisor::offers_resume`](crate::supervisor::Supervisor::offers_resume).
+    /// Reads whether its process still runs (a look at the system): callers build it outside the supervisor's lock.
+    pub fn interrupted_event(&self, resumable: bool) -> v1::AgentInterrupted {
+        v1::AgentInterrupted {
+            agent_id: self.agent_id.clone(),
+            kind: self.kind.clone(),
+            project_id: self.project_id.clone(),
+            folder: self.folder.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            resumable,
+            started_at_ms: self.started_at_ms,
+            interrupted_at_ms: self.interrupted_at_ms,
+            last_state: proto_state(&self.last_state) as i32,
+            still_running: self.still_running(),
+        }
+    }
+
     /// The process it ran as, when one was recorded.
     pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
         (self.pid > 1 && self.process_started != 0).then(|| agora_platform::ProcessIdentity {
@@ -536,7 +554,7 @@ impl Entry {
 }
 
 /// The number in a node's agent id (`agent-7` is 7).
-fn id_number(id: &str) -> Option<u64> {
+pub(crate) fn id_number(id: &str) -> Option<u64> {
     id.strip_prefix("agent-")?.parse().ok()
 }
 
@@ -660,6 +678,25 @@ impl Ledger {
             .entries
             .values()
             .filter(|e| e.interrupted())
+            .cloned()
+            .collect();
+        v.sort_by_key(|e| {
+            (
+                id_number(&e.agent_id).unwrap_or(u64::MAX),
+                e.agent_id.clone(),
+            )
+        });
+        v
+    }
+
+    /// #1120: the agents that ended and are still kept ([`KEEP_MS`] from `now_ms`), oldest id first. A restarted node lists them in
+    /// `agent.list` as its previous process did, whatever folder they ran in.
+    pub fn ended(&self, now_ms: u64) -> Vec<Entry> {
+        let mut v: Vec<Entry> = self
+            .st()
+            .entries
+            .values()
+            .filter(|e| e.ended && now_ms.saturating_sub(e.last_touched()) <= KEEP_MS)
             .cloned()
             .collect();
         v.sort_by_key(|e| {
@@ -1801,6 +1838,52 @@ mod tests {
         }
         assert_eq!(l.st().entries.len(), MAX_ENTRIES);
         assert!(l.get("agent-10").is_none());
+    }
+
+    /// #1120: a reopened ledger offers the agents that ended, directory agents as well as worktree ones, for 14 days from their end;
+    /// an interrupted one is not among them (it is offered to resume instead).
+    #[test]
+    fn the_agents_that_ended_are_read_back_after_a_reopen_whatever_their_folder() {
+        let dir = temp("ended");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-2", "/wt/a", ""), 1);
+        directory_start(&l, "agent-1", "/work/repo", 2);
+        l.observe(&started("agent-3", "/wt/c", ""), 3);
+        for id in ["agent-1", "agent-2"] {
+            l.observe(&state_event(id, v1::AgentState::Done), 5);
+            l.observe(
+                &Body::AgentExited(v1::AgentExited {
+                    agent_id: id.into(),
+                    exit_code: 0,
+                }),
+                10,
+            );
+        }
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let ended = l.ended(20);
+        let rows: Vec<_> = ended
+            .iter()
+            .map(|e| {
+                (
+                    e.agent_id.as_str(),
+                    e.folder.as_str(),
+                    e.directory,
+                    e.last_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("agent-1", "/work/repo", true, "done"),
+                ("agent-2", "/wt/a", false, "done"),
+            ]
+        );
+        assert!(ended.iter().all(|e| !e.managed_worktree));
+        assert_eq!(l.interrupted().len(), 1, "agent-3 did not end");
+        assert_eq!(l.ended(10 + KEEP_MS).len(), 2);
+        assert!(l.ended(10 + KEEP_MS + 1).is_empty(), "kept 14 days only");
     }
 
     #[test]

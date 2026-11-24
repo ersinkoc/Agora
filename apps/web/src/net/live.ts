@@ -9,6 +9,7 @@ import { decodeTerminalFrame, historyPairing, type TerminalEvent } from '../term
 import type { TerminalSource } from '../terminal/source';
 import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_CONTROL, STREAM_EVENTS } from './frame';
 import { decodePairFrame, type PairNote } from './pairing';
+import { mayChange, welcomeRole, type PersonRole } from './role';
 import { applyEvent, emptyView, fromSnapshot, num, type View } from './view';
 
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -36,6 +37,9 @@ export interface LiveOptions {
   // ADR-0065: what the hub tells an owner's window about machines asking to join. `reset` comes first on every new connection (the cards
   // held from the last one are stale until the hub sends the ones waiting now). Memory only: the caller must never store a note.
   onPair?: (n: PairNote) => void;
+  // ADR-0106: the role of the person this window signed in as, as the hub's first frame on each connection names it (the hub ends a
+  // connection whose role changed); `unspecified` from an older hub, which never says. Called when it changes.
+  onRole?: (r: PersonRole) => void;
   socket?: SocketFactory;
   // Waits before reconnect attempt n (0-based); capped exponential with jitter by default (`defaultBackoff`).
   backoffMs?: (attempt: number) => number;
@@ -135,6 +139,22 @@ export function connectLive(o: LiveOptions): Live {
   let opening: ReturnType<typeof setTimeout> | undefined;
   let refusals = 0;
   let requests = 0;
+  let role: PersonRole = 'unspecified';
+  // ADR-0106: whether this connection has said the role yet (its `Welcome`, or an older hub's first frame). Until then nothing that the
+  // role may refuse is sent: a viewer's window must not size or type into a terminal it watches (the hub refuses it and writes it down),
+  // and the role may have changed since the last connection. Typing meanwhile waits here (a few frames at most).
+  let roleKnown = false;
+  let held: (() => void)[] = [];
+  const HELD_MAX = 256;
+  const settle = (named: PersonRole) => {
+    roleKnown = true;
+    if (named !== role) { role = named; o.onRole?.(role); }
+    const waiting = held;
+    held = [];
+    if (!mayChange(role)) return;
+    for (const t of terminals.values()) if (t.size) sendSize(t.node, t.terminalId, t.size);
+    for (const send of waiting) send();
+  };
   let nextStream = 3;
   // Bumped for every socket: a retry scheduled on an older one must not resubscribe on the new one (which already did).
   let generation = 0;
@@ -202,6 +222,8 @@ export function connectLive(o: LiveOptions): Live {
   };
 
   const sendSize = (node: string, terminalId: string, size: { cols: number; rows: number }) => {
+    // ADR-0106: a viewer's window does not size the agent's terminal (the hub refuses it, and writes the refusal down).
+    if (!roleKnown || !mayChange(role)) return;
     request(STREAM_COMMANDS, node, { terminalResize: { terminalId, cols: size.cols, rows: size.rows } }).catch(() => {});
   };
 
@@ -273,6 +295,8 @@ export function connectLive(o: LiveOptions): Live {
       if (opening) clearTimeout(opening);
       opening = undefined;
       isOpen = true;
+      roleKnown = false;
+      held = [];
       heard = false;
       o.onPair?.({ type: 'reset' });
       quiet();
@@ -294,6 +318,9 @@ export function connectLive(o: LiveOptions): Live {
       received++;
       const f = decodeFrame(bytes);
       if (!f) { s.close(); return; }
+      // ADR-0106: the first frame says the role: a `Welcome`, or anything else from an older hub, which names none.
+      const welcome = f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.WELCOME;
+      if (!roleKnown && !welcome) settle('unspecified');
       if (f.streamId === STREAM_COMMANDS && f.kind === 1) {
         try {
           const r = agora.v1.CommandResponse.decode(f.payload);
@@ -332,6 +359,10 @@ export function connectLive(o: LiveOptions): Live {
         const e = d && t.pairing.frame(d);
         if (e?.type === 'snapshot') t.painted = true;
         if (e) t.onEvent(e);
+        return;
+      }
+      if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.WELCOME) {
+        settle(welcomeRole(f.payload));
         return;
       }
       if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PONG && synced) {
@@ -391,7 +422,10 @@ export function connectLive(o: LiveOptions): Live {
           // A closed session is inert: a late keystroke or resize (a frame callback after the pane went) is not sent.
           sendInput(bytes) {
             if (!terminals.has(stream)) return;
-            request(STREAM_COMMANDS, node, { terminalInput: { terminalId, data: bytes } }).catch(() => {});
+            const send = () => { if (terminals.has(stream)) request(STREAM_COMMANDS, node, { terminalInput: { terminalId, data: bytes } }).catch(() => {}); };
+            // ADR-0106: a viewer's keys are not sent (the hub would refuse each and write it down); before the role is known they wait.
+            if (!roleKnown) { if (held.length < HELD_MAX) held.push(send); return; }
+            if (mayChange(role)) send();
           },
           resize(cols, rows) {
             const t = terminals.get(stream);

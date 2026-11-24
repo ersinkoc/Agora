@@ -46,6 +46,10 @@ pub struct TranscriptReport {
     pub take_8k_p50_us: f64,
     #[serde(default)]
     pub write_8k_p50_ms: f64,
+    /// Review of #1103, round 4: writing one 16 KiB tool output dense with edges (the bridge's `[redacted] ` marks) with an 8 KiB value
+    /// held (p50, ms): linear in the text, whatever the number of edges.
+    #[serde(default)]
+    pub write_dense_8k_p50_ms: f64,
     /// The file seeding reads, and the time to read its end and fill the ring (p50, max).
     pub seed_file_bytes: u64,
     pub seed_p50_ms: f64,
@@ -168,6 +172,7 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         secrets
             .set("BENCH", &secret)
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        settled(secrets.dir())?;
         let st = std::sync::Arc::new(Store::new(
             &home,
             Limits::default(),
@@ -175,6 +180,8 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         ));
         let board = ChatBoard::saving(std::sync::Arc::clone(&st));
         let agent = AgentId::new("agent-s");
+        // In a turn: the newest words are held back, and each take joins the carry, the words written and those held.
+        board.set_working(&agent, true);
         let (mut take, mut write) = (Vec::new(), Vec::new());
         let mut now = 1_000_000u64;
         for _ in 0..runs {
@@ -198,6 +205,43 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
     };
     let (take_52_p50_us, write_52_p50_ms) = with_secret("s52", "s".repeat(52))?;
     let (take_8k_p50_us, write_8k_p50_ms) = with_secret("s8k", "k".repeat(8192))?;
+    let write_dense_8k_p50_ms = {
+        let home = dir.join("dense");
+        std::fs::create_dir_all(&home)?;
+        let value = format!("Q{}", "abcdefghij".repeat(800));
+        let secret = agora_node::credentials::Secret::new(&value)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let secrets = agora_node::credentials::SecretStore::in_data(&home);
+        secrets
+            .set("BENCH", &secret)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))?;
+        settled(secrets.dir())?;
+        let st = std::sync::Arc::new(Store::new(
+            &home,
+            Limits::default(),
+            Some(agora_node::credentials::SecretStore::in_data(&home)),
+        ));
+        let board = ChatBoard::saving(std::sync::Arc::clone(&st));
+        let agent = AgentId::new("agent-d");
+        let mut times = Vec::new();
+        for i in 0..runs {
+            let item = agora_adapters::host::ToolItem {
+                call_id: format!("c{i}"),
+                tool: Some("sh".into()),
+                status: "completed".into(),
+                output: Some("[redacted] ".repeat(1480)),
+                ..Default::default()
+            };
+            board.push_item(&agent, &ChatItem::Tool(item), 1);
+            let batches = board.take_unsaved();
+            let start = Instant::now();
+            for b in &batches {
+                st.write(b)?;
+            }
+            times.push(start.elapsed());
+        }
+        percentile(&mut times, 0.5).as_secs_f64() * 1e3
+    };
 
     // A full file to seed from: 32 MiB of entries.
     let full = AgentId::new("agent-full");
@@ -236,8 +280,22 @@ fn measure(dir: &std::path::Path, commit: &str, runs: usize) -> std::io::Result<
         write_52_p50_ms,
         take_8k_p50_us,
         write_8k_p50_ms,
+        write_dense_8k_p50_ms,
         seed_file_bytes,
         seed_p50_ms: ms(percentile(&mut seed, 0.5)),
         seed_max_ms: ms(percentile(&mut seed, 1.0)),
     })
+}
+
+/// The secrets folder as a node sees it once a value has been there a while: its times a minute old, so the store reads its values
+/// once (it reads them at every write while a time is under 2 s old).
+fn settled(dir: &std::path::Path) -> std::io::Result<()> {
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for entry in std::fs::read_dir(dir)? {
+        std::fs::File::options()
+            .write(true)
+            .open(entry?.path())?
+            .set_modified(old)?;
+    }
+    std::fs::File::open(dir)?.set_modified(old)
 }

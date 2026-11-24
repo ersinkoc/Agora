@@ -140,8 +140,16 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Reject edits to published fixtures
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff --no-renames --exit-code --name-status --diff-filter=DMT "$BASE_SHA" HEAD -- schema/fixtures
       - name: Extract base schema
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          mkdir base
-          git archive "${{ github.event.pull_request.base.sha }}" schema | tar -x -C base
+          mkdir -p base/schema
+          if git cat-file -e "$BASE_SHA:schema"; then
+            git archive "$BASE_SHA" schema | tar -x -C base
+          fi
       - run: cargo run -q -p agora-schema-check -- base/schema schema
