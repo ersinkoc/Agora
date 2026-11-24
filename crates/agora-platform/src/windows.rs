@@ -96,7 +96,10 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
-/// could open it (#320). The handle is not inheritable and the file is not shared while open.
+/// could open it (#320). The handle is not inheritable. The handle that creates the file and a lock file's handle are not shared for
+/// delete, so a lock file can be neither renamed nor removed while it is open; an append log's handle is. Both are shared for read and
+/// write, so another process creating or opening the same file at the same moment gets in beside it rather than failing with a
+/// sharing violation (two installs started together); only this user can open it at all.
 /// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write). The folder is opened as itself (never through a link) and held without letting anyone rename or
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
@@ -117,6 +120,12 @@ pub(crate) fn open_private_in(
     open_private_held(dir, &path, append)
 }
 
+/// How [`open_private_held`] shares the handle that creates a held file: for read and write, never for delete. Another process that
+/// finds the name between that creation and its own open must still open it (a creation handle not shared made two installs started
+/// together fail with a sharing violation).
+const HELD_CREATE_SHARE: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+
 /// The part of [`open_private`] after its folder is held (`held`): `path` is created private or opened, then checked through its own
 /// handle, including that it is inside `held`.
 fn open_private_held(held: &std::fs::File, path: &Path, append: bool) -> io::Result<std::fs::File> {
@@ -126,7 +135,9 @@ fn open_private_held(held: &std::fs::File, path: &Path, append: bool) -> io::Res
         FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
-    match create_private_new(path) {
+    // Shared for read and write: another process that finds the name between this creation and the open below must still open it
+    // (a creation handle not shared made two installs started together fail with a sharing violation). Never shared for delete.
+    match create_private_new(path, HELD_CREATE_SHARE) {
         Ok(f) => drop(f),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
@@ -340,7 +351,10 @@ pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
     ))
 }
 
-pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+/// Creates the file at `path`, which must not exist yet (`CREATE_NEW`), for writing, with the owner-only descriptor given at its
+/// creation (#320). `share` is the share mode of the new handle: `0` keeps everyone else out while it is open (a file written and then
+/// renamed), `FILE_SHARE_READ | FILE_SHARE_WRITE` lets another opener of the same file in beside it ([`open_private`]).
+pub(crate) fn create_private_new(path: &Path, share: u32) -> io::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
@@ -360,7 +374,7 @@ pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
         CreateFileW(
             name.as_ptr(),
             GENERIC_WRITE,
-            0,
+            share,
             &attrs,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
@@ -1592,14 +1606,45 @@ mod tests {
         drop(f);
         // Looked at while the file is still open and empty, before anything else touches it.
         let private = dir.join("private.tmp");
-        let f = create_private_new(&private).unwrap();
+        let f = create_private_new(&private, 0).unwrap();
         let a = acl(&private);
         assert!(!a.contains("Everyone"), "{a}");
         assert!(!a.contains("(I)"), "inherited entries: {a}");
         assert!(a.contains("SYSTEM"), "{a}");
         drop(f);
         // Exclusive: an existing name is never opened.
-        assert!(create_private_new(&private).is_err());
+        assert!(create_private_new(&private, 0).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two installs started together: one process has just created the lock file and still holds its creation handle when the other
+    /// finds the name and opens it. That open must succeed (it failed with a sharing violation while the creation handle was not
+    /// shared), and the file still can be neither renamed nor removed while either handle is open.
+    #[test]
+    fn a_lock_file_opens_while_another_process_is_still_creating_it() {
+        let dir = std::env::temp_dir().join(format!("agora-private-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join(".lock");
+        // The share the production path creates with: a change to it fails here.
+        let creating = create_private_new(&lock, HELD_CREATE_SHARE).unwrap();
+        let mut held = open_private(&dir, &lock, false).unwrap();
+        assert!(std::fs::rename(&lock, dir.join(".lock.moved")).is_err());
+        assert!(std::fs::remove_file(&lock).is_err());
+        drop(creating);
+        held.write_all(b"1").unwrap();
+        assert!(std::fs::rename(&lock, dir.join(".lock.moved")).is_err());
+        assert!(std::fs::remove_file(&lock).is_err());
+        // A creation that is not shared still keeps everyone out.
+        let tmp = dir.join("key.tmp");
+        let alone = create_private_new(&tmp, 0).unwrap();
+        let refused = std::fs::OpenOptions::new().read(true).open(&tmp);
+        assert_eq!(
+            refused.err().and_then(|e| e.raw_os_error()),
+            Some(32),
+            "a sharing violation"
+        );
+        drop((alone, held));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

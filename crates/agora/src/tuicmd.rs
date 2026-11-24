@@ -1194,6 +1194,7 @@ fn start(
         &[],
         &kinds,
         missing.as_deref(),
+        window_area(),
         Duration::from_secs(30),
     );
     let Some((kind, name)) = pick.and_then(|i| kinds.get(i)) else {
@@ -1699,6 +1700,7 @@ fn start_in_folder(
         &[plain(&info.path)],
         &kinds,
         missing.as_deref(),
+        window_area(),
         Duration::from_secs(60),
     );
     let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
@@ -5125,10 +5127,11 @@ fn clean_up_old(
     say.text(key!("tui-cleanup-done"), &[("count", Arg::Num(forgotten))])
 }
 
-/// Asks which of a machine's installed `kinds` to start (`s`, `f`), nine to a page numbered 1 to 9: one key picks, `n` turns to the
-/// next page (after the last, the first again) when there is more than one, and the question says so; any other key, or none in
-/// `wait`, cancels, so no kind is ever chosen for the person (#1134). `under_title` goes below the question (the folder `f` starts
-/// in). The index into `kinds`, or `None`.
+/// Asks which of a machine's installed `kinds` to start (`s`, `f`), up to nine to a page numbered from 1 (fewer when a page of nine
+/// would not fit a window of `area`, #1150): one key picks, `n` turns to the next page (after the last, the first again) when there is
+/// more than one, and the question says so; any other key, or none in `wait`, cancels, so no kind is ever chosen for the person
+/// (#1134). `under_title` goes below the question (the folder `f` starts in). The index into `kinds`, or `None`.
+#[allow(clippy::too_many_arguments)]
 fn pick_kind(
     say: &Say,
     ask: &mut dyn Asker,
@@ -5136,25 +5139,51 @@ fn pick_kind(
     under_title: &[String],
     kinds: &[(String, String)],
     missing: Option<&str>,
+    area: Area,
     wait: Duration,
 ) -> Option<usize> {
-    let pages = kinds.len().div_ceil(KIND_PAGE);
+    // Sized once for the window the question opens in: a window resized meanwhile redraws the box, but keeps the page size, so the
+    // numbers already on the screen never change under the person's finger (a smaller window can cut the page again, as before).
+    let per = kind_page(say, machine, under_title, kinds, missing, area);
+    let pages = kinds.len().div_ceil(per);
     let mut page = 0;
     loop {
-        let (menu, shown) = kind_menu(say, machine, under_title, kinds, missing, page);
+        let (menu, shown) = kind_menu(say, machine, under_title, kinds, missing, per, page);
         match ask.key(&menu, wait)? {
             b'n' if pages > 1 => page = (page + 1) % pages,
             k @ b'1'..=b'9' => {
                 let i = usize::from(k - b'1');
-                return (i < shown).then_some(page * KIND_PAGE + i);
+                return (i < shown).then_some(page * per + i);
             }
             _ => return None,
         }
     }
 }
 
-/// How many kinds one page of [`pick_kind`] numbers.
+/// How many kinds one page of [`pick_kind`] numbers at most.
 const KIND_PAGE: usize = 9;
+
+/// How many kinds a page of [`pick_kind`] numbers in a window of `area`: the most, up to [`KIND_PAGE`], for which every page's box
+/// shows all of its lines (#1150: before, a page taller than the window was cut at its bottom, the line naming the missing agents
+/// first, then the last kinds). One when even that does not fit. Pure.
+fn kind_page(
+    say: &Say,
+    machine: &str,
+    under_title: &[String],
+    kinds: &[(String, String)],
+    missing: Option<&str>,
+    area: Area,
+) -> usize {
+    (1..=KIND_PAGE)
+        .rev()
+        .find(|&per| {
+            (0..kinds.len().div_ceil(per).max(1)).all(|page| {
+                let (menu, _) = kind_menu(say, machine, under_title, kinds, missing, per, page);
+                agora_tui::app::dialog_fits(area, &menu)
+            })
+        })
+        .unwrap_or(1)
+}
 
 /// The lines of one page of [`pick_kind`], and how many kinds it numbers. `kinds` come as [`split_kinds`] orders them: the ACP
 /// registry's (untested in Agora, ADR-0092) after the hand-made ones, so an "Untested" heading stands before the first of them on a
@@ -5165,9 +5194,11 @@ fn kind_menu(
     under_title: &[String],
     kinds: &[(String, String)],
     missing: Option<&str>,
+    per: usize,
     page: usize,
 ) -> (Vec<String>, usize) {
-    let pages = kinds.len().div_ceil(KIND_PAGE);
+    let per = per.clamp(1, KIND_PAGE);
+    let pages = kinds.len().div_ceil(per);
     let machine = ("machine", Arg::Str(machine.to_string()));
     let title = if pages > 1 {
         say.text(
@@ -5181,8 +5212,8 @@ fn kind_menu(
     } else {
         say.text(key!("tui-start-pick"), &[machine])
     };
-    let from = (page * KIND_PAGE).min(kinds.len());
-    let shown = &kinds[from..((page + 1) * KIND_PAGE).min(kinds.len())];
+    let from = (page * per).min(kinds.len());
+    let shown = &kinds[from..((page + 1) * per).min(kinds.len())];
     let mut menu = vec![title];
     menu.extend_from_slice(under_title);
     menu.push(String::new());
@@ -7099,6 +7130,7 @@ mod start_pick_tests {
             &[],
             kinds,
             None,
+            Area::new(0, 0, 120, 40),
             Duration::from_millis(50),
         );
         (got, ask.shown)
@@ -8300,6 +8332,7 @@ mod registry_picker_tests {
             &[],
             kinds,
             None,
+            Area::new(0, 0, 120, 40),
             Duration::from_millis(50),
         );
         (got, ask.shown)
@@ -8395,6 +8428,7 @@ mod registry_picker_tests {
             &["/home/r/src".to_string()],
             &ok,
             missing.as_deref(),
+            KIND_PAGE,
             0,
         );
         assert_eq!(count, 2);
@@ -8410,6 +8444,59 @@ mod registry_picker_tests {
             "Not found on this machine: Codex (`codex`). The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.",
         ];
         assert_eq!(menu, want.map(String::from));
+    }
+
+    /// #1150: in a window too short for nine kinds a page, a page holds fewer, every page's box shows all its lines (the missing
+    /// agents' line included), and every kind can still be reached; a tall window keeps nine.
+    #[test]
+    fn a_short_window_gets_shorter_pages_that_show_every_line() {
+        let say = Say(Catalog::english());
+        let mut kinds: Vec<(String, String)> = (1..=6)
+            .map(|i| (format!("made{i}"), format!("Made {i}")))
+            .collect();
+        kinds.extend((1..=10).map(|i| (format!("registry-r{i}"), format!("Reg {i}"))));
+        let missing = Some("Not found on this machine: Codex (`codex`).");
+        let under = ["/home/r/src".to_string()];
+        let tall = Area::new(0, 0, 120, 40);
+        assert_eq!(
+            kind_page(&say, "blackview", &under, &kinds, missing, tall),
+            KIND_PAGE
+        );
+        let short = Area::new(0, 0, 120, 14);
+        let per = kind_page(&say, "blackview", &under, &kinds, missing, short);
+        assert!((1..KIND_PAGE).contains(&per), "{per}");
+        let mut reached = Vec::new();
+        for page in 0..kinds.len().div_ceil(per) {
+            let (menu, shown) = kind_menu(&say, "blackview", &under, &kinds, missing, per, page);
+            assert!(agora_tui::app::dialog_fits(short, &menu), "{menu:#?}");
+            assert!(menu.iter().any(|l| l.starts_with("Not found")), "{menu:#?}");
+            reached.extend((0..shown).map(|i| page * per + i));
+        }
+        assert_eq!(reached, (0..kinds.len()).collect::<Vec<_>>());
+        // Through the question itself: the last kind on its own page, by its number there.
+        let (tx, rx) = mpsc::channel();
+        let pages = kinds.len().div_ceil(per);
+        for _ in 1..pages {
+            tx.send(b'n').unwrap_or_else(|_| panic!("send"));
+        }
+        let last = (kinds.len() - 1) % per;
+        tx.send(b'1' + u8::try_from(last).unwrap_or(0))
+            .unwrap_or_else(|_| panic!("send"));
+        let mut ask = Script {
+            rx,
+            shown: Vec::new(),
+        };
+        let got = pick_kind(
+            &say,
+            &mut ask,
+            "blackview",
+            &under,
+            &kinds,
+            missing,
+            short,
+            Duration::from_millis(50),
+        );
+        assert_eq!(got, Some(kinds.len() - 1), "{:#?}", ask.shown);
     }
 
     #[test]
