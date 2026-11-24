@@ -75,7 +75,7 @@
 //! | bridge: the stderr tail's home path (`/home/<name>` written `~`) | spliced | **not covered** across the splice |
 //! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) |
 //! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step, permission label and refused action 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
-//! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB (also one of digits) | end dropped | recorded (`cap_end`): (b) |
+//! | node: a text, a diff or a prompt cut to 16 KiB; a notice parameter to 1 KiB (also one of digits) | end dropped | recorded (`cap_end`): (b) in the field, and for the agent's words in their stream too, so the next piece (which may go on with the value) starts at an edge; the place stays with the carry for later batches |
 //! | node: a tool call's text, a plan's text | made of the call's arguments, the plan's steps | made again by the writer from the redacted parts |
 //! | node: a tool call still running | its output and arguments are written as they are, then replaced | (b): the end of a version not final is an edge |
 //! | node: a prompt, a queued prompt or a notice between the agent's words | entries between pieces of one value | not a break: the stream is the agent's words only |
@@ -95,7 +95,11 @@
 //! path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
 //! hold. The bridge cleans and redacts a tool's whole output before
 //! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
-//! the agent chose and is written as it is. What the window is sent live is not redacted (#1147). The file is as sensitive as the
+//! the agent chose and is written as it is. What the window is sent live is not redacted (#1147). The matcher of fragments costs
+//! about 27 bytes of memory per byte of the values held (13 MiB for 64 values of 8,000 bytes, built in about 70 ms when the values
+//! change), kept while the node runs; a value over 16 KiB (only one from the node's environment can be) gets none and is only
+//! replaced whole. The values are read again when the secrets folder or a file in it changes (name, size or time), and at every
+//! write while one of those times is under 2 s old, so a change within one tick of a coarse clock is not missed. The file is as sensitive as the
 //! terminal, and its mode is what protects it.
 //!
 //! **Not built here.** A forget at the hub (ADR-0053 `agent.forget`) is answered by the hub and never reaches the node, so it does not
@@ -276,10 +280,42 @@ pub struct Store {
     secrets: Option<SecretStore>,
     /// ADR-0084: values the node passes from its own environment (a `credentials.<kind>` name it does not hold in its store).
     env_values: Vec<String>,
-    /// The secret values last read, longest first, and when their folder last changed.
-    known: Mutex<(Option<SystemTime>, Vec<String>)>,
+    /// The secret values last read, longest first, and what their folder looked like then.
+    known: Mutex<(Option<Fingerprint>, Vec<String>)>,
     /// What finding pieces of those values needs, made again only when they change.
     pieces: Mutex<(Vec<String>, Arc<Vec<Needle>>)>,
+}
+
+/// What the secrets folder looks like: its own time, and each file's name, size and time.
+#[derive(Clone, PartialEq, Eq)]
+struct Fingerprint {
+    folder: SystemTime,
+    files: Vec<(std::ffi::OsString, u64, Option<SystemTime>)>,
+}
+
+impl Fingerprint {
+    fn times(&self) -> impl Iterator<Item = SystemTime> + '_ {
+        std::iter::once(self.folder).chain(self.files.iter().filter_map(|f| f.2))
+    }
+}
+
+/// `None` when the folder cannot be read (nothing is cached then).
+fn fingerprint(dir: &Path) -> Option<Fingerprint> {
+    let folder = std::fs::metadata(dir).and_then(|m| m.modified()).ok()?;
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| {
+            let m = e.metadata().ok();
+            (
+                e.file_name(),
+                m.as_ref().map_or(0, |m| m.len()),
+                m.and_then(|m| m.modified().ok()),
+            )
+        })
+        .collect();
+    files.sort();
+    Some(Fingerprint { folder, files })
 }
 
 /// The file name of an agent: its id when that is a plain name (letters, digits, `-` and `_`), never a path. Without dots, so no id
@@ -565,9 +601,12 @@ pub(crate) struct Needle {
     sam: Sam,
 }
 
+/// A value longer than [`MAX_SECRET_SPAN`] (a value the node keeps is at most 8 KiB, ADR-0084; one passed from its environment may be
+/// longer) gets no automaton: it is still replaced whole, and the node keeps no more of the words beside a piece than that span.
 fn needles(known: &[String]) -> Vec<Needle> {
     known
         .iter()
+        .filter(|v| v.len() <= agora_adapters::text::MAX_SECRET_SPAN)
         .map(|v| Needle {
             sam: Sam::of(v.as_bytes()),
         })
@@ -576,13 +615,24 @@ fn needles(known: &[String]) -> Vec<Needle> {
 
 /// A suffix automaton of one value: it recognises every part of it, so the longest part of the value ending at each place of a
 /// text is found in one pass over the text (review of #1103, round 4: the earlier pairwise comparison of places was quadratic).
+/// Kept in flat tables (at most 2 states and 3 moves per byte of the value: about 40 bytes per byte, review of #1103, round 5).
 struct Sam {
+    len: Vec<u32>,
+    link: Vec<u32>,
+    /// The moves of state `s` are `first[s]..first[s + 1]` of `by` (sorted) and `to`.
+    first: Vec<u32>,
+    by: Vec<u8>,
+    to: Vec<u32>,
+}
+
+/// A suffix automaton while it is built.
+struct Building {
     len: Vec<usize>,
     link: Vec<usize>,
     next: Vec<Vec<(u8, usize)>>,
 }
 
-impl Sam {
+impl Building {
     fn get(&self, p: usize, c: u8) -> Option<usize> {
         let n = &self.next[p];
         n.binary_search_by_key(&c, |x| x.0).ok().map(|i| n[i].1)
@@ -595,10 +645,18 @@ impl Sam {
             Err(i) => n.insert(i, (c, to)),
         }
     }
+}
+
+impl Sam {
+    fn get(&self, p: usize, c: u8) -> Option<usize> {
+        let (a, z) = (self.first[p] as usize, self.first[p + 1] as usize);
+        let by = self.by.get(a..z)?;
+        by.binary_search(&c).ok().map(|i| self.to[a + i] as usize)
+    }
 
     fn of(k: &[u8]) -> Self {
         const NONE: usize = usize::MAX;
-        let mut sam = Sam {
+        let mut sam = Building {
             len: vec![0],
             link: vec![NONE],
             next: vec![Vec::new()],
@@ -633,7 +691,29 @@ impl Sam {
             }
             last = cur;
         }
-        sam
+        // A value is at most a few KiB (ADR-0084), so every number fits in 32 bits; the root's link (none) becomes 0, never followed.
+        let narrow = |x: usize| u32::try_from(x).unwrap_or(0);
+        let mut first = Vec::with_capacity(sam.next.len() + 1);
+        let (mut by, mut to) = (Vec::new(), Vec::new());
+        for n in &sam.next {
+            first.push(narrow(by.len()));
+            for &(c, t) in n {
+                by.push(c);
+                to.push(narrow(t));
+            }
+        }
+        first.push(narrow(by.len()));
+        Sam {
+            len: sam.len.iter().map(|&x| narrow(x)).collect(),
+            link: sam
+                .link
+                .iter()
+                .map(|&x| if x == NONE { 0 } else { narrow(x) })
+                .collect(),
+            first,
+            by,
+            to,
+        }
     }
 
     /// For each place `i` in `text` (0 to its length), raises `out[i]` to the length of the longest part of the value ending there.
@@ -641,8 +721,8 @@ impl Sam {
         let (mut v, mut l) = (0usize, 0usize);
         for (i, &c) in text.iter().enumerate() {
             while v != 0 && self.get(v, c).is_none() {
-                v = self.link[v];
-                l = self.len[v];
+                v = self.link[v] as usize;
+                l = self.len[v] as usize;
             }
             match self.get(v, c) {
                 Some(n) => {
@@ -930,14 +1010,20 @@ impl Store {
         file_stem(agent).map(|s| self.dir.join(format!("{s}.earlier.jsonl")))
     }
 
-    /// The secret values to replace, read again only when their folder changed.
+    /// The secret values to replace, read again only when their folder or a file in it changed (its name, size or time), and always
+    /// while any of those times is under 2 s old: a change within one tick of a coarse clock keeps the time it had (review of #1103,
+    /// round 5).
     fn known_secrets(&self) -> Vec<String> {
-        let changed = self
-            .secrets
-            .as_ref()
-            .and_then(|s| std::fs::metadata(s.dir()).and_then(|m| m.modified()).ok());
+        let changed = self.secrets.as_ref().and_then(|s| fingerprint(s.dir()));
+        let racy = changed.as_ref().is_none_or(|f| {
+            f.times().any(|t| {
+                SystemTime::now()
+                    .duration_since(t)
+                    .map_or(true, |age| age < Duration::from_secs(2))
+            })
+        });
         let mut g = self.known.lock().unwrap_or_else(|e| e.into_inner());
-        if g.0 != changed || changed.is_none() {
+        if g.0 != changed || racy {
             let mut values: Vec<String> = self
                 .secrets
                 .iter()
@@ -1651,6 +1737,108 @@ mod tests {
         let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
         assert!(!body.contains("sk-very-secret-1234"));
         assert_eq!(body.matches(REDACTED).count(), 3, "{body}");
+    }
+
+    /// Round 5: a value changed within one tick of a coarse clock (the folder's and the file's times and the size as before) is
+    /// still read again.
+    #[test]
+    fn a_secret_changed_within_one_clock_tick_is_still_replaced() {
+        let dir = temp("secret-tick");
+        let secrets = SecretStore::in_data(&dir);
+        let set = |v: &str| {
+            secrets
+                .set("TOKEN", &crate::credentials::Secret::new(v).unwrap())
+                .unwrap()
+        };
+        set("first-value-0001");
+        let store = Store::new(&dir, Limits::default(), Some(SecretStore::in_data(&dir)));
+        let line = |t: &str| {
+            let mut e = full();
+            e.output = t.into();
+            Line::Entry(Box::new(e), Side::default())
+        };
+        store
+            .write(&batch("a", 1, vec![line("first-value-0001")]))
+            .unwrap();
+        let file = secrets.dir().join("TOKEN");
+        let times = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let (folder_t, file_t) = (times(secrets.dir()), times(&file));
+        set("other-value-0002");
+        std::fs::File::open(secrets.dir())
+            .unwrap()
+            .set_modified(folder_t)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(file_t)
+            .unwrap();
+        store
+            .write(&batch("a", 2, vec![line("other-value-0002")]))
+            .unwrap();
+        let body = std::fs::read_to_string(store.path("a").unwrap()).unwrap();
+        assert!(!body.contains("other-value-0002"), "{body}");
+    }
+
+    /// Round 5, a measurement (`--ignored --nocapture`): the matcher's tables and build time for 64 values of 8,000 bytes.
+    #[test]
+    #[ignore]
+    fn measure_the_matcher_for_64_values_of_8000_bytes() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let values: Vec<String> = (0..64)
+            .map(|_| {
+                (0..8000)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        char::from(b'!' + (x % 90) as u8)
+                    })
+                    .collect()
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let n = needles(&values);
+        let bytes: usize = n
+            .iter()
+            .map(|k| k.sam.len.len() * 12 + 4 + k.sam.by.len() * 5)
+            .sum();
+        eprintln!(
+            "matcher: {} KiB for {} bytes of values, built in {:?}",
+            bytes / 1024,
+            64 * 8000,
+            t.elapsed()
+        );
+    }
+
+    /// Round 5: the matcher's tables stay within 2 states and 3 moves per byte of a value, and it finds what a brute force finds.
+    #[test]
+    fn the_matcher_is_small_and_agrees_with_a_brute_force() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % m) as u8
+        };
+        let big: Vec<u8> = (0..8000).map(|_| b'a' + next(26)).collect();
+        let sam = Sam::of(&big);
+        assert!(sam.len.len() <= 2 * big.len() && sam.by.len() <= 3 * big.len());
+        for _ in 0..300 {
+            let v: Vec<u8> = (0..1 + next(12)).map(|_| b'a' + next(3)).collect();
+            let t: Vec<u8> = (0..1 + next(40)).map(|_| b'a' + next(3)).collect();
+            let mut got = vec![0; t.len() + 1];
+            Sam::of(&v).ending(&t, &mut got);
+            for (end, &g) in got.iter().enumerate() {
+                let want = (0..=end)
+                    .filter(|&a| a == end || v.windows(end - a).any(|w| w == &t[a..end]))
+                    .map(|a| end - a)
+                    .max()
+                    .unwrap_or(0);
+                assert_eq!(g, want, "{v:?} in {t:?} at {end}");
+            }
+        }
     }
 
     fn store_with_secret(tag: &str, value: &str) -> (PathBuf, Store) {
