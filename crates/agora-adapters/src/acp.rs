@@ -490,9 +490,11 @@ fn pointer_token(key: &str) -> std::borrow::Cow<'_, str> {
 
 /// ADR-0111: the `cuts` entries of an item, at most [`crate::host::MAX_ITEM_CUTS`]. The node reads a plan with `entries` from its
 /// entries only, so a place in one of its `steps` (the same text sent twice) is left out, as the node would ignore it. Should an item
-/// hold more places than the node reads (a tool call with its tool, arguments and output cut and more than 61 of its 64 locations cut
-/// too), the places in the item's own strings come first and then those of its list's elements in order: the node keeps a list's
-/// first elements (64 locations, 64 plan steps), so the places left out are those of the last locations.
+/// hold more places than the node reads, the places in the item's own strings come first and then those of its list's elements in
+/// order. Only a tool call the bridge did not halve can: its arguments and output cut and more than 62 of its 64 location paths
+/// (a title is only cut by halving, which also halves the locations to at most 32), so the places of locations 62 and 63 are left
+/// out. That is harmless: the node keeps only the head and tail of each path (`MAX_PATH_BYTES`, 1 KiB), never the bridge's place
+/// in the middle of a path of over 4 KiB.
 fn cuts_value(params: &Value, cuts: &Cuts) -> Value {
     let entries = params.pointer("/plan/entries").is_some();
     let mut kept: Vec<(usize, &str, usize)> = cuts
@@ -534,10 +536,15 @@ fn fit_line(params: Value, cuts: Option<Cuts>) -> Result<String, usize> {
     let mut cuts = cuts.unwrap_or_default();
     let mut line = json!({"jsonrpc": "2.0", "method": "chat/append", "params": params});
     loop {
-        if report && !cuts.is_empty() {
+        if report {
+            // Written again each round: a halving that drops every element that held a place leaves none, and then no `cuts`.
             let list = cuts_value(&line["params"], &cuts);
             if let Some(params) = line.get_mut("params").and_then(Value::as_object_mut) {
-                params.insert("cuts".to_string(), list);
+                if list.as_array().is_some_and(|l| !l.is_empty()) {
+                    params.insert("cuts".to_string(), list);
+                } else {
+                    params.remove("cuts");
+                }
             }
         }
         let text = line.to_string();
@@ -4798,6 +4805,18 @@ mod tests {
                 "/plan/entriesX/5",
                 "/text/text"
             ]
+        );
+        // A halving that drops the only element with a place leaves no `cuts` behind.
+        let steps: Vec<String> = (0..300_000).map(|i| format!("{i:020}")).collect();
+        let line = fit_line(
+            json!({"sessionId": "s", "plan": {"steps": steps}}),
+            Some(vec![("/plan/steps/299999".into(), 3)]),
+        )
+        .unwrap_or_default();
+        assert!(
+            line.len() <= MAX_LINE && !line.contains("\"cuts\""),
+            "{}",
+            line.len()
         );
         // An item the bridge did not cut is sent as before, without `cuts`.
         let line = fit_line(
