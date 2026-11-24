@@ -4,7 +4,8 @@
 //! Prompts (the `text` of `session/prompt`):
 //! - `ask`: goes `blocked`, sends an `approval/request`, waits for `approval/resolve`, then works and finishes.
 //! - `first:TEXT`: says TEXT, then answers the prompt 300 ms later.
-//! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
+//! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck); writes `hang.txt` in its folder once it has read the
+//!   prompt, so a test knows the prompt reached it.
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
 //! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
@@ -199,6 +200,8 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(300));
                 }
                 if text == "hang" {
+                    // A marker in the agent's folder (best effort: a folder it cannot write leaves the prompt as it was).
+                    let _ = std::fs::write("hang.txt", "read");
                     std::thread::sleep(std::time::Duration::from_secs(30));
                 }
                 reply(out, json!({}))?;

@@ -978,7 +978,7 @@ impl Spawner {
                         Ok(()) => true,
                         Err(e) => {
                             // #1150: nobody is answered with this error, so the node's log says it (never the prompt's text).
-                            crate::supervisor::log_prompt_failure(&agent, &e);
+                            crate::supervisor::log_call_failure("prompt", &agent, &e);
                             false
                         }
                     }

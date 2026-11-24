@@ -388,7 +388,7 @@ pub enum SupervisorError {
     /// `agent.prompt` (no stable code says this yet).
     Prompt(String),
     /// #1150: an adapter was not given the answer to one of its approval requests (it did not answer in time, it exited, or it
-    /// answered with an error); the text is for logs only. The caller gets `internal` with the reference `agent.approval`.
+    /// answered with an error); the text is for logs only. The caller gets `internal` with the reference `approval.resolve`.
     Approval(String),
     /// #1150: a cancel or a switch (`call`: `cancel`, `set_config`, `set_option`) failed without one of the adapter's stable reasons;
     /// the text is for logs only. The node's log names the call; the caller gets `internal`, as before.
@@ -482,7 +482,7 @@ impl SupervisorError {
             }
             Self::Approval(text) => {
                 eprintln!("agent approval answer failed: {text:?}");
-                Error::new(ErrorCode::Internal).with("incident_id", "agent.approval")
+                Error::new(ErrorCode::Internal).with("incident_id", "approval.resolve")
             }
             Self::AdapterCall(call, text) => {
                 eprintln!("agent {call} failed: {text:?}");
@@ -4573,7 +4573,7 @@ fn begin_send(
             let ok = match call.run() {
                 Ok(()) => true,
                 Err(e) => {
-                    log_prompt_failure(&agent, &e);
+                    log_call_failure("prompt", &agent, &e);
                     false
                 }
             };
@@ -4587,14 +4587,17 @@ fn begin_send(
     }
 }
 
-/// #1150: one line in the node's log for a prompt that was not given to `agent` where nobody is answered with the error (a queued
-/// prompt, a dispatch typed to a structured agent). Never the prompt's text, which may hold secrets: only the cause.
-pub(crate) fn log_prompt_failure(agent: &AgentId, e: &SupervisorError) {
+/// #1150: one line in the node's log for a call to `agent`'s adapter that failed where nobody is answered with the error (`what`:
+/// `prompt` for a queued prompt or a helper's first prompt, `approval refusal` for a request the node refuses on its own). Never the
+/// prompt's or the request's text, which may hold secrets: only the cause.
+pub(crate) fn log_call_failure(what: &str, agent: &AgentId, e: &SupervisorError) {
     match e {
-        SupervisorError::Prompt(cause) => {
-            eprintln!("agent prompt failed: {}: {cause:?}", agent.as_str())
+        SupervisorError::Prompt(cause)
+        | SupervisorError::Approval(cause)
+        | SupervisorError::AdapterCall(_, cause) => {
+            eprintln!("agent {what} failed: {}: {cause:?}", agent.as_str())
         }
-        other => eprintln!("agent prompt failed: {}: {other:?}", agent.as_str()),
+        other => eprintln!("agent {what} failed: {}: {other:?}", agent.as_str()),
     }
 }
 

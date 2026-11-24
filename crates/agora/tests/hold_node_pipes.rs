@@ -1618,7 +1618,10 @@ fn a_prompt_waiting_for_its_answer_when_the_node_stops_stays_in_the_conversation
     wait_for("the person's entry", || {
         user_entry(&node, &id, "hang").is_some()
     });
-    std::thread::sleep(Duration::from_millis(300));
+    // #1150: the adapter read the prompt (a fixed wait here did not prove that on a stalled runner).
+    wait_for("the adapter to read the prompt", || {
+        rig.folder.join("hang.txt").exists()
+    });
     drop(node);
     let answer = asking.join().unwrap();
     let node = rig.node();
@@ -1660,7 +1663,11 @@ fn a_queued_prompt_being_sent_when_the_node_stops_is_shown_sent() {
     wait_for("the first turn to end", || {
         rig.folder.join("later.txt").exists() && state_of(&node, &id) == Some(AgentState::Idle)
     });
-    std::thread::sleep(Duration::from_millis(500));
+    // #1150: the queued prompt was written to the adapter, which read it: a call not yet written when the node lets go is answered
+    // as never given (a fixed 500 ms wait here did not prove that on a stalled runner).
+    wait_for("the adapter to read the queued prompt", || {
+        rig.folder.join("hang.txt").exists()
+    });
     assert!(user_entry(&node, &id, "hang").is_some_and(|e| e.queued));
     drop(node);
     let node = rig.node();

@@ -2223,7 +2223,7 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
     assert_eq!(info.code, "internal");
     assert_eq!(
         info.params["incident_id"].value,
-        Some(v1::param_value::Value::Str("agent.approval".into()))
+        Some(v1::param_value::Value::Str("approval.resolve".into()))
     );
     assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
     // Codex review of #794: the request is over, so the hub is told as for a cancelled turn (unsigned, not approved), or it would
