@@ -1515,7 +1515,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
             };
             let may_watch = approvals.flight_begin(&id);
-            let mut kept: Option<bool> = None;
+            // `gave_up`: this call is followed by its thread; `kept`: the card was put back (None: not, or an answer was recorded).
+            let (mut gave_up, mut kept): (bool, Option<bool>) = (false, None);
             let delivered = if may_watch {
                 let late_wait =
                     Duration::from_millis(resolution.request.expires_ms.saturating_sub(now))
@@ -1524,8 +1525,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 call.run_keeping_late(
                     late_wait,
                     || {
+                        gave_up = true;
                         approvals.flight_watched(&id);
-                        kept = Some(approvals.restore(&resolution, crate::daemon::now_ms()));
+                        kept = approvals.restore_unless_recorded(
+                            &resolution,
+                            crate::daemon::now_ms(),
+                            false,
+                        );
                     },
                     move |answered| {
                         let id = late_settle.approval_id.clone();
@@ -1554,12 +1560,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
                 Err(e) => e,
             };
-            let keep = match (&e, kept) {
+            let keep = match (&e, gave_up) {
                 // Followed by its thread: the card was put back (or handed to the expiry sweep) under that thread's lock.
-                (crate::supervisor::SupervisorError::NoAnswer { .. }, Some(_)) => false,
+                (crate::supervisor::SupervisorError::NoAnswer { .. }, true) => false,
                 // B1: never given (the adapter's input is full), or not followed while another call of the request is: nothing
                 // can reach the agent from this call, so the card is put back for another answer.
-                (crate::supervisor::SupervisorError::NoAnswer { given, .. }, None)
+                (crate::supervisor::SupervisorError::NoAnswer { given, .. }, false)
                     if !*given || approvals.flight_is_watched(&id) =>
                 {
                     true
@@ -1576,8 +1582,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
             };
             if keep {
-                approvals.flight_undelivered(&id, false, false);
-                kept = Some(approvals.restore(&resolution, crate::daemon::now_ms()));
+                // R3: ends this call and puts the card back in one step, unless the followed call recorded an answer meanwhile.
+                kept =
+                    approvals.restore_unless_recorded(&resolution, crate::daemon::now_ms(), true);
             }
             // A kept card whose agent's run ended during the wait would never be cancelled by that end (it was not in the queue
             // then): it is ended here, unless an answer took it first.
