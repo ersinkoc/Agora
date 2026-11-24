@@ -4,8 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A structured agent's conversation is no longer empty after its machine's Agora restarts: the node now keeps each conversation on its own disk (readable by its user only, the secrets it holds replaced, kept 30 days after the agent ended and at most 32 MiB per agent, both lowered with `chat.history_days` and `chat.history_max_bytes` in the node policy), so a kept or resumed agent shows its earlier turns, and a tool call that finishes after the restart updates its own row. A full disk does not stop the agent; its conversation says once that it is not being saved. `agora history purge` removes all of it (#931, ADR-0104, ADR-0089).
 - In team mode, the window and the terminal client know the role of the person they signed in as from the moment they connect (the hub says it first, ADR-0106), so a member's or viewer's window no longer asks the hub for the pairing cards or the cost and leaves no refused row in the owner's Activity for it. A viewer is no longer offered starting, stopping, removing, resuming, answering, approving another device or giving a task in the terminal client (its footer lists only the keys that read, and its typing and terminal sizes are not sent), nor starting agents or terminals, prompts, giving tasks, device changes or a helper's grant in the window, whose empty Home now says what they will see; forgetting a machine is offered to the owner only. A member's folder picker opens at their project without asking first, and a member made the owner gets the owner's view at the reconnect the hub forces. An older hub keeps the behaviour from before (#1099).
-_Nothing yet._
 
 ## 0.3.37
 
