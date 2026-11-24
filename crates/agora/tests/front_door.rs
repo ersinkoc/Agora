@@ -878,6 +878,36 @@ impl Drop for DownAgents {
     }
 }
 
+/// The agent kind `slow`, an adapter that never answers (it would wait 60 s), in `home`. Dropped, it ends the adapter that was started
+/// (the holder runs it in a session of its own, so it outlives the node and the holder): it writes its pid where this finds it.
+struct SlowKind(PathBuf);
+
+impl SlowKind {
+    fn add(home: &Path) -> SlowKind {
+        let pid_file = home.join("slow.pid");
+        std::fs::write(
+            home.join("manifests/slow.toml"),
+            format!(
+                "kind = \"slow\"\ndisplay_name = \"Slow\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [\"/bin/sh\", \"-c\", {}]\n",
+                toml_string(&format!("echo $$ > '{}'; exec sleep 60", pid_file.display())),
+            ),
+        )
+        .unwrap();
+        SlowKind(pid_file)
+    }
+}
+
+impl Drop for SlowKind {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+        {
+            let _ = agora_platform::terminate_process(pid);
+        }
+    }
+}
+
 /// The agent id `agora agent start` printed.
 fn agent_id_in(out: &str) -> String {
     out.split_whitespace()
@@ -1069,35 +1099,57 @@ fn a_node_started_ignoring_hangups_keeps_ignoring_them() {
 /// #1119 item 4: one stop that reaches the node twice at once (Ctrl-C on a foreground `agora supervise node` signals the node and its
 /// supervisor, which passes its own on as `SIGTERM`) is one request: the node stops cleanly and ends as the first signal ends it. Before,
 /// the second ended it at once, as a second request does, and the clean stop was skipped.
+///
+/// The stop is made to take a while (an agent is being started: its adapter never answers `initialize`, and the stop waits up to 2 s
+/// for the supervisor), so the second signal comes while it runs.
 #[cfg(unix)]
 #[test]
 fn a_stop_that_reaches_the_node_twice_at_once_still_stops_it_cleanly() {
     use std::os::unix::process::ExitStatusExt;
-    let home = tmp("o2-echo");
+    if !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (home, repo) = node_home_with_an_adapter_kind("o2-echo");
+    let _slow = SlowKind::add(&home);
+    let _down = DownAgents(home.clone());
     let mut node = agora(&home, &["node", "run"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    wait_for("the node's socket", Duration::from_secs(60), || {
-        home.join("node.sock").exists()
+    wait_for("the node", Duration::from_secs(60), || {
+        run(&home, &["agent", "list"]).0 == 0
     });
-    // The node is up a moment after its socket is there.
-    std::thread::sleep(Duration::from_millis(300));
+    let mut starting = agora(
+        &home,
+        &["agent", "start", "slow", "--cwd", &repo.to_string_lossy()],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    // The start is waiting for the adapter's answer, under the supervisor's lock.
+    std::thread::sleep(Duration::from_millis(1500));
     let pid = node.id().to_string();
+    // A moment between them, so the first is taken first: two standard signals pending together are delivered lowest number first
+    // (`SIGINT` before `SIGTERM` on Linux). Well under the second that makes them one stop, and the stop takes longer.
     assert!(Command::new("sh")
-        .args(["-c", "kill -TERM \"$0\"; kill -INT \"$0\"", &pid])
+        .args(["-c", "kill -TERM \"$0\"; sleep 0.2; kill -INT \"$0\"", &pid])
         .status()
         .unwrap()
         .success());
     let ended = ended_within(&mut node, Duration::from_secs(10));
     let _ = node.kill();
-    let (status, _) = ended.expect("the node did not end");
+    let _ = starting.kill();
+    let _ = starting.wait();
+    let (status, took) = ended.expect("the node did not end");
     assert_eq!(
         status.signal(),
         Some(15),
-        "the second signal ended the node at once: {status:?}"
+        "the second signal ended the node at once: {status:?} after {took:?}"
     );
+    drop(_down);
+    drop(_slow);
     let _ = std::fs::remove_dir_all(home);
 }
 
@@ -1112,12 +1164,7 @@ fn agora_down_while_an_agent_starts_still_keeps_the_usage_being_gathered() {
         return;
     }
     let (home, repo) = node_home_with_an_adapter_kind("o2-busy");
-    // `slow`: an adapter that never answers.
-    std::fs::write(
-        home.join("manifests/slow.toml"),
-        "kind = \"slow\"\ndisplay_name = \"Slow\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [\"/bin/sh\", \"-c\", \"sleep 60\"]\n",
-    )
-    .unwrap();
+    let _slow = SlowKind::add(&home);
     let _down = DownAgents(home.clone());
     let (code, out, err) = run(&home, &[]);
     assert_eq!(code, 0, "{out}{err}");
@@ -1153,5 +1200,6 @@ fn agora_down_while_an_agent_starts_still_keeps_the_usage_being_gathered() {
         "the usage the node was still gathering when it stopped"
     );
     drop(_down);
+    drop(_slow);
     let _ = std::fs::remove_dir_all(home);
 }
