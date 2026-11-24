@@ -1,0 +1,302 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d5ce63c..24e10ea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -645,6 +645,7 @@ if(LIBUV_BUILD_TESTS)
+        test/test-pipe-sendmsg.c
+        test/test-pipe-server-close.c
+        test/test-pipe-set-fchmod.c
++       test/test-pipe-restricted-token.c
+        test/test-pipe-set-non-blocking.c
+        test/test-pipe-write.c
+        test/test-platform-output.c
+diff --git a/Makefile.am b/Makefile.am
+index ba3adb8..e53b05f 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -238,6 +238,7 @@ test_run_tests_SOURCES = test/blackhole-server.c \
+                          test/test-pipe-close-stdout-read-stdin.c \
+                          test/test-pipe-set-non-blocking.c \
+                          test/test-pipe-set-fchmod.c \
++                         test/test-pipe-restricted-token.c \
+                          test/test-pipe-write.c \
+                          test/test-platform-output.c \
+                          test/test-poll.c \
+diff --git a/src/win/pipe.c b/src/win/pipe.c
+index 5b45fee..e667390 100644
+--- a/src/win/pipe.c
++++ b/src/win/pipe.c
+@@ -233,9 +233,58 @@ static void close_pipe(uv_pipe_t* pipe) {
+ }
+ 
+ 
++/* A security descriptor whose DACL is the default DACL of the token in
++ * effect (the thread's when it impersonates, else the process's). With NULL
++ * security attributes a named pipe gets the pipe file system's fixed default
++ * descriptor, which grants Everyone only read: a restricted token, whose
++ * restricting SIDs must also be granted, then cannot open the other end of a
++ * pipe it just created for writing. Returns the allocated TOKEN_DEFAULT_DACL
++ * (to free with uv__free) or NULL when there is none to use, in which case
++ * the caller keeps the old behaviour.
++ */
++static TOKEN_DEFAULT_DACL* uv__token_default_dacl(SECURITY_DESCRIPTOR* sd) {
++  TOKEN_DEFAULT_DACL* dacl;
++  HANDLE token;
++  DWORD len;
++
++  if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
++    if (GetLastError() != ERROR_NO_TOKEN)
++      return NULL;
++    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
++      return NULL;
++  }
++
++  len = 0;
++  GetTokenInformation(token, TokenDefaultDacl, NULL, 0, &len);
++  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) {
++    CloseHandle(token);
++    return NULL;
++  }
++
++  dacl = uv__malloc(len);
++  if (dacl == NULL) {
++    CloseHandle(token);
++    return NULL;
++  }
++
++  if (!GetTokenInformation(token, TokenDefaultDacl, dacl, len, &len) ||
++      dacl->DefaultDacl == NULL ||
++      !InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) ||
++      !SetSecurityDescriptorDacl(sd, TRUE, dacl->DefaultDacl, FALSE)) {
++    CloseHandle(token);
++    uv__free(dacl);
++    return NULL;
++  }
++
++  CloseHandle(token);
++  return dacl;
++}
++
++
+ static int uv__pipe_server(
+     HANDLE* pipeHandle_ptr, DWORD access,
+-    char* name, size_t nameSize, unsigned long long random) {
++    char* name, size_t nameSize, unsigned long long random,
++    SECURITY_ATTRIBUTES* server_sa) {
+   HANDLE pipeHandle;
+   int err;
+ 
+@@ -245,7 +294,7 @@ static int uv__pipe_server(
+     pipeHandle = CreateNamedPipeA(name,
+       access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+       PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0,
+-      NULL);
++      server_sa);
+ 
+     if (pipeHandle != INVALID_HANDLE_VALUE) {
+       /* No name collisions.  We're done. */
+@@ -280,6 +329,9 @@ static int uv__create_pipe_pair(
+   /* allowed flags are: UV_READABLE_PIPE | UV_WRITABLE_PIPE | UV_NONBLOCK_PIPE */
+   char pipe_name[64];
+   SECURITY_ATTRIBUTES sa;
++  SECURITY_ATTRIBUTES server_sa;
++  SECURITY_DESCRIPTOR server_sd;
++  TOKEN_DEFAULT_DACL* default_dacl;
+   DWORD server_access;
+   DWORD client_access;
+   HANDLE server_pipe;
+@@ -309,12 +361,18 @@ static int uv__create_pipe_pair(
+     client_access |= FILE_WRITE_ATTRIBUTES;
+   client_access |= WRITE_DAC;
+ 
+-  /* Create server pipe handle. */
++  /* Create server pipe handle, with the token's default DACL if any. */
++  default_dacl = uv__token_default_dacl(&server_sd);
++  server_sa.nLength = sizeof server_sa;
++  server_sa.lpSecurityDescriptor = default_dacl != NULL ? &server_sd : NULL;
++  server_sa.bInheritHandle = FALSE;
+   err = uv__pipe_server(&server_pipe,
+                         server_access,
+                         pipe_name,
+                         sizeof(pipe_name),
+-                        random);
++                        random,
++                        &server_sa);
++  uv__free(default_dacl);
+   if (err)
+     goto error;
+ 
+diff --git a/test/test-list.h b/test/test-list.h
+index 369847b..68f91d1 100644
+--- a/test/test-list.h
++++ b/test/test-list.h
+@@ -305,6 +305,7 @@ TEST_DECLARE   (pipe_close_stdout_read_stdin)
+ #endif
+ TEST_DECLARE   (pipe_set_non_blocking)
+ TEST_DECLARE   (pipe_set_chmod)
++TEST_DECLARE   (pipe_restricted_token)
+ TEST_DECLARE   (pipe_write_trailing_empty_buf)
+ TEST_DECLARE   (pipe_write_oom)
+ TEST_DECLARE   (process_ref)
+@@ -698,6 +699,7 @@ TASK_LIST_START
+   /* Seems to be either about 0.5s or 5s, depending on the OS. */
+   TEST_ENTRY_CUSTOM (pipe_set_non_blocking, 0, 0, 20000)
+   TEST_ENTRY  (pipe_set_chmod)
++  TEST_ENTRY  (pipe_restricted_token)
+   TEST_ENTRY  (tty)
+ #ifdef _WIN32
+   TEST_ENTRY  (tty_raw)
+diff --git a/test/test-pipe-restricted-token.c b/test/test-pipe-restricted-token.c
+new file mode 100644
+index 0000000..47c3ded
+--- /dev/null
++++ b/test/test-pipe-restricted-token.c
+@@ -0,0 +1,148 @@
++/* Copyright libuv project contributors. All rights reserved.
++*
++* Permission is hereby granted, free of charge, to any person obtaining a copy
++* of this software and associated documentation files (the "Software"), to
++* deal in the Software without restriction, including without limitation the
++* rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++* sell copies of the Software, and to permit persons to whom the Software is
++* furnished to do so, subject to the following conditions:
++*
++* The above copyright notice and this permission notice shall be included in
++* all copies or substantial portions of the Software.
++*
++* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++* IN THE SOFTWARE.
++*/
++
++
++#include "uv.h"
++#include "task.h"
++
++#ifdef _WIN32
++
++#include <aclapi.h>
++#include <io.h>
++#include <sddl.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* A restricted token like the ones sandboxes use: restricting SIDs Everyone,
++ * Users and the logon SID, and a default DACL that grants SYSTEM, the user
++ * and the logon SID full access (so objects created under it pass both
++ * access checks). Under it, a pipe pair created by uv_pipe() must open: its
++ * server end used to get the pipe file system's fixed default descriptor
++ * (Everyone: read only), so the restricting SIDs could not open the other
++ * end for writing.
++ */
++static HANDLE restricted_impersonation_token(void) {
++  SID_AND_ATTRIBUTES restrict_sids[3];
++  TOKEN_DEFAULT_DACL default_dacl;
++  TOKEN_GROUPS* logon;
++  TOKEN_USER* user;
++  HANDLE restricted;
++  HANDLE imp;
++  HANDLE own;
++  PSID everyone;
++  PSID users;
++  EXPLICIT_ACCESS_W ea[3];
++  PACL acl;
++  DWORD n;
++
++  ASSERT(OpenProcessToken(GetCurrentProcess(),
++                          TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT,
++                          &own));
++
++  n = 0;
++  GetTokenInformation(own, TokenLogonSid, NULL, 0, &n);
++  logon = malloc(n);
++  ASSERT_NOT_NULL(logon);
++  ASSERT(GetTokenInformation(own, TokenLogonSid, logon, n, &n));
++  ASSERT_GT(logon->GroupCount, 0);
++
++  n = 0;
++  GetTokenInformation(own, TokenUser, NULL, 0, &n);
++  user = malloc(n);
++  ASSERT_NOT_NULL(user);
++  ASSERT(GetTokenInformation(own, TokenUser, user, n, &n));
++
++  ASSERT(ConvertStringSidToSidW(L"S-1-1-0", &everyone));
++  ASSERT(ConvertStringSidToSidW(L"S-1-5-32-545", &users));
++  restrict_sids[0].Sid = everyone;
++  restrict_sids[0].Attributes = 0;
++  restrict_sids[1].Sid = users;
++  restrict_sids[1].Attributes = 0;
++  restrict_sids[2].Sid = logon->Groups[0].Sid;
++  restrict_sids[2].Attributes = 0;
++  ASSERT(CreateRestrictedToken(own, 0, 0, NULL, 0, NULL, 3, restrict_sids,
++                               &restricted));
++
++  memset(ea, 0, sizeof(ea));
++  ea[0].grfAccessPermissions = GENERIC_ALL;
++  ea[0].grfAccessMode = SET_ACCESS;
++  ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
++  ea[0].Trustee.ptstrName = (LPWSTR) user->User.Sid;
++  ea[1] = ea[0];
++  ea[1].Trustee.ptstrName = (LPWSTR) logon->Groups[0].Sid;
++  ea[2] = ea[0];
++  ASSERT(ConvertStringSidToSidW(L"S-1-5-18",
++                                (PSID*) &ea[2].Trustee.ptstrName));
++  ASSERT_OK(SetEntriesInAclW(3, ea, NULL, &acl));
++
++  ASSERT(DuplicateTokenEx(restricted,
++                          TOKEN_QUERY | TOKEN_IMPERSONATE |
++                              TOKEN_ADJUST_DEFAULT,
++                          NULL,
++                          SecurityImpersonation,
++                          TokenImpersonation,
++                          &imp));
++  default_dacl.DefaultDacl = acl;
++  ASSERT(SetTokenInformation(imp, TokenDefaultDacl, &default_dacl,
++                             sizeof(default_dacl)));
++
++  LocalFree(acl);
++  LocalFree(ea[2].Trustee.ptstrName);
++  LocalFree(everyone);
++  LocalFree(users);
++  CloseHandle(restricted);
++  CloseHandle(own);
++  free(user);
++  free(logon);
++  return imp;
++}
++
++#endif
++
++
++TEST_IMPL(pipe_restricted_token) {
++#ifndef _WIN32
++  RETURN_SKIP("Windows only");
++#else
++  uv_file fds[2];
++  HANDLE token;
++  int r;
++
++  token = restricted_impersonation_token();
++  ASSERT(SetThreadToken(NULL, token));
++  r = uv_pipe(fds, 0, 0);
++  ASSERT(RevertToSelf());
++  CloseHandle(token);
++
++  ASSERT_OK(r);
++  ASSERT_EQ(1, _write(fds[1], "x", 1));
++  {
++    char c;
++    ASSERT_EQ(1, _read(fds[0], &c, 1));
++    ASSERT_EQ('x', c);
++  }
++  ASSERT_OK(_close(fds[0]));
++  ASSERT_OK(_close(fds[1]));
++
++  MAKE_VALGRIND_HAPPY(uv_default_loop());
++  return 0;
++#endif
++}
