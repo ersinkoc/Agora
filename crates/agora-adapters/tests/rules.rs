@@ -189,6 +189,8 @@ fn a_typed_rule_must_need_a_regex_on_screen() {
         "all = [{ regex = '^.*Enter send' }]".to_string(),
         format!("{footer}\nall = [{{ regex = 'Enter send$' }}]"),
         format!("{footer}\nall = [{{ contains = \"x\" }}, {{ regex = 'Enter send$' }}]\nnot = [{{ regex = 'y' }}]"),
+        // An own regex still has to match beside an `any`.
+        "regex = 'Enter send$'\nany = [{ contains = \"x\" }, { contains = \"y\" }]".to_string(),
     ] {
         assert!(with_typed(footer, &ok).is_ok(), "{ok}");
     }
@@ -199,9 +201,13 @@ fn a_typed_rule_must_need_a_regex_on_screen() {
         format!("{footer}\nany = [{{ regex = 'Enter send$' }}, {{ contains = \"x\" }}]"),
         "any = [{ regex = 'Enter send$' }]".to_string(),
         format!("{footer}\nnot = [{{ regex = 'Enter send$' }}]"),
-        // An empty regex matches every screen.
+        // A regex that matches empty text matches every screen.
         "regex = ''".to_string(),
         format!("{footer}\nall = [{{ regex = '' }}]"),
+        "regex = '^'".to_string(),
+        "regex = '.*'".to_string(),
+        "regex = '(?:)'".to_string(),
+        format!("{footer}\nall = [{{ regex = '\\s*' }}]"),
     ] {
         assert_eq!(
             field(&with_typed(footer, &bad).unwrap_err()),

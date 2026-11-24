@@ -723,13 +723,14 @@ impl Manifest {
         }
         // #1150: phrases are found with runs of whitespace as one space, so a prompt holding a footer word the input box breaks in its
         // middle would read as the footer once typed. Only a regex sees the rows as they are: every `[[typed]]` rule must need one to
-        // match, its own or one in `all` (one in `any` need not match, one in `not` only excludes), and not an empty one.
+        // match, its own or one in `all` (one in `any` need not match, one in `not` only excludes), and not one that matches empty
+        // text (`''`, `^`, `.*`, `\s*`), which every screen passes.
         for (i, r) in self.typed.iter().enumerate() {
             let needs_regex = r
                 .regex
                 .iter()
                 .chain(r.all.iter().filter_map(|c| c.regex.as_ref()))
-                .any(|re| !re.is_empty());
+                .any(|re| crate::rules::compile(re).is_ok_and(|r| !r.is_match("")));
             if !needs_regex {
                 return Err(invalid(format!("typed[{i}].regex")));
             }
