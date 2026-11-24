@@ -361,7 +361,7 @@ pub fn load_locales(root: &Path) -> io::Result<BTreeMap<String, BTreeSet<String>
     let dir = root.join("locales");
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
-        if !entry.path().is_dir() {
+        if !entry.file_type()?.is_dir() {
             continue;
         }
         let mut files = Vec::new();
