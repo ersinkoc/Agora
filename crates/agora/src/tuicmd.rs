@@ -493,15 +493,17 @@ fn answer_request(
             let node = a.agent_id.split_once('/').map_or("", |(n, _)| n);
             not_trusted(say, &device, node_binary(snapshot, node).as_deref())
         }
-        Err(code) => not_taken(say, &code)
+        Err(code) => not_taken(say, &code, true)
             .unwrap_or_else(|| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))])),
     }
 }
 
-/// ADR-0110: a prompt or an approval answer the agent did not take, in words with the next step: wait and try again (it did not
-/// answer in time), or start the agent again (it stopped). `None` for any other code (the caller says its general sentence).
-fn not_taken(say: &Say, code: &str) -> Option<String> {
+/// ADR-0110: a prompt (`answer` false) or an approval answer the agent did not take, in words with the next step: wait (it did not
+/// answer in time: a prompt stays and may still be worked on, a request stays open to answer again), or start the agent again (it
+/// stopped). `None` for any other code (the caller says its general sentence).
+fn not_taken(say: &Say, code: &str, answer: bool) -> Option<String> {
     match code {
+        "adapter.no_answer" if answer => Some(say.text(key!("tui-answer-no-answer"), &[])),
         "adapter.no_answer" => Some(say.text(key!("tui-agent-no-answer"), &[])),
         "adapter.agent_exited" => Some(say.text(key!("tui-agent-exited"), &[])),
         _ => None,
@@ -1047,9 +1049,11 @@ fn chat(
                             |s| s.prompt(node, local, &line),
                         ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
-                            Tried::Done(Err(code)) => not_taken(say, &code).unwrap_or_else(|| {
-                                say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
-                            }),
+                            Tried::Done(Err(code)) => {
+                                not_taken(say, &code, false).unwrap_or_else(|| {
+                                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                                })
+                            }
                             Tried::Line(l) => l,
                         };
                     }
@@ -3888,7 +3892,7 @@ fn chat_send(
             });
             match tried {
                 Tried::Done(Ok(())) | Tried::Declined => String::new(),
-                Tried::Done(Err(code)) => not_taken(say, &code).unwrap_or_else(|| {
+                Tried::Done(Err(code)) => not_taken(say, &code, false).unwrap_or_else(|| {
                     say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
                 }),
                 Tried::Line(l) => l,
@@ -5401,23 +5405,28 @@ mod typing_grant_tests {
     /// general sentence. The codes' own sentences in `errors.ftl` choose their words by `call` and `stage`.
     #[test]
     fn a_prompt_or_answer_the_agent_did_not_take_says_what_to_do() {
-        for (say, wait, again) in [
+        for (say, wait, answer_again, again) in [
             (
                 Say(agora_i18n::Catalog::english()),
-                "try again",
+                "send it again only if nothing happens",
+                "answer again",
                 "Start the agent again",
             ),
             (
                 Say(agora_i18n::Catalog::turkish()),
-                "yeniden deneyin",
+                "bir şey olmazsa yeniden gönderin",
+                "yeniden yanıtlayın",
                 "yeniden başlatın",
             ),
         ] {
-            let late = not_taken(&say, "adapter.no_answer").unwrap_or_default();
+            let late = not_taken(&say, "adapter.no_answer", false).unwrap_or_default();
             assert!(late.contains(wait), "{late}");
-            let gone = not_taken(&say, "adapter.agent_exited").unwrap_or_default();
+            // ADR-0110 decision 6: the request stays open, so the answer can be given again.
+            let open = not_taken(&say, "adapter.no_answer", true).unwrap_or_default();
+            assert!(open.contains(answer_again), "{open}");
+            let gone = not_taken(&say, "adapter.agent_exited", false).unwrap_or_default();
             assert!(gone.contains(again), "{gone}");
-            assert_eq!(not_taken(&say, "internal"), None);
+            assert_eq!(not_taken(&say, "internal", true), None);
             let no_answer = |call: &str| {
                 say.text(
                     "adapter-no_answer",
@@ -5430,6 +5439,7 @@ mod typing_grant_tests {
             };
             let (prompt, approval) = (no_answer("prompt"), no_answer("approval"));
             assert_ne!(prompt, approval);
+            assert!(approval.contains(answer_again), "{approval}");
             assert!(
                 prompt.contains("claude") && prompt.contains("10") && prompt.contains(wait),
                 "{prompt}"

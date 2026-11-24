@@ -341,7 +341,17 @@ fn submit_to_adapter(
             match call.run() {
                 Ok(()) => Ok((false, 0)),
                 Err(e) => {
-                    ctx.chat.retract(id, entry);
+                    // ADR-0110 decision 6: a prompt the adapter did not answer in time may be held by it: it stays, marked as not
+                    // confirmed. Any other failure takes it back.
+                    if let crate::supervisor::SupervisorError::NoAnswer {
+                        kind, waited_ms, ..
+                    } = &e
+                    {
+                        ctx.chat
+                            .unconfirmed(id, entry, kind, *waited_ms, crate::daemon::now_ms());
+                    } else {
+                        ctx.chat.retract(id, entry);
+                    }
                     ctx.sup().adapter_send_failed(id, generation);
                     Err(sup_err(e))
                 }
@@ -638,6 +648,63 @@ fn launch_of(v: &crate::supervisor::AgentView) -> crate::launch_options::LaunchC
 
 fn sup_err(e: SupervisorError) -> Error {
     e.to_protocol()
+}
+
+/// ADR-0110 decision 6: the longest a decision's adapter call is followed after the node's wait ran out, so a late answer can still
+/// settle the card (a request that expires sooner bounds it).
+const LATE_ANSWER_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// What a verified decision the adapter took is recorded as: in the conversation and, for the hub, `ApprovalResolved` (or an always
+/// answer the agent now holds). Made at once after the answer, or by the adapter's late answer (ADR-0110 decision 6).
+#[derive(Clone)]
+struct Settle {
+    chat: Arc<crate::chat::ChatBoard>,
+    events: Option<Arc<EventSink>>,
+    supervisor: Arc<Mutex<Supervisor>>,
+    agent: AgentId,
+    approval_id: String,
+    action: String,
+    signer: String,
+    approved: bool,
+    always: bool,
+    run: Option<u64>,
+}
+
+impl Settle {
+    fn settled(&self) {
+        // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
+        self.chat.set_permission_as(
+            &self.agent,
+            &self.approval_id,
+            if self.approved {
+                v1::PermissionOutcome::Approved
+            } else {
+                v1::PermissionOutcome::Denied
+            },
+            self.always,
+            crate::daemon::now_ms(),
+        );
+        if let Some(ev) = &self.events {
+            if self.always {
+                // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
+                // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
+                // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
+                // before the check, which then fails, or after the record. A late answer of a former process is audited as given
+                // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
+                record_always_answer(
+                    &self.supervisor.lock().unwrap_or_else(|e| e.into_inner()),
+                    ev,
+                    &self.agent,
+                    self.run,
+                    &self.approval_id,
+                    &self.action,
+                    &self.signer,
+                );
+            } else {
+                ev.approval_resolved(&self.approval_id, self.approved, &self.signer);
+            }
+        }
+    }
 }
 
 /// ADR-0101 (Codex review of PR #1007): records an always answer the adapter delivered to the run `run` of `agent`'s process. The
@@ -1383,8 +1450,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 return decide_skip(ctx, r, &resolution);
             }
             let (agent, adapter_id, verdict) = (
-                resolution.agent,
-                resolution.adapter_approval_id,
+                resolution.agent.clone(),
+                resolution.adapter_approval_id.clone(),
                 resolution.verdict,
             );
             let approved = verdict == crate::approvals::Verdict::Approved;
@@ -1404,57 +1471,66 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .as_ref()
                 .ok()
                 .map(crate::supervisor::AdapterCall::epoch);
+            let settle = Settle {
+                chat: Arc::clone(&ctx.chat),
+                events: ctx.events.clone(),
+                supervisor: Arc::clone(&ctx.supervisor),
+                agent: agent.clone(),
+                approval_id: r.approval_id.clone(),
+                action: resolution.request.action.clone(),
+                signer: r.signer_device_id.clone(),
+                approved,
+                always,
+                run,
+            };
+            // ADR-0110 decision 6: a decision whose answer the adapter did not take within the node's wait keeps its card pending
+            // (`kept`), and the adapter's late answer, if it comes, settles it once (only while it still waits: an answer given again
+            // meanwhile settles it instead).
+            let mut kept = false;
+            let delivered = call.and_then(|c| {
+                let late_wait =
+                    Duration::from_millis(resolution.request.expires_ms.saturating_sub(now))
+                        .min(LATE_ANSWER_MAX);
+                let (late_approvals, late_settle) = (Arc::clone(approvals), settle.clone());
+                c.run_keeping_late(
+                    late_wait,
+                    || kept = approvals.restore(&resolution, crate::daemon::now_ms()),
+                    move |answered| {
+                        if answered.is_ok() && late_approvals.take_pending(&late_settle.approval_id)
+                        {
+                            late_settle.settled();
+                        }
+                    },
+                )
+            });
             // The adapter answers only once the answer was written to the agent (the ACP bridge waits for its writer), so a success
             // here means the agent was given it.
-            if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
-                // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
-                // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
-                // conversation must not stay pending for good.
-                ctx.chat.set_permission(
-                    &agent,
-                    &r.approval_id,
-                    v1::PermissionOutcome::Cancelled,
-                    crate::daemon::now_ms(),
-                );
-                // The request already left the queue: the hub is told as for a cancelled turn (unsigned, not approved), or it
-                // would keep showing an approval the node no longer holds.
-                if let Some(ev) = &ctx.events {
-                    ev.approval_resolved(&r.approval_id, false, "");
+            if let Err(e) = delivered {
+                let no_answer = matches!(e, crate::supervisor::SupervisorError::NoAnswer { .. });
+                // A kept card whose agent's run ended during the wait would never be cancelled by that end (it was not in the queue
+                // then): it is cancelled here, unless an answer settled it first.
+                let gone = kept
+                    && !run.is_some_and(|run| ctx.sup().runs(&agent, run))
+                    && approvals.take_pending(&r.approval_id);
+                if !no_answer || gone {
+                    // The decision was verified but the adapter could not be told (it is gone, or no longer holds the request, as when
+                    // an ACP bridge already answered it `cancelled`): the request is over, and the entry in the conversation must not
+                    // stay pending for good.
+                    ctx.chat.set_permission(
+                        &agent,
+                        &r.approval_id,
+                        v1::PermissionOutcome::Cancelled,
+                        crate::daemon::now_ms(),
+                    );
+                    // The request already left the queue: the hub is told as for a cancelled turn (unsigned, not approved), or it
+                    // would keep showing an approval the node no longer holds.
+                    if let Some(ev) = &ctx.events {
+                        ev.approval_resolved(&r.approval_id, false, "");
+                    }
                 }
                 return Err(sup_err(e));
             }
-            // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
-            ctx.chat.set_permission_as(
-                &agent,
-                &r.approval_id,
-                if approved {
-                    v1::PermissionOutcome::Approved
-                } else {
-                    v1::PermissionOutcome::Denied
-                },
-                always,
-                crate::daemon::now_ms(),
-            );
-            if let Some(ev) = &ctx.events {
-                if always {
-                    // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
-                    // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
-                    // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
-                    // before the check, which then fails, or after the record. A late answer of a former process is audited as given
-                    // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
-                    record_always_answer(
-                        &ctx.sup(),
-                        ev,
-                        &agent,
-                        run,
-                        &r.approval_id,
-                        &resolution.request.action,
-                        &r.signer_device_id,
-                    );
-                } else {
-                    ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
-                }
-            }
+            settle.settled();
             Ok(ok_empty())
         }
         Cmd::GitStatus(g) => {

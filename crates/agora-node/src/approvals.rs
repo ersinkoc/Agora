@@ -756,6 +756,13 @@ impl<V: Verifier> Approvals<V> {
             .collect()
     }
 
+    /// ADR-0110 decision 6: puts back a request a verified decision took out ([`Self::resolve_decided`]) whose answer did not reach
+    /// the adapter in time, so it can be answered again. Its id is no longer spent.
+    pub fn restore(&mut self, p: Pending) {
+        self.spent.retain(|s| *s != p.id);
+        self.pending.insert(p.id.clone(), p);
+    }
+
     /// Withdraws one request (its asker no longer waits for it); the id is spent, so a late decision is refused.
     pub fn withdraw(&mut self, id: &str) -> Option<Pending> {
         let p = self.pending.remove(id)?;
@@ -1699,6 +1706,36 @@ impl NodeApprovals {
             self.withdraw(id);
         }
         ids
+    }
+
+    /// ADR-0110 decision 6: puts back the request of `resolution`, whose verified answer the adapter did not take within the node's
+    /// wait, so the card stays pending and can be answered again. The route goes back before the request (a decision takes the
+    /// request first and its route after). A request that ran out of time meanwhile is handed to the next sweep instead, as one
+    /// that expires under a decision is. True when it was put back.
+    pub fn restore(&self, resolution: &Resolution, now_ms: u64) -> bool {
+        let id = resolution.request.id.clone();
+        let route = (
+            resolution.agent.clone(),
+            resolution.adapter_approval_id.clone(),
+        );
+        if now_ms >= resolution.request.expires_ms {
+            self.l().push((id, route.0, route.1));
+            return false;
+        }
+        self.r().insert(id, route);
+        self.q().restore(resolution.request.clone());
+        true
+    }
+
+    /// ADR-0110 decision 6: takes request `id` out if it still waits, for the one answer that settles it (a late answer from the
+    /// adapter, or a check that its agent is gone). False when it was already answered, withdrawn or expired: then nothing is done.
+    pub fn take_pending(&self, id: &str) -> bool {
+        let taken = self.q().withdraw(id).is_some();
+        if taken {
+            self.r().remove(id);
+            self.l().retain(|(i, _, _)| i != id);
+        }
+        taken
     }
 
     /// Withdraws one request (ADR-0057: the agent that asked to start a helper stopped waiting).

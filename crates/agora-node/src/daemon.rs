@@ -3067,6 +3067,19 @@ fn chat_event(
                 mesh.give_back(&g);
             }
         }
+        // ADR-0110 decision 6: a queued prompt whose adapter did not answer in time stays, marked as not confirmed. A dispatch prompt
+        // gives its task back as for one that was not sent (today's handling).
+        SupervisorEvent::PromptUnconfirmed {
+            agent,
+            tag,
+            kind,
+            waited_ms,
+        } => {
+            chat.unconfirmed(agent, *tag, kind, *waited_ms, now);
+            if let Some(g) = mesh.dispatches().dequeued(agent, *tag, false) {
+                mesh.give_back(&g);
+            }
+        }
         SupervisorEvent::PromptsDropped { agent, tags } => {
             chat.drop_queued(agent, tags, now);
             for g in mesh.dispatches().dropped(agent, tags) {

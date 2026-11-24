@@ -213,6 +213,15 @@ pub enum SupervisorEvent {
         tag: u64,
         sent: bool,
     },
+    /// ADR-0110 decision 6: a prompt that waited behind a turn was sent and its adapter did not answer within the wait
+    /// (`adapter.no_answer`): it may hold the prompt, so the prompt stays in the conversation, marked as not confirmed. Counts as
+    /// not sent for the turn (as [`Self::PromptDequeued`] with `sent` false does). `kind` and `waited_ms` as in the error.
+    PromptUnconfirmed {
+        agent: AgentId,
+        tag: u64,
+        kind: String,
+        waited_ms: u64,
+    },
     /// ADR-0090: queued prompts that will never be sent, because their adapter ended (the user dropped them through
     /// `AgentCancelTurn` is answered to the caller instead).
     PromptsDropped {
@@ -324,7 +333,87 @@ impl AdapterCall {
     /// ADR-0110: a prompt or an approval answer the adapter did not answer within the wait is [`SupervisorError::NoAnswer`]; one it
     /// refused with `adapter.agent_exited` passes that reason on; any other failure of them is internal with the call's reference.
     pub fn run(self) -> Result<(), SupervisorError> {
-        const WAIT: Duration = ADAPTER_CALL_WAIT;
+        self.run_for(ADAPTER_CALL_WAIT)
+    }
+
+    /// ADR-0110 decision 6: [`run`](Self::run) for the answer to an approval request, whose adapter may answer after the node's wait.
+    /// The call is made on a thread of its own that waits up to `late_wait` (at least twice the node's wait); the caller waits the
+    /// node's wait for it. When that runs out, `give_up` runs (the caller keeps the request pending) and the caller gets
+    /// [`SupervisorError::NoAnswer`]; the call's own result, when it comes, then goes to `late` instead. `give_up` runs before
+    /// `late` can, so a late answer always finds what `give_up` kept. When no thread can be started, the call is made as by
+    /// [`run`](Self::run).
+    pub fn run_keeping_late(
+        self,
+        late_wait: Duration,
+        give_up: impl FnOnce(),
+        late: impl FnOnce(Result<(), SupervisorError>) + Send + 'static,
+    ) -> Result<(), SupervisorError> {
+        #[derive(Default)]
+        struct Slot {
+            result: Option<Result<(), SupervisorError>>,
+            gave_up: bool,
+        }
+        let (kind, call) = (self.kind.clone(), self.call_name());
+        let shared = Arc::new((Mutex::new(Slot::default()), std::sync::Condvar::new()));
+        let theirs = Arc::clone(&shared);
+        let wait = late_wait.max(ADAPTER_CALL_WAIT * 2);
+        // The call travels to the thread through this cell, so it is still here to make at once if no thread can be started.
+        let cell = Arc::new(Mutex::new(Some(self)));
+        let their_cell = Arc::clone(&cell);
+        let spawned = std::thread::Builder::new()
+            .name("agora-approval-answer".into())
+            .spawn(move || {
+                let taken = their_cell.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let Some(call) = taken else { return };
+                let r = call.run_for(wait);
+                let (slot, ready) = &*theirs;
+                let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+                if s.gave_up {
+                    drop(s);
+                    late(r);
+                } else {
+                    s.result = Some(r);
+                    ready.notify_all();
+                }
+            });
+        if spawned.is_err() {
+            let taken = cell.lock().unwrap_or_else(|e| e.into_inner()).take();
+            return match taken {
+                Some(call) => call.run(),
+                None => Err(SupervisorError::Approval("no thread".into())),
+            };
+        }
+        let (slot, ready) = &*shared;
+        let s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut s, _) = ready
+            .wait_timeout_while(s, ADAPTER_CALL_WAIT, |s| s.result.is_none())
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = s.result.take() {
+            return r;
+        }
+        // Kept under the slot's lock: the thread hands a late result over only after this.
+        s.gave_up = true;
+        give_up();
+        drop(s);
+        Err(SupervisorError::NoAnswer {
+            kind,
+            call,
+            waited_ms: u64::try_from(ADAPTER_CALL_WAIT.as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// The name of this call in `adapter.no_answer` (`prompt` or `approval`; the others are not made for a client's answer).
+    fn call_name(&self) -> &'static str {
+        match self.op {
+            CallOp::Prompt { .. } => "prompt",
+            CallOp::Resolve { .. } => "approval",
+            CallOp::Cancel => "cancel",
+            CallOp::SetConfig { .. } => "set_config",
+            CallOp::SetOption { .. } => "set_option",
+        }
+    }
+
+    fn run_for(self, wait: Duration) -> Result<(), SupervisorError> {
         let given = |r: Result<(), HostError>| match r {
             Err(HostError::Detached) => Ok(()),
             other => other,
@@ -332,18 +421,18 @@ impl AdapterCall {
         let session = self.session.as_str();
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
-                given(self.caller.prompt(session, text, *from_mesh, WAIT))
-                    .map_err(client_call_error(&self.kind, "prompt", WAIT))
+                given(self.caller.prompt(session, text, *from_mesh, wait))
+                    .map_err(client_call_error(&self.kind, "prompt", wait))
             }
             CallOp::Cancel => {
-                given(self.caller.cancel(session, WAIT)).map_err(call_error("cancel"))
+                given(self.caller.cancel(session, wait)).map_err(call_error("cancel"))
             }
             CallOp::SetConfig { id, value } => {
-                given(self.caller.set_config(session, id, value, WAIT))
+                given(self.caller.set_config(session, id, value, wait))
                     .map_err(call_error("set_config"))
             }
             CallOp::SetOption { kind, value } => {
-                given(self.caller.set_option(session, *kind, value, WAIT))
+                given(self.caller.set_option(session, *kind, value, wait))
                     .map_err(call_error("set_option"))
             }
             CallOp::Resolve {
@@ -352,9 +441,9 @@ impl AdapterCall {
                 scope,
             } => given(
                 self.caller
-                    .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
+                    .resolve_approval_scoped(session, approval, *approved, *scope, wait),
             )
-            .map_err(client_call_error(&self.kind, "approval", WAIT)),
+            .map_err(client_call_error(&self.kind, "approval", wait)),
         }
     }
 }
@@ -718,8 +807,20 @@ struct Queued {
     tag: u64,
 }
 
-/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, sent, generation)`, written by the threads that made them.
-type SentResults = Arc<Mutex<Vec<(AgentId, u64, bool, u64)>>>;
+/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, outcome, generation)`, written by the threads that made them.
+type SentResults = Arc<Mutex<Vec<(AgentId, u64, SendOutcome, u64)>>>;
+
+/// How the send of a queued prompt ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendOutcome {
+    Sent,
+    NotSent,
+    /// ADR-0110: its adapter did not answer within the wait; it may hold the prompt.
+    NoAnswer {
+        kind: String,
+        waited_ms: u64,
+    },
+}
 
 /// ADR-0090: how long an adapter that reports `idle` but never `working` may take before its `idle` counts as the end of the turn
 /// (an `idle` sooner than this after a prompt is the stray one of the turn before).
@@ -2414,27 +2515,33 @@ impl Supervisor {
         }
         let sent = Arc::clone(&self.sent);
         // ADR-0090: a queued prompt that could not be sent is dropped (its entry says so) and the next one goes.
-        let done: Vec<(AgentId, u64, bool, u64)> =
+        let done: Vec<(AgentId, u64, SendOutcome, u64)> =
             std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()));
-        for (id, tag, ok, generation) in done {
-            // Each tag is reported once, when its send ended: sent, or not (its entry then leaves with a notice).
-            match self.adapters.get_mut(&id) {
-                Some(e) => {
-                    let (was_sent, next) = e.rich.send_result(ok, generation, now);
-                    events.push(SupervisorEvent::PromptDequeued {
-                        agent: id.clone(),
-                        tag,
-                        sent: was_sent,
-                    });
-                    if let Some(next) = next.filter(|_| !letting_go) {
-                        begin_send(e, &id, next, &sent, events);
-                    }
-                }
-                None => events.push(SupervisorEvent::PromptDequeued {
+        for (id, tag, outcome, generation) in done {
+            // Each tag is reported once, when its send ended: sent, or not (its entry then leaves with a notice), or not confirmed
+            // (ADR-0110: its entry stays, marked).
+            let ok = outcome == SendOutcome::Sent;
+            let (was_sent, next) = match self.adapters.get_mut(&id) {
+                Some(e) => e.rich.send_result(ok, generation, now),
+                None => (ok, None),
+            };
+            events.push(match outcome {
+                SendOutcome::NoAnswer { kind, waited_ms } => SupervisorEvent::PromptUnconfirmed {
                     agent: id.clone(),
                     tag,
-                    sent: ok,
-                }),
+                    kind,
+                    waited_ms,
+                },
+                _ => SupervisorEvent::PromptDequeued {
+                    agent: id.clone(),
+                    tag,
+                    sent: was_sent,
+                },
+            });
+            if let (Some(next), Some(e)) =
+                (next.filter(|_| !letting_go), self.adapters.get_mut(&id))
+            {
+                begin_send(e, &id, next, &sent, events);
             }
         }
         for (id, e) in &mut self.adapters {
@@ -4594,16 +4701,16 @@ fn begin_send(
         .as_ref()
         .filter(|_| e.running)
         .map(Adapter::caller);
-    let push = |results: &SentResults, ok: bool| {
+    let push = |results: &SentResults, outcome: SendOutcome| {
         results.lock().unwrap_or_else(|e| e.into_inner()).push((
             id.clone(),
             next.tag,
-            ok,
+            outcome,
             generation,
         ));
     };
     let Some(caller) = caller else {
-        return push(sent, false);
+        return push(sent, SendOutcome::NotSent);
     };
     let call = AdapterCall {
         caller,
@@ -4620,20 +4727,25 @@ fn begin_send(
     let spawned = std::thread::Builder::new()
         .name("agora-queued-prompt".into())
         .spawn(move || {
-            let ok = match call.run() {
-                Ok(()) => true,
+            let outcome = match call.run() {
+                Ok(()) => SendOutcome::Sent,
                 Err(e) => {
                     log_call_failure("prompt", &agent, &e);
-                    false
+                    match e {
+                        SupervisorError::NoAnswer {
+                            kind, waited_ms, ..
+                        } => SendOutcome::NoAnswer { kind, waited_ms },
+                        _ => SendOutcome::NotSent,
+                    }
                 }
             };
             results
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((agent, tag, ok, generation));
+                .push((agent, tag, outcome, generation));
         });
     if spawned.is_err() {
-        push(sent, false);
+        push(sent, SendOutcome::NotSent);
     }
 }
 

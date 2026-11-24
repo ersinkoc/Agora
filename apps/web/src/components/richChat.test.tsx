@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { demoRichConversation } from '../demoChat';
 import type { AgentTileModel, ConfigOptionModel, SessionModel } from '../model';
-import type { ChatLine, ChatSource } from '../net/chat';
+import { noticeText, type ChatLine, type ChatSource } from '../net/chat';
 import { transcript } from '../net/transcript';
 import { ChatActionsContext, type ChatActions } from './chatActions';
 import { Item, ToolSteps } from './ChatEntry';
@@ -333,6 +333,13 @@ describe('a prompt that did not go through (ADR-0110)', () => {
     expect(await said('agent.queue_full')).toBe(t('prompt-queue-full'));
     expect(await said('internal')).toBe(t('prompt-failed'));
     expect(await said(undefined)).toBe(t('prompt-failed'));
+  });
+  it('the node\'s mark on a prompt the agent did not confirm in time is said in words, never as the general notice', () => {
+    const said = noticeText(L(5, { kind: 'notice', code: 'adapter.no_answer', params: { kind: 'claude', call: 'prompt', waited_ms: '10000', entries: '4' } }), t);
+    expect(said).toBe(t('notice-adapter-no_answer', { waited_ms: '10000' }));
+    expect(said).not.toBe(t('notice-other', { code: 'adapter.no_answer' }));
+    expect(t('notice-adapter-no_answer', { waited_ms: '10000' })).toContain('may still be working');
+    for (const lang of ['en', 'tr']) expect(readFileSync(`../../locales/${lang}/web.ftl`, 'utf8')).toMatch(/^notice-adapter-no_answer = /m);
   });
 });
 

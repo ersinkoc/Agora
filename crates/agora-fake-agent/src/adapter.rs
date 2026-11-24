@@ -11,6 +11,7 @@
 //!   ADR-0110).
 //! - `ask-exited`: like `ask`, but answers the decision with an error whose `data` is `adapter.agent_exited` (stage `turn`, exit code
 //!   `3`, a 2000-byte stderr tail and a parameter the code does not have), as an adapter whose agent ended does (ADR-0110).
+//! - `ask-late`: like `ask`, but answers the decision 12 s late, after the node's wait for it ran out (ADR-0110 decision 6).
 //! - `prompt-error`: answers the prompt with a JSON-RPC error that carries no stable reason (ADR-0110).
 //! - `prompt-exited`: answers the prompt with the error `data` of `ask-exited` (ADR-0110).
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
@@ -338,6 +339,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                 | "ask-error"
                                 | "ask-hang"
                                 | "ask-exited"
+                                | "ask-late"
                                 | "ask-reserved"
                                 | "later-ask"
                         ) || asked.starts_with("ask:") =>
@@ -387,6 +389,9 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                     if text == "ask-hang" {
                                         // The decision is never answered; everything after it still is.
                                         break;
+                                    }
+                                    if text == "ask-late" {
+                                        std::thread::sleep(std::time::Duration::from_secs(12));
                                     }
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;
                                 }

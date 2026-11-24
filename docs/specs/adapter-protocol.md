@@ -95,9 +95,14 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
   (`approval/resolve`): an error whose `data.code` is `adapter.agent_exited` is passed on in the same way, with the stage the adapter
   sent (for example `turn`); no answer within the node's 10 s wait is `adapter.no_answer` (`kind`, `call` `prompt` or `approval`,
   `waited_ms`); any other failure of these two calls (the adapter exited without a reason, or answered with an error that carries
-  none or another code) is `internal`, with `incident_id` `agent.prompt` or `approval.resolve` (#1150). The bridge answers a node's
-  `session/prompt` as soon as it has passed it to the agent, so an ACP agent that exits during its turn is reported by the notice and
-  the `log` line, not as the prompt's error.
+  none or another code) is `internal`, with `incident_id` `agent.prompt` or `approval.resolve` (#1150). An L3 adapter may send
+  `adapter.agent_exited` for these calls; the ACP bridge does not: it answers a node's `session/prompt` as soon as it has passed it to
+  the agent, so an ACP agent that exits during its turn is reported by the notice and the `log` line, not as the prompt's error.
+  ADR-0110 decision 6, after `adapter.no_answer`: a decision keeps its approval card pending (it can be answered again; the node
+  keeps waiting for the adapter's answer until the request expires, at most 30 minutes, and a late success settles the card once,
+  with the decision it was given, unless another answer settled it first), and a prompt stays in the conversation (a queued one is
+  shown sent) with the node's notice `adapter.no_answer` naming its entry instead of being taken back. Other failures are handled as
+  before (the card is cancelled, the prompt taken back or, queued, dropped with `adapter.queue_dropped`).
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
 
@@ -245,6 +250,7 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` / `session/set_config_option` with an error | error `data` of `session/set_option` and `session/set_config` |
 | `adapter.restarting` | `attempt` | #902: the adapter ended on its own and the node starts it again (`attempt` of the restart budget); the node's own notice, an adapter does not send it | a `CHAT_KIND_NOTICE` entry |
 | `adapter.gave_up` | `restarts`, `exit_code` (only when known) | #902: the adapter ended on its own once more after its restart budget was spent (or could not be started again), so the node gave up on it; `restarts` is how often it was started again, `exit_code` the value of the `AgentExited` it recorded, left out when the node could not read how the last process ended (that `AgentExited` then carries 1). The node's own notice | a `CHAT_KIND_NOTICE` entry |
+| `adapter.no_answer` | `kind`, `call` (`prompt`), `waited_ms`, `entries` | ADR-0110 decision 6: a prompt's adapter did not answer `session/prompt` within the node's wait; it may hold the prompt, so its entry (`entries`, its id) stays, marked as not confirmed (the node's own notice; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry |
 | `adapter.queue_dropped` | `count` | Prompts that waited behind a turn will not be sent: `AgentCancelTurn` with `drop_queue`, or the adapter ended (the node's own notice, ADR-0090; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry; the dropped prompts' entries leave the transcript |
 
 For `turn_empty` and `turn_failed` the bridge waits 100 ms for the last lines and adds what the agent wrote to stderr during that turn,

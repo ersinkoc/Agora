@@ -2210,6 +2210,266 @@ fn a_prompt_refused_because_the_agent_exited_reaches_the_client_with_its_reason(
     );
 }
 
+/// ADR-0110 decision 6: a node with an adapter agent that was given `prompt` and asked for approval `ap-1` (one of the fake adapter's
+/// `ask` prompts): the node, a client, the agent and the node's id of the request.
+fn asked_over_control(
+    name: &str,
+    prompt: &str,
+) -> (Env, Node, Client, agora_core::AgentId, String) {
+    use v1::event::Body;
+    let e = env(name);
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    n.approvals.set_verifier(Box::new(EchoVerifier));
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: prompt.into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let id = loop {
+        if let Some(a) = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::ApprovalRequested(a)) => Some(a),
+                _ => None,
+            })
+        {
+            break a.approval_id;
+        }
+        assert!(Instant::now() < end, "no approval request announced");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    (e, n, c, agent, id)
+}
+
+fn answer(c: &mut Client, id: &str, approved: bool) -> Result<v1::CommandOk, v1::ErrorInfo> {
+    use agora_node::approvals::signed_message;
+    c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: id.to_string(),
+        approved,
+        signer_device_id: "phone".into(),
+        signature: signed_message("node-test", id, approved),
+        ..Default::default()
+    }))
+    .expect("io")
+}
+
+fn outcome_of(n: &Node, agent: &agora_core::AgentId, id: &str) -> Option<i32> {
+    n.chat
+        .snapshot(agent)
+        .into_iter()
+        .find(|e| e.kind == v1::ChatKind::Permission as i32 && e.approval_id == id)
+        .map(|e| e.permission_outcome)
+}
+
+fn resolved_events(n: &Node) -> Vec<v1::ApprovalResolved> {
+    n.events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::ApprovalResolved(r)) => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `info` is `adapter.no_answer` for `call` after the node's 10 s wait.
+fn is_no_answer(info: &v1::ErrorInfo, call: &str) {
+    use v1::param_value::Value;
+    assert_eq!(info.code, "adapter.no_answer", "{info:?}");
+    assert_eq!(info.params["call"].value, Some(Value::Str(call.into())));
+    assert_eq!(
+        info.params["kind"].value,
+        Some(Value::Str("adapted".into()))
+    );
+    assert_eq!(info.params["waited_ms"].value, Some(Value::Int(10_000)));
+}
+
+/// ADR-0110 decision 6: a decision whose answer the adapter does not take within the node's wait is answered `adapter.no_answer`, and
+/// its card stays pending (no `ApprovalResolved`, the entry still pending), so the person can answer again: a second answer is
+/// accepted and settles it once, signed.
+#[test]
+fn a_decision_the_adapter_does_not_take_in_time_keeps_its_card_and_can_be_answered_again() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, id) = asked_over_control("decision-no-answer", "ask-hang");
+    let info = answer(&mut c, &id, true).expect_err("the adapter did not take the answer");
+    is_no_answer(&info, "approval");
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Pending as i32)
+    );
+    assert!(resolved_events(&n).is_empty(), "{:?}", resolved_events(&n));
+    // A fresh command (its own request id): accepted, and the adapter takes this one.
+    answer(&mut c, &id, true).expect("the second answer is accepted");
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Approved as i32)
+    );
+    let resolved = resolved_events(&n);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        (
+            resolved[0].approval_id.as_str(),
+            resolved[0].approved,
+            resolved[0].signer_device_id.as_str()
+        ),
+        (id.as_str(), true, "phone")
+    );
+}
+
+/// ADR-0110 decision 6: the adapter's answer to a decision that comes after the node's wait ran out still settles the card, once,
+/// with the decision that was given; the request is then over, so another answer is refused.
+#[test]
+fn a_late_answer_from_the_adapter_settles_the_kept_card_once() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (_e, n, mut c, agent, id) = asked_over_control("decision-late", "ask-late");
+    let info = answer(&mut c, &id, false).expect_err("the adapter answered after the wait");
+    is_no_answer(&info, "approval");
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Pending as i32)
+    );
+    let end = Instant::now() + Duration::from_secs(15);
+    while outcome_of(&n, &agent, &id) == Some(v1::PermissionOutcome::Pending as i32) {
+        assert!(
+            Instant::now() < end,
+            "the late answer did not settle the card"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        outcome_of(&n, &agent, &id),
+        Some(v1::PermissionOutcome::Denied as i32)
+    );
+    let resolved = resolved_events(&n);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        (resolved[0].approved, resolved[0].signer_device_id.as_str()),
+        (false, "phone")
+    );
+    let again = answer(&mut c, &id, true).expect_err("the request is over");
+    assert_eq!(again.code, "protocol.invalid_message", "{again:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(resolved_events(&n).len(), 1);
+}
+
+/// ADR-0110 decision 6: a prompt the adapter does not answer within the node's wait stays in the conversation (the adapter may hold
+/// it), marked as not confirmed by a notice `adapter.no_answer` that names its entry.
+#[test]
+fn a_prompt_the_adapter_does_not_answer_in_time_stays_marked_not_confirmed() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("prompt-no-answer");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let info = c
+        .call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: "hang".into(),
+        }))
+        .expect("io")
+        .expect_err("the adapter did not answer");
+    is_no_answer(&info, "prompt");
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    let entries = n.chat.snapshot(&agent);
+    let user = entries
+        .iter()
+        .find(|e| e.role == v1::ChatRole::User as i32 && e.text == "hang")
+        .expect("the prompt stays in the conversation");
+    assert!(!user.queued);
+    let notice = entries
+        .iter()
+        .find(|e| e.kind == v1::ChatKind::Notice as i32 && e.code == "adapter.no_answer")
+        .expect("the prompt is marked as not confirmed");
+    assert_eq!(notice.params["entries"], user.entry_id.to_string());
+    assert_eq!(notice.params["call"], "prompt");
+    assert_eq!(notice.params["kind"], "adapted");
+    assert_eq!(notice.params["waited_ms"], "10000");
+}
+
+/// ADR-0110 decision 6: the same for a prompt that waited behind a turn: when it is sent and its adapter does not answer within the
+/// node's wait, it stays in the conversation (no longer shown waiting, never "not sent"), marked as not confirmed.
+#[test]
+fn a_queued_prompt_the_adapter_does_not_answer_in_time_stays_marked_not_confirmed() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("queued-no-answer");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--turns\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    let prompt = |c: &mut Client, text: &str| {
+        ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: text.into(),
+        })))
+    };
+    // A turn that stays open until `go.txt` appears, and `hang` queued behind it.
+    prompt(&mut c, "hold:working");
+    let end = Instant::now() + Duration::from_secs(15);
+    let queued = loop {
+        let r = prompt(&mut c, "hang");
+        match r.result {
+            Some(v1::command_ok::Result::AgentPrompt(p)) if p.queued => break true,
+            _ => {}
+        }
+        assert!(Instant::now() < end, "the second prompt was never queued");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(queued);
+    let folder = n.supervisor.lock().unwrap().list()[0].worktree.clone();
+    std::fs::write(folder.join("go.txt"), "go").unwrap();
+    let end = Instant::now() + Duration::from_secs(25);
+    let entries = loop {
+        let entries = n.chat.snapshot(&agent);
+        if entries.iter().any(|e| {
+            e.kind == v1::ChatKind::Notice as i32
+                && (e.code == "adapter.no_answer" || e.code == "adapter.queue_dropped")
+        }) {
+            break entries;
+        }
+        assert!(Instant::now() < end, "the queued prompt's send never ended");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let user = entries
+        .iter()
+        .find(|e| e.role == v1::ChatRole::User as i32 && e.text == "hang")
+        .expect("the prompt stays in the conversation");
+    assert!(!user.queued, "it is no longer shown waiting");
+    let notice = entries
+        .iter()
+        .find(|e| e.kind == v1::ChatKind::Notice as i32 && e.code == "adapter.no_answer")
+        .expect("the prompt is marked as not confirmed");
+    assert_eq!(notice.params["entries"], user.entry_id.to_string());
+    assert!(!entries.iter().any(|e| e.code == "adapter.queue_dropped"));
+}
+
 /// ADR-0090: a verified decision that cannot be delivered (the adapter answers with an error) does not leave the entry in the
 /// conversation pending for good: it is shown as cancelled, and the user gets the error.
 #[test]

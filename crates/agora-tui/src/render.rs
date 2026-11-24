@@ -613,6 +613,11 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
             ],
         ),
         "adapter.output_dropped" => t(key!("tui-notice-output_dropped"), &[("bytes", p("bytes"))]),
+        // ADR-0110 decision 6: the prompt before it was not confirmed by the agent in time.
+        "adapter.no_answer" => t(
+            key!("tui-notice-no_answer"),
+            &[("waited_ms", p("waited_ms"))],
+        ),
         // #902: the node's own notices about an adapter that ended on its own.
         "adapter.restarting" => t(key!("tui-notice-restarting"), &[("attempt", p("attempt"))]),
         // The exit code only when the node knows it (#902): an unknown one is left out, never said as `?` or as 1.
@@ -1239,6 +1244,17 @@ mod tests {
         );
         assert!(
             said.contains("tui-notice-other[code=future.thing]"),
+            "{said}"
+        );
+        // ADR-0110 decision 6: the node's mark on a prompt its adapter did not confirm in time.
+        let mut unconfirmed = entry(ChatRole::Agent, ChatKind::Notice, "");
+        unconfirmed.code = "adapter.no_answer".into();
+        unconfirmed
+            .params
+            .insert("waited_ms".into(), "10000".into());
+        let said = render_chat(&[unconfirmed], "a", "", (160, 24), false, &t, false).join("\n");
+        assert!(
+            said.contains("tui-notice-no_answer[waited_ms=10000]"),
             "{said}"
         );
         // #902: the node's own notices about an adapter that ended on its own, with their numbers.
