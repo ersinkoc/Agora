@@ -1,0 +1,35 @@
+diff --git a/crates/agora-node/src/transcript.rs b/crates/agora-node/src/transcript.rs
+index a98fb5eb..5112c6b0 100644
+--- a/crates/agora-node/src/transcript.rs
++++ b/crates/agora-node/src/transcript.rs
+@@ -1760,20 +1760,23 @@ mod tests {
+         store
+             .write(&batch("a", 1, vec![line("first-value-0001")]))
+             .unwrap();
++        let before = fingerprint(secrets.dir()).unwrap();
+         let file = secrets.dir().join("TOKEN");
+-        let times = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+-        let (folder_t, file_t) = (times(secrets.dir()), times(&file));
+-        set("other-value-0002");
+-        // A folder can't be opened this way on Windows; there its time stays newer, which only makes the store read again sooner.
+-        if let Ok(f) = std::fs::File::open(secrets.dir()) {
+-            let _ = f.set_modified(folder_t);
+-        }
++        let file_t = std::fs::metadata(&file).unwrap().modified().unwrap();
++        // Rewrite the existing file without replacing its directory entry. Only the file time needs restoring.
++        std::fs::File::options()
++            .write(true)
++            .open(&file)
++            .unwrap()
++            .write_all(b"other-value-0002")
++            .unwrap();
+         std::fs::File::options()
+             .write(true)
+             .open(&file)
+             .unwrap()
+             .set_modified(file_t)
+             .unwrap();
++        assert!(fingerprint(secrets.dir()).as_ref() == Some(&before));
+         store
+             .write(&batch("a", 2, vec![line("other-value-0002")]))
+             .unwrap();
