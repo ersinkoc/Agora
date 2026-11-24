@@ -566,6 +566,97 @@ fn a_refusal_a_grant_and_the_limits() {
     assert!(e.node().approvals.helper_grants().is_empty());
 }
 
+/// #1119 item 3: a node that is stopping starts no helper, even one a grant covers (it would launch under the lock the stop takes to
+/// let its agents go, and nothing counts it): the agent is told `node.offline`, as a command is.
+#[test]
+fn a_node_that_is_stopping_starts_no_helper_even_under_a_grant() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("stopping");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p = e.request_of(&parent);
+    e.decide(&p, true, 3, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    e.node().begin_stop();
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(m.error_code(call), "node.offline");
+    assert_eq!(
+        helpers_of(&e, &parent),
+        1,
+        "a helper started while the node stopped"
+    );
+    assert_eq!(
+        refusals(&e, &parent, "node.offline"),
+        1,
+        "the refusal is not on record"
+    );
+}
+
+/// How many helpers `parent` has (running or not).
+fn helpers_of(e: &Env, parent: &str) -> usize {
+    e.node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .filter(|v| v.parent.as_ref().is_some_and(|p| p.as_str() == parent))
+        .count()
+}
+
+/// How many `agent_start_refused` events with `code` the node recorded for `parent`.
+fn refusals(e: &Env, parent: &str, code: &str) -> usize {
+    e.node()
+        .events
+        .events_after(0)
+        .iter()
+        .filter(|ev| matches!(&ev.body, Some(Body::AgentStartRefused(r)) if r.agent_id == parent && r.code == code))
+        .count()
+}
+
+/// #1119 item 3 (review of #1132): a decision that was already being handled when the node began to stop (its command was admitted
+/// before) reaches the launch, which reads the stop under the supervisor's lock: nothing starts, and the refusal is on record.
+#[test]
+fn a_decision_handled_as_the_node_stops_starts_no_helper() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("stopping-decided");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p = e.request_of(&parent);
+    e.node().begin_stop();
+    // As the command that verified the decision does next (it was admitted before the stop; a new one is refused).
+    e.node()
+        .spawner
+        .decided(
+            &p,
+            &v1::ApprovalResolve {
+                approval_id: p.id.clone(),
+                approved: true,
+                signer_device_id: DEVICE.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(m.error_code(call), "node.offline");
+    assert_eq!(
+        helpers_of(&e, &parent),
+        0,
+        "a helper started while the node stopped"
+    );
+    assert_eq!(
+        refusals(&e, &parent, "node.offline"),
+        1,
+        "the refusal is not on record"
+    );
+}
+
 #[test]
 fn the_folder_ceiling_and_a_decision_that_lets_a_helper_ask() {
     if !supported() {

@@ -305,10 +305,15 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   from the holder (the holder counts them given) and had not yet recorded are lost too, as before.
 - **A clean stop (ADR-0104 O2, Unix):** `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` (`agora down`, a service stop or restart, the
   restart after an update, Ctrl-C), so a planned stop is no longer a kill. From then on control commands (local and the hub's) are refused
-  with `node.offline` and the supervision loop takes nothing more; each adapter the holder runs is let go (`Supervisor::let_go_held`: its
-  reader stops asking, hands over the lines it already had and ends). A call still waiting on one for its answer (a prompt, a queued
-  prompt being sent, a person's decision being delivered) was given: its line is written, it is answered `Detached`, and it is recorded
-  as sent or decided, never taken back, dropped or recorded as not delivered. The commands already running and the loop's last round are
+  with `node.offline`, the node resumes no waiting agent and starts no helper (#1119), and the supervision loop takes nothing more; each
+  adapter the holder runs is let go (`Supervisor::let_go_held`: its reader stops asking, hands over the lines it already had and ends).
+  That needs the supervisor's lock, which a start or a resume holds while it launches an adapter (up to 30 s): it is waited for at most
+  1 s (`LOCK_WAIT`); past it, the transcript's last batch, the usage and the ledger are written at once, and the lock is tried again until
+  2 s into the stop. Still busy then, nothing is let go: the held adapters see the link close, as at a kill (#1119). A call still waiting
+  on a let-go adapter for its answer (a prompt, a queued prompt being sent, a person's decision being delivered) whose line was written
+  was given: it is answered `Detached`, and it is recorded as sent or decided, never taken back, dropped or recorded as not delivered. One
+  whose line was not written yet when the reader ended is answered `Exited` (not delivered) and its line is never written; one being
+  written is answered when that write returns (#1119). The commands already running and the loop's last round are
   waited for (at most 1 s, `LOOP_WAIT`), and what the adapters had read and the node had not recorded is recorded as the loop would
   (states, options, config, commands, usage and chat; a waiting request is not, the next node asks it again from `seen`). Then the transcript's last batch, all the usage still being gathered and the ledger with the
   kept session files are written, and the process ends as the signal would have ended it (so its supervisor sees the same end). No agent
@@ -316,7 +321,15 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   readers are waited for at most 2 s (`DRAIN_WAIT`; a read of a holder that does not answer waits up to the link's frame time, 5 s) and
   the whole stop at most 5 s (`NODE_STOP_DEADLINE`), after which the process ends anyway; both are under `agora down`'s 10 s wait and
   systemd's `TimeoutStopSec=25`. A request before the node is up (still starting), and a second request, end the process at once, as
-  before; a signal the node was started ignoring (`nohup`, a background job) stays ignored. Windows ends the node with
+  before; a signal the node was started ignoring (`nohup`, a background job) stays ignored. A request less than 1 s after the first is
+  that first one reaching the node again, not a second (#1119): Ctrl-C on a foreground `agora supervise node` signals the node and its
+  supervisor (one process group), and the supervisor passes its own on as `SIGTERM`. `agora down` and the systemd unit
+  (`KillMode=process`) signal the supervisor only. launchd, from its documentation (`launchd.plist(5)`; not measured on macOS), stops the
+  job with `SIGTERM` and `SIGKILL` after `ExitTimeOut` (the page does not say whether to the job's process, the supervisor, or to its
+  whole process group), and with `AbandonProcessGroup` false kills what is left of the job's process group once the job died, which is
+  after its node. Either way the node gets one request. An adapter that really ended just before the stop, whose end the loop had not taken, is let go like the others and its end is
+  not recorded (the stop cannot act on it): the next node finds it ended in the holder, does not take it up, the holder lets it go, and
+  the ledger offers it for Resume (#1119). Windows ends the node with
   `TerminateProcess` and has no clean stop.
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
