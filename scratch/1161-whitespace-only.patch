@@ -1,0 +1,61 @@
+diff --git a/crates/agora-adapters/src/rules.rs b/crates/agora-adapters/src/rules.rs
+index 8fa0c39c..9435cbb8 100644
+--- a/crates/agora-adapters/src/rules.rs
++++ b/crates/agora-adapters/src/rules.rs
+@@ -130,7 +130,8 @@ impl Matcher {
+             (Some(s), None) => {
+                 let words: Vec<&str> = s.split_whitespace().collect();
+                 let padded = s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace);
+-                let collapsed = (words.len() > 1 || padded).then(|| collapse_whitespace(s, words));
++                let collapsed = (words.len() > 1 || (padded && !words.is_empty()))
++                    .then(|| collapse_whitespace(s, words));
+                 Some(Self::Contains(s.to_string(), collapsed))
+             }
+             (None, Some(r)) => compile(r).ok().map(Self::Regex),
+diff --git a/crates/agora-adapters/tests/rules.rs b/crates/agora-adapters/tests/rules.rs
+index c0f3cf1d..e1407a40 100644
+--- a/crates/agora-adapters/tests/rules.rs
++++ b/crates/agora-adapters/tests/rules.rs
+@@ -314,3 +314,28 @@ contains = " done "
+         );
+     }
+ }
++
++#[test]
++fn a_contains_pattern_with_only_whitespace_stays_literal() {
++    let manifest = Manifest::parse(
++        r#"
++kind = "space"
++display_name = "Space"
++version = "1"
++min_engine = 1
++[process]
++launch = ["fake"]
++[[rules]]
++id = "finished"
++state = "done"
++priority = 1
++region = "title"
++contains = " "
++"#,
++    )
++    .unwrap();
++    let detector = Detector::new(&manifest);
++    let state = |text| detector.detect(&term_with(text)).map(|d| d.state);
++    assert_eq!(state(b"\x1b]0;ready now\x07"), Some(AgentState::Done));
++    assert_eq!(state(b"\x1b]0;ready\x07"), None);
++}
+diff --git a/docs/specs/agent-manifest.md b/docs/specs/agent-manifest.md
+index 2fa97264..9e289f05 100644
+--- a/docs/specs/agent-manifest.md
++++ b/docs/specs/agent-manifest.md
+@@ -151,7 +151,8 @@ Engine details (`agora-adapters`):
+   space (so "Yes, I trust this folder" is found when a narrow terminal puts "folder" on the next row). Only whitespace is collapsed;
+   regexes still see the rows as they are. Whitespace at either end of a phrase is kept as one space and asks for a boundary there
+   (`" build done "` is not found in "prebuild done"); a line break and the region's first and last character count as one, so a
+-  padded phrase, one word included, is still found when it wraps or stands at the start or end of the region.
++  padded phrase, one word included, is still found when it wraps or stands at the start or end of the region. A value containing
++  only whitespace still matches the literal text.
+ - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
+   and are size-limited.
+ - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.
