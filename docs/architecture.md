@@ -180,9 +180,14 @@ Main window layout: see `ux/main-window.md`.
 - Approvals queue: permission requests from L2/L3 agents (and detected blocked prompts from L1) appear
   centrally and can be answered from any client, including mobile.
 - Secrets stay on nodes. The hub stores references only.
-- Team audit records the acting user and session, action, machine and outcome for routed commands, sign-ins and team changes.
-  The event log carries coordination events separately. Device, project and agent attribution in the audit export is tracked in
-  [#1127](https://github.com/ersinkoc/Agora/issues/1127).
+- Team audit records the acting user and session, action, target machine and outcome for routed commands. Sign-in
+  rows use `node` for the sign-in method and client origin. Successful sign-ins record the user and session.
+  Failed attempts such as an incorrect code use `-` for the user and leave the session empty.
+  Team changes use `owner` and an empty session. For `user.add` and `user.role`, `node` holds the affected
+  user ID and `outcome` holds the role. Removal records the affected user ID, and project grant and revoke
+  rows record the user and project scope in `node`.
+  The event log carries coordination events separately. Device, project and agent attribution in the audit export
+  is tracked in [#1127](https://github.com/ersinkoc/Agora/issues/1127).
 - Optional end-to-end encryption of terminal streams between node and client (required for cloud mode).
 
 ## 7. Internationalization
