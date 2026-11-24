@@ -247,6 +247,17 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                 }
             }
         }
+        for hf in &hm.field {
+            if hf.label() == Label::Required
+                && !bm.field.iter().any(|bf| bf.number() == hf.number())
+            {
+                out.push(format!(
+                    "{name}: required field {} = {} was added",
+                    hf.name(),
+                    hf.number()
+                ));
+            }
+        }
     }
     for (name, be) in &b.enums {
         let Some(he) = h.enums.get(name) else {
