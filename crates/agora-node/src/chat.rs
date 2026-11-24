@@ -5434,8 +5434,16 @@ mod every_cut {
                     "a secret value's JSON form without its quotes: a needle, not written",
                 ),
                 (
-                    "while let Some(i) = s[from..].find(k.as_str()) {",
-                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                    "while let Some(i) = s[from..].find(head) {",
+                    "searching a text for a value's first bytes: nothing of a text is dropped",
+                ),
+                (
+                    "let head = k.get(..lead).unwrap_or(k);",
+                    "#1147: a value's first bytes, only searched for: nothing kept or sent",
+                ),
+                (
+                    "if s.as_bytes().get(at..at + k.len()) == Some(k.as_bytes()) {",
+                    "#1147: only compared with the value: nothing kept or sent",
                 ),
                 (
                     "from = at + s[at..].chars().next().map_or(1, char::len_utf8);",

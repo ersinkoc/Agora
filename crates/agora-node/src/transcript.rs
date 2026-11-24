@@ -690,10 +690,19 @@ pub const BRIDGE_MARK: &str = "[redacted]";
 fn whole(s: &str, known: &[String], out: &mut Vec<Range<usize>>) {
     // A needle longer than the text is skipped before the search is set up (its setup costs the needle's length).
     for k in known.iter().filter(|k| !k.is_empty() && k.len() <= s.len()) {
+        // #1147: the search is for the value's first bytes (at most 16, whole characters), each place checked for the rest: the same
+        // places, without setting up a search of the whole value each time (the live path searches once per piece it sends).
+        let mut lead = k.len().min(16);
+        while !k.is_char_boundary(lead) {
+            lead += 1;
+        }
+        let head = k.get(..lead).unwrap_or(k);
         let mut from = 0;
-        while let Some(i) = s[from..].find(k.as_str()) {
+        while let Some(i) = s[from..].find(head) {
             let at = from + i;
-            out.push(at..at + k.len());
+            if s.as_bytes().get(at..at + k.len()) == Some(k.as_bytes()) {
+                out.push(at..at + k.len());
+            }
             // The next search starts one character on, so an occurrence overlapping this one is found too.
             from = at + s[at..].chars().next().map_or(1, char::len_utf8);
             if from > s.len() - k.len() {
