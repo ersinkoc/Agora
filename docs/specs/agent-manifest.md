@@ -34,7 +34,11 @@ when the agent first starts), else the registry's own program name. `agora docto
 many, and how many find their program) instead of one line per kind. No registry kind has a launch option, so none can skip
 permission questions (ADR-0092 decision 5). A registry kind (by origin, not by name) whose program is a package runner (`npx`, `uvx`) is
 started from the hub only by a signed start, and the node's policy can switch registry kinds off (`agents.registry = off`, `agents.registry.deny`): both in
-`docs/specs/protocol.md`, "ACP registry kinds".
+`docs/specs/protocol.md`, "ACP registry kinds". Such a kind's package runner never starts in the project (#1150): the bridge starts it
+in an empty folder of its own, `<data>/runner/<agent id>`, made again at every start, so a project's `.npmrc`, `package.json`,
+`node_modules`, `uv.toml`, `pyproject.toml` or `.python-version` cannot change what the pinned version resolves to, while the owner's
+user and global npm and uv configuration still apply; the agent gets the project as ACP's session `cwd`. What is and is not covered:
+`docs/security/threat-model.md`, T52.
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI

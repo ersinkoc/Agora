@@ -412,14 +412,24 @@ pub(crate) fn socket_path(o: &Opts) -> PathBuf {
     o.socket.clone().unwrap_or_else(|| home().join("node.sock"))
 }
 
-/// `agora acp-bridge -- AGENT ARGS...`: runs an ACP agent and speaks the adapter protocol on this process's stdio (L2, the node
-/// starts it; see `agora-adapters::acp`).
+/// `agora acp-bridge [--runner-cwd DIR] -- AGENT ARGS...`: runs an ACP agent and speaks the adapter protocol on this process's stdio
+/// (L2, the node starts it; see `agora-adapters::acp`). `--runner-cwd` starts the agent's command in `DIR` (#1150).
 fn acp_bridge(args: &[String]) -> ExitCode {
+    let (agent_cwd, args) = match args.split_first() {
+        Some((flag, rest)) if flag == agora_adapters::acp::RUNNER_CWD_FLAG => {
+            match rest.split_first() {
+                Some((dir, rest)) if !dir.is_empty() => (Some(std::path::Path::new(dir)), rest),
+                _ => return ExitCode::from(2),
+            }
+        }
+        _ => (None, args),
+    };
     let agent = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
     if agent.is_empty() {
         return ExitCode::from(2);
     }
-    match agora_adapters::acp::run(agent, std::io::stdin(), std::io::stdout().lock()) {
+    match agora_adapters::acp::run_in(agent, agent_cwd, std::io::stdin(), std::io::stdout().lock())
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     }

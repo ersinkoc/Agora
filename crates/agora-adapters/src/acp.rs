@@ -2586,8 +2586,29 @@ impl<W: Write> Bridge<W> {
     }
 }
 
+/// #1150 (ADR-0092): `agora acp-bridge --runner-cwd DIR -- AGENT...` starts the agent's command in `DIR` instead of the bridge's own
+/// working folder (the agent's worktree). The node passes it for an ACP registry kind that starts through a package runner (`npx`,
+/// `uvx`), so the runner never reads package-manager configuration from the project; the session's folder still reaches the agent as
+/// ACP's `cwd`.
+pub const RUNNER_CWD_FLAG: &str = "--runner-cwd";
+
 /// Runs the bridge until the node asks it to stop, closes its input, or the agent exits. `agent` is the ACP agent's command line.
 pub fn run<R, W>(agent: &[String], input: R, output: W) -> io::Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    run_in(agent, None, input, output)
+}
+
+/// [`run`], with the agent's command started in `agent_cwd` when one is given ([`RUNNER_CWD_FLAG`]); otherwise in the bridge's own
+/// working folder.
+pub fn run_in<R, W>(
+    agent: &[String],
+    agent_cwd: Option<&std::path::Path>,
+    input: R,
+    output: W,
+) -> io::Result<()>
 where
     R: Read + Send + 'static,
     W: Write,
@@ -2596,12 +2617,16 @@ where
         .split_first()
         .ok_or_else(|| io::Error::other("no agent command"))?;
     // A Windows `.cmd` shim (`npx`, which registry agents use) is started by its full path; elsewhere the name is unchanged.
-    let mut child = Command::new(agora_platform::program_path(program, None))
+    let mut command = Command::new(agora_platform::program_path(program, None));
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(dir) = agent_cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command.spawn()?;
     let (stdin, stdout, stderr) =
         match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
             (Some(i), Some(o), Some(e)) => (i, o, e),
