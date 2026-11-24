@@ -752,9 +752,18 @@ async fn run(
         return Err(PairError::NameUnverified { name: host });
     }
     let leaf_hash = sha256(&[&leaf_der]);
-    let mut conn = ws::connect(tls, &format!("wss://{addr}/"))
-        .await
-        .map_err(|_| PairError::Closed)?;
+    // The upgrade's answer is an answer that is not the owner's decision: it gets that wait, so a peer that completes the handshake
+    // and then says nothing cannot hold the machine for ever (audit F1440).
+    let mut conn =
+        match tokio::time::timeout(t.answer, ws::connect(tls, &format!("wss://{addr}/"))).await {
+            Err(_) => {
+                return Err(PairError::Timeout {
+                    waiting_for: "challenge",
+                })
+            }
+            Ok(Err(_)) => return Err(PairError::Closed),
+            Ok(Ok(c)) => c,
+        };
 
     let mut nonce_n = [0u8; 16];
     getrandom::getrandom(&mut nonce_n)
@@ -1053,6 +1062,88 @@ mod tests {
         ] {
             assert_eq!(ok(bad), None, "{bad:?}");
         }
+    }
+
+    /// F1440: a peer that completes the TLS handshake and then never answers the WebSocket upgrade ends the pairing within the
+    /// configured wait for an answer, as a hub that never sends the challenge does; it used to block the caller for ever.
+    #[test]
+    fn a_peer_that_never_answers_the_upgrade_ends_the_pairing_in_time() {
+        use std::sync::mpsc;
+        use tokio::io::AsyncReadExt;
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let key = KeyPair::generate().unwrap();
+                let cert = CertificateParams::new(vec!["127.0.0.1".to_string()])
+                    .unwrap()
+                    .self_signed(&key)
+                    .unwrap();
+                let cfg = rustls::ServerConfig::builder_with_provider(provider())
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![CertificateDer::from(cert.der().to_vec())],
+                        rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+                    )
+                    .unwrap();
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                addr_tx.send(l.local_addr().unwrap().to_string()).unwrap();
+                // Bounded too: a client that never dials (a broken environment) fails the test instead of leaving it waiting here.
+                let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(20), l.accept()).await
+                else {
+                    return;
+                };
+                let mut tls = tokio_rustls::TlsAcceptor::from(Arc::new(cfg))
+                    .accept(tcp)
+                    .await
+                    .unwrap();
+                // The upgrade request is read and never answered; the connection stays open until the test is done.
+                let _ = tls.read(&mut [0u8; 4096]).await;
+                let _ = tokio::task::spawn_blocking(move || release_rx.recv()).await;
+                drop(tls);
+            });
+        });
+        let addr: String = addr_rx.recv().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let w = Wanted {
+                address: &addr,
+                node_name: "laptop",
+                os: "linux",
+                version: "0",
+                csr_pem: "",
+                csr_der: b"",
+                expected_ca: None,
+            };
+            // Only the wait for an answer is short; the dial and the handshake get room on a loaded machine.
+            let t = Timeouts {
+                connect: Duration::from_secs(5),
+                answer: Duration::from_millis(200),
+                decision: Duration::from_millis(200),
+            };
+            let _ = done_tx.send(pair(&w, &t, &mut |_| {}).map(|_| ()));
+        });
+        // Past every wait a working call can take (the dial and the handshake at most 5 s each, then 200 ms): a call still blocked
+        // after this never gives up.
+        let got = done_rx.recv_timeout(Duration::from_secs(15));
+        let _ = release_tx.send(());
+        server.join().unwrap();
+        assert!(
+            matches!(
+                got,
+                Ok(Err(PairError::Timeout {
+                    waiting_for: "challenge"
+                }))
+            ),
+            "{got:?}"
+        );
     }
 
     #[test]
