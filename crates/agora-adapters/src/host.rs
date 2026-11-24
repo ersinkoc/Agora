@@ -301,6 +301,10 @@ struct PendingState {
     /// [`HostError::Detached`]; one whose line is still queued is answered [`HostError::Exited`] and its line is never written; one whose
     /// line is being written is answered by the writer when that write returns (#1119 item 1).
     detached: bool,
+    /// Lines the writer has written to the adapter's input (for a process the holder runs: that the holder took), counted under the lock
+    /// the writer already takes after each write (#1150: so a test that knows which line comes next can tell that it was given, and a
+    /// let-go answers it [`HostError::Detached`]).
+    written: usize,
 }
 
 /// A call waiting for its answer, and how far its line got.
@@ -982,6 +986,16 @@ impl Adapter {
         self.read.load(Ordering::Acquire)
     }
 
+    /// #1150: how many lines the writer has written to the adapter's input so far (for a process the holder runs: that the holder took),
+    /// so that a test that knows which line comes next can tell it was given (a let-go then answers it [`HostError::Detached`], never
+    /// [`HostError::Exited`]). Every line counts, the start's included.
+    pub fn lines_written(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .written
+    }
+
     /// ADR-0093: an adapter whose process the holder runs, over the link the node has to it. `replay` are events the node rebuilt from
     /// what the holder kept (a request still waiting for the person); they come first, before anything the process says from now.
     pub fn attach_held(io: HeldIo, replay: Vec<AdapterEvent>) -> io::Result<Self> {
@@ -1528,6 +1542,7 @@ fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: 
             .and_then(|()| stdin.flush());
         if wrote.is_ok() {
             let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+            p.written += 1;
             if p.closed && p.detached {
                 // The reader of an adapter the node let go ended while this line was written: given, its answer is not read.
                 if let Some(w) = p.map.remove(&id) {
@@ -1882,10 +1897,13 @@ mod tests {
     /// `Detached` (given) once written.
     #[test]
     fn a_line_still_queued_at_the_let_go_is_not_delivered_and_never_written() {
-        let (_a, written, end_write, prompt, cancel) = let_go_while_writing();
+        let (a, written, end_write, prompt, cancel) = let_go_while_writing();
         assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
+        assert_eq!(a.lines_written(), 0, "nothing written yet");
         end_write.send(true).unwrap();
         assert!(matches!(prompt.join().unwrap(), Err(HostError::Detached)));
+        // #1150: the line answered as given is counted; the skipped one never is.
+        assert_eq!(a.lines_written(), 1);
         // The writer goes on to the queued cancel, and skips it.
         std::thread::sleep(Duration::from_millis(100));
         let text = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
@@ -1897,11 +1915,13 @@ mod tests {
     /// failed, was not delivered: `Exited`, never `Detached` (which callers record as sent).
     #[test]
     fn a_line_whose_write_fails_after_the_let_go_is_not_delivered() {
-        let (_a, written, end_write, prompt, cancel) = let_go_while_writing();
+        let (a, written, end_write, prompt, cancel) = let_go_while_writing();
         assert!(matches!(cancel.join().unwrap(), Err(HostError::Exited)));
         end_write.send(false).unwrap();
         assert!(matches!(prompt.join().unwrap(), Err(HostError::Exited)));
         assert!(written.lock().unwrap().is_empty());
+        // #1150: a failed write is not counted.
+        assert_eq!(a.lines_written(), 0);
     }
 
     /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a
