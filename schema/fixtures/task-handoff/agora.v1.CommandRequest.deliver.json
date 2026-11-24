@@ -1,0 +1,15 @@
+{
+  "requestId": "r1",
+  "deliverTaskHandoff": {
+    "deliveryId": "AAECAwQFBgcICQoLDA0ODw==",
+    "receiverRunId": "EBESExQVFhcYGRobHB0eHw==",
+    "agentId": "agent-1",
+    "projectId": "p1",
+    "taskId": "t7",
+    "summary": "Review the changes in the working directory.",
+    "refs": ["src/lib.rs"],
+    "validUntilMs": "1700086400000",
+    "senderNode": "n2",
+    "senderAgentId": "agent-2"
+  }
+}

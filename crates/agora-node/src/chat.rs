@@ -17,8 +17,42 @@
 //!
 //! Cost of one entry: O(its size) once to cut it (a cap is applied with one pass over at most the cap's bytes after a length test),
 //! one clone per follower per version, one binary search of the ring (at most 500) per update; no per-byte work on terminals.
+//!
+//! **Live redaction** (#1147, ADR-0089 Amendment A). Followers (`ChatSubscribe`, then the hub's relay and the window) never get a
+//! value of a secret the node holds: everything they are sent is redacted as the transcript writer redacts its lines, by the same
+//! functions (`transcript::redact_lines`, `redact_entry`) with the same values (`transcript::Secrets`, which the writer refreshes and
+//! the chat path only reads, so no folder is read on an agent's path).
+//! - **When.** An operation marks what it changed (`Transcript::add`, `modify`, `flush_due`, seeding); the board's lock sends it when
+//!   it is let go (`Locked`), so the redaction sees what the operation recorded beside an entry (its cuts, a call's tool and
+//!   arguments) and no operation can forget to send. With no value held, every entry goes as it is, as before.
+//! - **Other entries.** A tool call (each version), plan, notice, permission entry, diff or prompt goes as the writer redacts its line:
+//!   whole values, and fragments at its cuts, the bridge's marks, a notice parameter's ends and the end of a version not final.
+//! - **The agent's words** (text and thinking) are one stream, as in the file. A piece goes once the stream after it cannot end inside
+//!   a value that started in it: while the stream ends in a part of a value of 4 bytes or more (what mechanism (b) would replace were
+//!   the end an edge; `Transcript::releasable`), the pieces that hold that part wait in `Live::unsent`. Words that cannot end in such a
+//!   part go at once. What goes is redacted over one run, as a writer's batch: the stream sent so far (the live carry, raw, at most
+//!   the longest value less one byte, with its edges), the pieces sent now, and the pieces still held after them. A value whole in it
+//!   is replaced in the pieces sent now; the rest of it, when it goes, is joined with the carry and replaced too.
+//! - **Sent without what follows.** Any other new entry of the agent sends every word held first (so ids still increase on the
+//!   stream: a client may drop a new id below one it has), as do the end of a turn, Start again, the ring's bound, and the node's tick
+//!   once the oldest held piece waited [`LIVE_HOLD_MS`]. The end of what goes is then an edge: a part of a value there (4 bytes or
+//!   more) is replaced, and the carry joins the rest when it comes. A value longer than 16 KiB (only one from the node's environment
+//!   can be) has no automaton: the last bytes of the stream within its length wait too, and a forced send can show part of it.
+//! - **Snapshot.** A new follower gets the words as they were sent (kept beside the ring where they differ, never redacted again
+//!   with another stream), every other entry redacted as it is now, and none of the words still held: its stream brings them.
+//! - **Latency** (ADR-0022): with no value held, nothing waits and nothing more is done. With one held, words wait only while the
+//!   stream ends in a part of a value, at most [`LIVE_HOLD_MS`] plus one tick; the work per piece is one pass of each value's
+//!   automaton over the piece's bytes (where each stands at the stream's end is kept, `Live::at_end`), and a release's run (carry,
+//!   pieces, held pieces) as a batch's.
+//! - **Not covered**: what the file does not cover; where a part of a value stands at an edge by chance, the live view and the file
+//!   may differ (each masks it at its own edges); a value's first 3 bytes or fewer, sent before the next words show it goes on (the
+//!   rest is replaced; the file, which holds back more, masks them); text sent before a value was added to the store stays as sent on
+//!   streams already open (a later snapshot redacts the words again, as one stream, with the values held then: `shown_entries`), and
+//!   a value added is replaced from the next read of the values (the writer's, or the node's tick in `flush_due`, at most a second);
+//!   a value over 16 KiB can show in part when
+//!   its words are sent without what follows.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
@@ -31,7 +65,10 @@ use agora_protocol::v1::{
     ToolLocation, ToolStatus,
 };
 
-use crate::transcript::{Batch, Cuts, Line, Run, RunPart, Seed, Side, Store, Wake};
+use crate::transcript::{
+    redact_entry, redact_lines, redact_text, redact_words_again, AtEnd, Batch, Cuts, Line, Run,
+    RunPart, Secrets, Seed, Side, Store, Wake, MIN_PART,
+};
 use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
@@ -52,6 +89,9 @@ pub const MAX_CALL_ID: usize = 256;
 pub const MAX_PERMISSION_BYTES: usize = 512;
 /// ADR-0090: the most often one entry's changes are sent: one version per this many milliseconds.
 pub const COALESCE_MS: u64 = 150;
+/// #1147: the longest the agent's words wait before they are sent to followers while the stream ends in a part of a secret value
+/// (checked on the node's tick, every 100 ms): then they go with that part replaced, as at an edge.
+pub const LIVE_HOLD_MS: u64 = 300;
 /// The most entries a follower may have waiting. A follower that falls further behind (a client that stopped reading) is dropped, and
 /// its stream ends: the client subscribes again and gets the ring. One slow client therefore never grows the node's memory.
 pub const FOLLOWER_QUEUE: usize = 1024;
@@ -111,6 +151,43 @@ struct Transcript {
     carry_edges: Vec<usize>,
     working: bool,
     closed_upto: u64,
+    /// #1147: what followers are sent, and when.
+    live: Live,
+}
+
+/// #1147: what of one transcript followers are sent while the node holds a secret value (see the module doc, **Live redaction**).
+#[derive(Default)]
+struct Live {
+    /// The agent's words not sent yet, by id, with when each came (its `at_ms`).
+    unsent: BTreeMap<u64, u64>,
+    /// What followers were sent of each of the agent's words in the ring, where that differs from the ring's entry.
+    shown: HashMap<u64, ChatEntry>,
+    /// The words sent, as one stream (like the writer's `carry`, `carry_edges` and `carry_open`): the last of them (raw, in memory,
+    /// at most the longest value less one byte), the edges in it, and whether the next words start at one.
+    carry: String,
+    carry_edges: Vec<usize>,
+    open: bool,
+    /// Where each value's automaton stands at the end of the stream (the carry and the words held), moved on by each new piece; made
+    /// again from the stream's end when the values change or the carry is replaced (seeding).
+    at_end: AtEnd,
+    /// The set of values every word shown so far was redacted with (`None`: none shown yet; `Some(0)`: several, or words shown with
+    /// none held or seeded from the file). A snapshot taken with another set redacts the words again (`shown_entries`).
+    words_gen: Option<u64>,
+    /// What the operation under way changed, sent when it ends (each entry once, in the order it was first changed).
+    outbox: Vec<(u64, Out)>,
+    /// Send every word held when the operation ends, their end an edge (a turn ended, Start again, the hold's deadline).
+    force: bool,
+}
+
+/// #1147: how an entry in the outbox changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Out {
+    /// A new entry.
+    New,
+    /// A new version of an entry that changes in place.
+    Version,
+    /// An entry seeded from the file (written redacted already).
+    Seeded,
 }
 
 /// The most bytes of changed entries that left the ring before a batch took them, kept for that batch (a flood between two batches);
@@ -185,6 +262,45 @@ pub struct ChatBoard {
     forgets: Mutex<Vec<(AgentId, SyncSender<bool>)>>,
     /// ADR-0108: the transcript writer runs ([`crate::transcript::spawn_writer`]); when it does not, a forget removes the files itself.
     writer: AtomicBool,
+}
+
+/// #1147: the board's lock. When it is let go, what the operation changed is sent to followers (`Transcript::deliver`), still under
+/// the lock and in order, once the operation has also recorded what goes beside its entries (their cuts, a call's tool and
+/// arguments), which the redaction needs. No operation can forget to send.
+struct Locked<'a> {
+    g: std::sync::MutexGuard<'a, HashMap<AgentId, Transcript>>,
+    store: Option<&'a Store>,
+}
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = HashMap<AgentId, Transcript>;
+    fn deref(&self) -> &Self::Target {
+        &self.g
+    }
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.g
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let mut sec: Option<Arc<Secrets>> = None;
+        for t in self.g.values_mut() {
+            if t.live.outbox.is_empty() && !t.live.force {
+                continue;
+            }
+            if sec.is_none() {
+                sec = self.store.map(Store::current);
+            }
+            t.deliver(sec.as_deref());
+        }
+    }
 }
 
 /// A live chat subscription. Dropping it unregisters its follower even if the transcript stays quiet.
@@ -498,9 +614,21 @@ impl Transcript {
             + e.plan_steps.iter().map(|s| s.text.len()).sum::<usize>()
     }
 
-    /// Keeps the ring within its bounds, and forgets what pointed at an entry that left it.
+    fn over(&self) -> bool {
+        self.entries.len() > MAX_ENTRIES || self.bytes > MAX_BYTES
+    }
+
+    /// Keeps the ring within its bounds, and forgets what pointed at an entry that left it. The agent's words not sent to followers
+    /// yet stay until they are (#1147): the operation's end sends them and bounds the ring again (`deliver`).
     fn evict(&mut self) {
-        while self.entries.len() > MAX_ENTRIES || self.bytes > MAX_BYTES {
+        while self.over() {
+            if self
+                .entries
+                .front()
+                .is_some_and(|e| self.live.unsent.contains_key(&e.entry_id))
+            {
+                break;
+            }
             let Some(old) = self.entries.pop_front() else {
                 break;
             };
@@ -697,12 +825,16 @@ impl Transcript {
             .filter_map(|b| b.checked_sub(from))
             .collect();
         self.carry_open = false;
+        // #1147: what followers were sent before is the file too, so the live stream goes on from the same words and edges.
+        self.live.carry = self.carry.clone();
+        self.live.carry_edges = self.carry_edges.clone();
+        self.live.open = false;
+        self.live.at_end = AtEnd::default();
         self.evict();
-        if !self.followers.is_empty() {
-            let all: Vec<ChatEntry> = self.entries.iter().cloned().collect();
-            for e in &all {
-                self.send(e);
-            }
+        // Every seeded entry goes to followers (a window that already follows a resumed agent) as written, redacted again.
+        let ids: Vec<u64> = self.entries.iter().map(|e| e.entry_id).collect();
+        for id in ids {
+            self.out(id, Out::Seeded);
         }
         let pending: Vec<u64> = self
             .entries
@@ -745,6 +877,8 @@ impl Transcript {
         self.sent_ms.remove(&e.entry_id);
         self.dirty.remove(&e.entry_id);
         self.cuts.remove(&e.entry_id);
+        self.live.shown.remove(&e.entry_id);
+        self.live.unsent.remove(&e.entry_id);
     }
 
     fn send(&mut self, entry: &ChatEntry) {
@@ -753,19 +887,261 @@ impl Transcript {
             .retain(|(_, sender)| sender.try_send(entry.clone()).is_ok());
     }
 
-    /// Numbers an entry, keeps it, and hands it to every follower. Returns its id.
+    /// Numbers an entry, keeps it, and hands it to every follower when the operation ends (#1147: `deliver`). Returns its id.
     fn add(&mut self, mut entry: ChatEntry, now_ms: u64) -> u64 {
         // Seeding keeps the id far below the end of the range (`MAX_SEEDED_ID`), so this never saturates in practice; if it did, ids
         // would repeat rather than the node panic or wrap under the board's lock.
         self.next_id = self.next_id.saturating_add(1);
         entry.entry_id = self.next_id;
-        self.bytes += Self::size(&entry);
-        self.entries.push_back(entry.clone());
-        self.sent_ms.insert(entry.entry_id, now_ms);
-        self.changed(entry.entry_id, Self::size(&entry));
+        let (id, size) = (entry.entry_id, Self::size(&entry));
+        self.bytes += size;
+        self.entries.push_back(entry);
+        self.sent_ms.insert(id, now_ms);
+        self.changed(id, size);
         self.evict();
-        self.send(&entry);
-        entry.entry_id
+        self.out(id, Out::New);
+        id
+    }
+
+    /// #1147: an entry to send to followers when the operation ends (once, at the place it was first marked, as it is then).
+    fn out(&mut self, id: u64, how: Out) {
+        if !self.live.outbox.iter().any(|(i, _)| *i == id) {
+            self.live.outbox.push((id, how));
+        }
+    }
+
+    /// #1147: sends what the operation changed, in order. With no secret value held, every entry goes as it is, as before. With one:
+    /// an entry that is not the agent's words goes as the writer redacts its line (each version on its own); the agent's words wait
+    /// in `unsent` and go when [`Self::release`] lets them, every word held going first when any other new entry comes (so ids still
+    /// increase on the stream, which a client may rely on).
+    fn deliver(&mut self, sec: Option<&Secrets>) {
+        let outbox = std::mem::take(&mut self.live.outbox);
+        let force = std::mem::take(&mut self.live.force);
+        let Some(sec) = sec.filter(|s| !s.is_empty()) else {
+            // Whatever went now went with no value held: a later snapshot with one redacts the words again.
+            self.live.words_gen = Some(0);
+            // No value held (or none any more): words held while one was go first, as they are.
+            let held: Vec<u64> = std::mem::take(&mut self.live.unsent).into_keys().collect();
+            for id in held.into_iter().chain(outbox.into_iter().map(|(id, _)| id)) {
+                if self.followers.is_empty() {
+                    break;
+                }
+                if let Some(i) = self.index(id) {
+                    let e = self.entries[i].clone();
+                    self.send(&e);
+                }
+            }
+            self.evict();
+            return;
+        };
+        if !self.live.at_end.of(sec) {
+            let mut text = self.live.carry.clone();
+            for id in self.live.unsent.keys() {
+                if let Some(i) = self.index(*id) {
+                    text.push_str(&self.entries[i].text);
+                }
+            }
+            self.live.at_end = sec.at_end(&text);
+        }
+        for (id, how) in outbox {
+            let Some(i) = self.index(id) else {
+                continue;
+            };
+            let words = in_run(&self.entries[i]);
+            match how {
+                Out::New if words => {
+                    self.live.unsent.insert(id, self.entries[i].at_ms);
+                    sec.feed(&mut self.live.at_end, &self.entries[i].text);
+                }
+                Out::Seeded if words => {
+                    self.live.words_gen = Some(0);
+                    let e = &self.entries[i];
+                    let view = redact_entry(e, self.side(e), sec);
+                    self.show(view);
+                }
+                _ => {
+                    if how == Out::New && !self.live.unsent.is_empty() {
+                        self.release(sec, true);
+                    }
+                    if !self.followers.is_empty() {
+                        if let Some(i) = self.index(id) {
+                            let e = &self.entries[i];
+                            let view = redact_entry(e, self.side(e), sec);
+                            self.send(&view);
+                        }
+                    }
+                }
+            }
+        }
+        self.release(sec, force);
+        if self.over() {
+            // Words held at the ring's front kept it over its bounds: they go now, and it is bounded again.
+            self.release(sec, true);
+            self.evict();
+        }
+    }
+
+    /// #1147: how many of the words not sent (`ids`, in order) may go now: those with at least as many bytes after them as the part
+    /// of a value the stream ends in, when that part is 4 bytes or more (what mechanism (b) would replace were the end an edge), and
+    /// as a value with no automaton is long less one byte.
+    fn releasable(&self, sec: &Secrets, ids: &[u64]) -> usize {
+        let part = self.live.at_end.part();
+        let mut wait = if part >= MIN_PART { part } else { 0 };
+        if sec.unpieced() > 0 {
+            wait = wait.max(sec.unpieced() - 1);
+        }
+        // The bytes after each piece, from the newest back: the pieces with fewer than `wait` after them stay.
+        let mut after = 0usize;
+        let mut stay = 0usize;
+        for id in ids.iter().rev() {
+            if after >= wait {
+                break;
+            }
+            stay += 1;
+            after += self.index(*id).map_or(0, |i| self.entries[i].text.len());
+        }
+        ids.len() - stay
+    }
+
+    /// #1147: sends the agent's words that may go ([`Self::releasable`]; all of them when `force`, their end then an edge, as the
+    /// writer's end of words written without what may follow). They are redacted as the writer redacts a batch: one run of the
+    /// stream sent so far (the carry), the words sent now, and the words still held after them, with every edge the writer would use.
+    fn release(&mut self, sec: &Secrets, force: bool) {
+        if self.live.unsent.is_empty() {
+            return;
+        }
+        let ids: Vec<u64> = self.live.unsent.keys().copied().collect();
+        let n = if force {
+            ids.len()
+        } else {
+            self.releasable(sec, &ids)
+        };
+        if n == 0 {
+            return;
+        }
+        let reach = sec.span().saturating_sub(1);
+        let mut run = Run::default();
+        run.text.push_str(&self.live.carry);
+        if !run.text.is_empty() {
+            run.parts.push(RunPart {
+                line: None,
+                start: 0,
+                end: run.text.len(),
+            });
+        } else if self.live.open {
+            self.live.carry_edges = vec![0];
+        }
+        run.edges.extend(self.live.carry_edges.iter().copied());
+        let mut lines = Vec::new();
+        let mut cut_edges = Vec::new();
+        for id in ids.iter().take(n) {
+            let Some(i) = self.index(*id) else {
+                continue;
+            };
+            let e = &self.entries[i];
+            let side = self.side(e);
+            let at = run.text.len();
+            run.text.push_str(&e.text);
+            cut_edges.extend(side.cuts.text.iter().map(|c| at + c));
+            run.parts.push(RunPart {
+                line: Some(lines.len()),
+                start: at,
+                end: run.text.len(),
+            });
+            lines.push(Line::Entry(Box::new(e.clone()), side));
+        }
+        let written = run.text.len();
+        let mut ahead = 0usize;
+        for id in ids.iter().skip(n) {
+            if ahead >= reach {
+                break;
+            }
+            let Some(i) = self.index(*id) else {
+                continue;
+            };
+            let e = &self.entries[i];
+            let at = run.text.len();
+            run.text.push_str(&e.text);
+            ahead += e.text.len();
+            if let Some(c) = self.cuts.get(id) {
+                run.edges.extend(c.text.iter().map(|c| at + c));
+            }
+            run.parts.push(RunPart {
+                line: None,
+                start: at,
+                end: run.text.len(),
+            });
+        }
+        if force {
+            run.edges.push(written);
+        }
+        run.edges.extend(cut_edges.iter().copied());
+        let views = redact_lines(&lines, std::slice::from_ref(&run), sec);
+        self.live.carry = tail_of(&run.text[..written], reach);
+        let from = written - self.live.carry.len();
+        self.live.carry_edges = self
+            .live
+            .carry_edges
+            .iter()
+            .chain(&cut_edges)
+            .filter_map(|e| e.checked_sub(from))
+            .collect();
+        self.live.open = false;
+        for id in ids.iter().take(n) {
+            self.live.unsent.remove(id);
+        }
+        self.live.words_gen = match self.live.words_gen {
+            None => Some(sec.generation()),
+            Some(g) if g == sec.generation() => Some(g),
+            _ => Some(0),
+        };
+        for view in views {
+            if let Line::Entry(v, _) = view {
+                self.show(*v);
+            }
+        }
+    }
+
+    /// #1147: the agent's words as followers are sent them: kept beside the ring where they differ from it (a snapshot shows them so,
+    /// never redacted again with another stream), then sent.
+    fn show(&mut self, view: ChatEntry) {
+        let id = view.entry_id;
+        if self.index(id).is_some_and(|i| self.entries[i] == view) {
+            self.live.shown.remove(&id);
+        } else {
+            self.live.shown.insert(id, view.clone());
+        }
+        self.send(&view);
+    }
+
+    /// #1147: what a new follower's snapshot holds: every entry as followers were sent it, the words still held left out (they come
+    /// on the stream when they go). The agent's words as they were sent; any other entry redacted as it is now (its newest version).
+    fn shown_entries(&self, sec: Option<&Secrets>) -> Vec<ChatEntry> {
+        let sec = sec.filter(|s| !s.is_empty());
+        let mut out: Vec<ChatEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !self.live.unsent.contains_key(&e.entry_id))
+            .map(|e| match (self.live.shown.get(&e.entry_id), sec) {
+                (Some(v), _) => v.clone(),
+                (None, Some(sec)) if !in_run(e) => redact_entry(e, self.side(e), sec),
+                (None, _) => e.clone(),
+            })
+            .collect();
+        // Audit of #1157: words shown before a value was added to the store (or seeded from the file) are redacted again as one stream
+        // with the values held now, so no later snapshot shows it; the start of the ring's first word is an edge (words before it may
+        // have left the ring, a value's start among them). Masks are only added to what was sent.
+        if let Some(sec) = sec {
+            if self.live.words_gen.is_some_and(|g| g != sec.generation()) {
+                let at: Vec<usize> = (0..out.len()).filter(|&i| in_run(&out[i])).collect();
+                let mut words: Vec<ChatEntry> = at.iter().map(|&i| out[i].clone()).collect();
+                redact_words_again(&mut words, sec);
+                for (i, w) in at.into_iter().zip(words) {
+                    out[i] = w;
+                }
+            }
+        }
+        out
     }
 
     /// Changes an entry in place. With `coalesce`, a version is sent only when the last one went out at least [`COALESCE_MS`] ago;
@@ -782,9 +1158,9 @@ impl Transcript {
         };
         let before = Self::size(&self.entries[i]);
         f(&mut self.entries[i]);
-        let entry = self.entries[i].clone();
-        self.bytes = (self.bytes + Self::size(&entry)).saturating_sub(before);
-        self.changed(id, Self::size(&entry));
+        let after = Self::size(&self.entries[i]);
+        self.bytes = (self.bytes + after).saturating_sub(before);
+        self.changed(id, after);
         let due = self
             .sent_ms
             .get(&id)
@@ -794,7 +1170,7 @@ impl Transcript {
         } else {
             self.dirty.remove(&id);
             self.sent_ms.insert(id, now_ms);
-            self.send(&entry);
+            self.out(id, Out::Version);
         }
         self.evict();
         true
@@ -909,6 +1285,8 @@ impl ChatBoard {
 
     /// ADR-0089, ADR-0104 C1: a board whose transcripts are saved to `store` by its writer ([`crate::transcript::spawn_writer`]).
     pub fn saving(store: Arc<Store>) -> Self {
+        // #1147: the values the live path replaces, read once now so no operation on the chat path reads the folder.
+        store.current();
         Self {
             store: Some(store),
             wake: Some(Arc::new(Wake::default())),
@@ -922,6 +1300,20 @@ impl ChatBoard {
 
     pub fn wake(&self) -> Option<Arc<Wake>> {
         self.wake.clone()
+    }
+
+    /// #1147: the secret values the live path replaces, as the writer last read them (`None` on a board that keeps memory only).
+    fn secrets(&self) -> Option<Arc<Secrets>> {
+        self.store.as_deref().map(Store::current)
+    }
+
+    /// #1147 (audit of #1157): `text` the agent chose, with the node's secret values replaced as in a chat entry, for what the node
+    /// records as a hub event (an approval's action and detail, a mesh message, a task's title, an option's words).
+    pub fn redact_text(&self, text: &str) -> String {
+        match self.secrets() {
+            Some(sec) => redact_text(text, &sec),
+            None => text.to_string(),
+        }
     }
 
     /// ADR-0108: whether the transcript writer runs; set by the writer as it starts and ends.
@@ -1003,6 +1395,7 @@ impl ChatBoard {
         let t = slot(&mut g, agent, self.wake.as_ref());
         if t.next_id == 0 {
             t.carry_open = true;
+            t.live.open = true;
         }
     }
 
@@ -1022,6 +1415,7 @@ impl ChatBoard {
     /// (no file is touched under the supervisor's lock), and moved by the writer before it writes anything of the new session, so a
     /// batch never lands in the file being moved (review of #1103, N5 and N8). A resume that is refused calls nothing.
     pub fn resumed(&self, agent: &AgentId, seed: Option<Seed>, fresh: bool, now_ms: u64) {
+        let sec = self.secrets();
         let mut g = self.lock();
         let t = slot(&mut g, agent, self.wake.as_ref());
         let high = seed.as_ref().map_or(0, |s| s.high);
@@ -1030,8 +1424,17 @@ impl ChatBoard {
                 t.seed(seed, now_ms);
             }
             // Nothing to seed: the next words may still continue the earlier process's (review of #1103, round 4).
-            None if t.next_id == 0 => t.carry_open = true,
+            None if t.next_id == 0 => {
+                t.carry_open = true;
+                t.live.open = true;
+            }
             None => {}
+        }
+        if fresh {
+            // #1147: the earlier session's words go to followers now, their end an edge. A follower sees both sessions in one
+            // conversation, so the live stream goes on across them (the writer's starts again: its sessions are separate files).
+            t.live.force = true;
+            t.deliver(sec.as_deref());
         }
         // Marked whether or not a file exists yet: what the earlier session said and was not written yet goes to its own file
         // (review of #1103, probe 5).
@@ -1084,6 +1487,8 @@ impl ChatBoard {
             if let Some(s) = &t.save {
                 s.wake.notify();
             }
+            // #1147: the turn's last words go to followers now (their end an edge).
+            t.live.force = !t.live.unsent.is_empty();
         }
         t.working = working;
     }
@@ -1278,8 +1683,11 @@ impl ChatBoard {
         t.add(n, now_ms);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Transcript>> {
-        self.agents.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            g: self.agents.lock().unwrap_or_else(|e| e.into_inner()),
+            store: self.store.as_deref(),
+        }
     }
 
     /// Adds one entry to an agent's transcript and hands it to everyone following it.
@@ -1578,8 +1986,22 @@ impl ChatBoard {
     /// ADR-0090: sends the changes of entries that were held back to keep to one version per [`COALESCE_MS`], once that time is
     /// over. Called by the node's tick; an entry whose last change is final was never held back.
     pub fn flush_due(&self, now_ms: u64) {
+        // Audit of #1157: the values are read again at most once a second here too (the node's tick, before the board's lock), so the
+        // live path follows a change even without the writer thread.
+        if let Some(store) = &self.store {
+            store.refresh_if_older(Duration::from_secs(1));
+        }
         let mut g = self.lock();
         for t in g.values_mut() {
+            // #1147: words that waited [`LIVE_HOLD_MS`] go now, the part of a value they end in replaced.
+            if t.live
+                .unsent
+                .values()
+                .min()
+                .is_some_and(|since| now_ms < *since || now_ms - since >= LIVE_HOLD_MS)
+            {
+                t.live.force = true;
+            }
             if t.dirty.is_empty() {
                 continue;
             }
@@ -1595,10 +2017,9 @@ impl ChatBoard {
                 .collect();
             for id in due {
                 t.dirty.remove(&id);
-                if let Some(i) = t.index(id) {
-                    let e = t.entries[i].clone();
+                if t.index(id).is_some() {
                     t.sent_ms.insert(id, now_ms);
-                    t.send(&e);
+                    t.out(id, Out::Version);
                 }
             }
         }
@@ -1738,11 +2159,12 @@ impl ChatBoard {
         }
     }
 
-    /// The transcript so far.
+    /// The transcript so far, as a follower is shown it (#1147: redacted, without the words still held).
     pub fn snapshot(&self, agent: &AgentId) -> Vec<ChatEntry> {
+        let sec = self.secrets();
         self.lock()
             .get(agent)
-            .map(|t| t.entries.iter().cloned().collect())
+            .map(|t| t.shown_entries(sec.as_deref()))
             .unwrap_or_default()
     }
 
@@ -1751,9 +2173,10 @@ impl ChatBoard {
     pub fn follow(&self, agent: &AgentId) -> (Vec<ChatEntry>, ChatSubscription) {
         let follower_id = self.next_follower_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = sync_channel(FOLLOWER_QUEUE);
+        let sec = self.secrets();
         let mut g = self.lock();
         let t = slot(&mut g, agent, self.wake.as_ref());
-        let snapshot = t.entries.iter().cloned().collect();
+        let snapshot = t.shown_entries(sec.as_deref());
         t.followers.push((follower_id, tx));
         (
             snapshot,
@@ -3528,7 +3951,8 @@ mod review2 {
         t.tool = Some("write".into());
         t.arguments_json = Some(args);
         b.push_item(&a, &ChatItem::Tool(t), 1);
-        assert!(b.snapshot(&a)[0].text.contains(&SECRET[..30]));
+        // #1147: what a follower is shown is redacted as the file is.
+        assert!(!b.snapshot(&a)[0].text.contains(&SECRET[..30]));
         save(&b);
         assert_eq!(body(&s, "a").matches(&SECRET[..30]).count(), 0);
     }
@@ -4325,9 +4749,78 @@ mod property {
         dir: std::path::PathBuf,
         store: Arc<Store>,
         board: ChatBoard,
+        /// #1147: every follower of every board of the case, and what it was sent.
+        followers: Vec<Follower>,
+    }
+
+    /// #1147: one follower: its snapshot, then every version of every entry sent to it, and whether an id ever went back (a new id
+    /// below one it already had).
+    struct Follower {
+        sub: ChatSubscription,
+        got: Vec<ChatEntry>,
+        high: u64,
+        seen: BTreeSet<u64>,
+        backwards: Option<String>,
+    }
+
+    impl Follower {
+        fn drain(&mut self) {
+            for e in self.sub.try_iter() {
+                if e.entry_id <= self.high
+                    && !self.seen.contains(&e.entry_id)
+                    && self.backwards.is_none()
+                {
+                    self.backwards = Some(format!("id {} after {}", e.entry_id, self.high));
+                }
+                self.high = self.high.max(e.entry_id);
+                self.seen.insert(e.entry_id);
+                self.got.push(e);
+            }
+        }
+
+        /// Every field of every version it got, and its agent's words joined by id.
+        fn shown(&self) -> (Vec<String>, String) {
+            let mut fields = Vec::new();
+            let mut words: BTreeMap<u64, String> = BTreeMap::new();
+            for e in &self.got {
+                if in_run(e) {
+                    words.insert(e.entry_id, e.text.clone());
+                }
+                fields.extend([e.text.clone(), e.output.clone(), e.path.clone()]);
+                fields.extend(
+                    e.params
+                        .iter()
+                        .filter(|(k, _)| *k != "bytes" && *k != "entries")
+                        .map(|(_, v)| v.clone()),
+                );
+                fields.extend(e.paths.iter().map(|p| p.path.clone()));
+                fields.extend(e.plan_steps.iter().map(|s| s.text.clone()));
+            }
+            (fields, words.into_values().collect())
+        }
     }
 
     impl Case {
+        /// A new follower of the board as it is now (its snapshot first).
+        fn follow(&mut self, a: &AgentId) {
+            let (got, sub) = self.board.follow(a);
+            let seen: BTreeSet<u64> = got.iter().map(|e| e.entry_id).collect();
+            let high = seen.last().copied().unwrap_or(0);
+            self.followers.push(Follower {
+                sub,
+                got,
+                high,
+                seen,
+                backwards: None,
+            });
+        }
+
+        fn drain(&mut self) {
+            for f in &mut self.followers {
+                f.drain();
+            }
+        }
+
         fn write(&self, full: bool) {
             let batches = if full {
                 self.board.take_unsaved()
@@ -4405,8 +4898,12 @@ mod property {
             dir: dir.clone(),
             store,
             board,
+            followers: Vec::new(),
         };
         let a = AgentId::new("agent-1");
+        // #1147: what the live path does is drawn from a second generator, so the file's cases are the ones they always were.
+        let mut live = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        c.follow(&a);
         // A word only this case writes, in lower case, said last in a turn: it must reach the file once the turn ends (a Start again
         // replaces an older earlier session's file, so it is said at the end).
         let marker = format!("marker{}", filler(&mut r, 6).replace([' ', '.'], "q"));
@@ -4453,8 +4950,10 @@ mod property {
                                 c.write(true);
                                 let (store, board) = open(&dir);
                                 board.seed_from_disk(&a, 1);
+                                c.drain();
                                 c.store = store;
                                 c.board = board;
+                                c.follow(&a);
                             }
                             10 | 11 => {
                                 hit(&mut seen, 3);
@@ -4470,8 +4969,10 @@ mod property {
                                 hit(&mut seen, 15);
                                 let (store, board) = open(&dir);
                                 board.seed_from_disk(&a, 1);
+                                c.drain();
                                 c.store = store;
                                 c.board = board;
+                                c.follow(&a);
                             }
                             14 if r.chance(1) => {
                                 // A flood of other entries: words not written yet leave the ring and the evicted buffer.
@@ -4490,6 +4991,13 @@ mod property {
                             }
                             _ => {}
                         }
+                        if live.chance(10) {
+                            c.board.flush_due(1 + LIVE_HOLD_MS);
+                        }
+                        if live.chance(3) {
+                            c.follow(&a);
+                        }
+                        c.drain();
                     }
                 }
                 // A stderr tail the bridge cut at its front, or a notice parameter over 1 KiB, holding a secret.
@@ -4695,15 +5203,44 @@ mod property {
                     c.write(true);
                     let (store, board) = open(&dir);
                     board.seed_from_disk(&a, 1);
+                    c.drain();
                     c.store = store;
                     c.board = board;
+                    c.follow(&a);
                 }
             }
+            // #1147: a window that subscribes now (a snapshot mid-stream), the node's tick (the hold's deadline, or not yet), and
+            // every follower reading what it was sent.
+            if live.chance(15) {
+                c.follow(&a);
+            }
+            if live.chance(30) {
+                c.board
+                    .flush_due(if live.chance(50) { 1 } else { 1 + LIVE_HOLD_MS });
+            }
+            c.drain();
         }
         c.board.set_working(&a, true);
         c.board
             .push_item(&a, &ChatItem::Text(format!(" {marker}")), 1);
         c.board.set_working(&a, false);
+        // #1147: a turn that ended leaves nothing held: its last words reached the follower that followed all along.
+        c.drain();
+        let newest = c.followers.last().map(Follower::shown).unwrap_or_default();
+        if !newest.1.contains(&marker) {
+            return Err(format!(
+                "seed {seed}: the words of a turn that ended did not reach a follower"
+            ));
+        }
+        let mut late = c.board.snapshot(&a);
+        c.follow(&a);
+        c.drain();
+        if let Some(f) = c.followers.iter().find(|f| f.backwards.is_some()) {
+            return Err(format!(
+                "seed {seed}: a follower's ids went back: {}",
+                f.backwards.as_deref().unwrap_or_default()
+            ));
+        }
         c.write(false);
         let (_, _, before_stop) = on_disk(&c.dir);
         c.write(true);
@@ -4719,11 +5256,45 @@ mod property {
                 "seed {seed}: the case's own words never reached the file"
             ));
         }
+        // #1147: what every follower was sent (every version, its words joined), and the snapshot `snapshot` gives.
+        let sent: Vec<(Vec<String>, String)> = c.followers.iter().map(Follower::shown).collect();
+        let snapshot: Vec<String> = late
+            .drain(..)
+            .flat_map(|e| {
+                let mut f = vec![e.text, e.output, e.path];
+                f.extend(
+                    e.params
+                        .into_iter()
+                        .filter(|(k, _)| k != "bytes" && k != "entries")
+                        .map(|(_, v)| v),
+                );
+                f.extend(e.paths.into_iter().map(|p| p.path));
+                f.extend(e.plan_steps.into_iter().map(|s| s.text));
+                f
+            })
+            .collect();
         for v in &secrets {
             let escaped = serde_json::to_string(v).unwrap();
             let escaped = escaped[1..escaped.len() - 1].to_string();
             for form in [v.as_str(), escaped.as_str()] {
                 for piece in pieces_of(form, 4) {
+                    for (i, (fields, words)) in sent.iter().enumerate() {
+                        if let Some(f) = fields.iter().find(|f| f.contains(piece)) {
+                            return Err(format!(
+                                "seed {seed}: {piece:?} of {v:?} sent to follower {i}: {f:?}"
+                            ));
+                        }
+                        if words.contains(piece) {
+                            return Err(format!(
+                                "seed {seed}: {piece:?} of {v:?} in follower {i}'s joined words: {words:?}"
+                            ));
+                        }
+                    }
+                    if let Some(f) = snapshot.iter().find(|f| f.contains(piece)) {
+                        return Err(format!(
+                            "seed {seed}: {piece:?} of {v:?} in a snapshot: {f:?}"
+                        ));
+                    }
                     if let Some(f) = fields.iter().find(|f| f.contains(piece)) {
                         return Err(format!("seed {seed}: {piece:?} of {v:?} in a field: {f:?}"));
                     }
@@ -4739,7 +5310,7 @@ mod property {
     }
 
     #[test]
-    fn no_piece_of_a_secret_reaches_the_file() {
+    fn no_piece_of_a_secret_reaches_the_file_or_a_follower() {
         let cases = std::env::var("AGORA_PROPERTY_CASES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -4908,6 +5479,7 @@ mod every_cut {
                 ("tidy(&args, MAX_ENTRY_BYTES, Style::Code).0,", "seeding: the file's text, redacted already (or a list: whole items go)"),
                 ("None => vec![(0..=u64::MAX, None, t.next_id)],", "a range of entry ids"),
                 ("t.carry = tail_of(&run.text[..written], reach);", "the carry: kept in memory, never written"),
+                ("self.live.carry = tail_of(&run.text[..written], reach);", "#1147: the live carry: kept in memory, never sent"),
             ],
         );
         check(
@@ -4983,6 +5555,10 @@ mod every_cut {
             include_str!("transcript.rs"),
             &[
                 (
+                    ".push(n.sam.run((0, 0), b.get(from..).unwrap_or_default()));",
+                    "#1147: only read, to find the part of a value the stream ends in; nothing is kept or sent",
+                ),
+                (
                     "let by = self.by.get(a..z)?;",
                     "the matcher's own table of moves, not a text",
                 ),
@@ -4999,8 +5575,16 @@ mod every_cut {
                     "a secret value's JSON form without its quotes: a needle, not written",
                 ),
                 (
-                    "while let Some(i) = s[from..].find(k.as_str()) {",
-                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                    "while let Some(i) = s[from..].find(head) {",
+                    "searching a text for a value's first bytes: nothing of a text is dropped",
+                ),
+                (
+                    "let head = k.get(..lead).unwrap_or(k);",
+                    "#1147: a value's first bytes, only searched for: nothing kept or sent",
+                ),
+                (
+                    "if s.as_bytes().get(at..at + k.len()) == Some(k.as_bytes()) {",
+                    "#1147: only compared with the value: nothing kept or sent",
                 ),
                 (
                     "from = at + s[at..].chars().next().map_or(1, char::len_utf8);",
@@ -5291,5 +5875,501 @@ mod review4 {
             assert!(took < std::time::Duration::from_secs(3), "{took:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// #1147: what followers are sent (the live stream and a new follower's snapshot) holds no piece of the node's own secret values,
+/// and the agent's words are not delayed when nothing can hide one.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod live {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::Limits;
+    use std::collections::BTreeMap;
+
+    const SECRET: &str = "sk-LIVE-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+    /// The hold's deadline (`LIVE_HOLD_MS`, 300 ms), written out so these tests also build against a node without it.
+    const DEADLINE: u64 = 300;
+
+    fn board(
+        tag: &str,
+        secrets: &[&str],
+        limits: Limits,
+    ) -> (std::path::PathBuf, Arc<Store>, ChatBoard) {
+        let dir = std::env::temp_dir().join(format!("agora-live-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, v) in secrets.iter().enumerate() {
+            SecretStore::in_data(&dir)
+                .set(&format!("S{i}"), &Secret::new(v).unwrap())
+                .unwrap();
+        }
+        let store = Arc::new(Store::new(&dir, limits, Some(SecretStore::in_data(&dir))));
+        let board = ChatBoard::saving(Arc::clone(&store));
+        (dir, store, board)
+    }
+
+    /// One follower: its snapshot, then every entry sent to it.
+    struct Follower {
+        sub: ChatSubscription,
+        got: Vec<ChatEntry>,
+    }
+
+    impl Follower {
+        fn of(b: &ChatBoard, a: &AgentId) -> Self {
+            let (snapshot, sub) = b.follow(a);
+            Self { sub, got: snapshot }
+        }
+
+        fn drain(&mut self) -> &[ChatEntry] {
+            self.got.extend(self.sub.try_iter());
+            &self.got
+        }
+
+        /// The agent's words it holds, by id, joined.
+        fn words(&mut self) -> String {
+            let mut w: BTreeMap<u64, String> = BTreeMap::new();
+            for e in self.drain() {
+                if in_run(e) {
+                    w.insert(e.entry_id, e.text.clone());
+                }
+            }
+            w.into_values().collect()
+        }
+    }
+
+    fn fields(e: &ChatEntry) -> Vec<&str> {
+        let mut f = vec![e.text.as_str(), e.output.as_str(), e.path.as_str()];
+        f.extend(e.params.values().map(String::as_str));
+        f.extend(e.paths.iter().map(|p| p.path.as_str()));
+        f.extend(e.plan_steps.iter().map(|s| s.text.as_str()));
+        f
+    }
+
+    /// The shortest pieces of `v` of 4 bytes or more from each character: finding none of them finds no longer one.
+    fn pieces_of(v: &str) -> Vec<&str> {
+        let bounds: Vec<usize> = v.char_indices().map(|(i, _)| i).chain([v.len()]).collect();
+        bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(x, &a)| {
+                bounds[x + 1..]
+                    .iter()
+                    .find(|&&z| z - a >= 4)
+                    .map(|&z| &v[a..z])
+            })
+            .collect()
+    }
+
+    /// A piece of `v` in any field of any version the follower got, or in its words joined.
+    fn leak(f: &mut Follower, v: &str) -> Option<String> {
+        let words = f.words();
+        for p in pieces_of(v) {
+            if let Some(e) = f
+                .got
+                .iter()
+                .find(|e| fields(e).iter().any(|x| x.contains(p)))
+            {
+                return Some(format!("{p:?} in entry {}: {:?}", e.entry_id, fields(e)));
+            }
+            if words.contains(p) {
+                return Some(format!("{p:?} in the joined words: {words:?}"));
+            }
+        }
+        None
+    }
+
+    fn text(t: &str) -> ChatItem {
+        ChatItem::Text(t.into())
+    }
+
+    /// Splits `s` at the given byte offsets.
+    fn split<'a>(s: &'a str, at: &[usize]) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let mut from = 0;
+        for &k in at.iter().chain([&s.len()]) {
+            out.push(&s[from..k]);
+            from = k;
+        }
+        out
+    }
+
+    /// A value streamed in pieces of 1 to 7 bytes inside a turn, with a follower from the start and one that joins in its middle.
+    #[test]
+    fn a_value_streamed_in_pieces_never_reaches_a_follower() {
+        for cuts in [
+            vec![1, 2, 3],
+            vec![3, 4, 5, 20, 21],
+            vec![7, 14, 21, 28, 35],
+            (1..SECRET.len()).collect::<Vec<_>>(),
+        ] {
+            let (_d, _s, b) = board("pieces", &[SECRET], Limits::default());
+            let a = AgentId::new("a");
+            b.set_working(&a, true);
+            let mut first = Follower::of(&b, &a);
+            b.push_item(&a, &text("the key is "), 10);
+            let mut late = None;
+            let parts = split(SECRET, &cuts);
+            for (i, p) in parts.iter().enumerate() {
+                b.push_item(&a, &text(p), 10 + i as u64);
+                if i == parts.len() / 2 {
+                    late = Some(Follower::of(&b, &a));
+                }
+            }
+            b.push_item(&a, &text(" and that is all."), 100);
+            b.set_working(&a, false);
+            let mut late = late.unwrap();
+            for f in [&mut first, &mut late] {
+                assert_eq!(leak(f, SECRET), None, "split at {cuts:?}");
+                assert!(f.words().ends_with(" and that is all."), "{:?}", f.words());
+            }
+            assert!(first.words().contains(REDACTED_MARK));
+        }
+    }
+
+    const REDACTED_MARK: &str = "<redacted>";
+
+    /// The words go before a tool call, at the turn's end and at the hold's deadline while a value is half said: what was sent of it
+    /// is replaced at that end (an edge), and the rest when it comes; and ids never go back on the stream.
+    #[test]
+    fn a_value_cut_by_a_tool_call_a_turns_end_or_the_deadline_never_reaches_a_follower() {
+        for (how, k) in [
+            ("tool", 9),
+            ("turn", 12),
+            ("deadline", 20),
+            ("tool", 4),
+            ("deadline", 5),
+        ] {
+            let (_d, _s, b) = board("forced", &[SECRET], Limits::default());
+            let a = AgentId::new("a");
+            b.set_working(&a, true);
+            let mut f = Follower::of(&b, &a);
+            b.push_item(&a, &text(&format!("say {}", &SECRET[..k])), 1_000);
+            match how {
+                "tool" => b.push_item(
+                    &a,
+                    &ChatItem::Tool(ToolItem {
+                        call_id: "c1".into(),
+                        tool: Some("sh".into()),
+                        status: "in_progress".into(),
+                        ..ToolItem::default()
+                    }),
+                    1_001,
+                ),
+                "turn" => {
+                    b.set_working(&a, false);
+                    b.set_working(&a, true);
+                }
+                _ => {
+                    b.flush_due(1_000 + DEADLINE - 1);
+                    assert_eq!(
+                        f.words(),
+                        "",
+                        "{how} {k}: the end is part of the value: it waits"
+                    );
+                    b.flush_due(1_000 + DEADLINE);
+                }
+            }
+            // Whatever made them go, the words are out now.
+            assert!(f.words().starts_with("say "), "{how} {k}: {:?}", f.words());
+            b.push_item(&a, &text(&format!("{} done", &SECRET[k..])), 2_000);
+            b.set_working(&a, false);
+            assert_eq!(leak(&mut f, SECRET), None, "{how} at {k}");
+            assert!(f.words().ends_with(" done"));
+            let mut high = 0;
+            let mut seen = BTreeSet::new();
+            for e in f.drain() {
+                assert!(
+                    e.entry_id > high || seen.contains(&e.entry_id),
+                    "{how}: id {} after {high}",
+                    e.entry_id
+                );
+                high = high.max(e.entry_id);
+                seen.insert(e.entry_id);
+            }
+        }
+    }
+
+    /// A text over 16 KiB that the node cuts inside a value, the next piece going on with it; then a stop, a take-up by a new node
+    /// in the middle of another value, and a follower of the new node.
+    #[test]
+    fn a_value_on_a_16_kib_cut_or_across_a_take_up_never_reaches_a_follower() {
+        let (dir, store, b) = board("cut", &[SECRET], Limits::default());
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        let mut f = Follower::of(&b, &a);
+        let pre = "w".repeat(MAX_ENTRY_BYTES - 10);
+        b.push_item(&a, &text(&format!("{pre}{}", &SECRET[..25])), 1);
+        b.push_item(&a, &text(&format!("{} next ", &SECRET[25..])), 2);
+        b.push_item(&a, &text(&format!("then {}", &SECRET[..14])), 3);
+        assert_eq!(leak(&mut f, SECRET), None);
+        // The node stops (its flush writes all), and the next one takes the agent up and hears the rest.
+        for batch in b.take_unsaved() {
+            store.write(&batch).unwrap();
+        }
+        drop(b);
+        let b = ChatBoard::saving(Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        )));
+        b.seed_from_disk(&a, 10);
+        b.set_working(&a, true);
+        let mut g = Follower::of(&b, &a);
+        b.push_item(&a, &text(&format!("{} end", &SECRET[14..])), 11);
+        b.set_working(&a, false);
+        assert_eq!(leak(&mut g, SECRET), None);
+        assert!(g.words().ends_with(" end"));
+        let mut late = Follower::of(&b, &a);
+        assert_eq!(leak(&mut late, SECRET), None);
+    }
+
+    /// Everything else a follower is sent is redacted too: a tool call's output, arguments and text in every version, a notice's
+    /// parameters, a plan step, a permission label and the person's own prompt; also with no history kept on disk.
+    #[test]
+    fn every_entry_a_follower_is_sent_is_redacted_also_with_no_history_kept() {
+        for limits in [
+            Limits::default(),
+            Limits {
+                max_bytes: 0,
+                days: 0,
+            },
+        ] {
+            let (_d, _s, b) = board("fields", &[SECRET], limits);
+            let a = AgentId::new("a");
+            let mut f = Follower::of(&b, &a);
+            for (i, out) in [&SECRET[..10], &SECRET[..30], SECRET].iter().enumerate() {
+                b.push_item(
+                    &a,
+                    &ChatItem::Tool(ToolItem {
+                        call_id: "c1".into(),
+                        tool: Some("sh".into()),
+                        // Arguments that grow as the call is streamed: a version not final ends where it was cut.
+                        arguments_json: Some(if i == 2 {
+                            format!("{{\"cmd\":\"echo {out}\"}}")
+                        } else {
+                            format!("{{\"cmd\":\"echo {out}")
+                        }),
+                        status: if i == 2 { "completed" } else { "in_progress" }.into(),
+                        output: Some(format!("printed {out}")),
+                        ..ToolItem::default()
+                    }),
+                    1_000 * i as u64,
+                );
+            }
+            b.push_item(
+                &a,
+                &ChatItem::Notice {
+                    code: "adapter.turn_failed".into(),
+                    params: vec![("stderr_tail".into(), format!("…{}", &SECRET[6..]))],
+                },
+                5_000,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::PlanSteps(vec![PlanItem {
+                    text: format!("use {SECRET}"),
+                    ..PlanItem::default()
+                }]),
+                5_001,
+            );
+            b.push_permission(&a, "ap-1", &format!("run with {SECRET}"), 5_002);
+            b.push_user(&a, format!("my key is {SECRET}"), 5_003);
+            b.flush_due(1_000_000);
+            assert_eq!(leak(&mut f, SECRET), None, "{limits:?}");
+            let mut late = Follower::of(&b, &a);
+            assert_eq!(leak(&mut late, SECRET), None, "{limits:?}");
+            assert!(b
+                .snapshot(&a)
+                .iter()
+                .all(|e| fields(e).iter().all(|x| !x.contains(&SECRET[..12]))));
+        }
+    }
+
+    /// ADR-0022: with no secret value held, every word reaches a follower at once, as it is; with one held, words whose end cannot
+    /// be part of it are not delayed either, and only an end that is part of it (4 bytes or more) waits.
+    #[test]
+    fn words_reach_a_follower_at_once_unless_their_end_is_part_of_a_secret() {
+        let (_d, _s, none) = board("none", &[], Limits::default());
+        let memory = ChatBoard::new();
+        let (_d2, _s2, held) = board("held", &[SECRET], Limits::default());
+        let a = AgentId::new("a");
+        for b in [&none, &memory, &held] {
+            b.set_working(&a, true);
+            let (_, sub) = b.follow(&a);
+            for w in [
+                "Let me look ",
+                "at the file",
+                ". It says sk",
+                "-L and more.",
+            ] {
+                b.push_item(&a, &text(w), 1);
+                let e = sub.try_recv().expect("sent at once");
+                assert_eq!(e.text, w);
+            }
+        }
+        held.set_working(&a, true);
+        let (_, sub) = held.follow(&a);
+        held.push_item(&a, &text("the key: sk-LIVE"), 1);
+        assert!(
+            sub.try_recv().is_err(),
+            "an end that is part of the value waits"
+        );
+        held.push_item(&a, &text(" was wrong"), 2);
+        assert_eq!(sub.try_recv().unwrap().text, "the key: sk-LIVE");
+        assert_eq!(sub.try_recv().unwrap().text, " was wrong");
+    }
+
+    /// Letters only a value holds (upper case), never the words around it (lower case).
+    fn value(seed: u64, len: usize) -> String {
+        let mut x = seed | 1;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from(b'A' + (x % 26) as u8)
+            })
+            .collect()
+    }
+
+    /// A value of 2 KiB streamed a byte at a time fills the ring (500 entries) before it is whole: the words held at its front go,
+    /// their end an edge, so the ring stays bounded, and no piece of the value reaches a follower.
+    #[test]
+    fn words_held_at_the_rings_bound_go_with_the_value_replaced() {
+        let v = value(7, 2048);
+        let (_d, _s, b) = board("ring", &[&v], Limits::default());
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        let mut f = Follower::of(&b, &a);
+        b.push_item(&a, &text("start "), 1);
+        for c in v.chars() {
+            b.push_item(&a, &text(&c.to_string()), 1);
+            f.drain();
+        }
+        assert!(f.got.len() > 400, "the words at the ring's front went");
+        assert!(b.snapshot(&a).len() <= MAX_ENTRIES);
+        b.push_item(&a, &text(" end"), 2);
+        b.set_working(&a, false);
+        assert_eq!(leak(&mut f, &v), None);
+        assert!(f.words().starts_with("start "));
+        assert!(f.words().ends_with(" end"));
+        let late = b.snapshot(&a);
+        assert!(late.len() <= MAX_ENTRIES);
+        assert!(late
+            .iter()
+            .all(|e| !e.text.chars().any(|c| c.is_ascii_uppercase())));
+    }
+
+    /// A value over 16 KiB (one the node passes from its environment) has no automaton: the words within its length of the stream's
+    /// end wait, so it is whole before any of it goes, and it is replaced whole.
+    #[test]
+    fn a_value_over_16_kib_waits_until_it_is_whole() {
+        let name = format!("AGORA_TEST_LIVE_LONG_{}", std::process::id());
+        let v = value(11, 20_000);
+        std::env::set_var(&name, &v);
+        let dir = std::env::temp_dir().join(format!("agora-live-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store =
+            Arc::new(Store::new(&dir, Limits::default(), None).with_env_secrets([name.as_str()]));
+        std::env::remove_var(&name);
+        let b = ChatBoard::saving(store);
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        let mut f = Follower::of(&b, &a);
+        b.push_item(&a, &text("the key "), 1);
+        for chunk in v.as_bytes().chunks(4096) {
+            b.push_item(&a, &text(std::str::from_utf8(chunk).unwrap()), 1);
+        }
+        b.push_item(&a, &text(" ok"), 1);
+        assert_eq!(
+            f.words(),
+            "the key ",
+            "within the value's length of the end: waits"
+        );
+        b.set_working(&a, false);
+        assert!(f.words().ends_with(" ok"));
+        assert!(f
+            .got
+            .iter()
+            .all(|e| !e.text.chars().any(|c| c.is_ascii_uppercase())));
+    }
+
+    /// Audit of #1157: words shown before a value was added to the store (with another value held, or with none) are redacted again
+    /// in every later snapshot, also when the value lies across two of them; only masks are added.
+    #[test]
+    fn a_value_added_after_words_were_shown_is_out_of_every_later_snapshot() {
+        let added = "ADDED-VALUE-0123456789-XYZ";
+        for held in [vec![SECRET], vec![]] {
+            let (dir, store, b) = board("added", &held, Limits::default());
+            let a = AgentId::new("a");
+            b.push_item(&a, &text(&format!("first {added} then ")), 1);
+            b.push_item(&a, &text(&format!("split {}", &added[..10])), 2);
+            b.push_item(&a, &text(&format!("{} end", &added[10..])), 3);
+            assert!(
+                b.snapshot(&a).iter().any(|e| e.text.contains(added)),
+                "shown before it was a secret"
+            );
+            SecretStore::in_data(&dir)
+                .set("ADDED", &Secret::new(added).unwrap())
+                .unwrap();
+            // The node's tick (or the writer) reads the values again.
+            store.refresh_if_older(std::time::Duration::ZERO);
+            let mut late = Follower::of(&b, &a);
+            assert_eq!(leak(&mut late, added), None, "{held:?}");
+            assert!(late.words().starts_with("first <redacted> then "));
+            assert!(b.snapshot(&a).iter().all(|e| !e.text.contains(&added[..8])));
+        }
+    }
+
+    /// Audit of #1157, round 2: a value whose start left the ring before the value was added to the store: the ring's first word
+    /// holds only its tail, and a later snapshot still masks it (the start of that word is an edge).
+    #[test]
+    fn a_value_whose_start_left_the_ring_is_masked_once_it_is_added() {
+        let added = "ADDED-KEY-0123456789-9876";
+        let (dir, store, b) = board("evicted", &[SECRET], Limits::default());
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("the key is {}", &added[..12])), 1);
+        for _ in 0..MAX_ENTRIES {
+            b.output_dropped(&a, 7, 1);
+        }
+        b.push_item(&a, &text(&format!("{} ok", &added[12..])), 2);
+        assert!(
+            b.snapshot(&a)
+                .iter()
+                .all(|e| !e.text.starts_with("the key")),
+            "the start left the ring"
+        );
+        SecretStore::in_data(&dir)
+            .set("ADDED", &Secret::new(added).unwrap())
+            .unwrap();
+        store.refresh_if_older(std::time::Duration::ZERO);
+        let mut late = Follower::of(&b, &a);
+        assert_eq!(leak(&mut late, added), None);
+        assert_eq!(late.words(), "<redacted> ok");
+    }
+
+    /// A follower's snapshot never holds the words still held, and gets them on its stream once they go.
+    #[test]
+    fn a_snapshot_leaves_out_the_words_held_and_the_stream_brings_them() {
+        let (_d, _s, b) = board("snap", &[SECRET], Limits::default());
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        b.push_item(&a, &text("before "), 1);
+        b.push_item(&a, &text(&SECRET[..20]), 2);
+        let (snap, sub) = b.follow(&a);
+        assert_eq!(
+            snap.iter().map(|e| e.text.as_str()).collect::<String>(),
+            "before "
+        );
+        b.set_working(&a, false);
+        let e = sub.try_recv().unwrap();
+        assert_eq!(e.text, REDACTED_MARK);
+        assert!(b
+            .snapshot(&a)
+            .iter()
+            .all(|e| !e.text.contains(&SECRET[..8])));
     }
 }

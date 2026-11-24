@@ -482,6 +482,23 @@ entries or 256 KiB of each chat agent's conversation in memory (one entry at mos
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
 no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
+What the stream carries is redacted (ADR-0089 Amendment A, #1147): the node replaces the values of the secrets it holds (8 bytes or
+more: its secret store and the environment variables its policy passes to agents) by `<redacted>` in every entry and every version
+it sends and in the snapshot, by the same rule and code as the file below. A field is redacted before it is first sent; never an
+unredacted version first. What it does not cover is listed in the threat model (T61): a value's first 3 bytes or fewer can go before
+the next words show the value goes on, and text sent before a value was added to the store stays as it was sent on streams already
+open (a later snapshot replaces it). The agent's words (text and thinking)
+are one stream: a value split between two entries is found whole, and words whose end is a part of a value (4 bytes or more) wait
+until the next words show it is not one, until any other entry of the agent (so ids still increase on the stream), until its turn
+ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
+part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
+brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: on an approval
+card, before it is queued (so the card and the signature over it hold the same words), an adapter's action, detail and always-option
+label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a task's title, a
+handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids are kept; paths in
+other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted (T61).
+
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own
 secret values of 8 bytes or more replaced: whole anywhere, also when an agent's streamed text splits one between pieces, and as a piece of 4 bytes or more at a place the node cut a text; ids are never changed; see the threat model, T61). A node that takes an agent up from the holder, or resumes it (ADR-0060), fills the ring from the file's end
@@ -496,8 +513,8 @@ node shows that replay only when it holds none of the conversation, so every tur
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
 changes neither. A node that stops cleanly writes everything first, the words it held back included, with a secret value's start at
 their end masked (ADR-0104 O2: `agora node` on `SIGTERM`, Unix). A node killed loses at most the last batch (up to a second), and while
-it holds a secret value the agent's newest words it held back in a turn: those entries were shown live and are not in the
-file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
+it holds a secret value the agent's newest words it held back in a turn: those entries may have been shown live (redacted) and are
+not in the file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy
 `chat.history_max_bytes = N` (per agent; default and at most 32 MiB, 0 writes nothing) and `chat.history_days = N` (default and
@@ -1365,3 +1382,30 @@ node sets. The window's button and the terminal client's key come with the next 
   agent's remembered option when the agent offers no single one; under `allow` that residual is kept (named in ADR-0101), under `forbid`
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
+
+## Durable cross-node task handoffs (ADR-0109)
+
+The first slice reserves `mesh.task_handoff.v1` on the hub–node link and adds generation 1 wire types. The hub and node will
+advertise the capability once their queue and durable inbox paths are implemented. The hub must have negotiated the capability
+with the receiver before sending the new command. An older peer connects normally and uses the current best-effort handoff path.
+Until a node advertises the capability, it answers `DeliverTaskHandoff` with `protocol.capability_missing`
+(`capability = mesh.task_handoff.v1`), on the hub link before any grant or signed-command check, and on its local socket.
+
+- **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
+  A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
+  value, including when the local agent id is reused. Older peers ignore this field.
+- **Delivery.** `DeliverTaskHandoff` (`CommandRequest` arm 110) is a hub-to-node command on the command stream. It names the
+  `delivery_id` (1), `receiver_run_id` (2), node-local `agent_id` (3), `project_id` (4), `task_id` (5), `summary` (6), `refs` (7),
+  `valid_until_ms` (8), `sender_node` (9) and `sender_agent_id` (10). Both opaque identities are 16 bytes. Retries keep the delivery
+  id, run id, payload and deadline. The node checks the addressed run and project before accepting a new entry. Summary and refs
+  remain untrusted data. A window cannot issue this command.
+- **Receipt.** `TaskHandoffReceipt` (`CommandOk` arm 32) echoes the `delivery_id` (1) and `receiver_run_id` (2). It acknowledges
+  one durable inbox entry. A retry with the same delivery id gets the stored receipt, even if the inbox entry has been read.
+- **Bounds for the queue and inbox slices.** A 16 KiB UTF-8 summary and at most 20 refs totalling 16 KiB use the existing mesh
+  limits. The encoded command fits the negotiated frame limit (1 MiB by default). Per hub, keep at most 1,024 pending or unresolved
+  deliveries and 32 MiB of encoded delivery data. Per node, keep at most 1,024 durable handoff records and 32 MiB of encoded inbox
+  entries and receipts. Read entries can release their payload bytes while retaining their receipt. The hub sets `valid_until_ms`
+  to 24 hours after creating the delivery, in Unix milliseconds, and stops retries at that deadline. The node retains receipts
+  through the deadline and accepts a new entry only before it. Without a receipt, expiry leaves the outcome unresolved.
+- **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
+  fixture keeps its original bytes.

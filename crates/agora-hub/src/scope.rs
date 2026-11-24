@@ -563,6 +563,7 @@ mod tests {
         ev(
             node,
             Body::AgentStarted(v1::AgentStarted {
+                run_id: Vec::new(),
                 agent_id: id.into(),
                 project_id: project.into(),
                 node_id: node.into(),
