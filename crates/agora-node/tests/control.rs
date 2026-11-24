@@ -194,6 +194,16 @@ fn errors_travel_as_codes_with_params() {
         info.params["capability"].value,
         Some(v1::param_value::Value::Str("worktree.remove".into()))
     );
+    // ADR-0109: a node that does not take durable handoffs says so to an old or local caller.
+    let info = c
+        .call(Cmd::DeliverTaskHandoff(v1::DeliverTaskHandoff::default()))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(info.code, "protocol.capability_missing");
+    assert_eq!(
+        info.params["capability"].value,
+        Some(v1::param_value::Value::Str("mesh.task_handoff.v1".into()))
+    );
 }
 
 #[test]
@@ -2458,4 +2468,73 @@ fn the_registry_policy_line_switches_registry_kinds_off_and_leaves_hand_made_one
         drop(n);
         let _ = std::fs::remove_dir_all(&e.dir);
     }
+}
+
+/// #1147 (audit of #1157): a value the node holds, in an agent's tool title and arguments, never reaches the hub's event for the
+/// approval card (nor the queue the window's card and the always signature read, nor the conversation's permission entry).
+#[test]
+fn a_secret_in_an_approvals_action_and_detail_never_reaches_the_hub_event() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let value = "SK-APPROVAL-0123456789-ABCDEFGHIJ";
+    let e = env("approval-secret");
+    agora_node::credentials::SecretStore::in_data(&e.dir.join("data"))
+        .set(
+            "TOKEN",
+            &agora_node::credentials::Secret::new(value).unwrap(),
+        )
+        .unwrap();
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    // The title holds the whole value; the arguments hold it whole and, cut where the bridge cut them, its first 20 bytes.
+    let detail = format!("{{\"cmd\":\"curl -H {value}\",\"tail\":\"{}…", &value[..20]);
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: format!("ask:login with {value}|{detail}"),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let a = loop {
+        let found = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::ApprovalRequested(a)) => Some(a),
+                _ => None,
+            });
+        if let Some(a) = found {
+            break a;
+        }
+        assert!(Instant::now() < end, "no approval request announced");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let pieces: Vec<&str> = (0..=value.len() - 4).map(|i| &value[i..i + 4]).collect();
+    let leaks = |t: &str| pieces.iter().filter(|p| t.contains(**p)).count();
+    assert_eq!(leaks(&a.action), 0, "{a:?}");
+    assert_eq!(leaks(&a.detail), 0, "{a:?}");
+    assert!(a.action.starts_with("login with "), "{a:?}");
+    assert!(a.detail.starts_with("{\"cmd\":\"curl -H "), "{a:?}");
+    let queued = n.approvals.waiting();
+    assert!(queued
+        .iter()
+        .all(|p| leaks(&p.action) == 0 && leaks(&p.detail) == 0));
+    let entries = n
+        .chat
+        .snapshot(&agora_core::AgentId::new(s.agent_id.clone()));
+    // The agent's entries (the permission entry); the person's own prompt is theirs, typed through the window.
+    assert!(
+        entries
+            .iter()
+            .filter(|e| e.role == v1::ChatRole::Agent as i32)
+            .all(|e| leaks(&e.text) == 0),
+        "{entries:#?}"
+    );
 }
