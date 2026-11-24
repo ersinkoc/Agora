@@ -521,7 +521,8 @@ impl TerminalHandle {
 
     /// Subscribe to live output. Returns the current screen and a subscription that delivers everything
     /// the process writes after exactly that screen: registration and snapshot happen under one lock, so
-    /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order.
+    /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order. A subscriber of a terminal
+    /// whose program already ended finds [`Output::Exited`] waiting first (F1481).
     pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
         let (_, snapshot, sub) = self.subscribe_with_history(0);
         (snapshot, sub)
@@ -604,7 +605,8 @@ impl TerminalWatch {
     /// [`TerminalHandle::subscribe`] that also returns the kind 4 frames putting the newest `lines` scrollback lines into the
     /// window's own scrollback (ADR-0100 decision 2), sent before the snapshot: none for 0, while the program is on the alternate
     /// screen, or when nothing is kept. History, screen and registration are captured under one lock, so the history ends where the
-    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released.
+    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released. When the program
+    /// already ended, [`Output::Exited`] is queued on the new subscription first (F1481).
     pub fn subscribe_with_history(
         &self,
         lines: usize,
