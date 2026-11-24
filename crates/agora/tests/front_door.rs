@@ -810,3 +810,246 @@ fn a_linked_logs_folder_is_refused_by_the_front_door() {
     assert!(lock_pid(&home, "node").is_none_or(|p| !alive(p)));
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// ADR-0104: the turn `agent` said `word` in, as written in its node's transcript file (the agent's own entry, not the person's).
+fn written_answer(home: &Path, agent: &str, word: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(home.join(format!("data/transcripts/{agent}.jsonl")))
+    else {
+        return false;
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .any(|v| {
+            v["entry"]["text"] == word
+                && v["entry"]["role"] == agora_protocol::v1::ChatRole::Agent as i32
+        })
+}
+
+/// The usage a stopped node logged for `agent`: (input, output) summed over its `AgentUsageReported` events.
+fn logged_usage(home: &Path, agent: &str) -> (u64, u64) {
+    let events =
+        agora_node::daemon::EventSink::open_with_cap(&home.join("data/events"), "local", 1 << 30)
+            .expect("the node's event log");
+    events
+        .events_after(0)
+        .iter()
+        .filter_map(|e| match &e.body {
+            Some(agora_protocol::v1::event::Body::AgentUsageReported(u)) if u.agent_id == agent => {
+                Some((u.input_tokens, u.output_tokens))
+            }
+            _ => None,
+        })
+        .fold((0, 0), |(i, o), (a, b)| (i + a, o + b))
+}
+
+/// ADR-0104 O2: `agora down` stops the node cleanly. Its structured agent, which the terminal holder runs, keeps running, and what the
+/// node still held of the turn it just finished is on disk after the stop: the answer in the conversation's file and the usage the
+/// node gathers for 5 s before it logs it (lost on every planned stop before, which ended the node like a kill). Then the same with a
+/// holder that does not answer (stopped by the test): the node still stops within its deadline and `agora down` succeeds.
+#[test]
+fn agora_down_stops_the_node_cleanly_and_its_kept_agent_loses_nothing() {
+    if !cfg!(unix) || !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("o2");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    std::fs::create_dir_all(home.join("manifests")).unwrap();
+    std::fs::write(
+        home.join("manifests/k.toml"),
+        format!(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{}, \"--adapter\"]\n",
+            toml_string(&fake_agent().to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    // However the test ends, the agent the holder keeps is stopped too (`Down` stops only the node).
+    struct DownAgents(PathBuf);
+    impl Drop for DownAgents {
+        fn drop(&mut self) {
+            let _ = agora(&self.0, &["down", "--agents"]).output();
+        }
+    }
+    let _down = DownAgents(home.clone());
+    let up = || {
+        let (code, out, err) = run(&home, &[]);
+        assert_eq!(code, 0, "{out}{err}");
+        wait_for("the node", Duration::from_secs(30), || {
+            run(&home, &["agent", "list"]).0 == 0
+        });
+    };
+    // Stops the node with `agora down`, which must succeed within its own wait, and say the agent keeps running.
+    let down = || {
+        let stopping = Instant::now();
+        let (code, out, err) = run(&home, &["down"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("1 agent keeps running"), "{out}");
+        assert!(stopping.elapsed() < Duration::from_secs(10));
+        assert!(!home.join("run/node.lock").exists());
+    };
+    // A turn, waited for until its answer is in the transcript file (the writer runs once a second); its usage is still being gathered.
+    let turn = |id: &str, word: &str| {
+        let (code, out, err) = run(&home, &["agent", "prompt", id, word]);
+        assert_eq!(code, 0, "{out}{err}");
+        wait_for("the answer on disk", Duration::from_secs(20), || {
+            written_answer(&home, id, word)
+        });
+    };
+
+    up();
+    let (code, out, err) = run(
+        &home,
+        &["agent", "start", "k", "--cwd", &repo.to_string_lossy()],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let id = out
+        .split_whitespace()
+        .find(|w| w.starts_with("agent-"))
+        .expect("an agent id")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+        .to_string();
+    turn(&id, "first");
+    down();
+    assert_eq!(
+        logged_usage(&home, &id),
+        (10, 5),
+        "the usage the node was still gathering when it stopped"
+    );
+
+    // The next node takes the agent up; this time its holder does not answer when the node stops.
+    up();
+    turn(&id, "second");
+    let holder: u32 = std::fs::read_to_string(home.join("run/hold.pid"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pause = |signal: &str| {
+        assert!(Command::new("kill")
+            .args([signal, &holder.to_string()])
+            .status()
+            .unwrap()
+            .success());
+    };
+    pause("-STOP");
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-CONT", &self.0.to_string()])
+                .status();
+        }
+    }
+    let resume = Resume(holder);
+    std::thread::sleep(Duration::from_millis(300));
+    down();
+    drop(resume);
+    assert_eq!(logged_usage(&home, &id), (20, 11));
+    let (code, out, err) = run(&home, &["down", "--agents"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Sends `signal` (a `kill` name such as `TERM`) to a process this test started.
+#[cfg(unix)]
+fn signal(pid: u32, signal: &str) {
+    assert!(Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// Waits up to `limit` for `child` to end; how it ended and how long that took.
+#[cfg(unix)]
+fn ended_within(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<(std::process::ExitStatus, Duration)> {
+    let began = Instant::now();
+    while began.elapsed() < limit {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some((status, began.elapsed()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// ADR-0104 O2 (review of #1108): a stop request while the node is still starting (here it waits for a link folder it cannot read
+/// yet, which it tries again for 15 s) ends it at once, as before the clean stop: there is nothing to keep yet.
+#[cfg(unix)]
+#[test]
+fn a_node_stopped_while_it_starts_ends_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp("o2-start");
+    let link = home.join("link");
+    std::fs::create_dir_all(&link).unwrap();
+    std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&link).is_ok() {
+        // A user who can read it anyway (root): there is no slow start to stop here.
+        let _ = std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700));
+        return;
+    }
+    let mut node = agora(&home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(node.try_wait().unwrap().is_none(), "the node did not wait");
+    signal(node.id(), "TERM");
+    let ended = ended_within(&mut node, Duration::from_secs(10));
+    let _ = node.kill();
+    let _ = std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700));
+    let (status, took) = ended.expect("the node did not end");
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    assert!(took < Duration::from_secs(2), "it took {took:?}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// ADR-0104 O2 (review of #1108): a stop request the node was started ignoring (`nohup`, a background job) stays ignored, as before
+/// the clean stop; the others still stop it cleanly, and it ends as that signal ends it.
+#[cfg(unix)]
+#[test]
+fn a_node_started_ignoring_hangups_keeps_ignoring_them() {
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp("o2-nohup");
+    let mut node = Command::new("sh")
+        .args(["-c", "trap '' HUP; exec \"$0\" node run", AGORA])
+        .env("AGORA_HOME", &home)
+        .env("AGORA_LANG", "en")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the node's socket", Duration::from_secs(60), || {
+        home.join("node.sock").exists()
+    });
+    signal(node.id(), "HUP");
+    std::thread::sleep(Duration::from_secs(1));
+    let still = node.try_wait().unwrap();
+    if still.is_none() {
+        signal(node.id(), "TERM");
+    }
+    let ended = ended_within(&mut node, Duration::from_secs(10));
+    let _ = node.kill();
+    assert!(still.is_none(), "a hangup it ignored stopped it: {still:?}");
+    let (status, _) = ended.expect("the node did not end");
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    let _ = std::fs::remove_dir_all(home);
+}

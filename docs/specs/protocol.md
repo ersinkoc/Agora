@@ -494,8 +494,9 @@ What the file holds is held to the shapes and bounds of live entries before it i
 replays its conversation (ACP `session/load`, passed on by `agora acp-bridge` as chat before it answers the session's start): the
 node shows that replay only when it holds none of the conversation, so every turn appears once. A fresh start ("Start again") that went through begins a new file (the earlier
 one is kept as `<agent id>.earlier.jsonl`, replacing an older one) and numbers on after the earlier session's ids; a refused resume
-changes neither. A node killed loses at most the last batch (up to a second), and while it holds a secret value the agent's newest
-words it held back in a turn: those entries were shown live and are not in the
+changes neither. A node that stops cleanly writes everything first, the words it held back included, with a secret value's start at
+their end masked (ADR-0104 O2: `agora node` on `SIGTERM`, Unix). A node killed loses at most the last batch (up to a second), and while
+it holds a secret value the agent's newest words it held back in a turn: those entries were shown live and are not in the
 file, and the next node may give their ids again; every client then holds the new node's snapshot, since a relay closes when its node
 goes and a client subscribes again. When the history cannot be written (a full disk), the agent is not touched, its entries stay in
 memory, and its conversation gets the notice `chat.history_not_saved` once (no parameters; only the node makes it). The node policy

@@ -2247,13 +2247,28 @@ pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
     }
 }
 
-/// For a supervisor: from now on `SIGTERM`, `SIGINT` and `SIGHUP` do not end this process; they set [`stop_requested`] and are
-/// passed on as `SIGTERM` to the process named by [`forward_stop_to`]. Windows has no such request for a detached process (`agora
+/// For a supervisor, and for `agora node`, which stops cleanly on them (ADR-0104 O2): from now on `SIGTERM`, `SIGINT` and `SIGHUP` do
+/// not end this process; they set [`stop_requested`] and are passed on as `SIGTERM` to the process named by [`forward_stop_to`] (none
+/// unless it is set). Windows has no such request for a detached process (`agora
 /// down` ends it with `TerminateProcess`, and the job of [`spawn_bound`] takes the child with it): there this does nothing.
 pub fn catch_stop_requests() -> io::Result<()> {
     #[cfg(unix)]
     {
         unix::catch_stop_requests()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// [`catch_stop_requests`] for a process that stops cleanly on the first request (ADR-0104 O2: `agora node`): a signal that was ignored
+/// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
+/// have without the catch. Windows: nothing, as [`catch_stop_requests`].
+pub fn catch_stop_requests_once() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::catch_stop_requests_once()
     }
     #[cfg(not(unix))]
     {
@@ -2267,6 +2282,25 @@ pub fn forward_stop_to(pid: Option<u32>) {
     unix::forward_stop_to(pid);
     #[cfg(not(unix))]
     let _ = pid;
+}
+
+/// Whether [`catch_stop_requests`] catches anything here: Unix only (Windows ends a detached process with `TerminateProcess`, which
+/// cannot be caught).
+pub const STOP_REQUESTS_CAUGHT: bool = cfg!(unix);
+
+/// Ends this process as the stop request caught by [`catch_stop_requests`] would have ended it without the catch (Unix: that signal,
+/// with its default action again; `SIGTERM` when none was caught), so whoever waits for it (a supervisor, a shell, a service manager)
+/// sees the same end as before. For a process that stopped cleanly after the request (ADR-0104 O2: `agora node`). Other threads are not
+/// waited for. Elsewhere: exit code 0.
+pub fn end_as_stopped() -> ! {
+    #[cfg(unix)]
+    {
+        unix::end_as_stopped()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::exit(0)
+    }
 }
 
 /// Whether a stop request was caught since [`catch_stop_requests`].

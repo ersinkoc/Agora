@@ -15,7 +15,8 @@
 //!   waits until a file `go.txt` appears in its folder (a test makes it once the node it wants gone is gone), then finishes the call
 //!   with only its status and output (`completed`, `done`), says `tool-done`, goes idle and writes `later.txt` (ADR-0104 C1).
 //! - `hold:TEXT`: goes working, says TEXT, and stays working until a file `go.txt` appears in its folder; then goes idle and writes
-//!   `later.txt` (review of #1103, round 3).
+//!   `later.txt` (review of #1103, round 3). `hold:TEXT|REST` says REST too once `go.txt` appears, before it goes idle (words that
+//!   go on across a node's stop, ADR-0104 O2).
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `mode:ID` (with `--modes`): switches itself to mode ID, as an agent may on its own (ACP `current_mode_update`), and reports its
 //!   options again with ID as the current mode.
@@ -25,6 +26,7 @@
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
 //!
+//! With `--turns` it declares `turns` (it reports its turns), so the node queues a prompt sent while one runs.
 //! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
 //! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
 //! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
@@ -111,6 +113,10 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
         match method {
             "initialize" => {
                 let mut caps = vec!["chat", "approvals", "usage", "cancel", "resume"];
+                // `--turns`: it reports its turns, so the node queues a prompt behind the turn that runs (ADR-0090).
+                if std::env::args().any(|a| a == "--turns") {
+                    caps.push("turns");
+                }
                 if modes {
                     caps.extend(["set_mode", "config"]);
                 }
@@ -246,16 +252,27 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     held if held.starts_with("hold:") => {
                         // Review of #1103, round 3: words said in a turn that stays open until the test makes `go.txt`.
                         state(out, &session, "WORKING")?;
+                        let (first, rest) = match held["hold:".len()..].split_once('|') {
+                            Some((first, rest)) => (first, Some(rest)),
+                            None => (&held["hold:".len()..], None),
+                        };
                         note(
                             out,
                             "chat/append",
-                            json!({"sessionId": session, "text": {"text": &held["hold:".len()..]}}),
+                            json!({"sessionId": session, "text": {"text": first}}),
                         )?;
                         let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
                         while !std::path::Path::new("go.txt").exists()
                             && std::time::Instant::now() < end
                         {
                             std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        if let Some(rest) = rest {
+                            note(
+                                out,
+                                "chat/append",
+                                json!({"sessionId": session, "text": {"text": rest}}),
+                            )?;
                         }
                         state(out, &session, "IDLE")?;
                         std::fs::write("later.txt", "done")?;

@@ -291,17 +291,33 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
   (`skips_permissions_now`) until the agent reports new ones. Its `AgentStarted` says `same_process` (ADR-0104 decision 2), so the hub and the
-  window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering when it stopped (up to 5 s) is lost.
+  window keep its tokens, model, context level and own cost (#930); usage the old node was still gathering (up to 5 s) is lost only when it was
+  killed: a clean stop logs it first (below).
   Its earlier conversation is shown again (ADR-0104 C1, #931): before the node reads anything new from the holder, it fills the agent's chat
   ring from the end of the transcript the old node wrote (`<data>/transcripts/<id>.jsonl`, ADR-0089), numbers on after the file's highest
   id, rebuilds the tool calls and the plan that change in place, shows a permission entry still pending there as cancelled (the request is
   asked again under a new id, below), and drops a prompt still queued there (its queue ended with the old node; one the old node sent in
   its last unwritten second is said dropped too). The transcript is
   written in batches at most a second apart (while the node holds a secret value, the agent's newest words in a turn wait for what
-  follows or the turn's end), so a
-  kill loses at most those: they were shown live, are not in the file,
-  and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines the old node read
+  follows or the turn's end), so a kill loses at most those (a clean stop writes them all first, its end masked as an edge, below):
+  they were shown live, are not in the file,
+  and their ids may be given again by the next node (each window holds the next node's snapshot by then). Chat lines a killed node had read
   from the holder (the holder counts them given) and had not yet recorded are lost too, as before.
+- **A clean stop (ADR-0104 O2, Unix):** `agora node` catches `SIGTERM`, `SIGINT` and `SIGHUP` (`agora down`, a service stop or restart, the
+  restart after an update, Ctrl-C), so a planned stop is no longer a kill. From then on control commands (local and the hub's) are refused
+  with `node.offline` and the supervision loop takes nothing more; each adapter the holder runs is let go (`Supervisor::let_go_held`: its
+  reader stops asking, hands over the lines it already had and ends). A call still waiting on one for its answer (a prompt, a queued
+  prompt being sent, a person's decision being delivered) was given: its line is written, it is answered `Detached`, and it is recorded
+  as sent or decided, never taken back, dropped or recorded as not delivered. The commands already running and the loop's last round are
+  waited for (at most 1 s, `LOOP_WAIT`), and what the adapters had read and the node had not recorded is recorded as the loop would
+  (states, options, config, commands, usage and chat; a waiting request is not, the next node asks it again from `seen`). Then the transcript's last batch, all the usage still being gathered and the ledger with the
+  kept session files are written, and the process ends as the signal would have ended it (so its supervisor sees the same end). No agent
+  is ended: the holder's run on, and the node's own are left as a killed node leaves them (ADR-0060); no other thread is waited for. The
+  readers are waited for at most 2 s (`DRAIN_WAIT`; a read of a holder that does not answer waits up to the link's frame time, 5 s) and
+  the whole stop at most 5 s (`NODE_STOP_DEADLINE`), after which the process ends anyway; both are under `agora down`'s 10 s wait and
+  systemd's `TimeoutStopSec=25`. A request before the node is up (still starting), and a second request, end the process at once, as
+  before; a signal the node was started ignoring (`nohup`, a background job) stays ignored. Windows ends the node with
+  `TerminateProcess` and has no clean stop.
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines are read once (`agora_adapters::host::replay`, which also gives the newest
   reports above; `pending_approvals` is its requests), which keeps an `approval/request` unless a later
@@ -315,11 +331,13 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 ### Limits, plainly
 - A request the old node had read, before it was killed and with fewer than 1 MiB of output after it, is rebuilt. A request more than 1 MiB of output back is not
   (the agent waits and the person can cancel the turn).
-- Lines in flight to a node that dies are lost (at most once). What the old node had *not yet turned into an event* when it was let go is lost with it,
-  except what is taken from `seen` (a waiting request, and the newest options, config and commands).
+- Lines in flight to a node that dies are lost (at most once). What a killed node had *not yet turned into an event* is lost with it, except what
+  is taken from `seen` (a waiting request, and the newest options, config and commands). A clean stop records it first (above), except what a
+  reader still waiting on a holder that does not answer is handed after the stop stopped waiting for it: the holder counts those lines given,
+  so they are lost as with a kill.
 - Mode, model, configuration and command lists come from the kept file and the newest report in `seen` (ADR-0104). A report the old node read and did
   not record, when 1 MiB of newer output then pushed it out of the holder, is not known until the adapter reports again. Chat, usage and state are
-  never taken from `seen` (they append, so reading them twice would show or count them twice): those the old node read and did not record are lost.
+  never taken from `seen` (they append, so reading them twice would show or count them twice): those a killed node read and did not record are lost.
 - "Kept" against "continued" in the window (ADR-0093 decision 4) is **not built**: the snapshot has no field that says it without a schema change (`still_running`
   says the process runs, not that it survived a node). Left for build-order step 4.
 - **Delivered is forgotten as new.** A line is marked given when the holder takes it for a reply, before the reply is written. A reply that then
@@ -332,7 +350,9 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   whatever the lengths of the lines (a flood of one-byte lines is tested).
 - **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
   collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
-  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. Only an end counts (the
+  child exited, or a signal killed it, by `siginfo_t.si_code`): a stopped agent (`SIGSTOP`, a debugger) is not ended. `waitid` with only
+  `WEXITED` reports no other state on Linux or macOS, so this is a defence, not a fix of an observed case. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
   `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
   counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only

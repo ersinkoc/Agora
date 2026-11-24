@@ -311,32 +311,37 @@ impl AdapterCall {
         self.epoch
     }
 
-    /// Makes the request and waits for the answer.
+    /// Makes the request and waits for the answer. A request whose answer the node will not read because it let the adapter go while
+    /// waiting (it is stopping, ADR-0104 O2: [`HostError::Detached`]) was given to the adapter and counts as made: the caller records
+    /// it as sent, as it would after an answer, and never as failed.
     pub fn run(self) -> Result<(), SupervisorError> {
         const WAIT: Duration = Duration::from_secs(10);
+        let given = |r: Result<(), HostError>| match r {
+            Err(HostError::Detached) => Ok(()),
+            other => other,
+        };
         let session = self.session.as_str();
         match &self.op {
-            CallOp::Prompt { text, from_mesh } => self
-                .caller
-                .prompt(session, text, *from_mesh, WAIT)
-                .map_err(|e| SupervisorError::Spawn(e.to_string())),
-            CallOp::Cancel => self.caller.cancel(session, WAIT).map_err(adapter_error),
-            CallOp::SetConfig { id, value } => self
-                .caller
-                .set_config(session, id, value, WAIT)
-                .map_err(adapter_error),
-            CallOp::SetOption { kind, value } => self
-                .caller
-                .set_option(session, *kind, value, WAIT)
-                .map_err(adapter_error),
+            CallOp::Prompt { text, from_mesh } => {
+                given(self.caller.prompt(session, text, *from_mesh, WAIT))
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))
+            }
+            CallOp::Cancel => given(self.caller.cancel(session, WAIT)).map_err(adapter_error),
+            CallOp::SetConfig { id, value } => {
+                given(self.caller.set_config(session, id, value, WAIT)).map_err(adapter_error)
+            }
+            CallOp::SetOption { kind, value } => {
+                given(self.caller.set_option(session, *kind, value, WAIT)).map_err(adapter_error)
+            }
             CallOp::Resolve {
                 approval,
                 approved,
                 scope,
-            } => self
-                .caller
-                .resolve_approval_scoped(session, approval, *approved, *scope, WAIT)
-                .map_err(|e| SupervisorError::Spawn(e.to_string())),
+            } => given(
+                self.caller
+                    .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
+            )
+            .map_err(|e| SupervisorError::Spawn(e.to_string())),
         }
     }
 }
@@ -1641,6 +1646,14 @@ impl Supervisor {
         self.abort_hook = Some(hook);
     }
 
+    /// Lets go of the launch and abort hooks, for a node that has stopped: they hold the node's mesh, which holds what holds this
+    /// supervisor, so in a process that goes on (a test, an embedding) the mesh, and the agents' endpoints it locks, would never be
+    /// let go otherwise.
+    pub fn clear_hooks(&mut self) {
+        self.hook = None;
+        self.abort_hook = None;
+    }
+
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
     fn abandon(&self, id: &AgentId, worktree: git::StartWorktree) {
         if let Some(h) = &self.abort_hook {
@@ -2309,13 +2322,14 @@ impl Supervisor {
     }
 
     /// Drains what adapters said since the last call: states are applied (a report always wins over anything
-    /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`.
-    fn poll_adapters(&mut self, now: Instant, events: &mut Vec<SupervisorEvent>) {
+    /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`. `letting_go` ([`Self::let_go_held`]): only
+    /// the adapters the holder runs, with no restart and no queued prompt sent.
+    fn poll_adapters(&mut self, now: Instant, events: &mut Vec<SupervisorEvent>, letting_go: bool) {
         let policy = self.cfg.restart;
         let due: Vec<AgentId> = self
             .adapters
             .iter()
-            .filter(|(_, e)| e.restart_at.is_some_and(|t| now >= t))
+            .filter(|(_, e)| !letting_go && e.restart_at.is_some_and(|t| now >= t))
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
@@ -2335,7 +2349,7 @@ impl Supervisor {
                         tag,
                         sent: was_sent,
                     });
-                    if let Some(next) = next {
+                    if let Some(next) = next.filter(|_| !letting_go) {
                         begin_send(e, &id, next, &sent, events);
                     }
                 }
@@ -2347,8 +2361,11 @@ impl Supervisor {
             }
         }
         for (id, e) in &mut self.adapters {
+            if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
+                continue;
+            }
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
-            if let Some(next) = e.rich.expire(now) {
+            if let Some(next) = e.rich.expire(now).filter(|_| !letting_go) {
                 begin_send(e, id, next, &sent, events);
             }
             // #933: an adapter whose output ended keeps its launch's Git file until its process is collected (a look that never waits;
@@ -2392,7 +2409,7 @@ impl Supervisor {
                         // ADR-0090: an adapter that reports its turns (`turns`) tells when one is open; the next queued prompt goes
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
-                            if let Some(next) = e.rich.observe(state, now) {
+                            if let Some(next) = e.rich.observe(state, now).filter(|_| !letting_go) {
                                 begin_send(e, id, next, &sent, events);
                             }
                         }
@@ -3410,8 +3427,44 @@ impl Supervisor {
         for id in ids {
             self.tick_agent(&id, now, &mut events);
         }
-        self.poll_adapters(now, &mut events);
+        self.poll_adapters(now, &mut events, false);
         events
+    }
+
+    /// ADR-0104 O2: the node is stopping cleanly. Every adapter the holder runs is let go (it runs on for the next node), each reader
+    /// is waited for until `until` at most, and what they had read and the node had not taken yet is taken as a tick takes it (states,
+    /// options, config and commands applied; chat, usage and the rest passed on), for the node to record before it ends. Nothing is
+    /// restarted and no queued prompt is sent. A reader still running at `until` is left (a holder that does not answer): lines the
+    /// holder hands it after that are counted as given and lost, as with a kill, and the next node rebuilds only waiting requests and the
+    /// newest options, config and commands from them (ADR-0093, ADR-0104 O1). Adapters the node runs itself are left as they are.
+    pub fn let_go_held(&mut self, until: Instant) -> Vec<SupervisorEvent> {
+        for e in self.adapters.values_mut() {
+            e.restart_at = None;
+            if let Some(a) = e.adapter.as_mut().filter(|a| a.is_held()) {
+                a.let_go();
+            }
+        }
+        for e in self.adapters.values_mut() {
+            if let Some(a) = e.adapter.as_mut().filter(|a| a.is_held()) {
+                a.reader_ended_by(until);
+            }
+        }
+        // A queued prompt whose send was waiting for its answer has just been told it was given (`HostError::Detached`): its result
+        // is taken below with the rest. Each send's thread holds a handle on the results until it has put its own there.
+        while Arc::strong_count(&self.sent) > 1 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let mut events = Vec::new();
+        self.poll_adapters(Instant::now(), &mut events, true);
+        events
+    }
+
+    /// ADR-0104 O2: how many events the reader of `id`'s adapter has handed over (0 for none), so a test can tell a line was read.
+    pub fn adapter_events_read(&self, id: &AgentId) -> usize {
+        self.adapters
+            .get(id)
+            .and_then(|e| e.adapter.as_ref())
+            .map_or(0, Adapter::events_read)
     }
 
     fn tick_agent(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {

@@ -1341,7 +1341,8 @@ impl Wake {
 /// Runs the writer of `board` until `stop`: a batch once per [`BATCH_INTERVAL`] or when woken, and retention at its start and every
 /// [`SWEEP_EVERY`] (`status` says which agents' files are kept and when the others ended, see [`Store::sweep`]). A failed write is
 /// said once in that agent's conversation; its batch is not tried again (its entries stay in the ring, and every later change is
-/// written as it comes). Nothing is written when it stops: ADR-0104 O2 (a later step) flushes on a clean stop.
+/// written as it comes). Nothing is written when it stops: a clean stop writes the last batch itself with [`flush`], through the same
+/// [`Store::write`], once it has recorded everything and this writer has ended (ADR-0104 O2).
 pub fn spawn_writer(
     board: Arc<crate::chat::ChatBoard>,
     status: AgentStatus,
@@ -1364,26 +1365,48 @@ pub fn spawn_writer(
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
-                for batch in board.take_due(crate::daemon::now_ms()) {
-                    match store.write(&batch) {
-                        Ok(()) => {
-                            failed.remove(&batch.agent);
-                        }
-                        Err(e) => {
-                            if failed.insert(batch.agent.clone(), ()).is_none() {
-                                // Operational log, not UI text; the person is told by the notice.
-                                eprintln!(
-                                    "transcripts: {}: history not written: {e}",
-                                    batch.agent.as_str()
-                                );
-                            }
-                            board.not_saved(&batch.agent, crate::daemon::now_ms());
-                        }
-                    }
-                }
+                let due = board.take_due(crate::daemon::now_ms());
+                write_batches(&board, &store, due, &mut failed);
             }
         })
         .map(Some)
+}
+
+/// ADR-0104 O2: writes what `board` has not saved yet, now, on the caller's thread: the last batch of a node that stops cleanly, after
+/// its writer ([`spawn_writer`]) has ended. Everything is taken (`take_unsaved`), the pieces the writer would still hold back too, since
+/// the process is ending; it goes through the writer's own [`Store::write`] (redaction over runs, the watermark line). Nothing when the
+/// board keeps no history.
+pub fn flush(board: &crate::chat::ChatBoard) {
+    if let Some(store) = board.store() {
+        let all = board.take_unsaved();
+        write_batches(board, &store, all, &mut HashMap::new());
+    }
+}
+
+/// Writes `batches`; a failed write is logged once per agent in `failed` and said in its conversation.
+fn write_batches(
+    board: &crate::chat::ChatBoard,
+    store: &Store,
+    batches: Vec<Batch>,
+    failed: &mut HashMap<AgentId, ()>,
+) {
+    for batch in batches {
+        match store.write(&batch) {
+            Ok(()) => {
+                failed.remove(&batch.agent);
+            }
+            Err(e) => {
+                if failed.insert(batch.agent.clone(), ()).is_none() {
+                    // Operational log, not UI text; the person is told by the notice.
+                    eprintln!(
+                        "transcripts: {}: history not written: {e}",
+                        batch.agent.as_str()
+                    );
+                }
+                board.not_saved(&batch.agent, crate::daemon::now_ms());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
