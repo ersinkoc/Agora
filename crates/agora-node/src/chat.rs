@@ -1129,7 +1129,8 @@ impl Transcript {
             })
             .collect();
         // Audit of #1157: words shown before a value was added to the store (or seeded from the file) are redacted again as one stream
-        // with the values held now, so no later snapshot shows it. Masks are only added to what was sent.
+        // with the values held now, so no later snapshot shows it; the start of the ring's first word is an edge (words before it may
+        // have left the ring, a value's start among them). Masks are only added to what was sent.
         if let Some(sec) = sec {
             if self.live.words_gen.is_some_and(|g| g != sec.generation()) {
                 let at: Vec<usize> = (0..out.len()).filter(|&i| in_run(&out[i])).collect();
@@ -6321,6 +6322,33 @@ mod live {
             assert!(late.words().starts_with("first <redacted> then "));
             assert!(b.snapshot(&a).iter().all(|e| !e.text.contains(&added[..8])));
         }
+    }
+
+    /// Audit of #1157, round 2: a value whose start left the ring before the value was added to the store: the ring's first word
+    /// holds only its tail, and a later snapshot still masks it (the start of that word is an edge).
+    #[test]
+    fn a_value_whose_start_left_the_ring_is_masked_once_it_is_added() {
+        let added = "ADDED-KEY-0123456789-9876";
+        let (dir, store, b) = board("evicted", &[SECRET], Limits::default());
+        let a = AgentId::new("a");
+        b.push_item(&a, &text(&format!("the key is {}", &added[..12])), 1);
+        for _ in 0..MAX_ENTRIES {
+            b.output_dropped(&a, 7, 1);
+        }
+        b.push_item(&a, &text(&format!("{} ok", &added[12..])), 2);
+        assert!(
+            b.snapshot(&a)
+                .iter()
+                .all(|e| !e.text.starts_with("the key")),
+            "the start left the ring"
+        );
+        SecretStore::in_data(&dir)
+            .set("ADDED", &Secret::new(added).unwrap())
+            .unwrap();
+        store.refresh_if_older(std::time::Duration::ZERO);
+        let mut late = Follower::of(&b, &a);
+        assert_eq!(leak(&mut late, added), None);
+        assert_eq!(late.words(), "<redacted> ok");
     }
 
     /// A follower's snapshot never holds the words still held, and gets them on its stream once they go.

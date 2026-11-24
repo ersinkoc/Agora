@@ -413,7 +413,10 @@ impl EventSink {
         match &mut body {
             Body::MessagePosted(m) => r(&mut m.body),
             Body::TaskChanged(t) => r(&mut t.title),
-            Body::HandoffCreated(h) => r(&mut h.summary),
+            Body::HandoffCreated(h) => {
+                r(&mut h.summary);
+                h.refs.iter_mut().for_each(r);
+            }
             Body::AgentSessionOptions(o) => {
                 for x in o.modes.iter_mut().chain(o.models.iter_mut()) {
                     r(&mut x.name);
@@ -2381,10 +2384,12 @@ impl Node {
                                         .unwrap_or_else(|e| e.into_inner())
                                         .approval_raise_terms(agent);
                                     let (strict, permitted) = terms.unwrap_or((false, false));
+                                    // #1147 (audit of #1157): the agent's name for its "always" option, as the card (and the always
+                                    // signature over it) shows it, with the node's secret values replaced; its id is kept.
                                     let raise = crate::approvals::raise_for(
                                         strict,
                                         scopes,
-                                        always_label,
+                                        &chat.redact_text(always_label),
                                         always_option_id,
                                         permitted,
                                     );
@@ -4383,6 +4388,7 @@ mod event_redaction_tests {
                 }),
                 Body::HandoffCreated(v1::HandoffCreated {
                     summary: format!("x {s}"),
+                    refs: vec![format!("src/{s}")],
                     ..Default::default()
                 }),
                 Body::AgentSessionOptions(v1::AgentSessionOptions {

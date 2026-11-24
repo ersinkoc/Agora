@@ -1171,6 +1171,8 @@ pub(crate) fn redact_words_again(views: &mut [ChatEntry], sec: &Secrets) {
         return;
     }
     let mut run = Run::default();
+    // The ring's first word may follow words that left it (a value's start among them): its start is an edge.
+    run.edges.push(0);
     let mut lines = Vec::with_capacity(views.len());
     for (i, v) in views.iter().enumerate() {
         let at = run.text.len();

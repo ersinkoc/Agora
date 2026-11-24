@@ -493,10 +493,11 @@ until the next words show it is not one, until any other entry of the agent (so 
 ends, Start again or the ring's bound, or at most 300 ms (checked on the node's 100 ms tick), and then go with that part replaced. Words that cannot end in such a
 part go at once, and a node that holds no value sends everything as it did. A snapshot leaves out the words still waiting; the stream
 brings them. Unknown secrets are not found; a value added to the node's store is replaced live from the node's next read of its
-values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: an approval
-card's action and detail (before the request is queued, so the card and the always signature hold the same words), a mesh message's
-body, a task's title, a handoff's summary, and the names, descriptions and hints of the agent's modes, options and commands; ids are
-kept.
+values (at most a second later). The same values are replaced in the agent's own words the node records as hub events: on an approval
+card, before it is queued (so the card and the signature over it hold the same words), an adapter's action, detail and always-option
+label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a task's title, a
+handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids are kept; paths in
+other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted (T61).
 
 The node also writes each structured agent's transcript to its own disk (ADR-0089 decision 1, ADR-0104 C1:
 `<data>/transcripts/<agent id>.jsonl`, owner-only, batched off the agent's path at most once a second or per 64 KiB, the node's own

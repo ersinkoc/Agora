@@ -109,8 +109,9 @@ same redacted entries. No schema change: a follower gets the same messages, with
    added to the store stays as sent on streams already open (every later snapshot has it replaced), and a value added is replaced
    from the node's next read of its values (at most a second later); a value over 16 KiB (only one from the node's environment can
    be) can show in part when its words are sent without what follows.
-5. The same values are replaced in the agent's own words the node records as hub events (audit of #1157): an approval card's action
-   and detail (before the request is queued, so the queue, the event and the always signature hold the same words), a mesh message's
-   body, a task's title, a handoff's summary, and the names, descriptions and hints of the agent's modes, options and commands. Ids
-   are kept. Not covered: the body of a mesh message an agent sends to an agent on another machine, which the hub relays as written
+5. The same values are replaced in the agent's own words the node records as hub events (audits of #1157): on an approval card,
+   before the request is queued (so the queue, the event and the signature over it hold the same words), an adapter's action, detail
+   and always-option label, a helper start's prompt and folder, and a skip card's option and value names; a mesh message's body, a
+   task's title, a handoff's summary and refs, and the names, descriptions and hints of the agent's modes, options and commands. Ids
+   are kept, and paths in other events (a refused start's or an interrupted agent's folder, a skip card's folder) are not redacted. Not covered: the body of a mesh message an agent sends to an agent on another machine, which the hub relays as written
    (a question for the maintainer: replacing it changes what the other agent is told).

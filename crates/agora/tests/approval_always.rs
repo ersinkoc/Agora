@@ -83,6 +83,11 @@ impl Drop for Env {
 
 /// A node with the fake ACP kind, `policy` in its policy file, and the device `phone` trusted.
 fn env(tag: &str, policy: Option<&str>) -> Option<Env> {
+    env_with(tag, policy, None)
+}
+
+/// [`env`] on a node that holds `secret` in its store (#1147).
+fn env_with(tag: &str, policy: Option<&str>, secret: Option<&str>) -> Option<Env> {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return None;
     }
@@ -101,6 +106,11 @@ fn env(tag: &str, policy: Option<&str>) -> Option<Env> {
     )
     .unwrap();
     std::fs::create_dir_all(dir.join("data")).unwrap();
+    if let Some(v) = secret {
+        agora_node::credentials::SecretStore::in_data(&dir.join("data"))
+            .set("TOKEN", &agora_node::credentials::Secret::new(v).unwrap())
+            .unwrap();
+    }
     if let Some(p) = policy {
         std::fs::write(dir.join("data/policy"), p).unwrap();
     }
@@ -486,4 +496,22 @@ fn refused_under(policy: &str) {
         .any(|c| c.code == "approval.always_only_forbidden"
             && c.params.get("action").map(String::as_str) == Some("run_command")));
     assert!(always_records(&e, &agent).is_empty());
+}
+
+/// #1147 (audit of #1157): a value the node holds that is the agent's name for its "always" option never reaches the card (the hub's
+/// event); the always signature binds what the card showed, so the person's "always" still reaches the agent as `allow_always`.
+#[test]
+fn a_secret_in_the_always_options_name_never_reaches_the_card() {
+    let Some(e) = env_with("secret-label", None, Some("Name of allow_always")) else {
+        return;
+    };
+    let agent = e.start();
+    e.ask(&agent, "reject_always,allow_always,reject_once,allow_once");
+    let r = e.request(&agent, 0);
+    assert_eq!(
+        (r.always_label.as_str(), r.always_option_id.as_str()),
+        ("<redacted>", "allow_always")
+    );
+    e.decide(&r, true, true, ApprovalScope::Always).unwrap();
+    e.wait_said(&agent, "selected:allow_always");
 }

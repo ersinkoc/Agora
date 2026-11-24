@@ -513,7 +513,11 @@ fn switch(
 }
 
 /// Raises the approval for `ask` (or finds the one already waiting) and returns the error that tells the window to show it.
-fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
+fn raise_skip(ctx: &ControlContext, mut ask: SkipAsk) -> Error {
+    // #1147 (audit of #1157): the agent's names for the option and the value, as its card (and the signature over it) shows them,
+    // with the node's secret values replaced; the ids the decision applies are kept.
+    ask.option_name = ctx.chat.redact_text(&ask.option_name);
+    ask.value_name = ctx.chat.redact_text(&ask.value_name);
     let Some(approvals) = &ctx.approvals else {
         // A node without an approvals queue cannot ask anyone: the switch stays refused, as it was before the approval existed.
         let option = match ask.kind {
