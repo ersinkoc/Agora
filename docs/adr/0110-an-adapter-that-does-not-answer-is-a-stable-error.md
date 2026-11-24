@@ -1,6 +1,8 @@
 # 0110. A prompt or decision the adapter does not take is a stable error
-Status: Proposed
+Status: Accepted
 Date: 2026-11-24
+
+Accepted: 2026-11-24 (the maintainer, in the merger chat: "Accept and build").
 
 ## Context
 

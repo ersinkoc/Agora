@@ -126,4 +126,4 @@ Date: YYYY-MM-DD
 | 0107 | `agent.list` lists the agents a node found interrupted | Accepted |
 | 0108 | Forgetting an agent in the window reaches its node, which deletes its saved conversation | Accepted |
 | 0109 | Recover a cross-node task handoff after a hub restart | Accepted |
-| 0110 | A prompt or decision the adapter does not take is a stable error | Proposed |
+| 0110 | A prompt or decision the adapter does not take is a stable error | Accepted |
