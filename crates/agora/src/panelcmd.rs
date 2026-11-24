@@ -111,7 +111,7 @@ pub fn panel(say: &Say) -> ExitCode {
         say.err(key!("cli-panel-no-port"), &[]);
         return ExitCode::from(1);
     };
-    rt.block_on(async {
+    run_to_end(rt, async {
         match start(&link_dir(), PREFERRED_PORT).await {
             Ok(p) => {
                 say.out(
@@ -142,6 +142,15 @@ pub fn panel(say: &Say) -> ExitCode {
             }
         }
     })
+}
+
+/// Runs `fut` on `rt` and returns as soon as it ends. Dropping the runtime would wait, with no limit, for its blocking pool: a hub
+/// that did not answer within its 10 s while its name was still being looked up (`lookup_host` runs there and cannot be stopped) would
+/// keep `agora panel` from ending, after it said so, until the resolver gave up (#1150). That lookup is left to end on its own.
+fn run_to_end<F: std::future::Future>(rt: tokio::runtime::Runtime, fut: F) -> F::Output {
+    let out = rt.block_on(fut);
+    rt.shutdown_background();
+    out
 }
 
 #[cfg(test)]
@@ -222,6 +231,24 @@ mod tests {
 
     const REFUSED: &str =
         "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// #1150: `agora panel` ends when its wait for the hub ran out, also while a blocking task (a host name lookup) is still running;
+    /// the runtime used to wait for the task on its way out, so the command outlasted its 10 s wait by the resolver's own timeout.
+    #[test]
+    fn a_wait_that_ran_out_does_not_wait_for_a_lookup_still_running() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let got = run_to_end(rt, async {
+            let slow = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+            tokio::time::timeout(Duration::from_millis(200), slow).await
+        });
+        assert!(got.is_err());
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "took {took:?}");
+    }
 
     #[test]
     fn the_hub_address_gives_host_and_port() {
