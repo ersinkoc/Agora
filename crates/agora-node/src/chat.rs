@@ -320,16 +320,34 @@ pub fn notice(
     code: &str,
     params: &[(String, String)],
 ) -> Option<(String, std::collections::HashMap<String, String>)> {
+    notice_cuts(code, params).map(|(code, params, _)| (code, params))
+}
+
+/// The parameters a notice keeps, by key.
+type Params = std::collections::HashMap<String, String>;
+
+/// Where each of a notice's parameters was cut, by key.
+type ParamCuts = Vec<(String, Vec<usize>)>;
+
+/// [`notice`], and where each parameter was cut (review of #1103, round 4).
+fn notice_cuts(code: &str, params: &[(String, String)]) -> Option<(String, Params, ParamCuts)> {
     if code.len() > MAX_CODE || !code.contains('.') || !code.split('.').all(word) {
         return None;
     }
+    let mut cuts = Vec::new();
     let params = params
         .iter()
         .filter(|(k, _)| k.len() <= MAX_PARAM_KEY && word(k))
         .take(MAX_PARAMS)
-        .map(|(k, v)| (k.clone(), cap_end(v.clone(), MAX_PARAM_BYTES).0))
+        .map(|(k, v)| {
+            let (v, end) = cap_end(v.clone(), MAX_PARAM_BYTES);
+            if let Some(end) = end {
+                cuts.push((k.clone(), vec![end]));
+            }
+            (k.clone(), v)
+        })
         .collect();
-    Some((code.to_string(), params))
+    Some((code.to_string(), params, cuts))
 }
 
 fn json_string(s: &str) -> String {
@@ -358,8 +376,8 @@ fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
 
 /// [`tidy`], and the places in the result where something was cut out (review of #1103, N1): the transcript writer looks for a
 /// piece of a secret on each side of them. The `PRE_BOUND` cut is made first and each side cleaned apart, so where it lands is
-/// known however much cleaning took away; then the `max` cut. A place the isolates' balance moved by a character or two is found
-/// by the writer, which looks a few bytes around each.
+/// known however much cleaning took away; then the `max` cut. The isolates are balanced last, in each part between two places
+/// apart, so the places recorded are exact.
 fn tidy_cuts(text: &str, max: usize, style: Style) -> (String, bool, Vec<usize>) {
     let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);
     let (cleaned, mut seams) = match first {
@@ -558,11 +576,21 @@ impl Transcript {
             s.dirty.remove(&old.entry_id);
             s.evicted_bytes += size;
             s.evicted.push_back((old.clone(), side));
+            let mut gap = false;
             while s.evicted_bytes > EVICTED_MAX {
                 let Some((e, _)) = s.evicted.pop_front() else {
                     break;
                 };
                 s.evicted_bytes = s.evicted_bytes.saturating_sub(Self::size(&e));
+                gap |= in_run(&e);
+            }
+            if gap {
+                // Words dropped here are never written: in the file, what was written before (the carry) lies right beside what is
+                // written next, and the place between is an edge (review of #1103, round 4).
+                self.carry_edges.push(self.carry.len());
+                if self.carry.is_empty() {
+                    self.carry_open = true;
+                }
             }
         }
     }
@@ -649,18 +677,21 @@ impl Transcript {
         // as written (redacted, with up to 3 bytes of a value beside a mark or an edge) become the carry, and their end an edge:
         // what this node writes next is looked at together with them (review of #1103, round 3).
         self.closed_upto = high;
-        let written: String = self
-            .entries
-            .iter()
-            .filter(|e| in_run(e))
-            .map(|e| e.text.as_str())
-            .collect();
-        self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);
-        // Its end is where this node takes over, and its start, when it is the file's first words, where a session began.
-        self.carry_edges = vec![self.carry.len()];
-        if self.carry.len() == written.len() {
-            self.carry_edges.insert(0, 0);
+        let mut written = String::new();
+        let mut bounds = vec![0];
+        for e in self.entries.iter().filter(|e| in_run(e)) {
+            written.push_str(&e.text);
+            bounds.push(written.len());
         }
+        self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);
+        // Every boundary between the earlier words counts as an edge: the file does not say which of them were a stop's flush or
+        // an earlier take-up, beside which pieces of under 4 bytes of a value may have been written (review of #1103, round 4).
+        // Their end is where this node takes over.
+        let from = written.len() - self.carry.len();
+        self.carry_edges = bounds
+            .into_iter()
+            .filter_map(|b| b.checked_sub(from))
+            .collect();
         self.carry_open = false;
         self.evict();
         if !self.followers.is_empty() {
@@ -903,9 +934,21 @@ impl ChatBoard {
         };
         let seed = store.read(agent.as_str());
         if seed.high == 0 {
+            // No file (never written, purged, or the earlier node was killed before its first batch): the words that come next may
+            // still continue a value the earlier node held (review of #1103, round 4).
+            self.mark_taken_up(agent);
             return false;
         }
         self.seed(agent, seed, now_ms)
+    }
+
+    /// A take-up or a resume found nothing to seed: the start of the next words is an edge.
+    fn mark_taken_up(&self, agent: &AgentId) {
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        if t.next_id == 0 {
+            t.carry_open = true;
+        }
     }
 
     /// ADR-0060, ADR-0089 decision 5: what a resume will seed the agent's transcript with, read from its file before the resume (so
@@ -927,8 +970,13 @@ impl ChatBoard {
         let mut g = self.lock();
         let t = slot(&mut g, agent, self.wake.as_ref());
         let high = seed.as_ref().map_or(0, |s| s.high);
-        if let Some(seed) = seed {
-            t.seed(seed, now_ms);
+        match seed {
+            Some(seed) => {
+                t.seed(seed, now_ms);
+            }
+            // Nothing to seed: the next words may still continue the earlier process's (review of #1103, round 4).
+            None if t.next_id == 0 => t.carry_open = true,
+            None => {}
         }
         // Marked whether or not a file exists yet: what the earlier session said and was not written yet goes to its own file
         // (review of #1103, probe 5).
@@ -1213,12 +1261,8 @@ impl ChatBoard {
         self.insert_cut(agent, e, end.into_iter().collect())
     }
 
-    /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower. Returns its id.
-    fn insert(&self, agent: &AgentId, e: ChatEntry) -> u64 {
-        self.insert_cut(agent, e, Vec::new())
-    }
-
-    /// [`Self::insert`], noting where its text was cut (`cuts`).
+    /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower, noting where its text was cut (`cuts`).
+    /// Returns its id.
     fn insert_cut(&self, agent: &AgentId, e: ChatEntry, cuts: Vec<usize>) -> u64 {
         let at = e.at_ms;
         let mut g = self.lock();
@@ -1238,13 +1282,18 @@ impl ChatBoard {
                 if NODE_NOTICES.contains(&code.as_str()) {
                     return;
                 }
-                let Some((code, params)) = notice(code, params) else {
+                let Some((code, params, cuts)) = notice_cuts(code, params) else {
                     return;
                 };
                 let mut e = entry(ChatRole::Agent, ChatKind::Notice, String::new(), at_ms);
                 e.code = code;
                 e.params = params;
-                self.insert(agent, e);
+                let mut g = self.lock();
+                let t = slot(&mut g, agent, self.wake.as_ref());
+                let id = t.add(e, at_ms);
+                if !cuts.is_empty() {
+                    t.note_cuts(id, |c| c.params = cuts);
+                }
             }
             ChatItem::Thought(text) => {
                 // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
@@ -4043,7 +4092,7 @@ mod property {
     const CASES: u64 = 600;
 
     /// How many cases reached each scenario (reported by the test).
-    const SCENARIOS: [&str; 12] = [
+    const SCENARIOS: [&str; N] = [
         "words in pieces",
         "a stop's flush mid-words",
         "a take-up mid-words",
@@ -4056,11 +4105,19 @@ mod property {
         "a plan step",
         "a user prompt or a notice parameter with a secret",
         "a writer batch mid-words",
+        "a stderr tail cut at its front (through the bridge)",
+        "a notice parameter over 1 KiB",
+        "a flood that drops words from the evicted buffer",
+        "a kill, then a take-up (perhaps with no file)",
+        "a text over 16 KiB or a thought over 8 KiB",
+        "a legacy tool call, plan or diff",
+        "a secret of digits",
     ];
-    static HITS: [std::sync::atomic::AtomicUsize; 12] =
-        [const { std::sync::atomic::AtomicUsize::new(0) }; 12];
+    const N: usize = 19;
+    static HITS: [std::sync::atomic::AtomicUsize; N] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; N];
 
-    fn hit(seen: &mut [bool; 12], i: usize) {
+    fn hit(seen: &mut [bool; N], i: usize) {
         if !seen[i] {
             seen[i] = true;
             HITS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4099,11 +4156,14 @@ mod property {
         'u', 'v', 'w', ' ', ' ', '.',
     ];
 
+    const DIGITS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
     fn secret(r: &mut Rng) -> String {
-        let (alphabet, len) = match r.below(3) {
+        let (alphabet, len) = match r.below(4) {
             0 => (TOKEN, 24 + r.below(30)),
             1 => (PUNCT, 10 + r.below(16)),
-            _ => (WIDE, 8 + r.below(10)),
+            2 => (WIDE, 8 + r.below(10)),
+            _ => (DIGITS, 10 + r.below(10)),
         };
         (0..len).map(|_| r.pick(alphabet)).collect()
     }
@@ -4190,7 +4250,13 @@ mod property {
                     words.insert(e.entry_id, e.text.clone());
                 }
                 fields.extend([e.text, e.output, e.path, e.approval_id, e.call_id]);
-                fields.extend(e.params.into_values());
+                // The node's own numbers (`bytes`, `entries`) are not the agent's text.
+                fields.extend(
+                    e.params
+                        .into_iter()
+                        .filter(|(k, _)| k != "bytes" && k != "entries")
+                        .map(|(_, v)| v),
+                );
                 fields.extend(e.paths.into_iter().map(|p| p.path));
                 fields.extend(e.plan_steps.into_iter().map(|s| s.text));
                 if let Some((tool, args)) = side.tool {
@@ -4234,9 +4300,15 @@ mod property {
         // replaces an older earlier session's file, so it is said at the end).
         let marker = format!("marker{}", filler(&mut r, 6).replace([' ', '.'], "q"));
         let mut calls = 0;
-        let mut seen = [false; 12];
+        let mut seen = [false; N];
+        if secrets
+            .iter()
+            .any(|v| v.chars().all(|c| c.is_ascii_digit()))
+        {
+            hit(&mut seen, 18);
+        }
         for _ in 0..10 + r.below(40) {
-            match r.below(13) {
+            match r.below(17) {
                 // The agent's words, in pieces, with other entries, the writer, stops, take-ups, turns and Start again between them.
                 0..=4 => {
                     hit(&mut seen, 0);
@@ -4282,12 +4354,98 @@ mod property {
                                 let seed = c.board.read_seed(&a, true);
                                 c.board.resumed(&a, seed, true, 1);
                             }
+                            13 => {
+                                // Killed: nothing more is written; the next node takes the agent up from whatever file there is.
+                                hit(&mut seen, 15);
+                                let (store, board) = open(&dir);
+                                board.seed_from_disk(&a, 1);
+                                c.store = store;
+                                c.board = board;
+                            }
+                            14 if r.chance(1) => {
+                                // A flood of other entries: words not written yet leave the ring and the evicted buffer.
+                                hit(&mut seen, 14);
+                                let big = filler(&mut r, MAX_OUTPUT_BYTES);
+                                for i in 0..80 {
+                                    let item = ToolItem {
+                                        call_id: format!("flood{i}"),
+                                        tool: Some("sh".into()),
+                                        status: "completed".into(),
+                                        output: Some(big.clone()),
+                                        ..ToolItem::default()
+                                    };
+                                    c.board.push_item(&a, &ChatItem::Tool(item), 1);
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
+                // A stderr tail the bridge cut at its front, or a notice parameter over 1 KiB, holding a secret.
+                13 => {
+                    let m = message(&mut r, &secrets);
+                    let value = if r.chance(50) {
+                        hit(&mut seen, 12);
+                        let n = r.below(500);
+                        let pre = filler(&mut r, n);
+                        let n = 300 + r.below(200);
+                        let post = filler(&mut r, n);
+                        agora_adapters::acp::stderr_tail(format!("{pre}{m}{post}").as_bytes(), None)
+                    } else {
+                        hit(&mut seen, 13);
+                        let n = MAX_PARAM_BYTES.saturating_sub(r.below(40));
+                        format!("{}{m}", filler(&mut r, n))
+                    };
+                    c.board.push_item(
+                        &a,
+                        &ChatItem::Notice {
+                            code: "adapter.turn_failed".into(),
+                            params: vec![("stderr_tail".into(), value)],
+                        },
+                        1,
+                    );
+                }
+                // A text over 16 KiB or a thought over 8 KiB, with a secret where the node cuts it.
+                14 => {
+                    hit(&mut seen, 16);
+                    let m = message(&mut r, &secrets);
+                    let (item, n) = if r.chance(50) {
+                        (0, MAX_ENTRY_BYTES.saturating_sub(r.below(40)))
+                    } else {
+                        (1, MAX_THOUGHT_BYTES / 2 - r.below(40))
+                    };
+                    let pre = filler(&mut r, n);
+                    let post = filler(&mut r, MAX_ENTRY_BYTES);
+                    let text = format!("{pre}{m}{post}");
+                    let item = if item == 0 {
+                        ChatItem::Text(text)
+                    } else {
+                        ChatItem::Thought(text)
+                    };
+                    c.board.push_item(&a, &item, 1);
+                }
+                // The legacy items: a tool call without an id, a plan of lines, a diff.
+                15 => {
+                    hit(&mut seen, 17);
+                    let m = message(&mut r, &secrets);
+                    let item = match r.below(3) {
+                        0 => ChatItem::ToolCall {
+                            tool: "sh".into(),
+                            arguments_json: serde_json::to_string(&m).unwrap(),
+                        },
+                        1 => ChatItem::Plan(vec![m.clone(), filler(&mut r, 20)]),
+                        _ => {
+                            let n = MAX_ENTRY_BYTES.saturating_sub(r.below(40));
+                            ChatItem::Diff {
+                                path: "src/a.rs".into(),
+                                unified_diff: format!("{}{m}", filler(&mut r, n)),
+                            }
+                        }
+                    };
+                    c.board.push_item(&a, &item, 1);
+                }
                 // A user prompt or an adapter's notice holding a secret.
-                12 => {
+                12 | 16 => {
                     hit(&mut seen, 10);
                     if r.chance(50) {
                         let m = message(&mut r, &secrets);
@@ -4458,7 +4616,12 @@ mod property {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(CASES);
-        let failed: Vec<String> = (1..=cases)
+        // `AGORA_PROPERTY_BASE` starts the seeds elsewhere (another set of cases).
+        let base: u64 = std::env::var("AGORA_PROPERTY_BASE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let failed: Vec<String> = (base + 1..=base + cases)
             .filter_map(|seed| run_case(seed).err())
             .collect();
         for (name, n) in SCENARIOS.iter().zip(&HITS) {
@@ -4476,31 +4639,61 @@ mod property {
     }
 }
 
-/// Review of #1103, round 3: every cut of an agent's text says where it cut (`agora_adapters::text::cap_end`, `cap_middle`, and
-/// `tidy_cuts`, which record the place for the transcript writer), or is listed here with why its place needs no record. A new cut
-/// in the node's chat code or in the bridge fails this test until it is one or the other.
+/// Review of #1103, rounds 3 and 4: every cut of an agent's text says where it cut (`agora_adapters::text::cap_end`, `cap_middle`,
+/// and `tidy_cuts`, which record the place for the transcript writer), or is listed here with why its place needs no record. A line
+/// cuts when it truncates (`.truncate(`), slices or indexes with a range (`[a..b]`), or names a cutting helper (called or passed by
+/// name). A new one in the node's chat code, its transcript writer, the bridge or the cut helpers fails this test until it is
+/// recorded or listed.
 #[cfg(test)]
 mod every_cut {
+    const HELPERS: &[&str] = &[
+        "cut",
+        "cap_end",
+        "cap_middle",
+        "tidy",
+        "head_tail",
+        "cut_kept",
+        "clip",
+        "short",
+        "tail_of",
+    ];
+
     fn code(src: &str) -> &str {
         src.split("\n#[cfg(test)]").next().unwrap_or(src)
     }
 
-    fn check(name: &str, src: &str, cuts: &[&str], allowed: &[(&str, &str)]) {
-        let mut unlisted = Vec::new();
-        for line in code(src).lines().map(str::trim) {
-            if line.starts_with("//") {
-                continue;
-            }
-            let cutting = cuts.iter().any(|c| {
-                line.match_indices(c).any(|(i, _)| {
-                    // `cut(` as a word, not `insert_cut(` or `tidy_cuts(`.
-                    i == 0 || !line[..i].ends_with(|ch: char| ch.is_alphanumeric() || ch == '_')
-                })
-            });
-            if cutting && !allowed.iter().any(|(l, _)| line == *l) {
-                unlisted.push(line.to_string());
+    fn word(c: Option<char>) -> bool {
+        c.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    }
+
+    /// Whether a line (trimmed, not a comment) cuts text.
+    pub(super) fn cutting(line: &str) -> bool {
+        if line.contains(".truncate(") {
+            return true;
+        }
+        let mut open = None;
+        for (i, c) in line.char_indices() {
+            match c {
+                '[' => open = Some(i),
+                // A `]` closes the `[` before it either way.
+                ']' if open.take().is_some_and(|o| line[o..i].contains("..")) => return true,
+                _ => {}
             }
         }
+        HELPERS.iter().any(|h| {
+            line.match_indices(h).any(|(i, m)| {
+                !word(line[..i].chars().next_back()) && !word(line[i + m.len()..].chars().next())
+            })
+        })
+    }
+
+    fn check(name: &str, src: &str, allowed: &[(&str, &str)]) {
+        let unlisted: Vec<&str> = code(src)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && cutting(l))
+            .filter(|l| !allowed.iter().any(|(a, _)| a == l))
+            .collect();
         assert!(
             unlisted.is_empty(),
             "{name}: cuts that do not say where they cut: {unlisted:#?}"
@@ -4508,66 +4701,384 @@ mod every_cut {
     }
 
     #[test]
+    fn the_predicate_finds_a_truncation_a_slice_and_a_helper_passed_by_name() {
+        assert!(cutting("s.truncate(3);"));
+        assert!(cutting("let x = s[..3].to_string();"));
+        assert!(cutting("let x = &tail[start..];"));
+        assert!(cutting(".map(short)"));
+        assert!(!cutting("let x = insert_cut(a);"));
+        assert!(!cutting("let y = v[3];"));
+    }
+
+    #[test]
     fn every_cut_of_agent_text_says_where_it_cut_or_is_listed() {
         check(
             "chat.rs",
             include_str!("chat.rs"),
-            &[".truncate(", "cap_end(", "cap_middle(", "tidy(", "cut("],
             &[
-                ("fn cut(text: String) -> String {", "the helper below"),
-                ("cap_end(text, MAX_ENTRY_BYTES).0", "`cut`: only for texts the writer makes again (a call's, a plan's) and for seeding"),
-                ("cap_end(text, MAX_ENTRY_BYTES)", "`cut_at`: returns the place"),
-                ("cut(format!(", "a call's text: the writer makes it again from the redacted tool and arguments"),
-                ("cut(steps", "a plan's text: the writer makes it again from the redacted steps"),
-                (
-                    ".map(|(k, v)| (k.clone(), cap_end(v.clone(), MAX_PARAM_BYTES).0))",
-                    "a notice's parameters: both ends of each always count as places cut",
-                ),
-                ("fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {", "the helper (for seeding)"),
-                ("let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);", "`tidy_cuts` records it"),
-                ("let (out, last) = cap_middle(cleaned, max);", "`tidy_cuts` records it"),
-                ("ChatKind::Thought => tidy(&e.text, MAX_THOUGHT_BYTES, Style::Prose).0,", "seeding: the file's text, redacted already"),
-                ("ChatKind::Permission => tidy(&e.text, MAX_PERMISSION_BYTES, Style::Label).0,", "seeding"),
-                ("_ => cut(std::mem::take(&mut e.text)),", "seeding"),
-                ("e.path = tidy(&e.path, MAX_PATH_BYTES, Style::Label).0;", "seeding"),
-                ("let (output, cut_now) = tidy(&e.output, MAX_OUTPUT_BYTES, Style::Prose);", "seeding"),
-                ("e.paths.truncate(MAX_PATHS);", "seeding; a list: whole items go"),
-                ("p.path = tidy(&p.path, MAX_PATH_BYTES, Style::Label).0;", "seeding"),
-                ("e.plan_steps.truncate(MAX_PLAN_STEPS);", "seeding; a list"),
-                ("st.text = tidy(&st.text, MAX_PLAN_STEP_BYTES, Style::Step).0;", "seeding"),
-                ("e.approval_id = cap_end(std::mem::take(&mut e.approval_id), MAX_CALL_ID).0;", "seeding; an id"),
-                ("tidy(&tool, MAX_PATH_BYTES, Style::Label).0,", "seeding"),
-                ("tidy(&args, MAX_ENTRY_BYTES, Style::Code).0,", "seeding"),
+                ("use agora_adapters::text::{balanced, cap_end, cap_middle, strip_core, Style};", "an import"),
+                ("fn cut(text: String) -> String {", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
+                ("cap_end(text, MAX_ENTRY_BYTES).0", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
+                ("cap_end(text, MAX_ENTRY_BYTES)", "the place is recorded"),
+                ("cut(format!(", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
+                ("cut(steps", "only texts the writer makes again from redacted parts (a call's, a plan's) and seeding"),
+                ("let (v, end) = cap_end(v.clone(), MAX_PARAM_BYTES);", "the place is recorded"),
+                ("fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {", "the seeding helper"),
+                ("let (out, cut, _) = tidy_cuts(text, max, style);", "the place is recorded"),
+                ("(out, cut)", "the seeding helper"),
+                ("let (bounded, first) = cap_middle(text.to_string(), PRE_BOUND);", "the place is recorded"),
+                ("let head = strip_core(&bounded[..h], style);", "the place is recorded"),
+                ("(head + &strip_core(&bounded[h..], style), vec![seam])", "the place is recorded"),
+                ("let (out, last) = cap_middle(cleaned, max);", "the place is recorded"),
+                ("joined.push_str(&balanced(out[at..seam].to_string(), style));", "the place is recorded"),
+                ("self.carry = tail_of(&written, agora_adapters::text::MAX_SECRET_SPAN);", "the carry: kept in memory, never written"),
+                ("fn tail_of(s: &str, keep: usize) -> String {", "the carry: kept in memory, never written"),
+                ("s[from..].to_string()", "the carry: kept in memory, never written"),
+                ("ChatKind::Thought => tidy(&e.text, MAX_THOUGHT_BYTES, Style::Prose).0,", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("ChatKind::Permission => tidy(&e.text, MAX_PERMISSION_BYTES, Style::Label).0,", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("_ => cut(std::mem::take(&mut e.text)),", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("e.path = tidy(&e.path, MAX_PATH_BYTES, Style::Label).0;", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("let (output, cut_now) = tidy(&e.output, MAX_OUTPUT_BYTES, Style::Prose);", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("e.paths.truncate(MAX_PATHS);", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("p.path = tidy(&p.path, MAX_PATH_BYTES, Style::Label).0;", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("e.plan_steps.truncate(MAX_PLAN_STEPS);", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("st.text = tidy(&st.text, MAX_PLAN_STEP_BYTES, Style::Step).0;", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("e.approval_id = cap_end(std::mem::take(&mut e.approval_id), MAX_CALL_ID).0;", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("tidy(&tool, MAX_PATH_BYTES, Style::Label).0,", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("tidy(&args, MAX_ENTRY_BYTES, Style::Code).0,", "seeding: the file's text, redacted already (or a list: whole items go)"),
+                ("None => vec![(0..=u64::MAX, None, t.next_id)],", "a range of entry ids"),
+                ("t.carry = tail_of(&run.text[..written], reach);", "the carry: kept in memory, never written"),
             ],
         );
         check(
             "acp.rs",
             include_str!("../../agora-adapters/src/acp.rs"),
-            &["clip(", "head_tail(", "cut_kept(", "cap_middle(", "cap_end(", ".truncate("],
             &[
-                ("fn clip(s: &str, max: usize) -> String {", "the helper for ids and names below"),
-                ("|o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(\"\"), max);", "session options: not chat"),
-                ("*s = head_tail(s, s.len() / 2);", "`fit_line`, a line over the node's 4 MiB limit: a residual (T61)"),
-                ("a.truncate(a.len().div_ceil(2));", "`fit_line`: a list"),
-                ("fn head_tail(s: &str, max: usize) -> String {", "the helper"),
-                ("crate::text::cap_middle(s.to_string(), max).0", "`head_tail`"),
-                (".map(|c| clip(c, 40));", "a config choice: not chat"),
-                ("v[\"current\"] = json!(clip(", "a config value: not chat"),
-                ("cut_kept(redact(&clean), OUTPUT_MAX)", "cleaned and redacted first: the node never keeps this place"),
-                ("cut_kept(", "arguments and plan steps, cleaned first: the node never keeps this place"),
-                ("fn cut_kept(text: String, max: usize) -> String {", "the helper"),
-                ("crate::text::cap_middle(text, max).0", "`cut_kept`"),
-                ("state.model = clip(o[\"current\"].as_str().unwrap_or(\"\"), MODEL_MAX);", "a model name: not chat"),
-                ("\"name\": clip(name, OPTION_ID_MAX),", "a command: not chat"),
-                ("\"description\": clip(c.get(\"description\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_DESCRIPTION_MAX),", "a command"),
-                ("\"inputHint\": clip(c.pointer(\"/input/hint\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_NAME_MAX),", "a command"),
-                ("\"status\": clip(e.get(\"status\").and_then(Value::as_str).unwrap_or(\"\"), 40),", "a word the node maps to a status"),
-                ("\"priority\": clip(e.get(\"priority\").and_then(Value::as_str).unwrap_or(\"\"), 40)}))", "a word the node maps"),
-                ("Some(json!({\"path\": cut_kept(path, PATH_MAX),", "cleaned first, cut beyond what the node keeps"),
-                ("json!({\"diff\": {\"path\": path, \"unifiedDiff\": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),", "the node keeps the first 16 KiB of a diff and never cleans it: never this place"),
-                ("state.model = clip(m, MODEL_MAX);", "a model name"),
-                ("state.model = clip(&id, MODEL_MAX);", "a model name"),
+                ("fn short(v: &Value) -> String {", "an approval's detail, not chat text"),
+                ("format!(\"{}…\", &s[..end])", "an approval's detail, not chat text"),
+                ("fn clip(s: &str, max: usize) -> String {", "ids, names and words, not chat text"),
+                ("s[..end].to_string()", "ids, names and words, not chat text"),
+                ("|o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(\"\"), max);", "ids, names and words, not chat text"),
+                ("let mut cut = false;", "`fit_line` and its helper: a residual (T61)"),
+                ("cut |= halve(v);", "`fit_line` and its helper: a residual (T61)"),
+                ("if !cut {", "`fit_line` and its helper: a residual (T61)"),
+                ("*s = head_tail(s, s.len() / 2);", "`fit_line` and its helper: a residual (T61)"),
+                ("let mut cut = a.len() > 1;", "`fit_line` and its helper: a residual (T61)"),
+                ("a.truncate(a.len().div_ceil(2));", "`fit_line` and its helper: a residual (T61)"),
+                ("cut |= halve(e);", "`fit_line` and its helper: a residual (T61)"),
+                ("cut", "`fit_line` and its helper: a residual (T61)"),
+                ("Value::Object(o) => o.values_mut().fold(false, |cut, e| halve(e) | cut),", "`fit_line` and its helper: a residual (T61)"),
+                ("fn head_tail(s: &str, max: usize) -> String {", "`fit_line` and its helper: a residual (T61)"),
+                ("crate::text::cap_middle(s.to_string(), max).0", "`fit_line` and its helper: a residual (T61)"),
+                (".map(|c| clip(c, 40));", "ids, names and words, not chat text"),
+                ("v[\"current\"] = json!(clip(", "ids, names and words, not chat text"),
+                ("cut_kept(redact(&clean), OUTPUT_MAX)", "cleaned (and redacted) first: the node never keeps this place"),
+                ("cut_kept(", "cleaned (and redacted) first: the node never keeps this place"),
+                ("fn cut_kept(text: String, max: usize) -> String {", "cleaned (and redacted) first: the node never keeps this place"),
+                ("crate::text::cap_middle(text, max).0", "cleaned (and redacted) first: the node never keeps this place"),
+                ("match tail[..end].rfind('@') {", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("out.push_str(&tail[at..end]);", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("None => out.push_str(&tail[..end]),", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("rest = &tail[end..];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("rest = &rest[c.len_utf8()..];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("let run = &rest[..end];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("rest = &rest[end..];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("let word = &rest[..end];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("let tail = kept[kept.len().saturating_sub(STDERR_LINES)..]", "whole lines of a stderr tail"),
+                ("format!(\"…{}\", &tail[start..])", "a stderr tail's front cut: the node counts the place after `…` as an edge"),
+                ("let seg = &rest[..sep];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
+                ("let at = &lower[i..];", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("&& (at[1..].starts_with(\":\\\\users\\\\\") || at[1..].starts_with(\":/users/\"));", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("&& at[2..].starts_with(\"/users/\");", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("let name = user_name_len(&line[i + len..], spaces);", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("let c = line[i..].chars().next().unwrap_or(' ');", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("let digits: String = line[at + key.len()..]", "reading a log line's status"),
+                ("home[..1].to_ascii_lowercase(),", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("home[2..].replace('\\\\', \"/\")", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("&& t[i..i + n.len()].eq_ignore_ascii_case(n)", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("let step = text[i..].chars().next().map_or(1, char::len_utf8);", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("out.push_str(&text[i..i + step]);", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
+                ("&self.buf[self.buf.len().saturating_sub(new)..]", "stderr bytes being collected, not chat text"),
+                ("let _ = io::stderr().write_all(&buf[..n]);", "stderr bytes being collected, not chat text"),
+                ("k.buf.extend_from_slice(&buf[..n]);", "stderr bytes being collected, not chat text"),
+                ("state.model = clip(o[\"current\"].as_str().unwrap_or(\"\"), MODEL_MAX);", "ids, names and words, not chat text"),
+                ("\"name\": clip(name, OPTION_ID_MAX),", "ids, names and words, not chat text"),
+                ("\"description\": clip(c.get(\"description\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_DESCRIPTION_MAX),", "ids, names and words, not chat text"),
+                ("\"inputHint\": clip(c.pointer(\"/input/hint\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_NAME_MAX),", "ids, names and words, not chat text"),
+                ("\"status\": clip(e.get(\"status\").and_then(Value::as_str).unwrap_or(\"\"), 40),", "ids, names and words, not chat text"),
+                ("\"priority\": clip(e.get(\"priority\").and_then(Value::as_str).unwrap_or(\"\"), 40)}))", "ids, names and words, not chat text"),
+                ("Some(json!({\"path\": cut_kept(path, PATH_MAX),", "cleaned (and redacted) first: the node never keeps this place"),
+                ("json!({\"diff\": {\"path\": path, \"unifiedDiff\": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),", "cleaned (and redacted) first: the node never keeps this place"),
+                ("let detail = call.get(\"rawInput\").map(short).unwrap_or_default();", "an approval's detail, not chat text"),
+                ("state.model = clip(m, MODEL_MAX);", "ids, names and words, not chat text"),
+                ("state.model = clip(&id, MODEL_MAX);", "ids, names and words, not chat text"),
             ],
         );
+        check(
+            "transcript.rs",
+            include_str!("transcript.rs"),
+            &[
+                (
+                    "while let Some(i) = s[from..].find(k.as_str()) {",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+                (
+                    "from = at + s[at..].chars().next().map_or(1, char::len_utf8);",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+                (
+                    "out.push_str(&s[at..start]);",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+                (
+                    "out.push_str(&s[at..]);",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+                (
+                    "out.extend_from_slice(&tail[from..]);",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+                (
+                    "Ok(fold(&String::from_utf8_lossy(&bytes[from..])))",
+                    "copying whole texts or reading the file's tail: nothing of a text is dropped",
+                ),
+            ],
+        );
+        check(
+            "text.rs",
+            include_str!("../../agora-adapters/src/text.rs"),
+            &[
+                ("pub fn cap_end(mut text: String, max: usize) -> (String, Option<usize>) {", "the cut helpers themselves"),
+                ("text.truncate(end);", "the cut helpers themselves"),
+                ("pub fn cap_middle(text: String, max: usize) -> (String, Option<(usize, usize)>) {", "the cut helpers themselves"),
+                ("format!(\"{}{}\", &text[..head], &text[tail..]),", "the cut helpers themselves"),
+            ],
+        );
+    }
+}
+
+/// Review of #1103, round 4: the audit's probes, as regression tests.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review4 {
+    use super::*;
+    use crate::credentials::{Secret, SecretStore};
+    use crate::transcript::{Limits, Store};
+
+    fn board(tag: &str, secret: &str) -> (std::path::PathBuf, Arc<Store>, ChatBoard) {
+        let dir = std::env::temp_dir().join(format!("agora-review4-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        SecretStore::in_data(&dir)
+            .set("T", &Secret::new(secret).unwrap())
+            .unwrap();
+        let s = Arc::new(Store::new(
+            &dir,
+            Limits::default(),
+            Some(SecretStore::in_data(&dir)),
+        ));
+        (dir, Arc::clone(&s), ChatBoard::saving(s))
+    }
+
+    fn write(s: &Store, b: &ChatBoard, full: bool) {
+        let batches = if full {
+            b.take_unsaved()
+        } else {
+            b.take_due(0)
+        };
+        for x in batches {
+            s.write(&x).unwrap();
+        }
+    }
+
+    /// No piece of `v` of 4 bytes or more in `f`.
+    fn clean_of(f: &str, v: &str) -> Result<(), String> {
+        let bounds: Vec<usize> = v.char_indices().map(|(i, _)| i).chain([v.len()]).collect();
+        for (x, &a) in bounds.iter().enumerate() {
+            if let Some(&z) = bounds[x + 1..].iter().find(|&&z| z - a >= 4) {
+                if f.contains(&v[a..z]) {
+                    return Err(format!("{:?} on disk", &v[a..z]));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// B1: the bridge's stderr tail starts with `…` where it cut; that place is an edge.
+    #[test]
+    fn a_value_cut_at_the_front_of_a_stderr_tail_is_masked() {
+        let v = "hunter2!hunter2!xy";
+        let (dir, s, b) = board("stderr", v);
+        let raw = format!("Error: {}{v}{}", "ab ".repeat(100), "cd ".repeat(130));
+        let tail = agora_adapters::acp::stderr_tail(raw.as_bytes(), None);
+        let a = AgentId::new("a");
+        b.push_item(
+            &a,
+            &ChatItem::Notice {
+                code: "adapter.turn_failed".into(),
+                params: vec![("stderr_tail".into(), tail)],
+            },
+            1,
+        );
+        write(&s, &b, true);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        clean_of(&f, v).unwrap();
+    }
+
+    /// B2: a take-up with no file still makes the start of the next words an edge.
+    #[test]
+    fn a_take_up_with_no_file_makes_the_next_words_start_an_edge() {
+        let v = "hunter2!hunter2!xy";
+        let (dir, s, b) = board("nofile", v);
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        b.push_item(&a, &ChatItem::Text("hello hunter2!hun".into()), 1);
+        drop(b); // killed: nothing written
+        let b = ChatBoard::saving(Arc::clone(&s));
+        assert!(!b.seed_from_disk(&a, 2));
+        b.push_item(&a, &ChatItem::Text("ter2!xy and the rest of it".into()), 3);
+        write(&s, &b, false);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        clean_of(&f, v).unwrap();
+    }
+
+    /// A notice parameter cut at 1 KiB is an edge there, also for one made of digits.
+    #[test]
+    fn a_digits_parameter_cut_at_its_cap_is_masked() {
+        let v = "9876543210123456";
+        let (dir, s, b) = board("digits", v);
+        let a = AgentId::new("a");
+        let value = format!("{}{v}", "0".repeat(MAX_PARAM_BYTES - 8));
+        b.push_item(
+            &a,
+            &ChatItem::Notice {
+                code: "adapter.turn_failed".into(),
+                params: vec![("rpc_code".into(), value)],
+            },
+            1,
+        );
+        write(&s, &b, true);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        clean_of(&f, v).unwrap();
+    }
+
+    /// Words dropped from the evicted buffer are never written: the next words start with an edge.
+    #[test]
+    fn words_after_a_gap_in_the_evicted_buffer_start_with_an_edge() {
+        let v = "hunter2!hunter2!xy";
+        let (dir, s, b) = board("evicted", v);
+        let a = AgentId::new("a");
+        b.set_working(&a, true);
+        b.push_item(&a, &ChatItem::Text("x hunter2!h".into()), 1);
+        // A flood of other entries (they do not end the agent's words): far more than the ring and the evicted buffer hold, before
+        // any batch, so the words before are dropped unwritten.
+        let big = "z".repeat(MAX_OUTPUT_BYTES);
+        for i in 0..(EVICTED_MAX / MAX_OUTPUT_BYTES + MAX_BYTES / MAX_OUTPUT_BYTES + 8) {
+            let item = ToolItem {
+                call_id: format!("f{i}"),
+                tool: Some("sh".into()),
+                status: "completed".into(),
+                output: Some(big.clone()),
+                ..ToolItem::default()
+            };
+            b.push_item(&a, &ChatItem::Tool(item), 2);
+        }
+        b.push_item(&a, &ChatItem::Text("unter2!xy rest".into()), 3);
+        b.set_working(&a, false);
+        write(&s, &b, false);
+        write(&s, &b, true);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        clean_of(&f, v).unwrap();
+    }
+
+    /// Property seed 1003545: a cut (the bridge's, at a stderr tail's front, or the node's) through a bridge mark that replaced part of
+    /// a value leaves a piece of the mark between the edge and the rest of the value; the mark's far side is an edge too.
+    #[test]
+    fn a_value_beside_a_bridge_mark_that_a_cut_went_through_is_masked() {
+        let v = "hunter2!hunter2!xy";
+        let (dir, s, b) = board("cutmark", v);
+        let a = AgentId::new("a");
+        let front = format!("…ted]{} and more", &v[2..]);
+        let back = format!("and more {}[reda…", &v[..16]);
+        b.push_item(
+            &a,
+            &ChatItem::Notice {
+                code: "adapter.turn_failed".into(),
+                params: vec![("stderr_tail".into(), front), ("detail".into(), back)],
+            },
+            1,
+        );
+        write(&s, &b, true);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(f.contains("and more"), "{f}");
+        clean_of(&f, v).unwrap();
+    }
+
+    /// The agent's words in the file, joined in order.
+    fn joined_words(f: &str) -> String {
+        let mut words = std::collections::BTreeMap::new();
+        for line in f.lines() {
+            if let Some((_, crate::transcript::Line::Entry(e, _))) =
+                crate::transcript::decode_line(line)
+            {
+                if in_run(&e) {
+                    words.insert(e.entry_id, e.text);
+                }
+            }
+        }
+        words.into_values().collect()
+    }
+
+    /// Property seed 2461: a kill loses the words between a value's first letters (written) and its last ones (after the take-up),
+    /// and those letters, each under 4 bytes, make a part of the value where they meet.
+    #[test]
+    fn letters_that_meet_across_lost_words_are_masked() {
+        let v = "Ab#Cd%AbCd";
+        let (dir, s, b) = board("cross", v);
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Text("hello Ab".into()), 1);
+        b.set_working(&a, false);
+        write(&s, &b, false);
+        b.set_working(&a, true);
+        b.push_item(&a, &ChatItem::Text("#Cd%Ab".into()), 2);
+        drop(b); // killed: those words are lost
+        let b = ChatBoard::saving(Arc::clone(&s));
+        assert!(b.seed_from_disk(&a, 3));
+        b.push_item(&a, &ChatItem::Text("Cd there".into()), 4);
+        b.set_working(&a, false);
+        write(&s, &b, true);
+        let f = std::fs::read_to_string(s.path("a").unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        let words = joined_words(&f);
+        assert!(words.contains("there"), "{words:?}");
+        clean_of(&words, v).unwrap();
+    }
+
+    /// Performance: text dense with edges (the bridge's marks), with an 8 KiB value held, is written in near-linear time.
+    #[test]
+    fn text_dense_with_edges_is_written_quickly() {
+        let v = format!("Q{}", "abcdefghij".repeat(800));
+        let (dir, s, b) = board("dense", &v);
+        let a = AgentId::new("a");
+        for dense in ["[redacted]".repeat(1600), "[redacted] ".repeat(1480)] {
+            let item = ToolItem {
+                call_id: "c1".into(),
+                tool: Some("sh".into()),
+                status: "completed".into(),
+                output: Some(dense),
+                ..ToolItem::default()
+            };
+            b.push_item(&a, &ChatItem::Tool(item), 1);
+            let start = std::time::Instant::now();
+            write(&s, &b, true);
+            let took = start.elapsed();
+            assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
