@@ -25,7 +25,7 @@ describe('OSC 52 clipboard offers', () => {
     for (const bad of ['c;?', 'c;', 'c', 'c;!!!', 'c;%%%%', `c;${btoa('\xff\xfe')}`]) expect(clipboardOffer(bad), bad).toBeUndefined();
   });
   it('drops an offer with a line break, a control, a bidirectional or an invisible character', () => {
-    for (const bad of ['a\nb', 'a\rb', 'a\tb', 'ok\x1b[0m', 'a\u202eb', 'a\u200bb', 'a\u2028b', 'a\ufeffb', 'a\u0085b']) expect(clipboardOffer(`c;${b64(bad)}`), JSON.stringify(bad)).toBeUndefined();
+    for (const bad of ['a\nb', 'a\rb', 'a\tb', 'ok\x1b[0m', 'a\u202eb', 'a\u200bb', 'a\u2028b', 'a\ufeffb', 'a\u0085b', 'a\u2800b', 'a\u3164b', 'a\uffa0b']) expect(clipboardOffer(`c;${b64(bad)}`), JSON.stringify(bad)).toBeUndefined();
   });
   it('drops an offer that is too large', () => {
     expect(MAX_OFFER).toBe(8192);

@@ -65,6 +65,10 @@ describe('search in a file', () => {
     // Turkish: `i` finds `İ` and `I`, `ı` finds `I`; offsets stay on the line as it is.
     expect(findMatches(['İstanbul Izmir iç'], 'i').map((m) => m.start)).toEqual([0, 9, 12, 15]);
     expect(findMatches(['Işık ılık'], 'ı').map((m) => m.start)).toEqual([0, 2, 5, 7]);
+    // Unicode simple-case peers which are not direct lower/upper-case conversions still match.
+    expect(findMatches(['ẞ ς K'], 'ß')).toEqual([{ line: 0, start: 0, end: 1 }]);
+    expect(findMatches(['ẞ ς K'], 'σ')).toEqual([{ line: 0, start: 2, end: 3 }]);
+    expect(findMatches(['ẞ ς K'], 'k')).toEqual([{ line: 0, start: 4, end: 5 }]);
     expect(findMatches(['[a] (b)'], '[a]')).toEqual([{ line: 0, start: 0, end: 3 }]);
   });
   it('finds any punctuation as itself, a hyphen too, ignoring case or not', () => {

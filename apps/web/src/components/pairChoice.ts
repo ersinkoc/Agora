@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { replaceHidden } from '../net/hidden';
 
 /** ADR-0065: who asks to pair. A machine wants to join; a browser on another machine wants to sign in. */
 export interface PairRequestModel {
@@ -44,7 +45,7 @@ export function pairTitle(r: PairRequestModel): string {
 
 /** Text a machine or browser sent about itself, made safe to show: no control character, no character that reorders text or hides. */
 export function peerText(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  return replaceHidden(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /**

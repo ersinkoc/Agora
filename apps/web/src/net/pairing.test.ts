@@ -21,6 +21,11 @@ describe('the pairing notices (ADR-0065)', () => {
     expect(n).toMatchObject({ type: 'requested', card: { id: '01'.repeat(16), kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 1_000_000 } });
   });
 
+  it('removes every hidden character from peer text before a pairing card exists', () => {
+    const n = decodePairFrame(EVENT_KIND.PAIR_REQUESTED, requested({ name: 'lap\u2800top', os: 'lin\u3164ux', address: '192.0.\uffa02.1' }), 0);
+    expect(n).toMatchObject({ type: 'requested', card: { name: 'lap top', os: 'lin ux', address: '192.0. 2.1' } });
+  });
+
   it('reads the published fixtures: the decision, and a card whose number is not six digits is dropped, never half shown', () => {
     expect(decodePairFrame(EVENT_KIND.PAIR_DECIDED, fixture('PairDecided'), 7)).toEqual({ type: 'decided', id: '010203', outcome: 'approved', at: 7 });
     // The fixture of PairRequested carries the placeholder number "x": a client must not show it.

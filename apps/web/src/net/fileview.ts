@@ -68,12 +68,45 @@ export function findMatches(lines: string[], query: string, limit = 10_000): Mat
   // Ignoring case, each letter matches all its case forms, the Turkish ones too (`i` finds `İ`, `ı` finds `I`), which the `i` flag's
   // simple folding does not.
   const exact = query !== query.toLowerCase();
-  const re = new RegExp([...query].map((c) => (exact ? escapeRe(c) : caseClass(c))).join(''), 'gu');
+  if (!exact && query.includes('ı')) return findTurkishDotlessMatches(lines, query, limit);
+  const re = new RegExp([...query].map((c) => (exact ? escapeRe(c) : caseClass(c))).join(''), exact ? 'gu' : 'giu');
   const out: Match[] = [];
   for (let i = 0; i < lines.length && out.length < limit; i++) {
     re.lastIndex = 0;
     for (let m = re.exec(lines[i] as string); m && out.length < limit; m = re.exec(lines[i] as string)) {
       out.push({ line: i, start: m.index, end: m.index + m[0].length });
+    }
+  }
+  return out;
+}
+
+// JavaScript's Unicode case folding correctly covers forms such as ß/ẞ, σ/ς and k/K. Its one Turkish mismatch is I/i:
+// dotless `ı` must find I but not i, so queries containing it use a code-point scan while keeping the other Unicode folds.
+function findTurkishDotlessMatches(lines: string[], query: string, limit: number): Match[] {
+  const queryPoints = [...query];
+  const matchers = queryPoints.map((c) => {
+    if (c === 'ı') return (candidate: string) => candidate === 'ı' || candidate === 'I';
+    if (c === 'i') return (candidate: string) => candidate === 'i' || candidate === 'I' || candidate === 'İ';
+    const folded = new RegExp(`^(?:${escapeRe(c)})$`, 'iu');
+    return (candidate: string) => folded.test(candidate);
+  });
+  const out: Match[] = [];
+  for (let lineNo = 0; lineNo < lines.length && out.length < limit; lineNo++) {
+    const points = [...(lines[lineNo] as string)];
+    const offsets: number[] = [];
+    let offset = 0;
+    for (const point of points) {
+      offsets.push(offset);
+      offset += point.length;
+    }
+    offsets.push(offset);
+    for (let at = 0; at + queryPoints.length <= points.length && out.length < limit;) {
+      if (matchers.every((matches, i) => matches(points[at + i] as string))) {
+        out.push({ line: lineNo, start: offsets[at] as number, end: offsets[at + queryPoints.length] as number });
+        at += queryPoints.length;
+      } else {
+        at++;
+      }
     }
   }
   return out;

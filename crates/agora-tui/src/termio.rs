@@ -627,13 +627,7 @@ pub const MAX_TITLE: usize = 60;
 
 /// Characters that draw as nothing, as something else, or that reorder text, besides the control characters: written as escapes.
 fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{e0000}'..='\u{e007f}'
-            | '\u{061c}' | '\u{feff}' | '\u{3164}' | '\u{2800}' | '\u{00ad}' | '\u{fe0f}' | '\u{180e}')
+    c.is_control() || agora_core::text::is_hidden(c)
 }
 
 /// A program's title made safe to draw: control, bidirectional and invisible characters become visible escapes (`\x1b`, `\u{202e}`),
@@ -1105,6 +1099,10 @@ mod tests {
         assert_eq!(safe_title("a\u{9b}b\x7f"), "a\\x9bb\\x7f");
         // More characters that draw as nothing or as something else.
         for c in [
+            '\u{034f}',
+            '\u{0600}',
+            '\u{115f}',
+            '\u{17b4}',
             '\u{206a}',
             '\u{206f}',
             '\u{e0001}',
