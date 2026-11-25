@@ -89,8 +89,26 @@ usage events, which moves the budget from about three months of such use to year
 tail) stays the next step if a hub's history still grows past it; it needs its own design for versioning, corruption fallback and
 backups.
 
+### Measured on macOS and Windows (2026-11-25, `0b7295d1`)
+
+Release `agora-bench` (`footprint`, `history`, `run --secs 2`) run on two real machines: Apple M4 (10 cores, 24 GB, macOS 27.2.1,
+`/bin/sh`) and Windows 11 (WHITE, 32 CPUs, 126 GB, Git Bash `sh` on `PATH` through ConPTY).
+
+| Metric | macOS (50 / 10 warm) | Windows 11 (50 cold / 10 warm) | Budget | Note |
+| --- | --- | --- | --- | --- |
+| Node base memory | 11.27 / 11.23 MB | 9.67 / 9.48 MB | ≤ 50 MB | ok on both |
+| Memory per idle terminal | 0.17 / 0.19 MB | 2.08 / 2.14 MB | ≤ 10 MB | ok on both (ConPTY host overhead on Windows) |
+| Memory per busy terminal | 4.19 / 4.22 MB | 4.05 / 4.07 MB | ≤ 10 MB | ok on both |
+| Idle CPU | 0.16 / 0.05% | 0.00 / 0.00% | ≤ 1% | ok on both |
+| Node cold start | 51 / 42 ms | 2 760 / 197 ms | ≤ 200 ms | Windows dominated by serial `git.exe` spawns in `discover_checkout` (addressed in #1210) |
+| Keystroke → echo, same machine (p95) | 0.10 / 0.07 ms | 18.21 / 17.45 ms | ≤ 16 ms | Windows over budget on ConPTY + MSYS2 `sh` (~15.6 ms timer tick); Agora's ConPTY/terminal hot path has no polling (`pty-vt-throughput` p95 76.6 µs) |
+| History snapshot after switching (same conn, p95) | 10.23 ms (no history: 0.28 ms) | 6.86 ms (no history: 0.36 ms) | ≤ 150 ms | ok on both; new conn per sub: macOS 2.35 ms, Windows 7.43 ms |
+| `channel-throughput` | 1 707 MB/s (p95 704 µs) | 1 345 MB/s (p95 937 µs) | — | — |
+| `pty-vt-throughput` | 164 MB/s (p95 6.0 µs) | 13.2 MB/s (p95 76.6 µs) | — | — |
+| `terminals-20` | 177 MB/s (p95 46.6 µs) | 18.5 MB/s (p95 166 µs) | — | — |
+
 Not measured yet: binary size with web assets, process start (exec) in
-the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
+the cold-start figure, and real-browser frame times with many panes (M1.3).
 
 The first run found idle CPU at 8.7% and keystroke echo at 5 ms: every terminal actor woke 200 times per second to
 poll for commands, and the supervisor copied a full screen per agent per tick just to read an exit status. Input,
