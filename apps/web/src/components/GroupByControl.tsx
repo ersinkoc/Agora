@@ -1,5 +1,6 @@
 import { t } from '../i18n';
 import { GROUP_BYS, type FleetGroup, type GroupBy } from '../net/fleet';
+import { visible } from '../net/hidden';
 import { SegmentedControl } from './kit';
 
 // "Group by" for the fleet console and the agent list: Machine, Project, Agent, State. The kit's segmented control (a radio group named
@@ -13,4 +14,4 @@ export function GroupByControl({ by, onChange }: { by: GroupBy; onChange: (by: G
 }
 
 // What a group is called: a state by the window's own word, a project or a kind by its name, and a nameless one by what it is not.
-export const groupTitle = (g: FleetGroup, by: GroupBy): string => (g.labelKey ? t(g.labelKey) : g.name || t(by === 'kind' ? 'fleet-no-kind' : 'fleet-no-project'));
+export const groupTitle = (g: FleetGroup, by: GroupBy): string => (g.labelKey ? t(g.labelKey) : visible(g.name) || t(by === 'kind' ? 'fleet-no-kind' : 'fleet-no-project'));

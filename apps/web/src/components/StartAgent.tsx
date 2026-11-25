@@ -192,7 +192,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const seen = new Set<string>();
   const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
-  const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name);
+  const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: visible(m.name), id: visible(m.id) }) : visible(m.name));
   // A folder of another project: the task could not be given to an agent started there.
   const otherProject = !!forTask && !!info && info.projectId !== forTask.projectId;
 
@@ -257,7 +257,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                 <span className="text-caption text-muted">{t('ide-folder-known')}</span>
                 <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
                   {known.map(p => <li key={p.path}><button type="button" className="kit-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
-                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-caption text-muted">{visible(p.path)}</span></span>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{visible(p.label)}</span><span className="block truncate font-mono text-caption text-muted">{visible(p.path)}</span></span>
                   </button></li>)}
                 </ul>
               </div>}

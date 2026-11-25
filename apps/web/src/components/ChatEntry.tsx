@@ -118,11 +118,12 @@ export const UserText = memo(function UserText({ line, state }: { line: ChatLine
 // An agent's turn: its avatar (the kit's agent avatar, in the agent's own colour, as on its tile and rows), its name, the model it runs and when
 // it began, and everything it said and did beside them.
 export function Turn({ name, accent, kind, model, atMs, children }: { name: string; accent?: string; kind?: string; model?: string; atMs: number; children: ReactNode }) {
+  const shown = visible(name);
   return (
-    <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={name}>
+    <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={shown}>
       <span className="max-md:hidden" data-turn-avatar><AgentAvatar accent={accent ?? 'var(--agent-slate)'} kind={kind || name} /></span>
       <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
-        <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
+        <b className="truncate text-[0.8125rem] font-semibold text-ink">{shown}</b>
         {model && <span className="truncate">{visible(model)}</span>}
         {atMs > 0 && <span className="flex-none">{clock(atMs)}</span>}
       </div>

@@ -386,7 +386,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
               {by === 'project' && sharedAcross(spread.get(g.key)) && <ProjectChip spread={spread.get(g.key) as ProjectSpread} />}
               {by === 'machine' && !g.online && g.machine && <span className="muted">{t('fleet-offline-since', { when: ago(g.machine.lastSeenMs, now) })}</span>}
               <span className="flex-1" />
-              {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: g.name })} title={t('fleet-start-on', { machine: g.name })}><Icon name="plus" /></button>}
+              {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: visible(g.name) })} title={t('fleet-start-on', { machine: visible(g.name) })}><Icon name="plus" /></button>}
             </header>
             {by === 'machine' && !g.online && <p className="muted m-0">{t('fleet-offline-note')}</p>}
             {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.join(', ') })}</p>}
