@@ -57,7 +57,7 @@ fn starts_message(line: &str) -> Option<(&str, &str)> {
     let mut chars = id.chars();
     let ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    ok.then_some((id, rest.trim_start()))
+    ok.then_some((id, rest.trim_start_matches(FLUENT_BLANK)))
 }
 
 /// Locales with a translation in this build, besides the English source.
@@ -156,7 +156,8 @@ impl Catalog {
     }
 }
 
-/// What Fluent counts as blank around a message's value: spaces and line ends (a tab or a no-break space is text).
+/// What Fluent counts as blank around a message's value: spaces and line ends. A tab or a no-break space at either end of a
+/// value is text. (A selector's variant text is still trimmed of all whitespace, as before.)
 const FLUENT_BLANK: [char; 3] = [' ', '\n', '\r'];
 
 fn arg<'a>(args: &'a [(&str, Arg)], name: &str) -> Option<&'a Arg> {
@@ -236,8 +237,8 @@ fn render_expr(inner: &str, args: &[(&str, Arg)]) -> String {
 }
 
 /// A Fluent string literal, quotes included (`{" "}`, `{ "" }`): its text with the spec's escapes undone (`\\`, `\"`, `\uHHHH`,
-/// `\UHHHHHH`; a code point that is not a Unicode scalar value, such as a surrogate or one above U+10FFFF, becomes U+FFFD as in
-/// Fluent). `None` when `inner` is something else. An escape the spec does not define, or one with too few hex digits, keeps
+/// `\UHHHHHH`; a code point that is not a Unicode scalar value, such as a surrogate or one above U+10FFFF, becomes U+FFFD, as
+/// fluent-rs does). `None` when `inner` is something else. An escape the spec does not define, or one with too few hex digits, keeps
 /// its backslash, so it shows up instead of changing the text unseen.
 fn string_literal(inner: &str) -> Option<String> {
     let text = inner.strip_prefix('"')?.strip_suffix('"')?;
@@ -436,6 +437,25 @@ mod tests {
     }
 
     #[test]
+    fn a_selector_with_an_empty_default_leaves_no_space_at_the_end() {
+        // `agent-sandbox_unavailable` is sent without `reason` (the node's supervisor), and its default variant is empty.
+        for c in [Catalog::english(), Catalog::turkish()] {
+            let args: Vec<(&str, Arg)> = vec![("level", "strict".into()), ("kind", "shell".into())];
+            let none = c
+                .render("agent-sandbox_unavailable", &args)
+                .unwrap_or_default();
+            assert!(none.ends_with('.'), "{none:?}");
+            let mut args = args;
+            args.push(("reason", "label_failed".into()));
+            let some = c
+                .render("agent-sandbox_unavailable", &args)
+                .unwrap_or_default();
+            assert!(some.starts_with(&format!("{none} ")), "{some:?}");
+            assert!(!some.contains(".  "), "{some:?}");
+        }
+    }
+
+    #[test]
     fn an_argument_keeps_its_own_spaces() {
         // Only the message's source is trimmed; what a caller passes in is shown as it came.
         let c = cat("a = { $x }\nb = [{ $x }]\n");
@@ -483,9 +503,10 @@ mod tests {
 
     #[test]
     fn only_spaces_and_line_ends_around_a_value_are_trimmed() {
-        // Fluent's blank is spaces and line ends; a no-break space a translation ends with is text.
-        let c = cat("a =   x\u{a0}\n");
+        // Fluent's blank is spaces and line ends; a no-break space a translation starts or ends with is text.
+        let c = cat("a =   x\u{a0}\nb = \u{a0}y\n");
         assert_eq!(c.render("a", &[]).as_deref(), Some("x\u{a0}"));
+        assert_eq!(c.render("b", &[]).as_deref(), Some("\u{a0}y"));
     }
 
     #[test]

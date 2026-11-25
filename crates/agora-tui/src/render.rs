@@ -829,7 +829,10 @@ pub fn render_chat(
             // A tool call in words, as the web window says it ("Command cargo test"); text that is not a call is shown as it came.
             ChatKind::ToolCall => match crate::tool::call(&e.text) {
                 Some(c) => tool_line(&c, t),
-                None => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+                // The text may end in a line break, which would add an empty row.
+                None => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))])
+                    .trim_end()
+                    .to_string(),
             },
             ChatKind::Plan => format!("{}\n{}", t(key!("tui-chat-plan"), &[]), plain(&e.text)),
             ChatKind::Diff => t(key!("tui-chat-diff"), &[("path", Arg::Str(plain(&e.path)))]),
@@ -1202,6 +1205,25 @@ mod tests {
             Some("tui-chat-watching[]")
         );
         assert!(viewer.iter().any(|l| l.contains("done")));
+    }
+
+    #[test]
+    fn a_tool_line_ending_in_a_line_break_adds_no_empty_row() {
+        let en = agora_i18n::Catalog::english();
+        let t = |id: &str, args: &[(&str, Arg)]| en.render(id, args).unwrap_or_default();
+        let tool = |text: &str| ChatEntry {
+            role: ChatRole::Agent as i32,
+            kind: ChatKind::ToolCall as i32,
+            text: text.into(),
+            ..Default::default()
+        };
+        let plain_text = render_chat(&[tool("make")], "a", "", (80, 24), false, &t, false);
+        let with_break = render_chat(&[tool("make\n")], "a", "", (80, 24), false, &t, false);
+        assert!(
+            plain_text.iter().any(|l| l.ends_with("ran make")),
+            "{plain_text:?}"
+        );
+        assert_eq!(with_break, plain_text);
     }
 
     #[test]
