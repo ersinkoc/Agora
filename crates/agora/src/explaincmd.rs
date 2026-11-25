@@ -58,7 +58,10 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
         say.err(
             key!("cli-explain-manifest-problem"),
             &[
-                ("path", diagnostic(&path.display().to_string()).into()),
+                (
+                    "path",
+                    diagnostic_inline(&path.display().to_string()).into(),
+                ),
                 ("reason", diagnostic(reason).into()),
             ],
         );
@@ -66,7 +69,7 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
     let Some(found) = loaded.iter().find(|l| l.manifest.kind == *kind) else {
         say.err(
             key!("cli-explain-unknown-kind"),
-            &[("kind", diagnostic(kind).into())],
+            &[("kind", diagnostic_inline(kind).into())],
         );
         return ExitCode::from(1);
     };
@@ -83,7 +86,10 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
             say.err(
                 key!("cli-explain-file-too-large"),
                 &[
-                    ("path", diagnostic(&file.display().to_string()).into()),
+                    (
+                        "path",
+                        diagnostic_inline(&file.display().to_string()).into(),
+                    ),
                     ("max", (MAX_SCREEN_BYTES as i64).into()),
                 ],
             );
@@ -93,7 +99,10 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
             say.err(
                 key!("cli-explain-bad-file"),
                 &[
-                    ("path", diagnostic(&file.display().to_string()).into()),
+                    (
+                        "path",
+                        diagnostic_inline(&file.display().to_string()).into(),
+                    ),
                     ("reason", diagnostic(&e.to_string()).into()),
                 ],
             );
@@ -166,7 +175,7 @@ pub(crate) fn render(
             RuleOutcome::NotPresent(i) => (key!("cli-explain-rule-not-present"), Some(i)),
         };
         let mut args = vec![
-            ("id", c.id.as_str().into()),
+            ("id", diagnostic_inline(&c.id).into()),
             ("state", state_name(c.state).into()),
             ("priority", i64::from(c.priority).into()),
             ("region", c.region.name().into()),
@@ -181,7 +190,7 @@ pub(crate) fn render(
             key!("cli-explain-decided"),
             &[
                 ("state", state_name(d.state).into()),
-                ("id", d.rule_id.as_str().into()),
+                ("id", diagnostic_inline(&d.rule_id).into()),
             ],
         ),
         None => say.text(key!("cli-explain-undecided"), &[]),
@@ -250,6 +259,14 @@ pub(crate) fn size_from_name(path: &Path) -> Result<Option<Size>, ()> {
 /// Text used in an error parameter: retain what it said while making terminal controls and hidden formatting visible.
 fn diagnostic(text: &str) -> String {
     agora_core::text::visible(text)
+}
+
+/// A value embedded in one diagnostic or report line: unlike a multiline reason, a line break or tab must not create a second
+/// apparent diagnostic or move the following text into another column.
+fn diagnostic_inline(text: &str) -> String {
+    diagnostic(text)
+        .replace('\n', "\\u{a}")
+        .replace('\t', "\\u{9}")
 }
 
 enum ReadError {

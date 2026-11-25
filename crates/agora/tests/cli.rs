@@ -1525,3 +1525,95 @@ fn verify_f444_diagnostics_escape_path_content_and_unknown_kind_text() {
     assert!(stderr.contains("\\u{202e}"), "{stderr:?}");
     println!("FIX VERIFIED: F444 terminal-active diagnostic parameters are escaped");
 }
+
+#[test]
+fn proof_f445_explain_unknown_kind_cannot_inject_diagnostic_lines() {
+    let dir = explain_audit_dir("f445");
+    let control = explain_run(&dir, "ordinary-unknown", &explain_fixture(), &[]);
+    assert_eq!(control.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&control.stderr).contains("ordinary-unknown"));
+    println!("CONTROL OK");
+
+    let actual = explain_run(&dir, "unknown\nFORGED DIAGNOSTIC", &explain_fixture(), &[]);
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    let injected = stderr
+        .lines()
+        .any(|line| line.starts_with("FORGED DIAGNOSTIC"));
+    println!("EXPECTED: an unknown kind cannot start a forged diagnostic line");
+    println!("ACTUAL: forged diagnostic line exposed = {injected}");
+    if injected {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!injected, "{stderr:?}");
+}
+
+#[test]
+fn proof_f446_explain_rule_ids_cannot_emit_terminal_controls() {
+    let dir = explain_audit_dir("f446");
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"ordinary-id\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let control = explain_run(&dir, "audit-explain", &explain_fixture(), &[]);
+    assert!(control.status.success());
+    assert!(String::from_utf8_lossy(&control.stdout).contains("ordinary-id"));
+    println!("CONTROL OK");
+
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"clear\\u001B[2J\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let actual = explain_run(&dir, "audit-explain", &explain_fixture(), &[]);
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    let exposed = stdout.contains('\x1b');
+    println!("EXPECTED: rule ids cannot emit raw terminal controls");
+    println!("ACTUAL: raw terminal escape exposed = {exposed}");
+    if exposed {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!exposed, "{stdout:?}");
+}
+
+#[test]
+fn verify_f445_inline_diagnostics_escape_line_column_and_return_controls() {
+    let dir = explain_audit_dir("verify-f445");
+    for (kind, escaped) in [
+        ("bad\nforged", "bad\\u{a}forged"),
+        ("bad\tshift", "bad\\u{9}shift"),
+        ("bad\rreplace", "bad\\u{d}replace"),
+    ] {
+        let out = explain_run(&dir, kind, &explain_fixture(), &[]);
+        assert_eq!(out.status.code(), Some(1), "{kind:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(escaped), "{stderr:?}");
+        assert!(!stderr.contains(kind), "{stderr:?}");
+    }
+    println!("FIX VERIFIED: F445 inline diagnostics cannot inject lines or columns");
+}
+
+#[test]
+fn verify_f446_rule_ids_escape_controls_hidden_text_and_line_breaks() {
+    let dir = explain_audit_dir("verify-f446");
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"esc\\u001B-tab\\t-line\\n-bidi\\u202E\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let screen = dir.join("safe.screen");
+    std::fs::write(&screen, b"\x1b]0;safe\x07").unwrap();
+    let out = explain_run(&dir, "audit-explain", &screen, &[]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(['\x1b', '\t', '\u{202e}']), "{stdout:?}");
+    assert!(!stdout.contains("\n-bidi"), "{stdout:?}");
+    for escaped in ["\\u{1b}", "\\u{9}", "\\u{a}", "\\u{202e}"] {
+        assert!(stdout.contains(escaped), "{escaped}: {stdout:?}");
+    }
+    println!("FIX VERIFIED: F446 rule ids are inert in checks and decisions");
+}

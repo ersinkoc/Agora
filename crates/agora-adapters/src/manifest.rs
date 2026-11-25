@@ -615,7 +615,8 @@ impl Manifest {
         }
         if let Some(a) = &self.accounts {
             let mut seen = HashSet::new();
-            let ok = a.credential_env.len() <= MAX_CREDENTIAL_ENV
+            let ok = (a.credential_env.is_empty() || self.min_engine >= 4)
+                && a.credential_env.len() <= MAX_CREDENTIAL_ENV
                 && a.credential_env
                     .iter()
                     .all(|n| credential_name_ok(n) && seen.insert(n.to_ascii_uppercase()));
@@ -745,7 +746,7 @@ impl Manifest {
 
     fn validate_launch(&self) -> Result<(), ManifestError> {
         let options = &self.launch.option;
-        if options.len() > MAX_LAUNCH_OPTIONS {
+        if (!options.is_empty() && self.min_engine < 2) || options.len() > MAX_LAUNCH_OPTIONS {
             return Err(invalid("launch.option"));
         }
         let mut ids = HashSet::new();
@@ -774,7 +775,7 @@ impl Manifest {
         // ADR-0066: settings. Same id rules as options (the two share no id: a start names both by id); `args` must use `{value}`;
         // listed values and the default are values a start could give; a setting can never add a flag that skips permissions.
         let settings = &self.launch.setting;
-        if settings.len() > MAX_LAUNCH_SETTINGS {
+        if (!settings.is_empty() && self.min_engine < 3) || settings.len() > MAX_LAUNCH_SETTINGS {
             return Err(invalid("launch.setting"));
         }
         let mut setting_ids = HashSet::new();
@@ -929,7 +930,7 @@ mod launch_tests {
         let with_env = |names: &str| {
             Manifest::parse(&format!(
                 "{}\n[accounts]\nlogin = [\"k\", \"login\"]\ncredential_env = {names}\n",
-                with("")
+                with("").replace("min_engine = 2", "min_engine = 4")
             ))
         };
         let ok = with_env("[\"K_TOKEN\", \"_K2\"]").unwrap();
@@ -979,6 +980,103 @@ mod launch_tests {
         ));
     }
 
+    #[test]
+    fn proof_f447_launch_options_require_the_engine_that_understands_them() {
+        let control = Manifest::parse(&with(SKIP));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&with(SKIP).replace("min_engine = 2", "min_engine = 1"));
+        println!("EXPECTED: min_engine 1 refuses launch.option");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f448_launch_settings_require_the_engine_that_understands_them() {
+        let control = Manifest::parse(&with(MODEL).replace("min_engine = 2", "min_engine = 3"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&with(MODEL).replace("min_engine = 2", "min_engine = 1"));
+        println!("EXPECTED: min_engine 1 refuses launch.setting");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f449_credential_env_requires_the_engine_that_understands_it() {
+        let manifest = |engine| {
+            with("").replace("min_engine = 2", &format!("min_engine = {engine}"))
+                + "\n[accounts]\nlogin = [\"k\", \"login\"]\ncredential_env = [\"K_TOKEN\"]\n"
+        };
+        let control = Manifest::parse(&manifest(4));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&manifest(1));
+        println!("EXPECTED: min_engine 1 refuses accounts.credential_env");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f447_launch_option_engine_floor_and_plain_engine_one_manifest() {
+        assert!(Manifest::parse(&with("").replace("min_engine = 2", "min_engine = 1")).is_ok());
+        for engine in [0, 1] {
+            let src = with(SKIP).replace("min_engine = 2", &format!("min_engine = {engine}"));
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "launch.option"
+            ));
+        }
+        assert!(Manifest::parse(&with(SKIP)).is_ok());
+        println!("FIX VERIFIED: F447 launch options require engine 2 or newer");
+    }
+
+    #[test]
+    fn verify_f448_launch_setting_engine_floor_boundaries() {
+        for engine in [1, 2] {
+            let src = with(MODEL).replace("min_engine = 2", &format!("min_engine = {engine}"));
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "launch.setting"
+            ));
+        }
+        let engine_three = with(MODEL).replace("min_engine = 2", "min_engine = 3");
+        assert!(Manifest::parse(&engine_three).is_ok());
+        println!("FIX VERIFIED: F448 launch settings require engine 3 or newer");
+    }
+
+    #[test]
+    fn verify_f449_credential_engine_floor_and_empty_credential_list() {
+        let manifest = |engine, names| {
+            with("").replace("min_engine = 2", &format!("min_engine = {engine}"))
+                + &format!("\n[accounts]\nlogin = [\"k\", \"login\"]\ncredential_env = {names}\n")
+        };
+        assert!(Manifest::parse(&manifest(1, "[]")).is_ok());
+        for engine in [1, 3] {
+            assert!(matches!(
+                Manifest::parse(&manifest(engine, "[\"K_TOKEN\"]")),
+                Err(ManifestError::Invalid { field }) if field == "accounts.credential_env"
+            ));
+        }
+        assert!(Manifest::parse(&manifest(4, "[\"K_TOKEN\"]")).is_ok());
+        println!("FIX VERIFIED: F449 credential declarations require engine 4 or newer");
+    }
+
     /// ADR-0101: `[structured] allow_always = false` switches the always answer off for a kind, and needs engine 6.
     #[test]
     fn allow_always_switches_the_offer_off_and_needs_engine_six() {
@@ -1007,7 +1105,8 @@ mod launch_tests {
     #[test]
     fn launch_settings_put_a_checked_value_into_one_argument() {
         // ADR-0066.
-        let m = Manifest::parse(&with(&format!("{EFFORT}{MODEL}"))).unwrap();
+        let src = with(&format!("{EFFORT}{MODEL}")).replace("min_engine = 2", "min_engine = 3");
+        let m = Manifest::parse(&src).unwrap();
         let effort = m.launch_setting("effort").unwrap();
         assert_eq!(
             effort.args_for("high").unwrap(),
@@ -1038,7 +1137,9 @@ mod launch_tests {
 
     #[test]
     fn a_launch_setting_that_could_be_misused_is_refused() {
-        let field = |src: &str| match Manifest::parse(&with(src)) {
+        let field = |src: &str| match Manifest::parse(
+            &with(src).replace("min_engine = 2", "min_engine = 3"),
+        ) {
             Err(ManifestError::Invalid { field }) => field,
             other => panic!("{other:?}"),
         };
