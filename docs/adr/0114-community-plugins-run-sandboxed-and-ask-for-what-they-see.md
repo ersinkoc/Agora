@@ -1,6 +1,8 @@
 # 0114. Community plugins run sandboxed in the window and ask for what they see
-Status: Proposed
+Status: Accepted
 Date: 2026-11-25
+
+Accepted: 2026-11-25 (the maintainer, in the merger chat, chose "Sandboxed" for decision 1, the trade-off). The open questions were not answered; the proposed answers stand.
 
 Answers ADR-0068's open question on custom panels ("the contract first, the loader later, or a plugin system now?"). Touches
 ADR-0020 and ADR-0028 (approvals are signed by a device key in the window), ADR-0048 (the desktop app), ADR-0097 (Proposed: the hub

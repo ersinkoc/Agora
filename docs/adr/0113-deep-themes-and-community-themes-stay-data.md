@@ -1,6 +1,8 @@
 # 0113. Deep themes and community themes, and a theme is always data
-Status: Proposed
+Status: Accepted
 Date: 2026-11-25
+
+Accepted: 2026-11-25 (the maintainer, in the merger chat: "Accept and build"). The open questions were not answered; the proposed answers stand.
 
 Extends ADR-0068 decision 5 (themes are data) and `docs/ux/themes.md` (format version 1). Answers ADR-0068's open question on
 syncing themes per person. Touches ADR-0024 (simplicity and visual quality), ADR-0102 (colour rules in `visual-language.md`) and
