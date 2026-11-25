@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use agora_core::AgentId;
+use agora_core::{AgentId, LeaseTable};
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
 use agora_mesh::mcp::{
     board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
@@ -436,42 +436,44 @@ impl Boards {
         let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
             return;
         };
+        let Some(task_values) = v["tasks"].as_array() else {
+            return;
+        };
         let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
-        let tasks: Vec<TaskEntry> = v["tasks"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|t| {
-                        let owner = t["owner"].as_str().map(AgentId::new);
-                        let done = t["done"].as_bool().unwrap_or(false);
-                        TaskEntry {
-                            id: agora_core::TaskId::new(text(t, "id")),
-                            project: project.to_string(),
-                            title: text(t, "title"),
-                            detail: text(t, "detail"),
-                            depends_on: t["depends_on"]
-                                .as_array()
-                                .map(|d| {
-                                    d.iter()
-                                        .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                            status: match (&owner, done) {
-                                (None, _) => TaskStatus::Open,
-                                (Some(_), false) => TaskStatus::Claimed,
-                                (Some(_), true) => TaskStatus::Done,
-                            },
-                            owner,
-                            summary: t["summary"].as_str().map(str::to_string),
-                        }
-                    })
-                    .collect()
+        let tasks: Vec<TaskEntry> = task_values
+            .iter()
+            .map(|t| {
+                let owner = t["owner"].as_str().map(AgentId::new);
+                let done = t["done"].as_bool().unwrap_or(false);
+                TaskEntry {
+                    id: agora_core::TaskId::new(text(t, "id")),
+                    project: project.to_string(),
+                    title: text(t, "title"),
+                    detail: text(t, "detail"),
+                    depends_on: t["depends_on"]
+                        .as_array()
+                        .map(|d| {
+                            d.iter()
+                                .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    status: match (&owner, done) {
+                        (None, _) => TaskStatus::Open,
+                        (Some(_), false) => TaskStatus::Claimed,
+                        (Some(_), true) => TaskStatus::Done,
+                    },
+                    owner,
+                    summary: t["summary"].as_str().map(str::to_string),
+                }
             })
-            .unwrap_or_default();
+            .collect();
         let next = v["next"].as_u64().unwrap_or(1);
-        let mut ids = BTreeSet::new();
-        for task in &tasks {
+        if next == 0 || next == u64::MAX {
+            return;
+        }
+        let mut ids = BTreeMap::new();
+        for (value, task) in task_values.iter().zip(&tasks) {
             let Some(number) = task
                 .id
                 .as_str()
@@ -480,9 +482,42 @@ impl Boards {
             else {
                 return;
             };
-            if number == 0 || number >= next || !ids.insert(task.id.clone()) {
+            if number == 0 || number >= next || ids.insert(task.id.clone(), number).is_some() {
                 return;
             }
+            if value["done"].as_bool() == Some(true) && task.owner.is_none() {
+                return;
+            }
+        }
+        for task in &tasks {
+            let Some(number) = ids.get(&task.id) else {
+                return;
+            };
+            if task.depends_on.iter().any(|dependency| {
+                ids.get(dependency)
+                    .is_none_or(|dependency| dependency >= number)
+            }) {
+                return;
+            }
+        }
+        let Some(lease_values) = v["leases"].as_array() else {
+            return;
+        };
+        let mut lease_check = LeaseTable::new();
+        let mut restored_leases = Vec::with_capacity(lease_values.len());
+        for lease in lease_values {
+            let (Some(path), Some(holder), Some(expires)) = (
+                lease["path"].as_str(),
+                lease["holder"].as_str(),
+                lease["expires_at_ms"].as_u64(),
+            ) else {
+                return;
+            };
+            let holder = AgentId::new(holder);
+            if expires == 0 || lease_check.acquire(path, &holder, 0, expires).is_err() {
+                return;
+            }
+            restored_leases.push((path.to_string(), holder, expires));
         }
         let restarted = self
             .restarted
@@ -494,20 +529,7 @@ impl Boards {
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
         mesh.import_tasks(next, &tasks);
-        let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = v["leases"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|l| {
-                        Some((
-                            l["path"].as_str()?.to_string(),
-                            AgentId::new(l["holder"].as_str()?),
-                            l["expires_at_ms"].as_u64()?,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = restored_leases
             .into_iter()
             .partition(|(_, _, expires)| *expires > now_ms);
         // A restored lease is granted again to its holder, so it belongs to a grant: when the holder ends, `sync` (or a restart of
@@ -2315,6 +2337,447 @@ mod tests {
             load(json!({"next": 2, "tasks": [task("other")], "leases": []})),
             json!([])
         );
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f400_a_snapshot_counter_at_u64_max_is_ignored_before_id_allocation_panics() {
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": 1, "tasks": [], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let control = run(
+            &valid,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_create",
+            json!({"title": "control", "depends_on": []}),
+            1,
+        );
+        assert_eq!(
+            agora_mesh::mcp::tool_result_value(match &control.verdict {
+                Verdict::Done { result, .. } => result,
+                _ => panic!(),
+            })
+            .unwrap()["task_id"],
+            "t-1"
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": u64::MAX, "tasks": [], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(
+                &damaged,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_create",
+                json!({"title": "target", "depends_on": []}),
+                1,
+            )
+        }));
+        println!("EXPECTED: Ok(t-1)");
+        println!("ACTUAL: {}", if actual.is_ok() { "Ok" } else { "panic" });
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_ok());
+    }
+
+    #[test]
+    fn f401_a_done_snapshot_task_without_an_owner_is_not_reopened() {
+        let task = |owner: Value| {
+            json!({"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                   "done": true, "owner": owner, "summary": "done"})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": 2, "tasks": [task(json!("alpha/a"))], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let saved: Value = serde_json::from_slice(&valid.snapshot("p", 0).unwrap()).unwrap();
+        assert_eq!(saved["tasks"][0]["done"], true);
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": 2, "tasks": [task(Value::Null)], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f402_a_snapshot_task_with_an_unknown_dependency_is_ignored() {
+        let task = |dependency: &str| {
+            json!({"id": "t-2", "title": "task", "detail": "", "depends_on": [dependency],
+                   "done": false, "owner": null, "summary": null})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 3,
+                "tasks": [
+                    {"id": "t-1", "title": "dependency", "detail": "", "depends_on": [],
+                     "done": true, "owner": "alpha/a", "summary": "done"},
+                    task("t-1")
+                ],
+                "leases": []
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": 3, "tasks": [task("t-1")], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f403_a_snapshot_with_a_dependency_cycle_is_ignored() {
+        let task = |id: &str, dependency: &str| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": [dependency],
+                   "done": false, "owner": null, "summary": null})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 3,
+                "tasks": [
+                    {"id": "t-1", "title": "first", "detail": "", "depends_on": [],
+                     "done": false, "owner": null, "summary": null},
+                    task("t-2", "t-1")
+                ],
+                "leases": []
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": 3, "tasks": [task("t-1", "t-2"), task("t-2", "t-1")], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f404_a_snapshot_with_conflicting_live_leases_is_ignored_atomically() {
+        let lease = |path: &str, holder: &str| json!({"path": path, "holder": holder, "expires_at_ms": 10_000});
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 1,
+                "tasks": [],
+                "leases": [lease("src/a", "alpha/a"), lease("src/b", "beta/a")]
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({
+                "next": 1,
+                "tasks": [],
+                "leases": [lease("src", "alpha/a"), lease("src/lib", "beta/a")]
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f400_snapshot_counter_allocation_boundaries() {
+        let create_after = |next: u64| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": next, "tasks": [], "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            let answer = run(
+                &boards,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_create",
+                json!({"title": "task", "depends_on": []}),
+                1,
+            );
+            let Verdict::Done { result, .. } = answer.verdict else {
+                panic!()
+            };
+            agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(create_after(1), "t-1");
+        assert_eq!(create_after(42), "t-42");
+        assert_eq!(create_after(u64::MAX - 1), format!("t-{}", u64::MAX - 1));
+        assert_eq!(create_after(0), "t-1");
+        assert_eq!(create_after(u64::MAX), "t-1");
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f401_snapshot_task_terminal_state_boundaries() {
+        let load = |done: bool, owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+
+        let open = load(false, Value::Null).unwrap();
+        assert_eq!(open[0]["done"], false);
+        assert!(open[0]["owner"].is_null());
+        let claimed = load(false, json!("alpha/a")).unwrap();
+        assert_eq!(claimed[0]["done"], false);
+        assert_eq!(claimed[0]["owner"], "alpha/a");
+        let done = load(true, json!("alpha/a")).unwrap();
+        assert_eq!(done[0]["done"], true);
+        assert_eq!(done[0]["owner"], "alpha/a");
+        assert!(load(true, Value::Null).is_none());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f402_snapshot_dependency_existence_boundaries() {
+        let load = |tasks: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 4, "tasks": tasks, "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert_eq!(load(json!([task("t-1", json!([]))])), 1);
+        assert_eq!(
+            load(json!([
+                task("t-1", json!([])),
+                task("t-2", json!(["t-1"])),
+                task("t-3", json!(["t-1", "t-2"]))
+            ])),
+            3
+        );
+        assert_eq!(load(json!([task("t-2", json!(["t-1"]))])), 0);
+        assert_eq!(load(json!([task("t-1", json!(["t-9"]))])), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f403_snapshot_dependency_order_boundaries() {
+        let load = |tasks: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 4, "tasks": tasks, "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert!(load(json!([
+            task("t-1", json!([])),
+            task("t-2", json!(["t-1"])),
+            task("t-3", json!(["t-2"]))
+        ])));
+        assert!(!load(json!([task("t-1", json!(["t-1"]))])));
+        assert!(!load(json!([
+            task("t-1", json!(["t-2"])),
+            task("t-2", json!(["t-1"]))
+        ])));
+        assert!(!load(json!([
+            task("t-1", json!(["t-2"])),
+            task("t-2", json!([]))
+        ])));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f404_snapshot_lease_consistency_boundaries() {
+        let load = |leases: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        let lease = |path: &str, holder: &str| json!({"path": path, "holder": holder, "expires_at_ms": 10_000});
+
+        assert_eq!(
+            load(json!([lease("src/a", "alpha/a"), lease("src/b", "beta/a")])),
+            2
+        );
+        assert_eq!(
+            load(json!([
+                lease("src", "alpha/a"),
+                lease("src/lib", "alpha/a")
+            ])),
+            2
+        );
+        assert_eq!(
+            load(json!([lease("src", "alpha/a"), lease("src/lib", "beta/a")])),
+            0
+        );
+        assert_eq!(load(json!([lease("../outside", "alpha/a")])), 0);
         println!("FIX VERIFIED");
     }
 }
