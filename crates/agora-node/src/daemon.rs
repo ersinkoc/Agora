@@ -629,7 +629,7 @@ impl EventSink {
         record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
             state: proto_state(view.state) as i32,
-            reported: false,
+            reported: view.reported,
         }));
         if let Some(session) = session {
             record(Body::AgentSessionReported(v1::AgentSessionReported {
@@ -811,11 +811,15 @@ impl EventSink {
                         session_id: session.clone(),
                     }));
                 }
-                SupervisorEvent::StateChanged { agent, state } => {
+                SupervisorEvent::StateChanged {
+                    agent,
+                    state,
+                    reported,
+                } => {
                     self.record(Body::AgentStateChanged(v1::AgentStateChanged {
                         agent_id: agent.as_str().to_string(),
                         state: proto_state(*state) as i32,
-                        reported: false,
+                        reported: *reported,
                     }));
                 }
                 SupervisorEvent::Exited { agent, status } => {
@@ -3119,7 +3123,7 @@ fn chat_event(
         }
         // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in a turn; leaving one
         // (or ending) closes them.
-        SupervisorEvent::StateChanged { agent, state } => {
+        SupervisorEvent::StateChanged { agent, state, .. } => {
             chat.set_working(agent, *state == agora_core::AgentState::Working);
         }
         SupervisorEvent::Exited { agent, .. } => {
@@ -3582,6 +3586,7 @@ mod announce_tests {
             id: AgentId::new(id),
             kind: "probe".into(),
             state: AgentState::Idle,
+            reported: false,
             worktree: PathBuf::from(format!("/wt/{id}")),
             branch: format!("agent/{id}"),
             project: "p".into(),
@@ -4304,6 +4309,7 @@ mod process_record_tests {
             id: AgentId::new("agent-1"),
             kind: "fake".into(),
             state,
+            reported: false,
             worktree: std::path::PathBuf::from("/wt/agent-1"),
             branch: "main".into(),
             project: "p".into(),
@@ -4365,6 +4371,7 @@ mod process_record_tests {
                 let done = SupervisorEvent::StateChanged {
                     agent: AgentId::new("agent-1"),
                     state: AgentState::Done,
+                    reported: false,
                 };
                 sink.supervisor_events(&[exited(0), done], &[view(false, AgentState::Done)]);
                 up.to_vec()
