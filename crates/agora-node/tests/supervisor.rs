@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 
 use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
+use agora_node::daemon::{Announce, EventSink};
 use agora_node::supervisor::{
     NodeLimits, RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorError,
     SupervisorEvent,
 };
 use agora_node::terminal::TerminalOptions;
-use agora_protocol::ErrorCode;
+use agora_protocol::{v1, ErrorCode};
 
 /// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
 /// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
@@ -310,6 +311,112 @@ fn reported_state_outranks_the_screen() {
     assert!(states(&events)
         .iter()
         .all(|s| *s != AgentState::Working && *s != AgentState::Blocked));
+    sup.stop(&id).unwrap();
+}
+
+/// Every `(state, reported)` the event log holds after `mark`.
+fn logged_states(sink: &EventSink, mark: u64) -> Vec<(i32, bool)> {
+    sink.events_after(mark)
+        .into_iter()
+        .filter_map(|ev| match ev.body? {
+            v1::event::Body::AgentStateChanged(s) => Some((s.state, s.reported)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `AgentStateChanged.reported` is true exactly when the agent itself said the state: not for one read from its screen, nor for the
+/// node's own facts about its process (its start, its end, a stop, a resume), and an announcement says it again from the last source.
+#[test]
+fn reported_is_said_only_for_the_agents_own_state() {
+    use v1::AgentState as P;
+    let e = env("reported-flag");
+    let mut sup = supervisor(RestartPolicy::default());
+    sup.register(manifest(&fake_launch(), None));
+    let sink = EventSink::open(&e.dir.join("events"), "node-1").unwrap();
+    let id = sup.start(&request(&e, "rf"), Instant::now()).unwrap();
+    // Started: the node's own `Unknown`.
+    assert!(!sup.list()[0].reported);
+
+    // Read from the screen.
+    let mark = sink.next_seq() - 1;
+    let events = run_until(&mut sup, Duration::from_secs(20), |ev| {
+        states(ev).contains(&AgentState::Working)
+    });
+    sink.supervisor_events(&events, &sup.list());
+    assert_eq!(logged_states(&sink, mark), [(P::Working as i32, false)]);
+    let mark = sink.next_seq() - 1;
+    sink.announce_present(&sup.list(), &[], Announce::Present);
+    assert_eq!(logged_states(&sink, mark), [(P::Working as i32, false)]);
+
+    // The agent reports the state its screen already shows: the state is the same, where it came from is news.
+    let mark = sink.next_seq() - 1;
+    let events = sup.report_state(&id, AgentState::Working).unwrap();
+    sink.supervisor_events(&events, &sup.list());
+    assert_eq!(logged_states(&sink, mark), [(P::Working as i32, true)]);
+    assert!(sup.list()[0].reported);
+    assert!(sup
+        .report_state(&id, AgentState::Working)
+        .unwrap()
+        .is_empty());
+    let events = sup.report_state(&id, AgentState::Blocked).unwrap();
+    sink.supervisor_events(&events, &sup.list());
+    // An announcement (a resync) keeps the last source.
+    let mark = sink.next_seq() - 1;
+    sink.announce_present(&sup.list(), &[], Announce::Present);
+    assert_eq!(logged_states(&sink, mark), [(P::Blocked as i32, true)]);
+
+    // The process ends: the node's own `Done`, whatever the agent said before.
+    let mark = sink.next_seq() - 1;
+    let events = run_until(&mut sup, Duration::from_secs(20), |ev| exited(ev) == 1);
+    sink.supervisor_events(&events, &sup.list());
+    assert_eq!(logged_states(&sink, mark), [(P::Done as i32, false)]);
+    assert!(!sup.list()[0].reported);
+
+    // A stop and a resume: the node's own facts too.
+    let mut events = sup.stop(&id).unwrap();
+    events.extend(sup.resume(&id, Instant::now()).unwrap());
+    let mark = sink.next_seq() - 1;
+    sink.supervisor_events(&events, &sup.list());
+    let logged = logged_states(&sink, mark);
+    assert!(
+        logged.contains(&(P::Unspecified as i32, false)) && logged.iter().all(|(_, r)| !r),
+        "{logged:?}"
+    );
+    assert!(!sup.list()[0].reported);
+    sup.stop(&id).unwrap();
+}
+
+/// A stop of an agent that said it was done leaves its word standing; a resume starts a new process, whose state is the node's again.
+#[test]
+fn a_stop_keeps_the_agents_own_done_and_a_resume_clears_it() {
+    let e = env("reported-resume");
+    let mut sup = supervisor(RestartPolicy::default());
+    sup.register(manifest(&fake_launch(), None));
+    let id = sup.start(&request(&e, "rr"), Instant::now()).unwrap();
+    let said = |events: &[SupervisorEvent]| -> Vec<(AgentState, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SupervisorEvent::StateChanged {
+                    state, reported, ..
+                } => Some((*state, *reported)),
+                _ => None,
+            })
+            .collect()
+    };
+    let events = sup.report_state(&id, AgentState::Done).unwrap();
+    assert_eq!(said(&events), [(AgentState::Done, true)]);
+    let events = sup.stop(&id).unwrap();
+    assert_eq!(
+        said(&events),
+        [],
+        "the stop left the state as the agent said it"
+    );
+    assert!(sup.list()[0].reported);
+    let events = sup.resume(&id, Instant::now()).unwrap();
+    assert_eq!(said(&events), [(AgentState::Unknown, false)]);
+    assert!(!sup.list()[0].reported);
     sup.stop(&id).unwrap();
 }
 
