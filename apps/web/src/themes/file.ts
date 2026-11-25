@@ -48,7 +48,8 @@ function readPx(v: unknown, min: number, max: number): number | undefined {
 // The pieces of a format-1 name that a format-2 file refuses: removed when a format-1 theme becomes format 2, so every theme format
 // 1 accepts stays one format 2 accepts (the name never reaches CSS; it is text on the page).
 const UNSAFE_ALL = UNSAFE.map((r) => new RegExp(r.source, `${r.flags}g`));
-const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''), name).trim() || 'Theme';
+// A name of nothing but those pieces becomes a dash (a mark, not a word: no language's text lives in code).
+const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''), name).replace(/\s+/g, ' ').trim() || '—';
 
 // ---- Reading --------------------------------------------------------------------------------------------------------------------
 
@@ -143,7 +144,7 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
   for (const [k, v] of Object.entries(shape ?? {})) {
     const field = `shape.${k}`;
     if (floorKey(k, field)) continue;
-    if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
+    if (hasOwn(DERIVED, k)) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
     if (!isShapeToken(k)) { if (isFontToken(k)) issues.push({ code: 'moved-token', field, token: k, to: 'text' }); else if (isColourToken(k)) issues.push({ code: 'moved-token', field, token: k, to: 'tokens' }); else unknown(field); continue; }
     if (!ok(field)) continue;
     const read = readValue(k as TokenName, v);
@@ -207,7 +208,7 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
     for (const [k, v] of Object.entries(group(section?.tokens, `${scheme}.tokens`) ?? {})) {
       const field = `${scheme}.tokens.${k}`;
       if (floorKey(k, field)) continue;
-      if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
+      if (hasOwn(DERIVED, k)) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
       if (!isTokenName(k)) { issues.push({ code: 'unknown-token', token: shortKey(k) }); continue; }
       if (!isColourToken(k)) { issues.push({ code: 'moved-token', field, token: k, to: isFontToken(k) ? 'text' : 'shape' }); continue; }
       if (!ok(field)) continue;

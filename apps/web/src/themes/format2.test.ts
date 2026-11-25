@@ -183,6 +183,15 @@ describe('format 2', () => {
         expect(issues(r), `${piece} in ${where}`).toContainEqual({ code: 'unsafe', field: where });
       }
     }
+    // Keys that name a built-in property of every object are unknown keys like any other, and say so in words.
+    for (const file of [
+      v2({ inherits: 'dark', shape: { constructor: 1 } }), v2({ dark: { tokens: { constructor: '#000000', toString: 1 } } }), v1({ constructor: '#000000' }),
+      JSON.parse('{"agora-theme":2,"name":"x","inherits":"dark","shape":{"__proto__":1},"chrome":{"__proto__":"x","constructor":"y"}}'),
+    ]) {
+      const r = readTheme(file);
+      expect(r.ok).toBe(false);
+      expect(() => issues(r).map(issueText), JSON.stringify(file)).not.toThrow();
+    }
     // A value that is refused as unsafe is not also judged as a bad value.
     expect(issues(readTheme(v2({ dark: { terminal: { red: 'url(x)' } } })))).toEqual([{ code: 'unsafe', field: 'dark.terminal.red' }]);
   });

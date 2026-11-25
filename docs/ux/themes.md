@@ -145,7 +145,7 @@ changes until a theme sets one. Agent replies get a box (padding, a corner, a li
 `cyan`, `white` and their `bright-` forms. Left out, a terminal draws as before: the pane's background, the theme's text, the
 accent as cursor and selection, and the window's palette for the scheme. Every terminal pane takes them, and takes them again on
 every theme change (`agora-theme` event). The selection is drawn at 40 % over the background, fainter in a terminal not in focus,
-so text keeps its own colour on top. The terminal's frame and find bar follow the terminal's background and text.
+so text keeps its own colour on top. The terminal's frame and its search matches follow the terminal's background and text.
 
 ### Chrome
 
@@ -164,7 +164,7 @@ builds CSS.
 | `state-display` | `symbol`, `dot`, `word` | How an agent's state shows in lists and tabs. The word is always in the tooltip and read aloud; "Needs you" always keeps its own symbol. |
 | `icons` | `lines` | The icon set. There is one so far; the key is there so a theme can name it. |
 | `shadow` | `soft`, `none`, `strong` | The one elevation (menus, overlays); cards and panels stay flat. |
-| `motion` | `system`, `reduced`, `off` | Follow the system's reduced-motion setting, reduce (no pulsing marks, no transitions), or no motion at all. |
+| `motion` | `system`, `reduced`, `off` | Follow the system's reduced-motion setting; reduced: the marks that pulse or breathe (a state, a working dot, a loading row) stand still; off: no animation or transition at all. |
 
 ## The floor: what no theme can change
 

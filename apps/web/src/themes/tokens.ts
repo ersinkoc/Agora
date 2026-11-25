@@ -301,7 +301,7 @@ export function parseTheme(value: unknown): ParsedTheme {
   if (value.tokens !== undefined && !isObject(value.tokens)) return { ok: false, issues: [...issues, { code: 'invalid' }] };
   const tokens: Tokens = { ...baseTokens(scheme) };
   for (const [k, v] of Object.entries(value.tokens ?? {})) {
-    if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
+    if (Object.prototype.hasOwnProperty.call(DERIVED, k)) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
     if (!isTokenName(k)) { issues.push({ code: 'unknown-token', token: cleanName(k).slice(0, 40) }); continue; }
     const read = readValue(k, v);
     if (read === undefined) issues.push({ code: 'bad-value', token: k });
