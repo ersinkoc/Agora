@@ -14,6 +14,7 @@ describe('agent kinds for Settings → Agents', () => {
   });
   it('shows third-party text as one short plain line', () => {
     expect(plainText('  a\n\tb‮evil\u0000 ')).toBe('a b evil');
+    expect(plainText('Co\u034f\u2800\u3164\uffa0dex')).toBe('Co dex');
     expect(plainText('x'.repeat(100), 10)).toBe(`${'x'.repeat(9)}…`);
     expect(plainText('<img src=x onerror=alert(1)>')).toBe('<img src=x onerror=alert(1)>'); // kept as text; React never parses it
   });

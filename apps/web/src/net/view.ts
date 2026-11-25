@@ -535,16 +535,19 @@ export function tiles(v: View): AgentTileModel[] {
     const workspaceId = v.agentWorkspaces.get(id);
     const selected = workspaceId ? v.workspaces.get(workspaceId) : undefined;
     const sharing = !!workspaceId && (sharingCounts.get(workspaceId) ?? 0) > 1;
+    const workspace = selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '';
+    const project = selected ? lastSegment(selected.gitRoot || selected.path) : wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') : '';
+    const branch = selected?.branch || wt?.branch || '';
     // A closed agent is finished, whatever state it had when its machine lost it (a blocked one that ended is not waiting for anyone).
     const state = !a.running ? 'finished' : waiting.has(id) ? 'needs-you' : uiState(a.state);
     return {
       id,
-      name: `${a.kind} · ${ACCENT_NAMES[i]}`,
+      name: `${visible(a.kind)} · ${ACCENT_NAMES[i]}`,
       ...(a.kind ? { kind: a.kind } : {}),
       accent: ACCENTS[i] as string,
-      machine: node?.hostname || a.nodeId,
+      machine: visible(node?.hostname || a.nodeId),
       machineId: a.nodeId,
-      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '',
+      workspace: visible(workspace),
       shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,
       preview: '',
@@ -552,9 +555,9 @@ export function tiles(v: View): AgentTileModel[] {
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
       workspaceRef: selected && workspaceId ? { node: a.nodeId, id: workspaceId.slice(workspaceId.indexOf('/') + 1), directory: true } : wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
-      project: selected ? lastSegment(selected.gitRoot || selected.path) : wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
+      project: project ? visible(project) : undefined,
       terminal: v.withTerminal.has(id),
-      branch: selected?.branch || wt?.branch || undefined,
+      branch: branch ? visible(branch) : undefined,
       filesChanged: selected?.filesChanged ?? wt?.filesChanged ?? 0,
       closed: !a.running,
       exitCode: a.exitCode,
@@ -692,7 +695,7 @@ export interface MachineModel { id: string; name: string; os: string; online: bo
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build, terminalsOpen: n.terminalsOpen, binary: n.binary }))
+    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary) }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
@@ -703,7 +706,7 @@ export function projectChoices(v: View): ProjectChoice[] {
   const choices = new Map<string, ProjectChoice>();
   for (const c of [...v.checkouts.values(), ...v.workspaces.values()]) {
     if (v.nodes.get(c.nodeId)?.online) choices.set(`${c.nodeId}/${c.path}`, { node: c.nodeId, projectId: c.projectId, path: c.path,
-      label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` });
+      label: visible(`${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}`) });
   }
   return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }

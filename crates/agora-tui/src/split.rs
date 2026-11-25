@@ -103,7 +103,9 @@ fn state_word(state: AgentState, t: Text<'_>) -> String {
 /// Text cut or padded to exactly `width` columns. Every character counts as one column; agent ids, kinds and host names are what
 /// goes here, and a wide character only shortens the padding.
 fn fit(text: &str, width: usize) -> String {
-    let mut chars = text.chars().filter(|c| !c.is_control());
+    let without_controls: String = text.chars().filter(|c| !c.is_control()).collect();
+    let clean = plain(&without_controls);
+    let mut chars = clean.chars();
     let mut out: String = chars.by_ref().take(width).collect();
     let n = out.chars().count();
     if n < width {
@@ -1846,5 +1848,12 @@ mod tests {
         assert_eq!(fit("\x07a\nb\x1bc", 3), "abc");
         assert_eq!(fit("abcd\n", 3), "ab…");
         assert_eq!(fit("a\n", 3), "a  ");
+    }
+
+    #[test]
+    fn fit_makes_hidden_machine_and_agent_text_visible() {
+        let shown = fit("co\u{202e}\u{2800}dex", 20);
+        assert!(!shown.chars().any(agora_core::text::is_hidden), "{shown:?}");
+        assert!(shown.contains("co\\u{2800}dex"), "{shown:?}");
     }
 }

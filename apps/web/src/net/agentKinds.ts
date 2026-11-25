@@ -4,6 +4,7 @@ import { usableOptions } from '../components/launchChoice';
 import type { LaunchOptionChoice } from '../components/launchChoice';
 import { usableSettings, type LaunchSettingChoice } from '../components/launchSettingsModel';
 import { AGENT_COLOUR_NAMES } from '../themes/tokens';
+import { replaceHidden } from './hidden';
 
 // The wire's integration level (agora.v1.IntegrationLevel): 1 generic, 2 manifest, 3 ACP, 4 adapter process.
 export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[] }
@@ -12,11 +13,11 @@ export interface KindInfo { kind: string; name: string; installed: boolean; leve
 export type RunsAs = 'terminal' | 'chat' | 'adapter';
 export const runsAs = (level: number): RunsAs => (level === 3 ? 'chat' : level === 4 ? 'adapter' : 'terminal');
 
-/** Text that came from a machine or a manifest (a third party may have written it): plain, one line, no control or direction
+/** Text that came from a machine or a manifest (a third party may have written it): plain, one line, no control or hidden
  * characters, at most `max` characters. It is only ever rendered as text, never as markup. */
 export function plainText(s: string, max = 48): string {
   // eslint-disable-next-line no-control-regex
-  const one = s.replace(/[\u0000-\u001f\u007f-\u009f\u061c​-‏‪-‮⁦-⁩﻿]/g, ' ').replace(/\s+/g, ' ').trim();
+  const one = replaceHidden(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
   const chars = [...one];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : one;
 }
