@@ -397,3 +397,93 @@ contains = " "
     let detector = Detector::new(&manifest);
     assert_eq!(detector.detect(&term_with(b"oneword")), None);
 }
+
+/// `agora agent explain`: every rule is checked (not only up to the first match), each with the first condition that failed, in the
+/// order detection reads them; the decision is detection's own.
+#[test]
+fn explain_lists_every_rule_with_why_it_failed() {
+    use agora_adapters::{Region, RuleOutcome};
+    let m = Manifest::parse(
+        r#"
+kind = "x"
+display_name = "X"
+version = "1"
+min_engine = 1
+[process]
+launch = ["x"]
+
+[[rules]]
+id = "own"
+state = "blocked"
+priority = 900
+region = "bottom_lines(4)"
+contains = "Allow"
+
+[[rules]]
+id = "all"
+state = "blocked"
+priority = 800
+region = "bottom_lines(4)"
+all = [{ contains = "ready" }, { contains = "missing" }]
+
+[[rules]]
+id = "any"
+state = "working"
+priority = 700
+region = "bottom_lines(4)"
+contains = "ready"
+any = [{ contains = "nope" }, { contains = "never" }]
+
+[[rules]]
+id = "not"
+state = "working"
+priority = 600
+region = "title"
+contains = "busy"
+not = [{ contains = "spin" }, { contains = "done" }]
+
+[[rules]]
+id = "idle"
+state = "idle"
+priority = 100
+region = "bottom_lines(4)"
+contains = "ready"
+
+[[rules]]
+id = "later"
+state = "idle"
+priority = 50
+region = "bottom_lines(4)"
+contains = "ready"
+"#,
+    )
+    .unwrap();
+    let d = Detector::new(&m);
+    let t = term_with(b"\x1b]0;busy done\x07ready >");
+    let why = d.explain(&t);
+    let got: Vec<(&str, RuleOutcome)> = why
+        .checks
+        .iter()
+        .map(|c| (c.id.as_str(), c.outcome))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("own", RuleOutcome::OwnMissing),
+            ("all", RuleOutcome::AllMissing(1)),
+            ("any", RuleOutcome::AnyMissing),
+            ("not", RuleOutcome::NotPresent(1)),
+            ("idle", RuleOutcome::Matched),
+            ("later", RuleOutcome::Matched),
+        ]
+    );
+    assert_eq!(why.decided, d.detect(&t));
+    assert_eq!(
+        why.decided.as_ref().map(|d| d.rule_id.as_str()),
+        Some("idle")
+    );
+    let regions: Vec<&Region> = why.regions.iter().map(|(r, _)| r).collect();
+    assert_eq!(regions.len(), 2, "each region read once: {regions:?}");
+    assert_eq!(why.regions[1].1, "busy done");
+    assert_eq!(why.regions[0].0.name(), "bottom_lines(4)");
+}
