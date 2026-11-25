@@ -1,1 +1,0 @@
-- A structured agent's adapter can now tell the node where it shortened a long tool output, argument or plan step, and the node then also hides the parts of your saved secrets left on either side of that cut, both in what you see live and in the saved conversation. Adapters that do not say so work as before. (ADR-0111)
