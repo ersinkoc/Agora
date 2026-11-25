@@ -504,9 +504,9 @@ not built: nothing to check.
   `agora down`, then start again with `agora` (the run's `AGORA_HOME`; on Linux and macOS the Shells keep running with their
   holder; on Windows `agora down` ends them, and the message should stay all the same, since the hub rebuilds its Team chat from its
   log (unverified)).
-- **See:** before the reload, Team chat shows `[#rm] RM-63 hello` from the first Shell to the second; after the reload, in the new tab
-  and in the first tab once it has reconnected, the message is there at once, with no new message sent (up to the newest 50 messages
-  and 256 KiB per project).
+- **See:** before the reload, Team chat shows `RM-63 hello` from the first Shell to `#rm` (on one machine the node delivers it
+  without the `[#rm] ` prefix a shared project's copies get); after the reload, in the new tab and in the first tab once it has
+  reconnected, the message is there at once, with no new message sent (up to the newest 50 messages and 256 KiB per project).
 - **Evidence so far:** none recorded.
 
 ### RM-29 Shared project board (tasks, leases)
@@ -726,16 +726,17 @@ not built (the window says how many files are not shown): nothing to check.
 - **Do:** S1, S2. Start a Shell in `$RM/proj`.
   1. **History.** Run `seq 1 300` (PowerShell: `1..300`). Reload the window, open the Shell in a second browser tab, and select it in
      `agora tui` (its terminal panel); scroll back in each.
-  2. **Mouse, alternate screen, cursor.** In the Shell run `printf '\e[?1049h\e[?1000h\e[6 q'; cat -v` (bash or zsh; it switches to
-     the alternate screen, turns mouse reports on, makes the cursor a bar, and shows what it receives). PowerShell (unverified):
+  2. **Mouse, alternate screen, cursor.** In the Shell run `printf '\033[?1049h\033[?1000h\033[6 q'; cat -v` (`\033` is `\e`, written
+     so that S2's `sh` takes it as well as bash and zsh; it switches to the alternate screen, turns mouse reports on, makes the
+     cursor a bar, and shows what it receives). PowerShell (unverified):
      `$e = [char]27; [Console]::Write("$e[?1049h$e[?1000h$e[6 q"); while ($true) { $k = [Console]::ReadKey($true); [Console]::Write([int]$k.KeyChar); [Console]::Write(' ') }`
      (it prints the code of each character it receives; 27 is Esc). Only then reload the window, open a second tab, and open the
      Shell's terminal in `agora tui` (Enter); in each, click in the terminal.
-  3. **Wheel.** Ctrl-C, then `printf '\e[?1000l'; cat -v` (mouse reports off, still on the alternate screen; PowerShell: the same
+  3. **Wheel.** Ctrl-C, then `printf '\033[?1000l'; cat -v` (mouse reports off, still on the alternate screen; PowerShell: the same
      loop after `[Console]::Write("$e[?1000l")`). Reload, open a second tab and `agora tui` again; in each, turn the wheel over the
-     terminal. Ctrl-C, then `printf '\e[?1049l\e[0 q'` (PowerShell: `[Console]::Write("$e[?1049l$e[0 q")`) to go back.
-- **See:** 1: each late window scrolls back to the earlier lines (up to its history setting; 2000 lines in the terminal client), in
-  their colours, not only the last screen. 2: a click shows a mouse report (`^[[M` and three more characters; in PowerShell `27 91
+     terminal. Ctrl-C, then `printf '\033[?1049l\033[0 q'` (PowerShell: `[Console]::Write("$e[?1049l$e[0 q")`) to go back.
+- **See:** 1: each late window scrolls back to the earlier lines (up to its history setting; 2000 lines in the terminal client),
+  not only the last screen. 2: a click shows a mouse report (`^[[M` and three more characters; in PowerShell `27 91
   77 …`), so clicks reach the program, and the cursor is a bar. 3: the wheel shows arrow keys (`^[[A` / `^[[B`, three a notch in
   the terminal client), not history recall and not mouse reports.
 - **Evidence so far:** none recorded.
