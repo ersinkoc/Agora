@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import { ago } from '../net/time';
 import type { MachineModel } from '../net/view';
 import { Icon, type IconName } from './Icon';
@@ -16,7 +17,7 @@ export function OsTile({ os }: { os: string }) {
 export function MachineName({ m, id, className = '' }: { m: Pick<MachineModel, 'id' | 'name'>; id?: string; className?: string }) {
   return (
     <span className="flex min-w-0 items-baseline gap-2">
-      <strong id={id} className={`truncate ${className}`.trim()}>{m.name}</strong>
+      <strong id={id} className={`truncate ${className}`.trim()}>{visible(m.name)}</strong>
       {m.id !== m.name && <code dir="ltr" className="truncate text-xs font-normal text-muted">{m.id}</code>}
     </span>
   );

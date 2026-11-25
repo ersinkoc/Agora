@@ -33,8 +33,8 @@ export function HistoryDialog({ agent, load, onClose }: { agent: AgentTileModel;
                 <ol className="m-0 grid list-none gap-2 p-0">
                   {commits.map((c) => (
                     <li key={c.id} className="rounded-m border border-line px-3 py-2">
-                      <div className="break-words font-medium">{c.subject || t('history-no-subject')}</div>
-                      <div className="muted mt-0.5"><span className="font-mono">{c.id.slice(0, 8)}</span> · {c.author} · {new Date(c.atMs).toLocaleString()}</div>
+                      <div className="break-words font-medium">{c.subject ? visible(c.subject) : t('history-no-subject')}</div>
+                      <div className="muted mt-0.5"><span className="font-mono">{c.id.slice(0, 8)}</span> · {visible(c.author)} · {new Date(c.atMs).toLocaleString()}</div>
                     </li>
                   ))}
                 </ol>
