@@ -470,11 +470,31 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
         "{kinds:?}"
     );
     assert_eq!(kinds[snapshot_at + 1..], [KIND_TERM_RESIZE], "{kinds:?}");
-    let window = window.unwrap();
-    let (node_history, node_screen) = {
+    let mut window = window.unwrap();
+    // The window is the terminal as of the subscribe, and the node is read later. Output still arriving in between can scroll one
+    // more line into the node's history: the shell's prompt after `hist-60`, which a newer ConPTY ends the line for only when it
+    // writes it (under load on Windows the window ended at `hist-36`, the node at `hist-37`). So the live output after the size is
+    // fed in too, until the two agree or 10 s pass: history and snapshot plus live output give the node's scrollback and screen.
+    // A line the history frames lost never comes back this way, so the comparison below still catches it (#1150).
+    let node_state = || {
         let sup = n.supervisor.lock().unwrap();
         let t = sup.terminal(&id).unwrap();
         t.inspect(|t| (history_lines(t), t.bottom_lines(usize::from(t.size().rows))))
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    let (node_history, node_screen) = loop {
+        let (history, screen) = node_state();
+        let agree = history_lines(&window) == history
+            && agora_vt::Terminal::bottom_lines(&window, screen.len()) == screen;
+        if agree || Instant::now() >= end {
+            break (history, screen);
+        }
+        if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
+            if f.stream_id == 5 {
+                assert_eq!(f.kind, KIND_TERM_DATA, "live output after the size");
+                agora_vt::Terminal::feed(&mut window, &f.payload);
+            }
+        }
     };
     assert!(
         node_history.iter().any(|l| l == "hist-1"),
@@ -504,25 +524,33 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
         data: b"yes 'resync flood resync flood' | head -n 1500000; echo flood-$((6*7))-done\n"
             .to_vec(),
     })));
-    std::thread::sleep(Duration::from_secs(3));
+    // How long the queue takes to overflow depends on how fast the shell writes, and load slows it: after a fixed 3 s pause it
+    // sometimes had not, and no resync came (#1150). So the pauses grow (3, 6, 12, then 24 s) with reading in between, 120 s at
+    // most. A subscriber that fell behind stays behind until its resync, so reading between pauses never hides one.
     let mut snapshots = 0;
     let mut kinds = Vec::new();
-    let end = Instant::now() + Duration::from_secs(60);
+    let end = Instant::now() + Duration::from_secs(120);
+    let mut pause = Duration::from_secs(3);
     while snapshots < 2 && Instant::now() < end {
-        if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
-            if f.stream_id != 7 {
-                continue;
-            }
-            if f.kind != KIND_TERM_DATA && kinds.len() < 200 {
-                kinds.push(f.kind);
-            }
-            if f.kind == KIND_TERM_SNAPSHOT {
-                snapshots += 1;
-            } else if f.kind == KIND_TERM_HISTORY {
-                assert_eq!(
-                    snapshots, 0,
-                    "history only before the first snapshot: {kinds:?}"
-                );
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_secs(24));
+        let read_until = Instant::now() + Duration::from_secs(5);
+        while snapshots < 2 && Instant::now() < read_until {
+            if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
+                if f.stream_id != 7 {
+                    continue;
+                }
+                if f.kind != KIND_TERM_DATA && kinds.len() < 200 {
+                    kinds.push(f.kind);
+                }
+                if f.kind == KIND_TERM_SNAPSHOT {
+                    snapshots += 1;
+                } else if f.kind == KIND_TERM_HISTORY {
+                    assert_eq!(
+                        snapshots, 0,
+                        "history only before the first snapshot: {kinds:?}"
+                    );
+                }
             }
         }
     }
