@@ -15,6 +15,7 @@ cli-usage =
       agora agent resume AGENT_ID [--again] [--socket PATH]
       agora agent list [--socket PATH]
       agora agent kinds [--socket PATH]
+      agora agent explain KIND --file SCREEN [--size COLSxROWS] [--manifests DIR]
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
@@ -705,3 +706,27 @@ cli-agent-install-err-not-offered = The list does not offer that agent as a down
 cli-agent-install-err-tool-missing = A program this needs is not installed: { $detail } ({ $code }). Nothing was changed.
 cli-agent-install-err-io-failed = A file could not be written ({ $code }: { $detail }). Nothing was changed.
 cli-agent-install-err-conflict = That name is not available ({ $code }: { $detail }): another agent already owns that program name, or the agent is named bin. Nothing was changed.
+
+## agora agent explain: which screen rule decides a captured screen. Rule ids, regions and states are the manifest's own words.
+cli-explain-header = Agent kind { $kind } ({ $source ->
+        [built-in] built in
+        [registry] from the ACP registry
+       *[folder] from the manifests folder
+    }), screen replayed at { $cols }x{ $rows }.
+cli-explain-region = What the rules read in { $region }:
+cli-explain-region-empty = (nothing)
+cli-explain-region-cut = ({ $count } earlier lines not shown)
+cli-explain-rule-matched = MATCH   { $id } → { $state } (priority { $priority }, { $region })
+cli-explain-rule-own-missing = no      { $id } → { $state } (priority { $priority }, { $region }): its own text is not there
+cli-explain-rule-all-missing = no      { $id } → { $state } (priority { $priority }, { $region }): all[{ $index }] is not there
+cli-explain-rule-any-missing = no      { $id } → { $state } (priority { $priority }, { $region }): none of its "any" conditions is there
+cli-explain-rule-not-present = no      { $id } → { $state } (priority { $priority }, { $region }): not[{ $index }] is there
+cli-explain-decided = Decision: { $state }, by rule { $id } (the first match, highest priority first).
+cli-explain-undecided = Decision: none. No rule matched, so the node keeps the agent's previous state.
+cli-explain-note = These are the screen rules only. A state the agent reports itself (through its hooks, ACP or an adapter) wins over them.
+cli-explain-no-rules = { $kind } has no screen rules, so no state is read from its screen and there is nothing to explain here. A state the agent reports, or the node's own (such as done when it exits), is outside this report.
+cli-explain-unknown-kind = There is no agent kind "{ $kind }" here. "agora agent kinds" lists the kinds a running node offers.
+cli-explain-bad-file = Could not read the screen file { $path }: { $reason }
+cli-explain-file-too-large = The screen file { $path } is larger than { $max } bytes, so it is not a captured screen.
+cli-explain-manifest-problem = Skipped the manifest file { $path }, as the node does: { $reason }
+cli-explain-bad-size = --size takes the terminal size as COLSxROWS, for example 120x40 (each from 2 to 1000).

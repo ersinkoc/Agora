@@ -168,6 +168,7 @@ impl HostKeyboard {
 mod adaptercmd;
 mod agentcmd;
 mod certs;
+mod explaincmd;
 mod frontdoor;
 mod hold;
 mod hubcli;
@@ -332,6 +333,9 @@ pub(crate) struct Opts {
     settings: Vec<String>,
     /// ADR-0060, #1137: `agora agent resume AGENT_ID --again`, Start again (a new session in the same folder) instead of Resume.
     again: bool,
+    /// `agora agent explain KIND --file SCREEN [--size COLSxROWS]`: the captured screen, and the terminal size to replay it on.
+    file: Option<PathBuf>,
+    size: Option<String>,
     save: bool,
     positional: Vec<String>,
 }
@@ -347,6 +351,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--cwd" => o.cwd = Some(it.next()?.clone()),
             "--worktree" => o.separate_worktree = true,
             "--again" => o.again = true,
+            "--file" => o.file = Some(it.next()?.into()),
+            "--size" => o.size = Some(it.next()?.clone()),
             "--accept-project-id-change" => o.accept_identity_change = true,
             "--worktrees" => o.worktrees = Some(it.next()?.into()),
             "--project" => {
@@ -507,6 +513,7 @@ fn main() -> ExitCode {
         ["agent", "resume"] => agent_resume(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
+        ["agent", "explain"] => explaincmd::explain(&say, &opts),
         ["agent", "install"] => agentcmd::install(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["panel"] => panelcmd::panel(&say),
