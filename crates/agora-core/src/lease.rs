@@ -140,7 +140,8 @@ impl LeaseTable {
         let path = normalize(path).ok()?;
         self.leases
             .iter()
-            .find(|l| !l.is_expired(now_ms) && &l.holder != agent && overlaps(&l.path, &path))
+            .filter(|l| !l.is_expired(now_ms) && &l.holder != agent && overlaps(&l.path, &path))
+            .max_by_key(|l| l.expires_at_ms)
     }
 
     /// Who may not write `path` right now (a live lease held by someone else).

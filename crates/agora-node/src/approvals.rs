@@ -1080,15 +1080,9 @@ pub struct SkipAsk {
 
 const MAX_NAME_CHARS: usize = 64;
 
-/// A character that must never reach a card: a control character (Cc), a format character (Cf: bidirectional controls and isolates,
-/// zero-width characters, the byte order mark, tags) or a line or paragraph separator.
+/// A character that must never reach a card: a control character or one in the shared hidden-character policy.
 fn is_hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
-            | '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}'
-            | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+    c.is_control() || agora_core::text::is_hidden(c)
 }
 
 /// Untrusted text for a card: hidden characters removed, at most `max` characters, and a cut is marked with `…` (inside the bound).
@@ -2798,7 +2792,8 @@ mod tests {
     /// separators) never reach the detail, long text is cut and marked; an id or value that cannot be signed as shown gets no card.
     #[test]
     fn a_card_shows_no_hidden_characters_and_is_bounded() {
-        let hidden = "\u{202e}\u{2066}\u{200b}\u{200f}\u{2028}\u{feff}\u{1b}\u{85}";
+        let hidden =
+            "\u{202e}\u{2066}\u{200b}\u{200f}\u{2028}\u{2800}\u{3164}\u{fe0f}\u{feff}\u{1b}\u{85}";
         let mut a = skip_ask("agent-1", SkipKind::Mode, "mode", "bypass");
         a.agent_kind = format!("cl{hidden}aude{}", "k".repeat(200));
         a.folder = format!("/work/{hidden}login{}", "f".repeat(1000));
