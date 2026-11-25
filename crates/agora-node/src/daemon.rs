@@ -3223,7 +3223,7 @@ fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
 /// attached and unread: the attach made the holder stop reading each terminal and forget its buffer, and the node drops what it does
 /// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
 /// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
-/// folder or project is gone or changed (as a resume refuses), and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
+/// folder or project is gone (or, in a worktree the node made, changed, as a resume refuses), and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
 /// Returns the agents taken up, each with the session id the ledger knew, for the events that say them up again.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
@@ -3257,9 +3257,9 @@ fn take_up_held(
         } else {
             git::discover_checkout(&folder).ok().map(|c| c.project)
         }
-        // As a resume does (T15): a project that changed is not taken up, so an agent that moved its branch or links while no node
-        // ran does not come back as another project's (T8b).
-        .filter(|p| agora_core::same_project(&p.to_string(), &entry.project_id));
+        // T8b: in a worktree the node made, as a resume checks (T15), a project that changed is not taken up, so an agent that moved
+        // its branch to a root of its own while no node ran does not come back as another project's.
+        .filter(|p| entry.directory || agora_core::same_project(&p.to_string(), &entry.project_id));
         let Some(project) = project else {
             ended.push(h);
             continue;
@@ -3354,9 +3354,9 @@ fn take_up_held(
         } else {
             git::discover_checkout(&folder).ok().map(|c| c.project)
         }
-        // As a resume does (T15): a project that changed is not taken up, so an agent that moved its branch or links while no node
-        // ran does not come back as another project's (T8b).
-        .filter(|p| agora_core::same_project(&p.to_string(), &entry.project_id));
+        // T8b: in a worktree the node made, as a resume checks (T15), a project that changed is not taken up, so an agent that moved
+        // its branch to a root of its own while no node ran does not come back as another project's.
+        .filter(|p| entry.directory || agora_core::same_project(&p.to_string(), &entry.project_id));
         let Some(project) = project else {
             ended_pipes.push(p);
             continue;

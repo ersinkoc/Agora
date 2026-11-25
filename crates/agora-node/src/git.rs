@@ -239,6 +239,14 @@ fn record_made(work: &Path, project: Option<ProjectId>) {
     });
 }
 
+/// Test hook: forgets the record of the worktree at `work`, as a node that restarts has none ([`MADE`]).
+#[doc(hidden)]
+pub fn forget_made_worktree(work: &Path) {
+    if let Ok(work) = agora_platform::canonicalize_plain(work) {
+        made().retain(|m| m.work != work);
+    }
+}
+
 /// The record of the worktree this node made that `dir` is, or is inside.
 fn made_dirs(dir: &Path) -> Option<Made> {
     let dir = agora_platform::canonicalize_plain(dir).ok()?;
@@ -2742,9 +2750,9 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// What an agent that may write its worktree's admin folder and the shared object store can do (T8b): build another bare
-    /// repository inside the admin folder, sharing the real objects, with `refs` of its choosing and, when `mark` is given, a clean
-    /// filter `probe` that touches it, and point the admin folder's `commondir` there.
+    /// A worktree whose admin folder's `commondir` names another bare repository (T8b: the agent may write its admin folder and the
+    /// shared object store). That repository sits inside the admin folder and shares the real objects. Its branches are `refs`, and with
+    /// `mark` its config defines a clean filter `probe` that touches `mark`. Returns its path.
     fn common_dir_elsewhere(
         admin: &Path,
         common: &Path,
@@ -2794,22 +2802,35 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         fs::write(file, text).expect("write");
     }
 
-    /// T8b: removing a worktree runs no filter driver from a config its admin folder's `commondir` was pointed at, whether git's own
-    /// cleanliness check would have run or not; the node's own checks decide, on the links it recorded.
+    /// T8b: removing a worktree runs no filter driver from a config its admin folder's `commondir` was pointed at; the node's own
+    /// checks decide, on the links it recorded.
     #[test]
     fn removing_a_worktree_runs_no_filter_from_a_common_dir_its_agent_named() {
+        removal_with_a_moved_common_dir("links-rm", true);
+    }
+
+    /// The same with no record of the worktree (a restarted node): the moved link makes the node's checks refuse.
+    #[test]
+    fn removing_an_unrecorded_worktree_runs_no_filter_from_a_common_dir_its_agent_named() {
+        removal_with_a_moved_common_dir("links-rm-unrec", false);
+    }
+
+    fn removal_with_a_moved_common_dir(name: &str, recorded: bool) {
         let r = Repo::new(None);
-        let wt = r.wt("links-rm");
-        create_worktree(&r.dir, &wt, "links-rm", None).expect("worktree");
+        let wt = r.wt(name);
+        create_worktree(&r.dir, &wt, name, None).expect("worktree");
+        if !recorded {
+            forget_made_worktree(&wt);
+        }
         let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
         // The agent's own commit, kept on a second branch too, so nothing on its branch is unmerged.
         fs::write(wt.join(".gitattributes"), "a.txt filter=probe\n").expect("attributes");
         agent_git(&wt, &["add", "-A"]);
         agent_git(&wt, &["commit", "-q", "-m", "attributes"]);
-        agent_git(&wt, &["branch", "links-rm-kept"]);
+        agent_git(&wt, &["branch", &format!("{name}-kept")]);
         let tip = agent_git(&wt, &["rev-parse", "HEAD"]);
-        let mark = r.wt("links-rm-ran");
-        common_dir_elsewhere(&admin, &common, &[("links-rm", &tip)], Some(&mark));
+        let mark = r.wt(&format!("{name}-ran"));
+        common_dir_elsewhere(&admin, &common, &[(name, &tip)], Some(&mark));
         restat(&wt.join("a.txt"));
         // Control: git that follows the admin folder's links runs the filter.
         let _ = raw_git()
@@ -2824,10 +2845,15 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
 
         let removed = remove_worktree(&r.dir, &wt, false);
         assert!(!mark.exists(), "the node's removal ran the filter");
-        assert!(
-            removed.is_err() || !wt.exists(),
-            "neither refused nor removed: {removed:?}"
-        );
+        if recorded {
+            assert_eq!(removed, Ok(()));
+            assert!(!wt.exists(), "not removed");
+        } else {
+            assert!(
+                matches!(removed, Err(GitError::LinksMoved(_))),
+                "{removed:?}"
+            );
+        }
         let _ = fs::remove_file(&mark);
         let _ = remove_worktree(&r.dir, &wt, true);
         let _ = fs::remove_dir_all(&wt);
