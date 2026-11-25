@@ -791,7 +791,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // ADR-0039 amendment B: only the hub asks for this, and the uplink answers it where the hub's commands enter; from the
         // local socket it would hand this node's board work to nobody.
         Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
-        // ADR-0109: only the hub delivers a durable handoff, and this node does not take them yet.
+        // ADR-0109: only the hub delivers a durable handoff; the uplink takes it where the hub's commands enter, once negotiated
+        // and under the node's grant policy. A local client cannot add an entry to an agent's durable inbox.
         Cmd::DeliverTaskHandoff(_) => Err(capability_missing(
             agora_protocol::handshake::TASK_HANDOFF_V1,
         )),
@@ -1114,6 +1115,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                     &launch,
+                    view.run_id,
                 );
                 // ADR-0060: a session id the node chose at launch, recorded right after the start.
                 if let Some(session) = &session {
@@ -1199,6 +1201,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                     &launch,
+                    view.as_ref().and_then(|v| v.run_id),
                 );
                 if let Some(session) = &session {
                     ev.session_reported(&id, session);
@@ -1975,6 +1978,7 @@ pub(crate) fn resume_agent(
                         skips_permissions: v.skips_permissions,
                     })
                     .unwrap_or_default(),
+                views.iter().find(|v| v.id == id).and_then(|v| v.run_id),
             );
             // Its start is said above with its folder; the rest (its state, its session) as usual.
             let rest: Vec<SupervisorEvent> = events

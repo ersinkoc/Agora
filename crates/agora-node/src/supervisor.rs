@@ -96,6 +96,8 @@ pub type LaunchHook = Box<dyn Fn(&Launching) -> Option<agora_adapters::inject::E
 /// Undoes the launch hook for an agent whose start then failed (its mesh endpoint would otherwise stay registered).
 pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
 
+type RunHook = Box<dyn Fn(&AgentId, &str, Option<[u8; 16]>) + Send>;
+
 /// What injection adds to every (re)launch of one agent.
 #[derive(Debug, Clone, Default)]
 struct Extras {
@@ -710,6 +712,8 @@ pub struct AgentView {
     pub project: String,
     pub running: bool,
     pub restarts: u32,
+    /// ADR-0109: the identity of the process currently running, when available.
+    pub run_id: Option<[u8; 16]>,
     /// ADR-0057: the agent on this node that started this one through the mesh.
     pub parent: Option<AgentId>,
     /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
@@ -1124,6 +1128,7 @@ impl AdapterEntry {
 
 struct AdapterEntry {
     agent: Agent,
+    run_id: Option<[u8; 16]>,
     /// `None` once a user stop has ended the adapter process.
     adapter: Option<Adapter>,
     session_id: String,
@@ -1163,6 +1168,7 @@ struct AdapterEntry {
 
 struct Entry {
     agent: Agent,
+    run_id: Option<[u8; 16]>,
     worktree: PathBuf,
     branch: String,
     terminal: Option<TerminalHandle>,
@@ -1198,6 +1204,7 @@ pub struct Supervisor {
     next_id: u64,
     hook: Option<LaunchHook>,
     abort_hook: Option<AbortHook>,
+    run_hook: Option<RunHook>,
     sandbox: crate::sandbox::SandboxPolicy,
     /// ADR-0084: the secrets this node holds and which kind may receive which.
     credentials: crate::credentials::Credentials,
@@ -1233,6 +1240,7 @@ impl Supervisor {
             next_id: 1,
             hook: None,
             abort_hook: None,
+            run_hook: None,
             sandbox: Default::default(),
             credentials: Default::default(),
             adapters: BTreeMap::new(),
@@ -1323,10 +1331,13 @@ impl Supervisor {
             }
         };
         // The agent's mesh endpoint was the old node's: made again at the same path, so its configuration keeps working.
+        let run_id = process_run_id(adapter.pid(), adapter.is_held());
+        self.notify_run(&id, &project, run_id);
         let mesh = self.adapter_mesh(&id, &kind, &project, &worktree);
         let Some(e) = self.adapters.get_mut(&id) else {
             return Err(SupervisorError::NotFound(id));
         };
+        e.run_id = run_id;
         e.adapter = Some(adapter);
         // ADR-0101 (Codex review of PR #1007): the holder runs only adapters without a sandbox (`launch_held_adapter`), whatever this
         // node's confinement policy says now.
@@ -1380,6 +1391,8 @@ impl Supervisor {
                 return Err(SupervisorError::Spawn(e.to_string()));
             }
         };
+        let run_id = process_run_id(terminal.pid(), terminal.is_held());
+        self.notify_run(&id, &project, run_id);
         // The agent's mesh endpoint was the old node's: made again at the same path, so its configuration keeps working.
         if let Some(hook) = &self.hook {
             let _ = hook(&Launching {
@@ -1397,6 +1410,7 @@ impl Supervisor {
             let _ = ctl.resize(size.cols, size.rows);
         }
         if let Some(e) = self.agents.get_mut(&id) {
+            e.run_id = run_id;
             e.terminal = Some(terminal);
             e.pacer = Pacer::default();
             e.next_check = now;
@@ -1795,6 +1809,26 @@ impl Supervisor {
     }
 
     /// Installs the hook that gives each launching agent a mesh endpoint.
+    pub(crate) fn set_run_hook(&mut self, hook: RunHook) {
+        self.run_hook = Some(hook);
+    }
+
+    fn notify_run(&self, id: &AgentId, project: &str, run: Option<[u8; 16]>) {
+        if let Some(hook) = &self.run_hook {
+            hook(id, project, run);
+        }
+    }
+
+    fn publish_run(&self, id: &AgentId) {
+        if let Some(e) = self.agents.get(id).filter(|e| e.terminal.is_some()) {
+            self.notify_run(id, &e.agent.project.to_string(), e.run_id);
+        } else if let Some(e) = self.adapters.get(id).filter(|e| e.running) {
+            self.notify_run(id, &e.agent.project.to_string(), e.run_id);
+        } else {
+            self.notify_run(id, "", None);
+        }
+    }
+
     pub fn set_launch_hook(&mut self, hook: LaunchHook) {
         self.hook = Some(hook);
     }
@@ -1925,6 +1959,7 @@ impl Supervisor {
     pub fn clear_hooks(&mut self) {
         self.hook = None;
         self.abort_hook = None;
+        self.run_hook = None;
     }
 
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
@@ -2134,6 +2169,7 @@ impl Supervisor {
             id.clone(),
             Entry {
                 agent,
+                run_id: process_run_id(terminal.pid(), terminal.is_held()),
                 worktree,
                 branch,
                 terminal: Some(terminal),
@@ -2153,6 +2189,7 @@ impl Supervisor {
                 folder: None,
             },
         );
+        self.publish_run(&id);
         Ok(id)
     }
 
@@ -2323,6 +2360,7 @@ impl Supervisor {
                 id.clone(),
                 AdapterEntry {
                     agent,
+                    run_id: process_run_id(adapter.pid(), adapter.is_held()),
                     adapter: Some(adapter),
                     session_id,
                     worktree,
@@ -2391,6 +2429,7 @@ impl Supervisor {
                 id.clone(),
                 Entry {
                     agent,
+                    run_id: process_run_id(terminal.pid(), terminal.is_held()),
                     worktree,
                     branch: String::new(),
                     terminal: Some(terminal),
@@ -2411,6 +2450,7 @@ impl Supervisor {
                 },
             );
         }
+        self.publish_run(&id);
         Ok(id)
     }
 
@@ -2587,6 +2627,7 @@ impl Supervisor {
             id.clone(),
             AdapterEntry {
                 agent,
+                run_id: process_run_id(adapter.pid(), adapter.is_held()),
                 adapter: Some(adapter),
                 session_id,
                 worktree,
@@ -2608,6 +2649,7 @@ impl Supervisor {
                 replayed: Vec::new(),
             },
         );
+        self.publish_run(&id);
         Ok(id)
     }
 
@@ -2883,6 +2925,7 @@ impl Supervisor {
         let holder = self.holder.clone();
         let kept_launch = self.kept_launch.contains(id);
         let enforceable = self.sandbox.enforceable();
+        self.notify_run(id, "", None);
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2913,6 +2956,7 @@ impl Supervisor {
         });
         match launched {
             Ok((adapter, session_id, capabilities, git_config, confinement, replayed)) => {
+                e.run_id = process_run_id(adapter.pid(), adapter.is_held());
                 e.adapter = Some(adapter);
                 // Review of #1103 (B1): what a resumed session replayed before it answered, read before anything newer.
                 e.replayed = replayed;
@@ -2933,6 +2977,7 @@ impl Supervisor {
                 }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
+                self.publish_run(id);
             }
             Err(_) => schedule_adapter_restart(id, e, now, &policy, None, events),
         }
@@ -3771,6 +3816,13 @@ impl Supervisor {
             self.tick_agent(&id, now, &mut events);
         }
         self.poll_adapters(now, &mut events, false);
+        for event in &events {
+            if let SupervisorEvent::Exited { agent, .. }
+            | SupervisorEvent::Restarting { agent, .. } = event
+            {
+                self.publish_run(agent);
+            }
+        }
         events
     }
 
@@ -3917,6 +3969,7 @@ impl Supervisor {
         let kept_launch = self.kept_launch.contains(id);
         let (argv, native, fresh, _) =
             self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
+        self.notify_run(id, "", None);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
         let result = folder
             .as_deref()
@@ -3931,6 +3984,7 @@ impl Supervisor {
         let from_nothing = std::mem::take(&mut entry.fresh_next);
         match result {
             Ok(t) => {
+                entry.run_id = process_run_id(t.pid(), t.is_held());
                 entry.terminal = Some(t);
                 entry.native_since = (native && !from_nothing).then_some(now);
                 entry.pacer = Pacer::default();
@@ -3948,6 +4002,7 @@ impl Supervisor {
                 }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&entry.agent));
+                self.publish_run(id);
             }
             Err(_) => {
                 // Could not even start: count it as a failed attempt and back off again.
@@ -4040,6 +4095,7 @@ impl Supervisor {
     /// Stop an agent for good: kill its process group and cancel any pending restart. The worktree and its
     /// branch are kept (the work is the user's).
     pub fn stop(&mut self, id: &AgentId) -> Result<Vec<SupervisorEvent>, SupervisorError> {
+        self.notify_run(id, "", None);
         if let Some(e) = self.adapters.get_mut(id) {
             let mut events = Vec::new();
             e.restart_at = None;
@@ -4132,6 +4188,7 @@ impl Supervisor {
                 r.id,
                 AdapterEntry {
                     agent,
+                    run_id: None,
                     folder: r.directory.then(|| r.folder.clone()),
                     adapter: None,
                     session_id: String::new(),
@@ -4173,6 +4230,7 @@ impl Supervisor {
             r.id,
             Entry {
                 agent,
+                run_id: None,
                 folder: r.directory.then(|| r.folder.clone()),
                 worktree: r.folder,
                 branch: r.branch,
@@ -4326,6 +4384,7 @@ impl Supervisor {
                 .adapters
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+            entry.run_id = process_run_id(adapter.pid(), adapter.is_held());
             entry.adapter = Some(adapter);
             entry.replayed = replayed;
             entry.confinement = confinement;
@@ -4344,6 +4403,7 @@ impl Supervisor {
                 native,
             }];
             events.extend(session_report(&entry.agent));
+            self.publish_run(id);
             return Ok(events);
         }
         let entry = self
@@ -4399,6 +4459,7 @@ impl Supervisor {
             return Err(SupervisorError::NotFound(id.clone()));
         };
         entry.extras = extras;
+        entry.run_id = process_run_id(terminal.pid(), terminal.is_held());
         entry.terminal = Some(terminal);
         entry.pacer = Pacer::default();
         entry.next_check = now;
@@ -4423,6 +4484,7 @@ impl Supervisor {
             });
         }
         events.extend(session_report(&entry.agent));
+        self.publish_run(id);
         Ok(events)
     }
 
@@ -4625,6 +4687,7 @@ impl Supervisor {
                 project: e.agent.project.to_string(),
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
+                run_id: e.run_id.filter(|_| e.terminal.is_some()),
                 parent: self.parents.get(id).cloned(),
                 launch_options: e.launch.ids.clone(),
                 skips_permissions: e.launch.skips_permissions,
@@ -4642,6 +4705,7 @@ impl Supervisor {
             project: e.agent.project.to_string(),
             running: e.running,
             restarts: e.restarts,
+            run_id: e.run_id.filter(|_| e.running),
             parent: self.parents.get(id).cloned(),
             launch_options: e.launch.ids.clone(),
             skips_permissions: e.launch.skips_permissions,
@@ -4732,6 +4796,24 @@ fn inherited_session_markers(names: impl Iterator<Item = std::ffi::OsString>) ->
     } else {
         Vec::new()
     }
+}
+
+/// ADR-0109: local runs end with their node and can use a random identity. A held run can be
+/// recovered from its process birth identity, which the same surviving process reports after
+/// take-up. A held process whose birth cannot be checked gets no durable handoff identity.
+fn process_run_id(pid: u32, held: bool) -> Option<[u8; 16]> {
+    if held {
+        let process = agora_platform::process_identity(pid).ok()?;
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        digest.update(b"agora-task-handoff-run-v1\0");
+        digest.update(&process.pid.to_le_bytes());
+        digest.update(&process.started.to_le_bytes());
+        digest.update(process.boot.as_bytes());
+        return digest.finish().as_ref()[..16].try_into().ok();
+    }
+    let mut id = [0; 16];
+    getrandom::getrandom(&mut id).ok()?;
+    Some(id)
 }
 
 /// A random version 4 UUID, lower-case.

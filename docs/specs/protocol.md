@@ -1386,11 +1386,15 @@ node sets. The window's button and the terminal client's key come with the next 
 
 ## Durable cross-node task handoffs (ADR-0109)
 
-The first slice reserves `mesh.task_handoff.v1` on the hub–node link and adds generation 1 wire types. The hub and node will
-advertise the capability once their queue and durable inbox paths are implemented. The hub must have negotiated the capability
-with the receiver before sending the new command. An older peer connects normally and uses the current best-effort handoff path.
-Until a node advertises the capability, it answers `DeliverTaskHandoff` with `protocol.capability_missing`
-(`capability = mesh.task_handoff.v1`), on the hub link before any grant or signed-command check, and on its local socket.
+`mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub
+will offer it and send the new command once its durable queue is implemented. An older peer connects normally and uses the
+current best-effort handoff path. Without negotiation the node answers `DeliverTaskHandoff` before grants with
+`protocol.capability_missing` (`capability = mesh.task_handoff.v1`). Its local socket always answers with that error. After
+negotiation the delivery passes the node's grant check like any routed command (ADR-0041): when `signed_commands` lists
+`mesh.task_handoff.v1` (or `mesh.*`), it needs a live grant for that command, and it names no agent, so only a `node`-scope grant
+covers it. An identical retry of a delivery the node already stored (the same delivery id and the same fields) gets the stored
+receipt before that check, also once the grant has ended (ADR-0109 decisions 3 and 4); it changes nothing on the node. Any other
+delivery without a live grant gets `approval.grant_required` before the node stores anything.
 
 - **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
   A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
@@ -1399,14 +1403,39 @@ Until a node advertises the capability, it answers `DeliverTaskHandoff` with `pr
   `delivery_id` (1), `receiver_run_id` (2), node-local `agent_id` (3), `project_id` (4), `task_id` (5), `summary` (6), `refs` (7),
   `valid_until_ms` (8), `sender_node` (9) and `sender_agent_id` (10). Both opaque identities are 16 bytes. Retries keep the delivery
   id, run id, payload and deadline. The node checks the addressed run and project before accepting a new entry. Summary and refs
-  remain untrusted data. A window cannot issue this command.
+  remain untrusted data. A window cannot issue this command. The node refuses a new entry with `protocol.invalid_message`, naming
+  the `field`, when `valid_until_ms` is more than 25 hours after the node's clock (the hub's 24 hours and one hour for the clocks
+  to differ), or when `task_id`, `sender_node` or `sender_agent_id` is empty or longer than 256 bytes (or a sender id holds `/`).
 - **Receipt.** `TaskHandoffReceipt` (`CommandOk` arm 32) echoes the `delivery_id` (1) and `receiver_run_id` (2). It acknowledges
-  one durable inbox entry. A retry with the same delivery id gets the stored receipt, even if the inbox entry has been read.
+  one durable inbox entry. The node stores each accepted delivery and its inbox number in one private atomic file under
+  `<data>/handoffs/`. An identical retry gets the stored receipt, even after reading the entry or replacing the receiver run. The
+  replacement run cannot see that entry. Reopening the store restores the original number for a held receiver run, before its
+  endpoint accepts MCP calls. A file there that is not a record the node could have written (its format, its name, or an inbox
+  number at or past the node's id clamp, 2^63 - 1), or that does not fit the limits below, is renamed with a `.rejected` suffix
+  and the rest load; the earliest accepted records are kept when more are on disk than the limits allow. `.rejected` files are
+  kept for a person to look at and do not count toward the limits. A file the node cannot read at that moment (an I/O error) is
+  left in place and not loaded; its size still counts toward the byte limit until the next start.
+- **Refusals.** A refusal stores nothing and returns no receipt.
+  - `mesh.unavailable` is temporary: the store could not be written, the node has not reserved message ids yet, or the node is
+    writing another delivery from the same link (it writes one at a time). The hub may retry before the deadline. The node gives
+    the same code for a delivery whose `valid_until_ms` is not after its clock; the hub has stopped retrying it by then, and the
+    outcome stays unresolved.
+  - `mesh.rate_limited` is temporary: the sending agent passed the mesh's message rate.
+  - `node.resource_limit` (`resource = handoff_records`, `limit = 1024`, or `resource = handoff_bytes`, `limit = 33554432`) means
+    the durable inbox is full. It is definitive (ADR-0109 decision 6). The node answers it before it takes an inbox number or
+    counts the delivery against the sender's mesh rate.
+  - Every other refusal is definitive, and the hub does not retry that delivery: `approval.grant_required`, `node.policy_denied`
+    (`rule = mesh.remote`), `mesh.recipient_unknown` (the run is not that agent's current run in the project),
+    `mesh.body_too_large`, `mesh.too_many_refs`, `protocol.invalid_message` (including `field = delivery_id` for a different
+    delivery under a stored id) and `protocol.capability_missing`.
 - **Bounds for the queue and inbox slices.** A 16 KiB UTF-8 summary and at most 20 refs totalling 16 KiB use the existing mesh
   limits. The encoded command fits the negotiated frame limit (1 MiB by default). Per hub, keep at most 1,024 pending or unresolved
   deliveries and 32 MiB of encoded delivery data. Per node, keep at most 1,024 durable handoff records and 32 MiB of encoded inbox
-  entries and receipts. Read entries can release their payload bytes while retaining their receipt. The hub sets `valid_until_ms`
-  to 24 hours after creating the delivery, in Unix milliseconds, and stops retries at that deadline. The node retains receipts
-  through the deadline and accepts a new entry only before it. Without a receipt, expiry leaves the outcome unresolved.
+  entries and receipts. Read entries may later release their payload bytes while retaining their receipt. In this slice a live
+  run keeps its entries so the existing non-destructive inbox reads still work. The hub sets `valid_until_ms` to 24 hours after
+  creating the delivery, in Unix milliseconds, and stops retries at that deadline. The node retains receipts through the deadline
+  and accepts a new entry only before it. When a new delivery arrives, expired entries of ended runs are reclaimed; an entry counts
+  as expired at its deadline, and never later than 25 hours after the node accepted it. Without a receipt, expiry leaves the
+  outcome unresolved.
 - **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
   fixture keeps its original bytes.
