@@ -91,21 +91,49 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let (host_part, path) = if let Some((_, rest)) = url.split_once("://") {
         let (authority, path) = rest.split_once('/').ok_or(ProjectError::InvalidRemote)?;
         (authority.to_string(), path.to_string())
-    } else if let Some((authority, path)) = url.split_once(':') {
-        // scp-like: [user@]host:path (no slash before the colon)
+    } else {
+        // In scp-like syntax, a colon inside brackets is part of the host.
+        let mut bracketed = false;
+        let separator = url
+            .char_indices()
+            .find_map(|(i, c)| match c {
+                '[' => {
+                    bracketed = true;
+                    None
+                }
+                ']' => {
+                    bracketed = false;
+                    None
+                }
+                ':' if !bracketed => Some(i),
+                _ => None,
+            })
+            .ok_or(ProjectError::InvalidRemote)?;
+        let (authority, path) = url.split_at(separator);
         if authority.contains('/') {
             return Err(ProjectError::InvalidRemote);
         }
-        (authority.to_string(), path.to_string())
-    } else {
-        return Err(ProjectError::InvalidRemote);
+        (authority.to_string(), path[1..].to_string())
     };
     let host_port = host_part.rsplit('@').next().unwrap_or(&host_part);
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or(host_port)
-        .to_ascii_lowercase();
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']').ok_or(ProjectError::InvalidRemote)?;
+        let suffix = &host_port[end + 1..];
+        if !suffix.is_empty() && !suffix.starts_with(':') {
+            return Err(ProjectError::InvalidRemote);
+        }
+        let literal = &host_port[1..end];
+        match literal.parse::<std::net::Ipv6Addr>() {
+            Ok(address) => format!("[{address}]"),
+            Err(_) => host_port[..=end].to_ascii_lowercase(),
+        }
+    } else {
+        host_port
+            .split(':')
+            .next()
+            .unwrap_or(host_port)
+            .to_ascii_lowercase()
+    };
     let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")
@@ -139,6 +167,45 @@ mod tests {
         ] {
             assert_eq!(normalize_remote(u).as_deref(), Ok(want), "{u}");
         }
+    }
+
+    #[test]
+    fn ipv6_remotes_keep_distinct_hosts() {
+        assert_eq!(
+            normalize_remote("ssh://git@example.com:22/o/r.git").as_deref(),
+            Ok("example.com/o/r")
+        );
+        let first = ProjectId::new(Some("ssh://git@[2001:db8::1]:22/o/r.git"), ROOT);
+        let second = ProjectId::new(Some("ssh://git@[2001:db8::2]:22/o/r.git"), ROOT);
+        assert_eq!(
+            normalize_remote("ssh://git@[2001:db8::1]:22/o/r.git").as_deref(),
+            Ok("[2001:db8::1]/o/r")
+        );
+        assert_ne!(first, second);
+        assert_eq!(
+            normalize_remote("https://[2001:DB8::1]/o/r").as_deref(),
+            Ok("[2001:db8::1]/o/r")
+        );
+        assert_eq!(
+            normalize_remote("ssh://[2001:db8::1/o/r"),
+            Err(ProjectError::InvalidRemote)
+        );
+    }
+
+    #[test]
+    fn ipv6_scp_remote_matches_ssh_url() {
+        assert_eq!(
+            normalize_remote("git@[2001:db8::1]:o/r.git").as_deref(),
+            Ok("[2001:db8::1]/o/r")
+        );
+    }
+
+    #[test]
+    fn equivalent_ipv6_addresses_share_project_identity() {
+        let compressed = ProjectId::new(Some("ssh://[2001:db8::1]/o/r"), ROOT);
+        let expanded = ProjectId::new(Some("ssh://[2001:db8:0:0:0:0:0:1]/o/r"), ROOT);
+        assert!(compressed.is_ok());
+        assert_eq!(compressed, expanded);
     }
 
     #[test]
