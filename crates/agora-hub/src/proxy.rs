@@ -10,7 +10,7 @@
 //!
 //! Pure data and parsing: no sockets. The web layer asks [`ProxyTrust::judge`] for each request head.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -131,6 +131,7 @@ fn authority_host(authority: &str) -> Option<String> {
     }
     let host = if let Some(rest) = a.strip_prefix('[') {
         let (h, tail) = rest.split_once(']')?;
+        h.parse::<Ipv6Addr>().ok()?;
         if !(tail.is_empty() || tail.strip_prefix(':').is_some_and(valid_port)) {
             return None;
         }
@@ -150,7 +151,10 @@ fn authority_host(authority: &str) -> Option<String> {
 }
 
 fn valid_port(p: &str) -> bool {
-    !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())
+    !p.is_empty()
+        && p.len() <= 5
+        && p.bytes().all(|b| b.is_ascii_digit())
+        && p.parse::<u16>().is_ok()
 }
 
 /// The names of the machine itself.
@@ -611,6 +615,108 @@ mod tests {
                 "{host}"
             );
         }
+    }
+
+    #[test]
+    fn f420_an_out_of_range_authority_port_is_refused() {
+        let t = trust();
+        let control = t.judge(&head(&[
+            "Host: agora.example.com:65535",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]));
+        assert_eq!(
+            control,
+            Verdict::Proxied(Some("203.0.113.9".parse().unwrap()))
+        );
+        println!("CONTROL OK");
+
+        let actual = t.judge(&head(&[
+            "Host: agora.example.com:65536",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]));
+        let expected = Verdict::Refuse {
+            status: 421,
+            code: "proxy.host_not_allowed",
+        };
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f420_authority_port_boundaries() {
+        for valid in ["1", "443", "65535"] {
+            assert_eq!(
+                authority_host(&format!("agora.example.com:{valid}")),
+                Some("agora.example.com".into()),
+                "{valid}"
+            );
+        }
+        for invalid in ["65536", "99999", "100000", "+443"] {
+            assert_eq!(
+                authority_host(&format!("agora.example.com:{invalid}")),
+                None,
+                "{invalid}"
+            );
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f421_brackets_are_reserved_for_ipv6_authorities() {
+        let t = trust();
+        assert_eq!(t.judge(&head(&["Host: [::1]"])), Verdict::Direct);
+        println!("CONTROL OK");
+
+        let actual = t.judge(&head(&[
+            "Host: [agora.example.com]",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]));
+        let expected = Verdict::Refuse {
+            status: 421,
+            code: "proxy.host_not_allowed",
+        };
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f421_only_ipv6_uses_bracketed_authorities() {
+        for valid in ["[::1]", "[2001:db8::1]:443", "agora.example.com"] {
+            assert!(authority_host(valid).is_some(), "{valid}");
+        }
+        for invalid in [
+            "[agora.example.com]",
+            "[127.0.0.1]",
+            "[not-an-address]:443",
+            "[[::1]]",
+        ] {
+            assert_eq!(authority_host(invalid), None, "{invalid}");
+        }
+        let t = trust();
+        let origin = head(&[
+            "Host: agora.example.com",
+            "Origin: https://[agora.example.com]",
+        ]);
+        assert_eq!(
+            t.judge(&origin),
+            Verdict::Refuse {
+                status: 403,
+                code: "proxy.origin_not_allowed"
+            }
+        );
+        println!("FIX VERIFIED");
     }
 
     /// A loopback `Host` with a public `Origin` is a proxy that kept the target's Host (a POST or a WebSocket from the page of the

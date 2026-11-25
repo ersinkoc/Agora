@@ -394,16 +394,23 @@ fn split_url(url: &str) -> Result<(bool, String, String), LinkError> {
     let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
     // An IPv6 address is written `[v6]` or `[v6]:port` (what `agora join` stores): the host is the address without the brackets,
     // which is how the hub's certificate names it; the address to dial keeps them.
+    let valid_port = |port: &str| port.parse::<u16>().is_ok_and(|p| p != 0);
     let (host, has_port) = match host_port.strip_prefix('[') {
         Some(r) => match r.split_once(']') {
-            Some((h, "")) => (h, false),
-            Some((h, after)) if after.starts_with(':') => (h, true),
+            Some((h, "")) if h.parse::<std::net::Ipv6Addr>().is_ok() => (h, false),
+            Some((h, after))
+                if h.parse::<std::net::Ipv6Addr>().is_ok()
+                    && after.strip_prefix(':').is_some_and(valid_port) =>
+            {
+                (h, true)
+            }
             _ => return Err(LinkError::Bad("url has no host".into())),
         },
-        None => (
-            host_port.rsplit_once(':').map_or(host_port, |(h, _)| h),
-            host_port.contains(':'),
-        ),
+        None => match host_port.rsplit_once(':') {
+            Some((h, port)) if !h.contains(':') && valid_port(port) => (h, true),
+            Some(_) => return Err(LinkError::Bad("url has no host".into())),
+            None => (host_port, false),
+        },
     };
     if host.is_empty() {
         return Err(LinkError::Bad("url has no host".into()));
@@ -1748,6 +1755,48 @@ mod tests {
         ] {
             assert!(split_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn f424_a_hub_url_refuses_a_malformed_authority() {
+        assert_eq!(
+            split_url("wss://hub.example:7443/x").unwrap(),
+            (true, "hub.example".into(), "hub.example:7443".into())
+        );
+        println!("CONTROL OK");
+
+        let actual = split_url("wss://hub.example:not-a-port/x");
+        println!("EXPECTED: Err(..)");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_err() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verifies_f424_hub_url_authority_boundaries() {
+        for valid in [
+            "wss://hub.example",
+            "wss://hub.example:1/x",
+            "wss://hub.example:65535/x",
+            "wss://[2001:db8::1]:7443/x",
+        ] {
+            assert!(split_url(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "wss://hub.example:0/x",
+            "wss://hub.example:65536/x",
+            "wss://hub.example:not-a-port/x",
+            "wss://[hub.example]:7443/x",
+            "wss://[127.0.0.1]:7443/x",
+            "wss://2001:db8::1/x",
+        ] {
+            assert!(split_url(invalid).is_err(), "{invalid}");
+        }
+        println!("FIX VERIFIED");
     }
 
     /// What the fake hub does once the handshake is over.
