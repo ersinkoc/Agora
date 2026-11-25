@@ -27,7 +27,12 @@ pub fn load(schema_root: &Path) -> Result<FileDescriptorSet, String> {
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     match std::fs::symlink_metadata(dir) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => return Ok(()),
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a directory", dir.display()),
+            ));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
