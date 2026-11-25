@@ -1087,11 +1087,13 @@ fn a_kept_agents_usage_counters_survive_its_node_restarting() {
     let first = events
         .iter()
         .find_map(|e| match &e.body {
-            Some(v1::event::Body::AgentStarted(s)) if s.agent_id == id => Some(s.same_process),
+            Some(v1::event::Body::AgentStarted(s)) if s.agent_id == id => Some(s),
             _ => None,
         })
         .expect("the first start");
-    assert!(!first, "the first start is a new process");
+    assert!(!first.same_process, "the first start is a new process");
+    assert_eq!(first.run_id.len(), 16);
+    assert_eq!(s.run_id, first.run_id, "the holder kept the same run");
 
     let key = agora_hub::projection::qualified("hold-node", &id);
     let fold = |events: &[v1::Event]| {

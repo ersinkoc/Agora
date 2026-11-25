@@ -4,6 +4,38 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.38
+
+- Agents that run through the ACP bridge now tell the node every place the bridge shortened their text (a very long message, tool output, arguments, plan step or file path, and the error lines kept when an agent stops), so the node also hides the parts of your saved secrets left on either side of each cut, live and in the saved conversation. (ADR-0111)
+- Searching inside a file in the window no longer fails on text with a hyphen in it (such as `--watch` or `a -> b`); before, the
+  search showed nothing for it.
+- A structured agent's adapter can now tell the node where it shortened a long tool output, argument or plan step, and the node then also hides the parts of your saved secrets left on either side of that cut, both in what you see live and in the saved conversation. Adapters that do not say so work as before. (ADR-0111)
+- When an agent does not take your request or your answer to its question in time, the window and the terminal client now say so
+  instead of "something went wrong". Your request stays in the conversation, marked as not confirmed, because the agent may still
+  be working on it. Your answer's question stays open, so you can answer it again; if the agent takes the first answer late, the
+  question closes with that answer. When the agent stopped, they tell you to start it again. (ADR-0110)
+- An agent from the ACP registry that starts through `npx` or `uvx` now starts its package runner in an empty folder of its own
+  instead of the project, so a project's `.npmrc`, `package.json`, `node_modules`, `uv.toml`, `pyproject.toml` or `.python-version`
+  can no longer change which package the pinned version resolves to; your own npm and uv settings (a mirror, a proxy, a registry in
+  `~/.npmrc` or your user uv configuration) still apply, and the agent still works in the project (#1150, ADR-0092)
+- If you write your own agent manifest: every `[[typed]]` rule now needs a `regex` that must match (the rule's own `regex`, or one
+  in `all`); a manifest file with a `[[typed]]` rule made only of phrases, or
+  whose regex matches empty text, is not loaded (`agora doctor` names the file). Write the regex so it needs the footer whole
+  on one row right under the input box, so a helper's prompt holding a footer word the box breaks in its middle cannot stand in for
+  the real footer. The manifests Agora ships already do this (#1150, ADR-0057).
+- A window that had fallen behind a terminal agent's output when its program crashed and was restarted is now told that program ended;
+  before, it could be shown the restarted program's screen as the crashed one's last screen (audit F1500,
+  #1150).
+- When you remove a closed agent for everyone and its machine is stopping, busy or hits an error, the hub now tries again the next time that machine connects (up to five times), so the agent's saved conversation and Resume offer are still removed there. If you then go back to an older hub version, it may give up removals it had not yet passed on to a machine; those files are still deleted when they expire. (#1150, ADR-0108)
+- `agora join` (and Join in the front door) now gives up when its wait to connect runs out, also while the hub's name is still
+  being looked up; before, it went on waiting until the name lookup itself gave up, which a slow or unreachable name server can make
+  take much longer (#1150).
+- The terminal client (`agora tui`) connecting to a hub by name now says the hub cannot be reached after its 10-second wait to
+  connect, also while that name is still being looked up; before, it waited until the name lookup itself gave up (#1150).
+- `agora panel` now ends as soon as it says the hub does not answer, also while the hub's name is still being looked up; before, it
+  said so after 10 seconds but went on waiting until the name lookup itself gave up (#1150).
 - A terminal agent whose program ended while something it started in the background (outside its process group) went on writing to its terminal at least once a second is now seen ending within about two seconds: the window shows it exited, a crash is restarted, and stopping it returns within about two seconds; before, the stop waited for as long as that background program kept writing (#1150).
 - A window that opens a terminal just after its program ended now gets the program's exit code; before, it got "unknown" when the node let the terminal go a moment later (#1150).
 - In the terminal client, the start pickers (`s`, and `f` for a folder) now put fewer agents on a page when the window is too short or too narrow for nine, so every agent and the line naming the ones the machine cannot find stay visible; before, the bottom of a tall page was cut off (#1150).

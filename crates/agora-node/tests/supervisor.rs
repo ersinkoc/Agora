@@ -387,6 +387,39 @@ fn reported_is_said_only_for_the_agents_own_state() {
     sup.stop(&id).unwrap();
 }
 
+/// A stop of an agent that said it was done leaves its word standing; a resume starts a new process, whose state is the node's again.
+#[test]
+fn a_stop_keeps_the_agents_own_done_and_a_resume_clears_it() {
+    let e = env("reported-resume");
+    let mut sup = supervisor(RestartPolicy::default());
+    sup.register(manifest(&fake_launch(), None));
+    let id = sup.start(&request(&e, "rr"), Instant::now()).unwrap();
+    let said = |events: &[SupervisorEvent]| -> Vec<(AgentState, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SupervisorEvent::StateChanged {
+                    state, reported, ..
+                } => Some((*state, *reported)),
+                _ => None,
+            })
+            .collect()
+    };
+    let events = sup.report_state(&id, AgentState::Done).unwrap();
+    assert_eq!(said(&events), [(AgentState::Done, true)]);
+    let events = sup.stop(&id).unwrap();
+    assert_eq!(
+        said(&events),
+        [],
+        "the stop left the state as the agent said it"
+    );
+    assert!(sup.list()[0].reported);
+    let events = sup.resume(&id, Instant::now()).unwrap();
+    assert_eq!(said(&events), [(AgentState::Unknown, false)]);
+    assert!(!sup.list()[0].reported);
+    sup.stop(&id).unwrap();
+}
+
 #[test]
 fn crashing_agents_restart_with_backoff_then_give_up() {
     if !sh_on_path() {
