@@ -65,13 +65,19 @@ impl Url {
             return None;
         }
         let default_port = if https { 443 } else { 80 };
+        let port = |text: &str| {
+            (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| text.parse::<u16>().ok())
+                .flatten()
+                .filter(|port| *port != 0)
+        };
         let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
             let (host, tail) = bracketed.split_once(']')?;
             host.parse::<std::net::Ipv6Addr>().ok()?;
             let port = if tail.is_empty() {
                 default_port
             } else {
-                tail.strip_prefix(':')?.parse().ok()?
+                port(tail.strip_prefix(':')?)?
             };
             (host, port)
         } else {
@@ -79,7 +85,7 @@ impl Url {
                 return None;
             }
             match authority.rsplit_once(':') {
-                Some((h, p)) if !p.is_empty() => (h, p.parse().ok()?),
+                Some((h, p)) if !p.is_empty() => (h, port(p)?),
                 _ => (authority, default_port),
             }
         };
@@ -314,6 +320,21 @@ pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
             break;
         }
         all.extend_from_slice(&buf[..n]);
+        match final_response(&all) {
+            Some((_, _, body_at)) if body_at > MAX_RESPONSE_HEAD => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "response head too large",
+                ));
+            }
+            None if all.len() >= MAX_RESPONSE_HEAD => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "response head too large",
+                ));
+            }
+            _ => {}
+        }
         if all.len() > max.saturating_add(MAX_RESPONSE_HEAD) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -323,12 +344,26 @@ pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
     }
     let (status, head_at, body_at) = final_response(&all)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no final HTTP response"))?;
+    let head = &all[head_at..body_at];
+    let transfer_coded = validate_response_fields(head)?;
+    if transfer_coded && status != 304 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported Transfer-Encoding",
+        ));
+    }
     // A 304 carries metadata for a selected representation but no message body; its Content-Length can describe that representation.
     let declared = (status != 304)
-        .then(|| content_length(&all[head_at..body_at]))
+        .then(|| content_length(head))
         .transpose()?
         .flatten();
     let body = all.split_off(body_at);
+    if matches!(status, 204 | 205 | 304) && !body.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "body on a content-free response",
+        ));
+    }
     if let Some(declared) = declared {
         match body.len().cmp(&declared) {
             std::cmp::Ordering::Less => {
@@ -357,6 +392,57 @@ pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
 
 fn find_body(r: &[u8]) -> Option<usize> {
     r.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// Validates the final response's field lines and reports whether transfer coding was declared.
+fn validate_response_fields(head: &[u8]) -> io::Result<bool> {
+    let mut transfer_coded = false;
+    for raw in head.split(|b| *b == b'\n').skip(1) {
+        let line = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if line.is_empty() {
+            break;
+        }
+        let Some(colon) = line.iter().position(|b| *b == b':') else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed HTTP response field",
+            ));
+        };
+        let (name, value) = (&line[..colon], &line[colon + 1..]);
+        let tchar = |b: &u8| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    *b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        };
+        if name.is_empty()
+            || !name.iter().all(tchar)
+            || value
+                .iter()
+                .any(|b| (*b < b' ' && *b != b'\t') || *b == 0x7f)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed HTTP response field",
+            ));
+        }
+        transfer_coded |= name.eq_ignore_ascii_case(b"transfer-encoding");
+    }
+    Ok(transfer_coded)
 }
 
 fn content_length(head: &[u8]) -> io::Result<Option<usize>> {
@@ -898,5 +984,205 @@ mod tests {
         assert_eq!(status, 200);
         let seen = server.join().unwrap();
         assert!(seen.starts_with("POST /hook HTTP/1.1") && seen.contains("hello"));
+    }
+
+    #[test]
+    fn proof_f430_signed_url_ports_are_not_decimal_port_syntax() {
+        println!("CONTROL OK: an unsigned nonzero decimal port is accepted");
+        assert_eq!(
+            Url::parse("https://notify.example:443/x").unwrap().port,
+            443
+        );
+        let actual = [
+            Url::parse("https://notify.example:+443/x").is_some(),
+            Url::parse("http://notify.example:+80/x").is_some(),
+            Url::parse("http://[::1]:+8080/x").is_some(),
+        ];
+        println!("EXPECTED: signed port spellings are rejected");
+        println!("ACTUAL: accepted signed ports = {actual:?}");
+        if actual.iter().any(|accepted| *accepted) {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert_eq!(actual, [false; 3]);
+    }
+
+    #[test]
+    fn proof_f431_catalog_get_enforces_its_response_head_limit() {
+        println!("CONTROL OK: a small response head and body are accepted");
+        let control = serve_once(b"HTTP/1.0 200 OK\r\nX: y\r\n\r\n{}");
+        assert_eq!(get(&control, 100).unwrap().1, b"{}");
+        let mut response = b"HTTP/1.0 200 OK\r\nX-Pad: ".to_vec();
+        response.extend(std::iter::repeat_n(b'a', MAX_RESPONSE_HEAD));
+        response.extend_from_slice(b"\r\n\r\n{}");
+        let oversized = serve_once(Box::leak(response.into_boxed_slice()));
+        let actual = get(&oversized, 100_000);
+        println!("EXPECTED: a response head over 16 KiB is rejected");
+        println!("ACTUAL: oversized-head result = {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f432_catalog_get_rejects_bodies_for_bodyless_statuses() {
+        println!("CONTROL OK: a 200 response can carry its declared body");
+        let control = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&control, 100).unwrap().1, b"{}");
+        let response = serve_once(b"HTTP/1.0 304 Not Modified\r\n\r\n{}");
+        let actual = get(&response, 100);
+        println!("EXPECTED: a 304 response with message content is rejected");
+        println!("ACTUAL: bodyless-status result = {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f433_catalog_get_never_returns_chunk_framing_as_the_body() {
+        println!("CONTROL OK: a content-length framed body is returned without framing");
+        let control = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&control, 100).unwrap().1, b"{}");
+        let response = serve_once(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+        );
+        let actual = get(&response, 100);
+        println!("EXPECTED: unsupported transfer coding is rejected, not returned as content");
+        println!("ACTUAL: transfer-coded result = {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f434_catalog_get_rejects_malformed_response_fields() {
+        println!("CONTROL OK: an exact Content-Length field is accepted");
+        let control = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&control, 100).unwrap().1, b"{}");
+        let response = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length : 2\r\n\r\n{}");
+        let actual = get(&response, 100);
+        println!("EXPECTED: whitespace before a response-field colon is rejected");
+        println!("ACTUAL: malformed-field result = {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f430_port_grammar_across_sign_range_and_authority_forms() {
+        for bad in [
+            "https://notify.example:+1/x",
+            "https://notify.example:-443/x",
+            "https://[2001:db8::1]:+65535/x",
+        ] {
+            assert_eq!(Url::parse(bad), None, "{bad}");
+        }
+        for (good, want) in [
+            ("http://notify.example:1/x", 1),
+            ("https://notify.example:65535/x", 65535),
+            ("https://[2001:db8::1]:8443/x", 8443),
+        ] {
+            assert_eq!(Url::parse(good).map(|url| url.port), Some(want), "{good}");
+        }
+        println!("FIX VERIFIED: F430 decimal unsigned nonzero u16 ports only");
+    }
+
+    #[test]
+    fn verify_f431_response_head_limit_at_both_exact_boundaries() {
+        fn response(head_len: usize) -> &'static [u8] {
+            let prefix = b"HTTP/1.0 200 OK\r\nX: ";
+            let suffix = b"\r\n\r\n";
+            assert!(head_len >= prefix.len() + suffix.len());
+            let mut bytes = prefix.to_vec();
+            bytes.extend(std::iter::repeat_n(
+                b'a',
+                head_len - prefix.len() - suffix.len(),
+            ));
+            bytes.extend_from_slice(suffix);
+            bytes.extend_from_slice(b"{}");
+            Box::leak(bytes.into_boxed_slice())
+        }
+        for size in [MAX_RESPONSE_HEAD - 1, MAX_RESPONSE_HEAD] {
+            let url = serve_once(response(size));
+            assert_eq!(get(&url, 100).unwrap().1, b"{}", "{size}");
+        }
+        let url = serve_once(response(MAX_RESPONSE_HEAD + 1));
+        assert_eq!(
+            get(&url, 100).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        println!("FIX VERIFIED: F431 exact 16 KiB cumulative response-head limit");
+    }
+
+    #[test]
+    fn verify_f432_content_free_statuses_across_all_three_codes() {
+        for status in [204, 205, 304] {
+            let empty = format!("HTTP/1.0 {status} Status\r\n\r\n");
+            let url = serve_once(Box::leak(empty.into_bytes().into_boxed_slice()));
+            assert_eq!(get(&url, 100).unwrap(), (status, Vec::new()), "{status}");
+
+            let with_body = format!("HTTP/1.0 {status} Status\r\n\r\nx");
+            let url = serve_once(Box::leak(with_body.into_bytes().into_boxed_slice()));
+            assert_eq!(
+                get(&url, 100).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{status}"
+            );
+        }
+        println!("FIX VERIFIED: F432 204, 205 and 304 never return message content");
+    }
+
+    #[test]
+    fn verify_f433_transfer_codings_across_single_and_combined_values() {
+        for field in [
+            "Transfer-Encoding: gzip",
+            "transfer-encoding: chunked",
+            "Transfer-Encoding: gzip, chunked",
+        ] {
+            let response = format!("HTTP/1.1 200 OK\r\n{field}\r\n\r\ndata");
+            let url = serve_once(Box::leak(response.into_bytes().into_boxed_slice()));
+            assert_eq!(
+                get(&url, 100).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{field}"
+            );
+        }
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata");
+        assert_eq!(get(&url, 100).unwrap().1, b"data");
+        println!("FIX VERIFIED: F433 transfer-coded framing is never exposed as content");
+    }
+
+    #[test]
+    fn verify_f434_response_field_grammar_across_distinct_malformed_classes() {
+        for field in [
+            "Broken field",
+            " Content-Length: 2",
+            "Content Length: 2",
+            "Content-Length\t: 2",
+        ] {
+            let response = format!("HTTP/1.0 200 OK\r\n{field}\r\n\r\n{{}}");
+            let url = serve_once(Box::leak(response.into_bytes().into_boxed_slice()));
+            assert_eq!(
+                get(&url, 100).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{field:?}"
+            );
+        }
+        let url = serve_once(b"HTTP/1.0 200 OK\r\nX-A_B~C: value\r\n\r\n{}");
+        assert_eq!(get(&url, 100).unwrap().1, b"{}");
+        println!("FIX VERIFIED: F434 malformed response field lines are rejected");
     }
 }
