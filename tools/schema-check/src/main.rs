@@ -1,5 +1,5 @@
 //! `schema-check BASE_SCHEMA_DIR HEAD_SCHEMA_DIR`: exit 1 if HEAD breaks anything BASE published.
-//! A base directory without any schema (first introduction) passes.
+//! A base directory without any schema (first introduction) passes; the head must contain a schema.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,6 +19,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if head.file.is_empty() {
+        eprintln!("schema-check: head schema has no .proto files");
+        return ExitCode::from(2);
+    }
     let problems = breaking_changes(&base, &head);
     for p in &problems {
         eprintln!("breaking: {p}");
