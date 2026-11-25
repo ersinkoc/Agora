@@ -45,12 +45,13 @@ export function CopyButton({ text, label, className = '' }: { text: string; labe
 const HOVER = 'opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-visible:opacity-100 max-md:opacity-100 pointer-coarse:opacity-100';
 
 function CodeBlock({ lang, text }: { lang: string; text: string }) {
-  const html = useHighlightedCode(lang, text);
+  const shown = visible(text);
+  const html = useHighlightedCode(lang, shown);
   return (
     <div className="overflow-hidden rounded-s border border-line bg-surface-1">
       <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-xs text-muted pointer-coarse:h-11"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
       <pre dir="ltr" className="m-0 max-h-96 overflow-auto p-3 font-mono text-xs leading-5">
-        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
+        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{shown}</code>}
       </pre>
     </div>
   );
@@ -73,7 +74,7 @@ function BlockView({ block }: { block: Block }) {
           <tbody>{block.rows.map((r, i) => <tr key={i} className="border-t border-line first:border-t-0">{r.map((c, j) => <td key={j} className="px-3 py-1.5 align-top"><Inlines parts={c} /></td>)}</tr>)}</tbody>
         </table>
       </div>
-    ) : <pre dir="ltr" className="m-0 overflow-x-auto font-mono text-xs leading-5">{block.text}</pre>;
+    ) : <pre dir="ltr" className="m-0 overflow-x-auto font-mono text-xs leading-5">{visible(block.text)}</pre>;
     default: return <p className="m-0 break-words whitespace-pre-wrap"><Inlines parts={block.inlines} /></p>;
   }
 }
@@ -158,15 +159,15 @@ const DIFF_CAP = 200;
 function DiffLines({ lines: all, fallback }: { lines: ReturnType<typeof parseHunks>['lines']; fallback: string }) {
   const [full, setFull] = useState(false);
   const lines = full ? all : all.slice(0, DIFF_CAP);
-  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{fallback}</pre>;
+  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{visible(fallback)}</pre>;
   return (
     <pre dir="ltr" className="m-0 max-h-80 overflow-auto bg-surface-0 font-mono text-xs leading-5">
       {lines.map((l, i) => l.kind === 'hunk'
-        ? <div key={i} className="bg-surface-2 px-3.5 py-1 text-muted">{l.text}</div>
+        ? <div key={i} className="bg-surface-2 px-3.5 py-1 text-muted">{visible(l.text)}</div>
         : (
           <div key={i} className={`grid grid-cols-[3rem_minmax(0,1fr)] ${l.kind === 'add' ? 'bg-finished/10 diff-bar-add' : l.kind === 'del' ? 'bg-removed/10 diff-bar-del' : ''}`}>
             <span aria-hidden className="pe-2.5 text-end text-muted select-none">{l.kind === 'del' ? l.oldNo : l.newNo}</span>
-            <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text || ' '}</span>
+            <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text ? visible(l.text) : ' '}</span>
           </div>
         ))}
       {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
@@ -204,7 +205,7 @@ function OutputBlock({ text, cut }: { text: string; cut?: boolean }) {
   const tail = useMemo(() => outputTail(text, full ? Number.MAX_SAFE_INTEGER : OUTPUT_TAIL), [text, full]);
   return (
     <div data-output>
-      <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{tail.text}</pre>
+      <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{visible(tail.text)}</pre>
       {tail.hidden > 0 && <button type="button" className="mt-1 text-xs text-muted underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: tail.hidden + OUTPUT_TAIL })}</button>}
       {cut && <p className="m-0 mt-1 text-xs text-muted">{t('tool-output-cut')}</p>}
     </div>

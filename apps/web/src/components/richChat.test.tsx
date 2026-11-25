@@ -75,6 +75,17 @@ describe('a tool call with the node\'s data', () => {
     expect(host.querySelector('img')).toBeNull();
     expect(host.textContent).toContain('<img src=x onerror=alert(1)>');
   });
+  it('makes hidden characters in tool output visible', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"execute","arguments":{"command":"x"}}', output: 'co\u2800de\u034f' })]} open />);
+    expect(html).toContain('co\\u{2800}de\\u{34f}');
+    expect(html).not.toContain('\u2800');
+    expect(html).not.toContain('\u034f');
+  });
+  it('verifies tool output across isolate, private-use and control characters', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { output: '模型\u2066\nça\ue000\u0001' })]} open />);
+    for (const shown of ['模型\\u{2066}', 'ça\\u{e000}\\u{1}']) expect(html).toContain(shown);
+    expect([...html].filter((c) => ['\u2066', '\ue000', '\u0001'].includes(c))).toEqual([]);
+  });
   it('opens a group with a failed call, folded or not, and says so; a spinner follows the calls themselves', () => {
     const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { status: 'failed' })]} flag="call-failed" />);
     expect(html).toMatch(/<details[^>]*\sopen/);

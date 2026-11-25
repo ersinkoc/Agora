@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -45,6 +45,24 @@ describe('the conversation as drawn', () => {
     expect(html).toContain('<table');
     expect(html).toContain('<th');
     expect(html).toContain('>rust<');
+  });
+  it('makes hidden characters in fenced code visible', () => {
+    const html = draw([line(1, '```text\nco\u3164de\u202e\n```')]);
+    expect(html).toContain('co\\u{3164}de\\u{202e}');
+    expect(html).not.toContain('\u3164');
+    expect(html).not.toContain('\u202e');
+  });
+  it('verifies visible fenced code while copying its raw text', async () => {
+    const raw = 'ça\u2066lış\ue000';
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const host = document.createElement('div'); const root = createRoot(host);
+    act(() => root.render(<>{transcript([line(1, `\`\`\`text\n${raw}\n\`\`\``)]).map((i) => <Item key={i.id} item={i} notice={() => null} />)}</>));
+    expect(host.textContent).toContain('ça\\u{2066}lış\\u{e000}');
+    const copy = host.querySelector('button[aria-label="Copy"]') as HTMLButtonElement;
+    await act(async () => { copy.click(); });
+    expect(writeText).toHaveBeenCalledWith(raw);
+    act(() => root.unmount());
   });
   it('says "N steps" with a duration only when the entries carry times', () => {
     const call = (id: number, atMs: number) => line(id, '{"tool":"Read","arguments":{"file_path":"a.rs"}}', { kind: 'tool', atMs });
@@ -201,6 +219,18 @@ describe('the conversation as drawn', () => {
     const text = html.replace(/<[^>]+>/g, '');
     expect([...text].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
     expect(text).toContain('src/Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('makes hidden characters in diff content visible', () => {
+    const html = draw([line(1, '@@ -1 +1 @@\n-old\u3164\n+new\u202e\n', { kind: 'diff', path: 'src/a.rs' })]);
+    expect(html).toContain('old\\u{3164}');
+    expect(html).toContain('new\\u{202e}');
+    expect(html).not.toContain('\u3164');
+    expect(html).not.toContain('\u202e');
+  });
+  it('verifies diff content across isolate, private-use and control characters', () => {
+    const html = draw([line(1, '@@ -1 +1 @@ işi\u2066\n-ça\ue000\n+模型\u0001\n', { kind: 'diff', path: 'src/a.rs' })]);
+    for (const shown of ['işi\\u{2066}', 'ça\\u{e000}', '模型\\u{1}']) expect(html).toContain(shown);
+    expect([...html].filter((c) => ['\u2066', '\ue000', '\u0001'].includes(c))).toEqual([]);
   });
   it('verifies diff-card display while preserving its raw identity', () => {
     const raw = 'src/漢\u202e字\u3164.rs';

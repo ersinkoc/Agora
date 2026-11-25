@@ -2,9 +2,9 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { visible } from '../net/hidden';
 import { ago } from '../net/time';
 import type { MessageModel } from '../net/view';
-import { visible } from './boardColumns';
 import { Icon } from './Icon';
 import { AgentAvatar, Tag } from './kit';
 

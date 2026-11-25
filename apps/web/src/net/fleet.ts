@@ -235,7 +235,7 @@ export function groupFleet(sorted: readonly AgentTileModel[], machines: readonly
     } else if (by === 'kind') {
       const key = agentKindOf(a);
       g = groups.get(key);
-      if (!g) { g = { key, name: key, online: true, agents: [] }; groups.set(key, g); }
+      if (!g) { g = { key, name: visible(key), online: true, agents: [] }; groups.set(key, g); }
     } else {
       const key = stateGroupOf(a);
       g = groups.get(key);
