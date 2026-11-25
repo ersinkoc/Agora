@@ -7,7 +7,9 @@ import { asksUnderHeader } from '../net/chatView';
 import { AgentAddress } from '../components/AgentAddress';
 import { AsksLessChip } from '../components/AllowAlways';
 import { ApprovalBanners } from '../components/ApprovalBanner';
-import { CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
+import { CloseAgentContext, CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
+import { ChatActionsContext } from '../components/chatActions';
+import { GiveContext } from '../components/GiveTask';
 import { ClosedSummary } from '../components/ClosedSummary';
 import { FleetConsole } from '../components/FleetConsole';
 import { HelperGrants } from '../components/HelperGrants';
@@ -23,7 +25,7 @@ import { TerminalSettings } from '../terminal/TerminalSettings';
 import { ThemeEditor } from '../themes/ThemeEditor';
 import { Menu, type MenuItem } from './Menu';
 import { Note } from './Note';
-import { BUILTIN_PANELS, type BuiltinPanel, type PanelActions, type PanelContext, type PanelDef, type PanelRender, type PanelState, type ToolPanel, panelRegistry } from './panels';
+import { BUILTIN_PANELS, PANEL_INFO, TOOL_PANELS, type BuiltinPanel, type PanelActions, type PanelContext, type PanelDef, type PanelRender, type PanelState, type ToolPanel, panelRegistry } from './panels';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -64,7 +66,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
   };
   // "Open beside" in an agent's header: its terminal (unless it is this one), changes, files and file manager, each as a pane next to it.
   const beside = (): MenuItem[] => [
-    ...(['changes', 'files', 'manager'] as const).filter((p) => (p === 'changes' ? !!loadDiff : !!filesOf)).map((p) => ({ label: t({ changes: 'ide-tab-changes', files: 'console-files', manager: 'layout-panel-manager' }[p]), run: () => openTool(p, a.id) })),
+    ...TOOL_PANELS.filter((p) => p !== 'terminal' && (p === 'changes' ? !!loadDiff : !!filesOf)).map((p) => ({ label: t(PANEL_INFO.label(p) as string), run: () => openTool(p, a.id) })),
   ];
   return (
     <div className="agent-body flex min-h-0 min-w-0 flex-1 flex-col">
@@ -162,5 +164,21 @@ const RENDERS: Record<Exclude<BuiltinPanel, 'empty'>, PanelRender> = {
   },
 };
 
+// The window's command paths that a built-in panel's components read from React context (closing an agent, an agent's settings, giving
+// a task), provided again from the panel's own actions, so what a panel can send is exactly what its context gives it. Providers draw nothing.
+function withPaths(actions: PanelActions, view: ReactNode): ReactNode {
+  return (
+    <CloseAgentContext.Provider value={actions.closeAgent}>
+      <ChatActionsContext.Provider value={actions.chat}>
+        <GiveContext.Provider value={actions.give}>{view}</GiveContext.Provider>
+      </ChatActionsContext.Provider>
+    </CloseAgentContext.Provider>
+  );
+}
+
 /** The window's panels. */
-export const BUILTIN_REGISTRY = panelRegistry<PanelDef>(BUILTIN_PANELS.map((p): PanelDef => (p.kind === 'chooser' ? p : { ...p, render: RENDERS[p.id] })));
+export const BUILTIN_REGISTRY = panelRegistry<PanelDef>(BUILTIN_PANELS.map((p): PanelDef => {
+  if (p.kind === 'chooser') return p;
+  const render = RENDERS[p.id];
+  return { ...p, render: (ctx) => { const view = render(ctx); return view === undefined ? undefined : withPaths(ctx.actions, view); } };
+}));

@@ -95,7 +95,7 @@ describe('pane tabs and bars', () => {
   const panels = panelRegistry<PanelDef>([{ id: 'agent', label: 'layout-panel-agent', kind: 'agent', binds: 'agent', streams: true, render: ({ agent }) => <p>{agent?.name}</p> }]);
   const panelState: PanelState = { fleet, machines: [], approvals: [], attention: [], changed: [], messages: [], boards: [], projects: [], now: 0, link: 'live' };
   const none = () => {};
-  const actions: HostActions = { openAgent: none, openFromHome: none, openTool: none, review: none, history: none, browse: none, showNeeds: none, showChanges: none, dismiss: none, answers: {} as AnswerGuard };
+  const actions: HostActions = { openAgent: none, openFromHome: none, openTool: none, review: none, history: none, browse: none, showNeeds: none, showChanges: none, dismiss: none, answers: {} as AnswerGuard, chat: {} };
   function Harness({ ws }: { ws: WorkspaceState }) {
     const [state, setState] = useStateRef(ws);
     return <div style={{ position: 'relative', width: 600, height: 400 }}>

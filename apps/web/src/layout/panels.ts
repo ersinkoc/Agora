@@ -14,7 +14,8 @@ import type { WorkspaceFiles } from '../net/files';
 import type { UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
-import type { PromptSend } from '../components/chatActions';
+import type { ChatActions, PromptSend } from '../components/chatActions';
+import type { GiveApi } from '../components/GiveTask';
 import type { HelperGrant } from '../components/HelperGrants';
 import type { PairingUi } from '../components/Pairing';
 import type { StartChoice } from '../components/StartApproval';
@@ -97,8 +98,8 @@ export interface PanelSources {
   readonly helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
 }
 
-/** What a panel may do: the window's own paths, each undefined where the window cannot do it. Anything signed (an answer, a prompt)
- *  is signed by the window behind the function, never by the panel. */
+/** What a panel may do: the window's own paths, each undefined where the window cannot do it. Every command a panel sends goes
+ *  through these; anything signed (an answer, a prompt) is signed by the window behind the function, never by the panel. */
 export interface PanelActions {
   // This pane.
   /** Point this pane's panel at another agent (a tool's folder chooser). */
@@ -128,6 +129,12 @@ export interface PanelActions {
   readonly answers: AnswerGuard;
   /** Machines asking to join, with their answers (ADR-0065), for an owner's session. */
   readonly pairing?: PairingUi;
+  /** Close an agent (`AgentStop`); undefined where this window cannot. */
+  readonly closeAgent?: (agent: AgentTileModel) => Promise<string | undefined>;
+  /** An agent's own settings and ending its turn, from its composer. */
+  readonly chat: ChatActions;
+  /** Giving a shared task to an agent (the board). */
+  readonly give?: GiveApi;
 }
 
 /** Everything one pane's panel is given, frozen. */

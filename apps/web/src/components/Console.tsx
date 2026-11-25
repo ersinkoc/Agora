@@ -1,7 +1,7 @@
 import type { ActionResult } from '../net/refusal';
 import { asksUnderHeader } from '../net/chatView';
 import { Arrangement, requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuard';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
 import type { UsageSummary } from '../net/usage';
@@ -42,7 +42,10 @@ import { subscribePanelRequests, subscribeProjectRequests, subscribeToolRequests
 import { type ToolPanel, changedFolders, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
 import type { MenuItem } from '../layout/Menu';
 import { BUILTIN_REGISTRY, type HostActions, homeView } from '../layout/builtinPanels';
-import type { PanelSources, PanelState } from '../layout/panels';
+import { TOOL_PANELS, type PanelSources, type PanelState } from '../layout/panels';
+import { CloseAgentContext } from './CloseAgent';
+import { ChatActionsContext } from './chatActions';
+import { GiveContext } from './GiveTask';
 
 const MAX_AUTO_PINNED = 4;
 // The icon rail of the right panel (rem, so it grows with the text size like the rail itself, `w-11`), always there; the panel's own width comes on top when it is open.
@@ -240,6 +243,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // every request with what its card shows and where the panes are, so a card that comes, goes or changes in any pane, or a pane that moves,
   // restarts the dwell everywhere; a request is answered once, whichever pane (or other surface: the window's holds) it was answered in.
   const banners = useAnswerGuard(approvals.map((x) => x.id), (status) => JSON.stringify([arrangement, approvals.map((x) => { const a = fleet.find((f) => f.id === x.agentId); return [requestShown(x, a), a ? asksUnderHeader(a) : null, status(x.id)]; })]), link !== 'live');
+  // The command paths the app installs for the whole window (closing an agent, an agent's settings, giving a task): the panes' panels
+  // get them through their actions.
+  const closeAgent = useContext(CloseAgentContext);
+  const chatActions = useContext(ChatActionsContext);
+  const give = useContext(GiveContext);
   const attention = needsAttention(fleet);
   const changed = changedFolders(fleet, projectFilter);
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
@@ -289,7 +297,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const plusItems = (): MenuItem[] => [
     ...(onStart ? [{ label: t('action-start-agent'), run: () => onStart() }] : []),
     ...(onNewTerminal ? [{ label: t('pane-new-terminal'), run: () => onNewTerminal() }] : []),
-    ...(['terminal', 'changes', 'files', 'manager'] as const).map((p, i) => ({ label: t(`palette-open-${p}`), divider: i === 0 && (!!onStart || !!onNewTerminal), run: () => openTool(p) })),
+    ...TOOL_PANELS.map((p, i) => ({ label: t(`palette-open-${p}`), divider: i === 0 && (!!onStart || !!onNewTerminal), run: () => openTool(p) })),
   ];
   // Home: the fleet console. A tile opens its agent like the tree does.
   const openFromFleet = (id: string) => {
@@ -298,14 +306,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     dispatch({ type: 'open', agent: id });
   };
   // What the panes' panels may see and do (ADR-0068 rung 3, layout/panels.ts): read-only slices of this window's state, the reads the
-  // window can make, and its own paths for every action. The panels get nothing else.
+  // window can make, and its own paths for every command (those the app installs as context included). The panels get nothing else.
   const panelState: PanelState = Object.freeze({ fleet, machines, approvals, attention, changed, messages, boards, usage, projects, now, link, notice, guest, watching, forgetError, resumeError, resuming });
   const panelSources: PanelSources = Object.freeze({ chatOf, filesOf, loadDiff, loadHistory, helperGrants });
   const panelActions: HostActions = Object.freeze({
     openAgent: onOpen, openFromHome: openFromFleet, openTool, review: setReviewing, history: setHistory, browse: setBrowsing,
     showNeeds: () => { setRailTab('needs'); setShowDetails(true); }, showChanges: () => { setRailTab('changes'); setShowDetails(true); },
     dismiss, forget: onForget ? removeClosed : undefined, resume, start: onStart, newTerminal: onNewTerminal ? () => onNewTerminal() : undefined, retry: onRetry,
-    resolve: onResolve, sendPrompt, chooseOption, revokeGrant, answers: banners, pairing,
+    resolve: onResolve, sendPrompt, chooseOption, revokeGrant, answers: banners, pairing, closeAgent, chat: chatActions, give,
   });
   const welcome = homeView(panelState, panelActions);
 

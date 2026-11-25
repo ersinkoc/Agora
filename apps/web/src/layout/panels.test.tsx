@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { AnswerGuard } from '../components/useAnswerGuard';
+import { CloseAgentContext } from '../components/CloseAgent';
 import type { TerminalSource } from '../terminal/source';
 import { BUILTIN_REGISTRY, type HostActions } from './builtinPanels';
 import { type Action, type Workspace as WorkspaceState, reduce, workspaceOf } from './engine';
@@ -30,7 +31,7 @@ const agent = (id: string, name: string): AgentTileModel => ({ id, name, accent:
 const fleet = [agent('n/a', 'claude · amber'), agent('n/b', 'codex · teal')];
 const state: PanelState = Object.freeze({ fleet, machines: [], approvals: [], attention: [], changed: [], messages: [], boards: [], projects: [], now: 0, link: 'live' as const });
 const none = () => {};
-const actions: HostActions = Object.freeze({ openAgent: none, openFromHome: none, openTool: none, review: none, history: none, browse: none, showNeeds: none, showChanges: none, dismiss: none, answers: {} as AnswerGuard });
+const actions: HostActions = Object.freeze({ openAgent: none, openFromHome: none, openTool: none, review: none, history: none, browse: none, showNeeds: none, showChanges: none, dismiss: none, answers: {} as AnswerGuard, chat: {} });
 const ws = (root: LayoutNode): WorkspaceState => workspaceOf({ version: LAYOUT_VERSION, root });
 const pane = (id: string, panel: string, bind?: { agent: string }) => ({ type: 'pane' as const, id, panel, ...(bind ? { bind } : {}) });
 const row = (...children: LayoutNode[]): LayoutNode => ({ type: 'split', direction: 'row', ratios: children.map(() => 1 / children.length), children });
@@ -195,6 +196,24 @@ describe('a panel\'s drawing gets only its context', () => {
     expect(ctx.agent).toBeUndefined();
     expect(ctx.bind).toBeUndefined();
     expect(ctx.terminal).toBeUndefined();
+  });
+});
+
+describe('a built-in panel sends commands only through its actions', () => {
+  it('closes an agent only when its actions can, whatever the app provides around it', () => {
+    const running = { ...agent('n/c', 'gemini · rose'), terminal: false };
+    const appClose = async () => undefined;
+    const ctx = (closeAgent?: PanelContext['actions']['closeAgent']): PanelContext => Object.freeze({
+      pane: 'p1', panel: 'agent', bind: { agent: 'n/c' }, agent: running, state, sources: {}, terminal: undefined,
+      actions: Object.freeze({ ...actions, rebind: none, ...(closeAgent ? { closeAgent } : {}) }),
+    });
+    const def = BUILTIN_REGISTRY.get('agent') as Extract<PanelDef, { render: unknown }>;
+    const menu = () => host.querySelector('[aria-label="Actions for gemini · rose"]');
+    act(() => root.render(<CloseAgentContext.Provider value={appClose}>{def.render(ctx())}</CloseAgentContext.Provider>));
+    expect(host.querySelector('.agent-body')).not.toBeNull();
+    expect(menu()).toBeNull();
+    act(() => root.render(<CloseAgentContext.Provider value={undefined}>{def.render(ctx(appClose))}</CloseAgentContext.Provider>));
+    expect(menu()).not.toBeNull();
   });
 });
 

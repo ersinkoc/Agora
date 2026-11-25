@@ -79,8 +79,10 @@ an agent makes a pane `agent`.
   draws the pane bar (name, avatar, state, tools), where ADR-0114's plugin marker goes.
 - **Outputs:** a typed set of actions the window gives it, wrapping the paths the window already uses: rebind this pane to
   another agent, open an agent or a tool, review, history, files, Needs you, Changes, remove, resume, start, retry, answer a
-  request, send a prompt. Anything signed is signed by the window behind the action, never by the panel. (The agent view's
-  "Close agent" still uses the window's own close path, a React context the app installs.)
+  request, send a prompt, an agent's settings, close an agent, give a task. Every command a panel sends goes through them;
+  the paths the app installs as React context (close, an agent's settings, give) are provided again inside each built-in panel
+  from its own actions. Anything signed is signed by the window behind the action, never by the panel. Local preferences (text
+  size, grouping, the theme editor's own themes) are not commands and stay where they are.
 - **Streaming:** `streams` (Terminal and the agent's own view) is what the stream plan reads, and only such a panel is given a
   terminal. Only panes on screen are drawn, so only they subscribe (see Performance).
 - **Unknown ids:** an id the registry does not have, or a panel that cannot draw in this window, shows the "unknown panel"
