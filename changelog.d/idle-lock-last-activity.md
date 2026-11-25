@@ -1,0 +1,1 @@
+- The window's idle lock (Settings, This device) now waits the full time after your last key press, click, touch or scroll. Before, a click within a second of a key press was not counted, so the window could lock up to a second early (found on the Windows machine).

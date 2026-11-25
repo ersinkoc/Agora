@@ -35,6 +35,26 @@ describe('idle lock', () => {
     expect(onIdle).toHaveBeenCalledTimes(1);
   });
 
+  it.each([['single keypress', 0], ['keypress followed by a click', 900]])('waits five minutes after the last activity: %s', (_case, gap) => {
+    const target = new EventTarget();
+    const onIdle = vi.fn();
+    const stop = watchIdle(5, onIdle, target);
+    try {
+      vi.advanceTimersByTime(60_000);
+      target.dispatchEvent(new Event('keydown'));
+      if (gap) {
+        vi.advanceTimersByTime(gap);
+        target.dispatchEvent(new Event('pointerdown'));
+      }
+      vi.advanceTimersByTime(5 * 60_000 - 1);
+      expect(onIdle, 'must not lock before five minutes of inactivity').not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(onIdle).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+
   it('watches nothing when off and stops when asked', () => {
     const target = new EventTarget();
     const onIdle = vi.fn();

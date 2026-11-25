@@ -33,16 +33,18 @@ export function watchIdle(minutes: number, onIdle: () => void, target: Pick<Even
   if (minutes <= 0) return () => {};
   const ms = minutes * 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let last = 0;
-  const arm = () => { timer = setTimeout(fire, ms); };
-  const fire = () => { timer = undefined; stop(); onIdle(); };
-  // Restarting the timer on every pointer move would be wasteful: at most once a second.
-  const active = () => {
-    const now = Date.now();
-    if (timer === undefined || now - last < 1_000) return;
-    last = now;
-    clearTimeout(timer);
-    arm();
+  let last = performance.now();
+  // Record every event without restarting the timer on every pointer move.
+  const active = () => { last = performance.now(); };
+  const fire = () => {
+    const remaining = ms - (performance.now() - last);
+    if (remaining > 0) {
+      timer = setTimeout(fire, Math.ceil(remaining));
+      return;
+    }
+    timer = undefined;
+    stop();
+    onIdle();
   };
   const stop = () => {
     if (timer !== undefined) clearTimeout(timer);
@@ -50,6 +52,6 @@ export function watchIdle(minutes: number, onIdle: () => void, target: Pick<Even
     for (const e of ACTIVITY) target.removeEventListener(e, active, true);
   };
   for (const e of ACTIVITY) target.addEventListener(e, active, { capture: true, passive: true });
-  arm();
+  timer = setTimeout(fire, ms);
   return stop;
 }
