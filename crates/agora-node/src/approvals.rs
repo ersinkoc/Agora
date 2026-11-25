@@ -1495,13 +1495,21 @@ impl NodeApprovals {
         if is_reserved_action(action) {
             return None;
         }
+        // #1150 (review of #1216, B1): the route is in place before the request can be seen or decided. A decision reads the route
+        // first, for the device's limits; one that came between the halves found none, skipped the limits and was applied with the
+        // route inserted meanwhile. The routes' lock is taken before the queue's, as in `request_start`.
+        let mut routes = self.r();
         let p = self.raise_adapter(agent, action, detail, now_ms, offer)?;
-        self.route_adapter(&p, agent, adapter_approval_id);
+        routes.insert(
+            p.id.clone(),
+            (agent.clone(), adapter_approval_id.to_string()),
+        );
         Some(p)
     }
 
-    /// The first half of [`Self::request_offered`]: the request is in the queue, without its route back to the adapter yet. Another
-    /// thread (a cancelled turn) can run between the halves; tests use them apart to make that interleaving.
+    /// The first half of [`Self::request_offered`]: the request is in the queue, without its route back to the adapter yet.
+    /// [`Self::request_offered`] holds the routes' lock across both halves, so nothing runs between them; tests use them apart to
+    /// check that what would run there (a cancelled turn, a decision) still does no harm.
     fn raise_adapter(
         &self,
         agent: &agora_core::AgentId,
@@ -1515,6 +1523,7 @@ impl NodeApprovals {
     }
 
     /// The second half of [`Self::request_offered`]: the route back to the adapter, which makes the request fully registered.
+    #[cfg(test)]
     fn route_adapter(&self, p: &Pending, agent: &agora_core::AgentId, adapter_approval_id: &str) {
         self.r().insert(
             p.id.clone(),
@@ -1586,19 +1595,24 @@ impl NodeApprovals {
             return Err(SkipRefusal::AgentTooOften);
         }
         let detail = ask.detail(node);
-        let pending = self
-            .q()
-            .request_bound(
-                ask.agent.as_str(),
-                SKIP_ACTION,
-                &detail,
-                now_ms,
-                SKIP_TTL_MS,
-                Some(ask.binding()),
-            )
-            .ok_or(SkipRefusal::NoId)?;
-        self.r()
-            .insert(pending.id.clone(), (ask.agent.clone(), String::new()));
+        // #1150 (review of #1216, B1): the route is in place before the request can be seen or decided (see `request_offered`).
+        // Released before the replaced requests are withdrawn, which takes it again.
+        let pending = {
+            let mut routes = self.r();
+            let pending = self
+                .q()
+                .request_bound(
+                    ask.agent.as_str(),
+                    SKIP_ACTION,
+                    &detail,
+                    now_ms,
+                    SKIP_TTL_MS,
+                    Some(ask.binding()),
+                )
+                .ok_or(SkipRefusal::NoId)?;
+            routes.insert(pending.id.clone(), (ask.agent.clone(), String::new()));
+            pending
+        };
         let mut superseded = Vec::new();
         for (id, _) in same.iter().filter(|(_, equal)| !*equal) {
             st.asks.remove(id);
@@ -1691,7 +1705,15 @@ impl NodeApprovals {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let (Some(limits), Some((agent, _))) = (limits, self.r().get(&r.approval_id).cloned()) {
+        // #1150 (review of #1216, B1): the route is read, the limits checked against it, the request taken and the route removed
+        // under one hold of the routes' lock (taken before the queue's, never the other way round). A request without a route is
+        // refused before anything is consumed: every request is routed as it is raised, so one decided before that, or a route put
+        // in between the check and the take, can never skip the device's limits.
+        let mut routes = self.r();
+        let Some((agent, _)) = routes.get(&r.approval_id).cloned() else {
+            return Err(ApprovalError::Unknown);
+        };
+        if let Some(limits) = limits {
             if !limits.allows_agent(&r.signer_device_id, agent.as_str()) {
                 return Err(ApprovalError::Forbidden);
             }
@@ -1701,15 +1723,18 @@ impl NodeApprovals {
             Ok(v) => v,
             Err(ApprovalError::Expired) => {
                 // The queue dropped the request, so the sweep will not see it: hand its route to the next sweep instead.
-                if let Some((agent, id)) = self.r().remove(&r.approval_id) {
+                if let Some((agent, id)) = routes.remove(&r.approval_id) {
                     self.l().push((r.approval_id.clone(), agent, id));
                 }
                 return Err(ApprovalError::Expired);
             }
             Err(e) => return Err(e),
         };
+        let route = routes.remove(&r.approval_id);
+        // Before the device trust store and the skip records are touched (a skip request is raised under its records' lock, then
+        // this one).
+        drop(routes);
         self.used(&r.signer_device_id);
-        let route = self.r().remove(&r.approval_id);
         let skip = if request.action == SKIP_ACTION {
             self.sk().asks.remove(&r.approval_id)
         } else {
@@ -2056,16 +2081,18 @@ mod tests {
         NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])))
     }
 
-    /// #1150: a start request cannot be seen (nor so decided) before its route is in place. A decision that came between the two
-    /// spent the request, found no route and was refused as unknown, while the spawner filed a request nothing would end.
-    #[test]
-    fn a_start_request_is_listed_only_with_its_route() {
-        let n = std::sync::Arc::new(node_approvals());
+    /// #1150: raises a request with `raise` on another thread while the routes' lock is held here, and checks that it is not listed
+    /// (so cannot be decided) until that lock is let go. Returns what `raise` returned.
+    fn raised_while_routes_are_held<T: Send + 'static>(
+        n: &std::sync::Arc<NodeApprovals>,
+        raise: impl FnOnce(&NodeApprovals) -> T + Send + 'static,
+    ) -> T {
+        let before = n.waiting();
         let routes = n.r();
-        let asker = std::sync::Arc::clone(&n);
+        let asker = std::sync::Arc::clone(n);
         let (tx, rx) = std::sync::mpsc::channel();
         let t = std::thread::spawn(move || {
-            let p = asker.request_start(&agora_core::AgentId::new("agent-1"), "{}", 1_000);
+            let p = raise(&asker);
             let _ = tx.send(());
             p
         });
@@ -2073,11 +2100,140 @@ mod tests {
         assert!(rx
             .recv_timeout(std::time::Duration::from_millis(300))
             .is_err());
-        assert!(n.waiting().is_empty(), "listed before its route");
+        assert_eq!(n.waiting(), before, "listed before its route");
         drop(routes);
-        let p = t.join().unwrap().expect("a request");
+        t.join().unwrap()
+    }
+
+    /// #1150: a start request cannot be seen (nor so decided) before its route is in place. A decision that came between the two
+    /// spent the request, found no route and was refused as unknown, while the spawner filed a request nothing would end.
+    #[test]
+    fn a_start_request_is_listed_only_with_its_route() {
+        let n = std::sync::Arc::new(node_approvals());
+        let p = raised_while_routes_are_held(&n, |n| {
+            n.request_start(&agora_core::AgentId::new("agent-1"), "{}", 1_000)
+        })
+        .expect("a request");
         assert_eq!(n.waiting(), vec![p.clone()]);
         assert_eq!(n.agent_of(&p.id), Some(agora_core::AgentId::new("agent-1")));
+    }
+
+    /// Approvals where device `eda` may answer only for project `web` (`agent-web`), not `api` (`agent-api`); `phone` for any.
+    fn limited_approvals() -> NodeApprovals {
+        let n = NodeApprovals::new(
+            "node-1",
+            Box::new(Fake(vec![("phone", "s3cret"), ("eda", "s3cret")])),
+        );
+        let limits = std::sync::Arc::new(crate::limits::DeviceLimits::new(
+            [("eda".to_string(), ["web".to_string()].into())].into(),
+        ));
+        limits.set_project_resolver(Box::new(|a| match a {
+            "agent-web" => Some("web".into()),
+            "agent-api" => Some("api".into()),
+            _ => None,
+        }));
+        n.set_limits(limits);
+        n
+    }
+
+    fn skip_decision(p: &Pending, binding: &SkipBinding, device: &str) -> ApprovalResolve {
+        ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: device.into(),
+            signature: sign(
+                "s3cret",
+                &skip_signed_message("node-1", &p.id, true, binding, &p.detail),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// Review of #1216, B1: an adapter's request and a skip request are routed before they can be seen, as a start request is. A
+    /// decision between the queue and the route skipped the device's limits and, with the route put in meanwhile, was applied: a
+    /// device limited to one project approved an action of an agent in another.
+    #[test]
+    fn adapter_and_skip_requests_are_listed_only_with_their_routes() {
+        let n = std::sync::Arc::new(limited_approvals());
+        let adapter = raised_while_routes_are_held(&n, |n| {
+            n.request(
+                &agora_core::AgentId::new("agent-api"),
+                "ap-1",
+                "run",
+                "x",
+                0,
+            )
+        })
+        .expect("a request");
+        let ask = skip_ask("agent-api", SkipKind::Mode, "mode", "bypassPermissions");
+        let binding = ask.binding();
+        let skip = raised_while_routes_are_held(&n, move |n| n.request_skip("node-1", ask, 0))
+            .expect("a skip request")
+            .pending;
+        // Routed: the limited device is refused for both and nothing is consumed.
+        let adapter_by = |device: &str| resolve_msg(&adapter.id, true, device, "s3cret", "node-1");
+        assert_eq!(
+            n.resolve(&adapter_by("eda"), 1).unwrap_err(),
+            ApprovalError::Forbidden
+        );
+        assert_eq!(
+            n.resolve_request(&skip_decision(&skip, &binding, "eda"), 1)
+                .err(),
+            Some(ApprovalError::Forbidden)
+        );
+        assert_eq!(n.waiting().len(), 2);
+        assert!(n.resolve(&adapter_by("phone"), 1).is_ok());
+        assert!(n
+            .resolve_request(&skip_decision(&skip, &binding, "phone"), 1)
+            .is_ok());
+    }
+
+    /// Review of #1216, B1: a decision on a request that has no route (one decided before it is fully raised) is refused before
+    /// anything is consumed, whatever device signed it, so no split between the queue and the routes can skip the device's limits.
+    #[test]
+    fn a_decision_on_a_request_without_its_route_consumes_nothing() {
+        let n = limited_approvals();
+        let agent = agora_core::AgentId::new("agent-api");
+        // An adapter's request between its two halves.
+        let p = n
+            .raise_adapter(&agent, "run", "x", 0, Offer::once_only())
+            .unwrap();
+        let by = |device: &str| resolve_msg(&p.id, true, device, "s3cret", "node-1");
+        assert_eq!(
+            n.resolve(&by("eda"), 1).unwrap_err(),
+            ApprovalError::Unknown
+        );
+        assert_eq!(n.waiting(), vec![p.clone()], "the request was consumed");
+        n.route_adapter(&p, &agent, "ap-1");
+        assert_eq!(
+            n.resolve(&by("eda"), 1).unwrap_err(),
+            ApprovalError::Forbidden
+        );
+        assert!(n.resolve(&by("phone"), 1).is_ok());
+        // A skip request whose route is missing (as it was between the queue and the route).
+        let ask = skip_ask("agent-api", SkipKind::Mode, "mode", "bypassPermissions");
+        let binding = ask.binding();
+        let skip = n.request_skip("node-1", ask, 0).unwrap().pending;
+        let route = n.r().remove(&skip.id).unwrap();
+        assert_eq!(
+            n.resolve_request(&skip_decision(&skip, &binding, "eda"), 1)
+                .err(),
+            Some(ApprovalError::Unknown)
+        );
+        assert_eq!(
+            n.waiting(),
+            vec![skip.clone()],
+            "the skip request was consumed"
+        );
+        n.r().insert(skip.id.clone(), route);
+        assert_eq!(
+            n.resolve_request(&skip_decision(&skip, &binding, "eda"), 1)
+                .err(),
+            Some(ApprovalError::Forbidden)
+        );
+        assert!(n
+            .resolve_request(&skip_decision(&skip, &binding, "phone"), 1)
+            .is_ok());
     }
 
     // ---- ADR-0101: an "always" answer ----

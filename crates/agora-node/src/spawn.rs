@@ -1122,9 +1122,23 @@ impl Helpers for Spawner {
         // #1150: the request enters the approval queue, is filed here and is announced under this lock. The queue can be read the
         // moment the request is in it (the node announces what waits whenever the hub needs it said again), but a decision
         // (`decided`), an expiry (`expired`) or the asker's end (`agent_ended`) that comes at once waits for this lock: it always
-        // finds the request, so it frees the caller's slot, and it is recorded after the request. Taken before the approvals' locks,
-        // never under them (nothing there calls the spawner); recording takes only the event sink's own locks.
+        // finds the request, so it frees the caller's slot, and it is recorded after the request. Taken before the supervisor's
+        // and the approvals' locks, as `tick` does, never under them (neither calls the spawner); recording takes only the event
+        // sink's own locks.
         let mut st = self.st();
+        // Review of #1216, N1: the asker may have ended since `check` looked. Its end (`agent_ended`, after the supervisor marked it
+        // ended) found nothing to withdraw then, and its approvals could have been cancelled with the request still to come: the
+        // request would be filed outside the queue, where no decision or expiry ends it. Looked at again under this lock, an end
+        // seen now is refused here, and one that comes later waits for the filing and withdraws it.
+        if !self
+            .sup()
+            .list()
+            .iter()
+            .any(|v| v.id == *caller && v.running)
+        {
+            drop(st);
+            return Err(refuse(not_found(caller.as_str())));
+        }
         let Some(p) = self
             .approvals
             .request_start(caller, &detail, crate::daemon::now_ms())
