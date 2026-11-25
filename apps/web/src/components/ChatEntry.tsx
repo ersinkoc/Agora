@@ -22,12 +22,12 @@ const ICONS: Record<ToolAction, IconName> = {
 
 function Inlines({ parts }: { parts: Inline[] }) {
   return <>{parts.map((p, i) => p.kind === 'code'
-    ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{p.text}</code>
-    : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{p.text}</strong>
+    ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{visible(p.text)}</code>
+    : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{visible(p.text)}</strong>
       // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window. On a touch screen it reaches
       // into the lines above and below (#1073); its text, in the inner span, stays above a neighbouring link's reach (`.tap-inline`).
-      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{p.text}</span></a>
-        : <span key={i}>{p.text}</span>)}</>;
+      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{visible(p.text)}</span></a>
+        : <span key={i}>{visible(p.text)}</span>)}</>;
 }
 
 // What a person copies: the text as written. Always reachable by keyboard (it shows on focus even where it hides until hover).
@@ -104,7 +104,7 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
     <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-(--line-accent) bg-tint-accent px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
-      <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
+      <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{visible(line.text)}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
         {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
         {line.atMs > 0 && <span>{clock(line.atMs)}</span>}
@@ -419,7 +419,7 @@ const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line
       <span className="min-w-0 flex-1 break-words">
         {/* ADR-0101: an approval answered "always" says so (the agent remembers it). */}
         <span className="font-medium text-ink">{outcome === 'approved' && line.always ? t(alwaysText('permission-approved-always')) : t(`permission-${outcome}`)}</span>
-        {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{line.text}</code></>}
+        {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{visible(line.text)}</code></>}
       </span>
       {outcome === 'pending' && onShow && <button type="button" className="tap-target text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}
     </div>

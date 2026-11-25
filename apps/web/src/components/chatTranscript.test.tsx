@@ -100,6 +100,44 @@ describe('the conversation as drawn', () => {
     expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(renderToStaticMarkup(<Thought text="t" />)).not.toContain('Thought for');
   });
+  it('makes agent Markdown inline text visible without losing its structure', () => {
+    const html = draw([line(1, 'Grü\u3164 **ß\u2800** [ça\u034f](https://example.com)')]);
+    const text = html.replace(/<[^>]+>/g, '');
+    expect([...text].filter((c) => ['\u3164', '\u2800', '\u034f'].includes(c))).toEqual([]);
+    for (const shown of ['Grü\\u{3164}', 'ß\\u{2800}', 'ça\\u{34f}']) expect(text).toContain(shown);
+    expect(html).toContain('<strong');
+    expect(html).toContain('href="https://example.com/"');
+  });
+  it('verifies agent Markdown inline text across headings, lists, and inline code', () => {
+    const html = draw([line(1, '# 模型\u2066\n\n- `ça\u000b`\n- İş\ue000')]);
+    for (const shown of ['模型\\u{2066}', 'ça\\u{b}', 'İş\\u{e000}']) expect(html).toContain(shown);
+    expect(html).toContain('font-semibold text-ink');
+    expect(html).toContain('<ul');
+    expect(html).toContain('<code');
+    expect([...html].filter((c) => ['\u2066', '\u000b', '\ue000'].includes(c))).toEqual([]);
+  });
+  it('makes user message text visible', () => {
+    const html = draw([line(1, 'İş\u202e\u0001 sürüyor', { role: 'user' })]);
+    expect(html).toContain('İş\\u{202e}\\u{1} sürüyor');
+    expect(html).not.toContain('\u202e');
+    expect(html).not.toContain('\u0001');
+  });
+  it('verifies user message text across combining and private-use characters', () => {
+    const html = draw([line(1, 'mañ\u034fana \ue000 hazır', { role: 'user' })]);
+    expect(html).toContain('mañ\\u{34f}ana \\u{e000} hazır');
+    expect([...html].filter((c) => ['\u034f', '\ue000'].includes(c))).toEqual([]);
+  });
+  it('makes permission record text visible', () => {
+    const html = draw([line(1, 'Ru\u2066n\ue000 now', { kind: 'permission', outcome: 'pending' })]);
+    expect(html).toContain('Ru\\u{2066}n\\u{e000} now');
+    expect(html).not.toContain('\u2066');
+    expect(html).not.toContain('\ue000');
+  });
+  it('verifies permission record text across bidi and blank characters', () => {
+    const html = draw([line(1, '文\u202e件\u3164', { kind: 'permission', outcome: 'approved' })]);
+    expect(html).toContain('文\\u{202e}件\\u{3164}');
+    expect([...html].filter((c) => ['\u202e', '\u3164'].includes(c))).toEqual([]);
+  });
   it('makes folded thought text visible', () => {
     const html = renderToStaticMarkup(<Thought text={'Grü\u3164ße\u2800 thinks'} seconds={1} />);
     const text = html.replace(/<[^>]+>/g, '');

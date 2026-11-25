@@ -3,7 +3,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage } from '../i18n';
+import { LayoutMenu } from './LayoutMenu';
 import { Menu } from './Menu';
+import { workspaceOf } from './engine';
+import { SAVED_KEY, savedLayouts } from './store';
+import { defaultLayout } from './tree';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -32,6 +36,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  window.localStorage.clear();
   proto.getBoundingClientRect = saved.rect;
   if (saved.ow) Object.defineProperty(proto, 'offsetWidth', saved.ow); else delete (proto as { offsetWidth?: number }).offsetWidth;
   if (saved.sh) Object.defineProperty(Element.prototype, 'scrollHeight', saved.sh); else delete (Element.prototype as { scrollHeight?: number }).scrollHeight;
@@ -70,5 +75,35 @@ describe('Menu placement', () => {
     act(() => { document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     expect(document.body.querySelector('[role=menu]')).toBeNull();
     expect(document.activeElement).toBe(host.querySelector('button'));
+  });
+});
+
+describe('saved layout names', () => {
+  it('makes stored layout names visible in the list', () => {
+    const raw = 'Grü\u3164ße\u202e';
+    window.localStorage.setItem(SAVED_KEY, JSON.stringify({ version: 1, items: [{ name: raw, layout: defaultLayout() }] }));
+    act(() => root.render(<LayoutMenu ws={workspaceOf(defaultLayout())} dispatch={() => {}} agents={() => []} onReset={() => {}} narrow={false} />));
+    act(() => { host.querySelector<HTMLButtonElement>('[aria-haspopup=menu]')?.click(); });
+    const saved = [...document.body.querySelectorAll<HTMLButtonElement>('[role=menuitem]')].find((b) => b.textContent?.includes('Saved layouts'));
+    expect(saved).toBeDefined();
+    act(() => { saved?.click(); });
+    const dialog = document.body.querySelector<HTMLElement>('[role=dialog]');
+    expect(dialog).not.toBeNull();
+    expect([...dialog?.textContent ?? ''].some((c) => ['\u3164', '\u202e'].includes(c))).toBe(false);
+    expect(dialog?.textContent).toContain('Grü\\u{3164}ße\\u{202e}');
+  });
+  it('verifies stored layout labels while deleting by the raw identity', () => {
+    const raw = 'İş\u2066\u0001';
+    window.localStorage.setItem(SAVED_KEY, JSON.stringify({ version: 1, items: [{ name: raw, layout: defaultLayout() }] }));
+    act(() => root.render(<LayoutMenu ws={workspaceOf(defaultLayout())} dispatch={() => {}} agents={() => []} onReset={() => {}} narrow={false} />));
+    act(() => { host.querySelector<HTMLButtonElement>('[aria-haspopup=menu]')?.click(); });
+    const saved = [...document.body.querySelectorAll<HTMLButtonElement>('[role=menuitem]')].find((b) => b.textContent?.includes('Saved layouts'));
+    act(() => { saved?.click(); });
+    const dialog = document.body.querySelector<HTMLElement>('[role=dialog]');
+    expect(dialog?.textContent).toContain('İş\\u{2066}\\u{1}');
+    const remove = [...dialog?.querySelectorAll<HTMLButtonElement>('button') ?? []].find((b) => b.getAttribute('aria-label')?.includes('İş\\u{2066}\\u{1}'));
+    expect(remove).toBeDefined();
+    act(() => { remove?.click(); });
+    expect(savedLayouts(window.localStorage)).toEqual([]);
   });
 });
