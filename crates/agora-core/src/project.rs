@@ -96,6 +96,12 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
         let (authority, path) = rest.split_once('/').ok_or(ProjectError::InvalidRemote)?;
         (authority.to_string(), path.to_string())
     } else if let Some((prefix, suffix)) = url.split_once(':') {
+        if prefix.len() == 1
+            && prefix.as_bytes()[0].is_ascii_alphabetic()
+            && suffix.starts_with(['/', '\\'])
+        {
+            return Err(ProjectError::InvalidRemote);
+        }
         // scp-like: [user@]host:path, with the separator after any bracketed host.
         let (authority, path) = if prefix
             .rsplit('@')
@@ -131,21 +137,21 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let host = if host_port.starts_with('[') {
         let end = host_port.find(']').ok_or(ProjectError::InvalidRemote)? + 1;
         let (host, port) = host_port.split_at(end);
-        if host[1..host.len() - 1].parse::<Ipv6Addr>().is_err() {
-            return Err(ProjectError::InvalidRemote);
-        }
+        let address = host[1..host.len() - 1]
+            .parse::<Ipv6Addr>()
+            .map_err(|_| ProjectError::InvalidRemote)?;
         if !port.is_empty() && port.strip_prefix(':').is_none_or(|port| !valid_port(port)) {
             return Err(ProjectError::InvalidRemote);
         }
-        host
+        format!("[{address}]")
     } else {
-        match host_port.split_once(':') {
+        let host = match host_port.split_once(':') {
             Some((host, port)) if valid_port(port) && !host.contains(':') => host,
             Some(_) => return Err(ProjectError::InvalidRemote),
             None => host_port,
-        }
-    }
-    .to_ascii_lowercase();
+        };
+        host.to_ascii_lowercase()
+    };
     let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")

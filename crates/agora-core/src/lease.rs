@@ -41,8 +41,12 @@ fn normalize(path: &str) -> Result<String, LeaseError> {
         return Err(LeaseError::InvalidPath);
     }
     let unified = path.replace('\\', "/");
-    let bytes = unified.as_bytes();
-    if unified.starts_with('/') || (bytes.get(1) == Some(&b':') && bytes[0].is_ascii_alphabetic()) {
+    let mut rooted = unified.as_str();
+    while let Some(rest) = rooted.strip_prefix("./") {
+        rooted = rest;
+    }
+    let bytes = rooted.as_bytes();
+    if rooted.starts_with('/') || (bytes.get(1) == Some(&b':') && bytes[0].is_ascii_alphabetic()) {
         return Err(LeaseError::InvalidPath);
     }
     let mut parts = Vec::new();
@@ -92,7 +96,8 @@ impl LeaseTable {
         if let Some(other) = self
             .leases
             .iter()
-            .find(|l| &l.holder != holder && overlaps(&l.path, &path))
+            .filter(|l| &l.holder != holder && overlaps(&l.path, &path))
+            .max_by_key(|l| l.expires_at_ms)
         {
             return Err(LeaseError::Conflict {
                 holder: other.holder.clone(),

@@ -56,6 +56,7 @@ impl Worktree {
 fn valid_branch(b: &str) -> bool {
     !b.is_empty()
         && b != "@"
+        && b != "HEAD"
         && !b.starts_with(['/', '-'])
         && !b.ends_with(['/', '.'])
         && !b
