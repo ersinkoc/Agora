@@ -1242,3 +1242,51 @@ fn with_a_confining_node_the_cli_reads_the_control_token_itself() {
     let _ = bridge.kill();
     let _ = bridge.wait();
 }
+
+/// `agora agent explain` names a manifests-folder file the node would skip (so the report is of the built-in kind, not the file
+/// being fixed), and a reader that goes away early (`| head`) does not make it panic.
+#[test]
+fn agent_explain_names_a_skipped_manifest_and_survives_a_closed_pipe() {
+    let dir = std::env::temp_dir().join(format!("agora-cli-explain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("codex.toml"),
+        "kind = \"codex\"\nthis is not toml\n",
+    )
+    .unwrap();
+    let screen = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../manifests/agents/fixtures/codex/permission.screen");
+    let run = |stdout: Stdio| {
+        Command::new(AGORA)
+            .env("AGORA_LANG", "en")
+            .args(["agent", "explain", "codex", "--file"])
+            .arg(&screen)
+            .arg("--manifests")
+            .arg(&dir)
+            .stdout(stdout)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let out = run(Stdio::piped()).wait_with_output().unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("Skipped the manifest file") && stderr.contains("codex.toml"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.lines().next().unwrap().contains("built in"),
+        "{stdout}"
+    );
+    // The reading end is closed before the report is written.
+    let mut child = run(Stdio::piped());
+    drop(child.stdout.take());
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

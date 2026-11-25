@@ -15,6 +15,7 @@ cli-usage =
       agora agent resume AJAN_KİMLİĞİ [--again] [--socket YOL]
       agora agent list [--socket YOL]
       agora agent kinds [--socket YOL]
+      agora agent explain TÜR --file EKRAN [--size SÜTUNxSATIR] [--manifests KLASÖR]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
       agora node stdio [--socket YOL]
       agora mesh stdio --socket YOL
@@ -22,6 +23,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
+      agora hub fleet on|off|status [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
@@ -252,6 +254,11 @@ cli-hub-not-here = Bu makine hub çalıştırmıyor ({ $dir } yok), bu yüzden b
 cli-hub-fingerprint = Hub sertifika yetkilisinin (CA) parmak izi (SHA-256): { $fingerprint }
 cli-hub-user-added = { $id } kullanıcısı { $role } rolüyle eklendi. Giriş kodu: { $code } (10 dakika geçerli). Hub adresini açıp kodu girsin; yenisi için `agora hub user login { $id }` çalıştırın.
 cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member` ile ekleyin.
+cli-hub-fleet-solo = Ajanlar bu hub'ın her makinesini ve ajanını görür: onu sizden başka kimse kullanmıyor. Kişi eklediğinizde bunları yalnızca `agora hub fleet on` çalıştırırsanız görürler.
+cli-hub-fleet-solo-on = Ajanlar bu hub'ın her makinesini ve ajanını görür: onu sizden başka kimse kullanmıyor. Anahtar açık, bu yüzden kişi eklediğinizde onların ajanları da her şeyi görür; erişimleri olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
+cli-hub-fleet-user-warning = Bu hub'da `agora hub fleet` açık, bu yüzden bu kişinin ajanları her makineyi ve ajanı görür; erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
+cli-hub-fleet-on = Ajanlar bu hub'ın her makinesini ve ajanını görür; kişilerinin erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
+cli-hub-fleet-off = Bu hub'ı başka kişiler de kullandığı için ajanlar yalnızca kendi projelerinin makinelerini ve ajanlarını görür. `agora hub fleet on` her makineyi ve ajanı görmelerini sağlar.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = { $id } adında bir ekip üyesi yok.
 cli-hub-user-project =   { $project } projesinde çalışır
@@ -693,3 +700,27 @@ cli-agent-install-err-not-offered = Liste bu ajanı indirme olarak sunmuyor ({ $
 cli-agent-install-err-tool-missing = Bunun için gereken bir program kurulu değil: { $detail } ({ $code }). Hiçbir şey değişmedi.
 cli-agent-install-err-io-failed = Bir dosya yazılamadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
 cli-agent-install-err-conflict = Bu ad kullanılamaz ({ $code }: { $detail }): başka bir ajan bu program adına zaten sahip ya da ajanın adı bin. Hiçbir şey değişmedi.
+
+## agora agent explain: yakalanmış bir ekranda hangi ekran kuralının karar verdiği. Kural kimlikleri, bölgeler ve durumlar manifestin kendi sözcükleridir.
+cli-explain-header = Ajan türü { $kind } ({ $source ->
+        [built-in] yerleşik
+        [registry] ACP kayıt defterinden
+       *[folder] manifest klasöründen
+    }), ekran { $cols }x{ $rows } boyutunda yeniden oynatıldı.
+cli-explain-region = Kuralların { $region } bölgesinde okuduğu:
+cli-explain-region-empty = (boş)
+cli-explain-region-cut = (önceki { $count } satır gösterilmiyor)
+cli-explain-rule-matched = EŞLEŞTİ { $id } → { $state } (öncelik { $priority }, { $region })
+cli-explain-rule-own-missing = hayır   { $id } → { $state } (öncelik { $priority }, { $region }): kendi metni ekranda yok
+cli-explain-rule-all-missing = hayır   { $id } → { $state } (öncelik { $priority }, { $region }): all[{ $index }] ekranda yok
+cli-explain-rule-any-missing = hayır   { $id } → { $state } (öncelik { $priority }, { $region }): "any" koşullarının hiçbiri ekranda yok
+cli-explain-rule-not-present = hayır   { $id } → { $state } (öncelik { $priority }, { $region }): not[{ $index }] ekranda var
+cli-explain-decided = Karar: { $state }, { $id } kuralıyla (en yüksek öncelikten başlayarak ilk eşleşen).
+cli-explain-undecided = Karar: yok. Hiçbir kural eşleşmedi; node ajanın önceki durumunu korur.
+cli-explain-note = Bunlar yalnızca ekran kurallarıdır. Ajanın kendisinin bildirdiği durum (kancaları, ACP ya da adaptör üzerinden) bunlardan önce gelir.
+cli-explain-no-rules = { $kind } türünün ekran kuralı yok, bu yüzden ekranından durum okunmaz ve burada açıklanacak bir şey yok. Ajanın bildirdiği durum ya da node'un kendi verdiği durum (çıkınca bitti gibi) bu raporun dışındadır.
+cli-explain-unknown-kind = Burada "{ $kind }" adlı bir ajan türü yok. Çalışan bir node'un sunduğu türleri "agora agent kinds" listeler.
+cli-explain-bad-file = Ekran dosyası { $path } okunamadı: { $reason }
+cli-explain-file-too-large = Ekran dosyası { $path } { $max } bayttan büyük; yakalanmış bir ekran değil.
+cli-explain-manifest-problem = Manifest dosyası { $path } atlandı, node da atlar: { $reason }
+cli-explain-bad-size = --size terminal boyutunu SÜTUNxSATIR olarak alır, örneğin 120x40 (her biri 2 ile 1000 arasında).

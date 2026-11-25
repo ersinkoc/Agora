@@ -46,7 +46,7 @@ export function TabStrip({ tabs, onPick, children, trailing }: { tabs: readonly 
   // The menu lists the tabs that are cut off, each with its state (a mark and in words), so one that needs you is never out of reach unseen.
   const hidden = (): MenuItem[] => tabs.filter((x) => hiddenIds.includes(x.id)).map((x) => ({
     label: x.label, checked: x.active, run: () => onPick(x.id),
-    lead: x.state ? <span className={`state state--${x.failed ? 'failed' : x.state}`}><StateMark state={x.state} failed={x.failed} /></span> : undefined,
+    lead: x.state ? <StateMark state={x.state} failed={x.failed} /> : undefined,
     hint: x.state ? t(x.failed ? 'state-failed' : `state-${x.state}`) : undefined,
   }));
   const signal = tabSignal(tabs.map((x) => ({ id: x.id, needsYou: x.state === 'needs-you' && !x.failed, failed: x.failed, working: x.state === 'working' && !x.failed })), hiddenIds);

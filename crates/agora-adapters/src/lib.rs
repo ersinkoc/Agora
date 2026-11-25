@@ -17,4 +17,4 @@ pub mod usage;
 
 pub use manifest::{Manifest, ManifestError};
 pub use pacer::Pacer;
-pub use rules::{Detection, Detector};
+pub use rules::{Detection, Detector, Explanation, Region, RuleCheck, RuleOutcome};

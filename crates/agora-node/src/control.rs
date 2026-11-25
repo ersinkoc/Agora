@@ -378,17 +378,27 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         return Err(unknown());
     };
     let id = AgentId::new(d.agent_id.clone());
-    let (terminal, skips, paste) = {
+    // ADR-0115: the command may name the project in another case of a GitHub, GitLab, Bitbucket or Codeberg path than the agent's own
+    // id (an agent that started before this node folded it, or a window that was shown the folded id): the same project. From here
+    // on the agent's own id is used, which is the one the node's broker and board calls know it by.
+    let (terminal, skips, paste, project) = {
         let sup = ctx.sup();
         let view = sup
             .list()
             .into_iter()
-            .find(|v| v.id == id && v.running && v.project == d.project_id)
+            .find(|v| {
+                v.id == id && v.running && agora_core::same_project(&v.project, &d.project_id)
+            })
             .ok_or_else(unknown)?;
         let paste = sup
             .terminal(&id)
             .map(crate::terminal::TerminalHandle::bracketed_paste);
-        (view.terminal, sup.skips_permissions_now(&id), paste)
+        (
+            view.terminal,
+            sup.skips_permissions_now(&id),
+            paste,
+            view.project.to_string(),
+        )
     };
     let dispatches = mesh.dispatches();
     // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
@@ -402,7 +412,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
     } else {
         None
     };
-    let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
+    let claim = match mesh.dispatch_claim(&project, &id, &d.task_id) {
         Ok(c) => c,
         Err(e) => {
             if let Some(t) = token {
@@ -471,7 +481,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
     let prompt_sha256 = crate::task_dispatch::prompt_sha256(&claim.prompt);
     if let Some(ev) = &ctx.events {
         ev.record_bodies(vec![v1::event::Body::TaskDispatched(v1::TaskDispatched {
-            project_id: d.project_id.clone(),
+            project_id: project.clone(),
             task_id: d.task_id.clone(),
             agent_id: d.agent_id.clone(),
             by_user: d.by_user.clone(),
@@ -630,6 +640,14 @@ fn resolve_in<'a>(projects: &'a [ProjectEntry], wanted: &str) -> Result<&'a Proj
     // An id always wins over a name, and a name that two projects share is refused instead of
     // guessed: the hub checks a member's grants against this exact string.
     if let Some(p) = projects.iter().find(|p| p.id == wanted) {
+        return Ok(p);
+    }
+    // ADR-0115: an id in an older spelling (a repository on a case-insensitive host, before this node folded it) names the same
+    // project. Two ids never fold to one here: this node folds every id it makes.
+    if let Some(p) = projects
+        .iter()
+        .find(|p| agora_core::same_project(&p.id, wanted))
+    {
         return Ok(p);
     }
     let mut named = projects.iter().filter(|p| p.name == wanted);
@@ -1025,7 +1043,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             // another folder after the check (the folder, or one above it, moved or swapped for a link) is refused.
             let held = agora_platform::HeldFolder::open(Path::new(&a.path));
             let (info, project) = crate::directory::inspect(&a.path, &ctx.node_id, false)?;
-            if info.path != a.path || info.project_id != a.project_id {
+            // ADR-0115: a launch signed for the folder's id in an older spelling is the same project.
+            if info.path != a.path || !agora_core::same_project(&info.project_id, &a.project_id) {
                 return Err(invalid("directory.project_id"));
             }
             let folder = held
@@ -1851,13 +1870,17 @@ pub(crate) fn resume_agent(
             .unwrap_or_else(|e| e.into_inner())
             .previous(&info)
             .is_empty();
-        if info.path != entry.folder || info.project_id != entry.project_id || !confirmed {
+        // ADR-0115: an agent recorded before this node folded its project's id resumes in the same project.
+        if info.path != entry.folder
+            || !agora_core::same_project(&info.project_id, &entry.project_id)
+            || !confirmed
+        {
             return Err(folder_changed());
         }
         project
     } else {
         let checkout = git::discover_checkout(&folder).map_err(|_| folder_changed())?;
-        if checkout.project.to_string() != entry.project_id {
+        if !agora_core::same_project(&checkout.project.to_string(), &entry.project_id) {
             return Err(folder_changed());
         }
         checkout.project
