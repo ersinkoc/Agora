@@ -10,8 +10,10 @@ import { type Divider, type Frame, type Rect, arrange, dragDelta, dropPlace } fr
 import { Menu, type MenuItem } from './Menu';
 import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
-import { type Pane, MIN_RATIO, bindOf, followOf, isKnownPanel, panesOf } from './tree';
-import { TOOL_PANELS, isToolPanel, type ToolPanel } from '../net/paneTools';
+import { type Pane, MIN_RATIO, bindOf, followOf, panesOf } from './tree';
+import { Note } from './Note';
+import { PANEL_INFO, type PanelActions, type PanelContext, type PanelDef, type PanelInfo, type PanelRegistry, type PanelSources, type PanelState } from './panels';
+import type { TerminalSource } from '../terminal/source';
 
 // The height of a pane's bar (a theme's density sets it, app.css), the space between panes (a theme's gaps and lines), and whether the
 // bars are at the bottom of their panes (1) or the top (0): CSS variables the theme sets, so the layout follows it with no state of its own.
@@ -39,13 +41,12 @@ function barBox(r: Rect): CSSProperties {
   return { ...box(r), top: `calc(${pct(r.y)} + ${AT_END} * (${pct(r.h)} - ${BAR} - ${below}))`, bottom: undefined, marginBottom: 0, height: BAR };
 }
 
-// The panel names the user sees for each panel id (UI vocabulary, not internal terms).
-const PANEL_LABEL: Record<string, string> = {
-  fleet: 'fleet-panel', terminal: 'focus-terminal', conversation: 'chat-log', agent: 'layout-panel-agent', approvals: 'attention-title', changes: 'ide-tab-changes',
-  files: 'console-files', manager: 'layout-panel-manager', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', theme: 'theme-editor-title', empty: 'layout-panel-empty',
+// The name the user sees for a panel id (UI vocabulary, not internal terms), from the registry; an id it does not have is named as unknown.
+export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'label'>, panel: string) => {
+  const key = panels.label(panel);
+  return key ? t(key) : t('layout-panel-unknown', { id: panel });
 };
-export const panelLabel = (panel: string) => (PANEL_LABEL[panel] ? t(PANEL_LABEL[panel] as string) : t('layout-panel-unknown', { id: panel }));
-const GLOBAL_PANELS = ['fleet', 'approvals', 'tasks', 'messages', 'usage', 'theme'];
+export const panelLabel = (panel: string) => panelName(PANEL_INFO, panel);
 
 export interface WorkspaceProps {
   ws: WorkspaceState;
@@ -53,19 +54,20 @@ export interface WorkspaceProps {
   fleet: readonly AgentTileModel[];
   bindings: Bindings;
   narrow: boolean;
-  // The agent's own view (terminal, chat or closed summary) as the window draws it today.
-  renderAgent: (a: AgentTileModel) => ReactNode;
-  // A panel that is not about one agent (Needs you, Changes, ...); undefined when this window cannot draw it.
-  renderPanel: (panel: string) => ReactNode | undefined;
-  /** A tool pane (Terminal, Changes, Files, File manager) for the agent the pane shows, or the chooser when it shows none yet;
-   *  undefined when this window cannot draw it. `rebind` points the pane at another agent's folder. */
-  renderTool?: (panel: ToolPanel, agent: AgentTileModel | undefined, rebind: (agentId: string) => void) => ReactNode | undefined;
+  /** The panels this window can draw (ADR-0068 rung 3): a pane's panel id is looked up here; one it does not have is "unknown". */
+  panels: PanelRegistry;
+  /** What each panel may see and do (its context, besides its pane and binding). The window keeps the connection and the keys. */
+  state: PanelState;
+  sources: PanelSources;
+  actions: Omit<PanelActions, 'rebind'>;
+  /** The terminal of an agent, given only to a panel that streams and only while its pane is drawn. */
+  terminalFor: (agentId: string) => TerminalSource;
   welcome: ReactNode;
   /** What the + button of a tab group offers (start an agent, a terminal, the tools beside the agent in focus). */
   plusItems?: () => MenuItem[];
 }
 
-export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, renderPanel, renderTool, welcome, plusItems }: WorkspaceProps) {
+export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state, sources, actions, terminalFor, welcome, plusItems }: WorkspaceProps) {
   const host = useRef<HTMLDivElement>(null);
   const root = displayRoot(ws, narrow);
   const { frames, dividers } = useMemo(() => arrange(root), [root]);
@@ -74,12 +76,16 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   const byId = useMemo(() => new Map(fleet.map((a) => [a.id, a])), [fleet]);
   const agentFor = (p: Pane) => { const id = agentOf(p, bindings); return id ? byId.get(id) : undefined; };
   // A pane's name: the agent it shows; for a tool (Terminal, Changes, Files, File manager) the tool first, so two panes of one agent differ.
-  const label = (p: Pane) => { const a = agentFor(p); return a ? (isToolPanel(p.panel) ? t('layout-tool-of', { what: panelLabel(p.panel), name: a.name }) : a.name) : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel); };
+  const panelLabel = (panel: string) => panelName(panels, panel);
+  const label = (p: Pane) => { const a = agentFor(p); return a ? (panels.get(p.panel)?.kind === 'tool' ? t('layout-tool-of', { what: panelLabel(p.panel), name: a.name }) : a.name) : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel); };
   const [drag, setDrag] = useState<string | undefined>();
   const [drop, setDrop] = useState<{ frame: string; place: Place } | undefined>();
   const single = all.length === 1;
-  // A window with only Home (the fleet) or nothing in it shows Home without a pane bar.
-  const lone = single && (all[0]?.panel === 'empty' || all[0]?.panel === 'fleet');
+  // A window with only Home (the fleet) or nothing in it shows Home without a pane bar (the registry's `lone`); any other panel alone
+  // keeps the bar the window draws.
+  const lone = single && !!panels.get(all[0]?.panel ?? '')?.lone;
+  const globals = panels.offered('global');
+  const tools = panels.offered('tool');
   const tiled = frames.length > 1;
 
   // Choosing what a pane shows: an agent, what needs you, the selection, or a panel.
@@ -87,12 +93,12 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     { label: t('layout-follow-attention'), checked: followOf(p) === 'attention', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'attention' }, panel: 'agent' }) },
     { label: t('layout-follow-selection'), checked: followOf(p) === 'selection', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'selection' }, panel: 'agent' }) },
     ...fleet.filter((a) => !a.closed).map((a, i) => ({ label: t('layout-show-agent', { name: a.name }), divider: i === 0, checked: bindOf(p) === a.id, run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: a.id }, panel: 'agent' }) })),
-    ...GLOBAL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0, checked: p.panel === panel, run: () => dispatch({ type: 'bind', pane: p.id, panel }) })),
+    ...globals.map(({ id: panel }, i) => ({ label: panelLabel(panel), divider: i === 0, checked: p.panel === panel, run: () => dispatch({ type: 'bind', pane: p.id, panel }) })),
     // The tools: for a pane bound to one agent, the same agent's terminal, changes, files and file manager (an editor's file tree next to
     // its terminal); for any other, the tool's own chooser.
-    ...(renderTool ? [
+    ...(tools.length > 0 ? [
       ...(bindOf(p) ? [{ label: t('layout-show-agent-itself'), divider: true, checked: p.panel === 'agent', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'agent' }) }] : []),
-      ...TOOL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0 && !bindOf(p), checked: p.panel === panel,
+      ...tools.map(({ id: panel }, i) => ({ label: panelLabel(panel), divider: i === 0 && !bindOf(p), checked: p.panel === panel,
         run: () => dispatch({ type: 'bind', pane: p.id, panel, ...(bindOf(p) ? { bind: { agent: bindOf(p) as string } } : {}) }) })),
     ] : []),
   ];
@@ -110,7 +116,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   ];
 
   // Split and maximize are also in the ⋯ menu, so a narrow pane folds them away first (app.css `.pane-bar`) and keeps its name.
-  const tools = (p: Pane, f: Frame) => (
+  const barTools = (p: Pane, f: Frame) => (
     <div className="flex flex-none items-center gap-0.5 px-1">
       {!narrow && !ws.zoom && <>
         <button type="button" data-pane-tool="split" className="ide-iconbtn" onClick={() => dispatch({ type: 'split', pane: p.id, direction: 'row' })} aria-label={t('layout-split-right')} title={t('layout-split-right')}><Icon name="splitRight" /></button>
@@ -195,39 +201,42 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
           </div>
         )}
         {f.tabs && followOf(front) && <span className="ide-chip mx-1 flex-none self-center">{t(`layout-follows-${followOf(front)}`)}</span>}
-        {tools(front, f)}
+        {barTools(front, f)}
         {!f.tabs && !lone && <button type="button" className="ide-iconbtn me-1 self-center" onClick={() => dispatch({ type: 'close', pane: front.id })} aria-label={t('layout-close-pane')} title={t('layout-close-pane')}><Icon name="close" /></button>}
       </div>
     );
   };
 
-  // What a pane shows. Hidden panes (background tabs, panes behind a maximized one) draw nothing, so they hold no stream.
+  // What a pane's panel is given: its pane, its binding (for a panel bound to an agent), the window's read-only state and its actions,
+  // with `rebind` for this pane, and a terminal only for a panel that streams. Frozen: a panel reads it, never changes it.
+  const contextOf = (p: Pane, def: PanelDef, a: AgentTileModel | undefined): PanelContext => {
+    const bound = def.binds === 'agent';
+    const agent = bound ? a : undefined;
+    const rebind = (id: string) => dispatch({ type: 'bind', pane: p.id, bind: { agent: id }, panel: p.panel });
+    return Object.freeze({
+      pane: p.id, panel: p.panel, bind: bound ? p.bind : undefined, agent, state, sources,
+      actions: Object.freeze({ ...actions, rebind }),
+      terminal: def.streams && agent ? () => terminalFor(agent.id) : undefined,
+    });
+  };
+
+  // What a pane shows: its panel from the registry, under the bar this window draws. Hidden panes (background tabs, panes behind a
+  // maximized one) draw nothing, so they hold no stream. The window resolves a panel's binding: with no agent to show it says why,
+  // and an agent's view bound to nothing shows the chooser (a tool draws its own).
   const content = (p: Pane): ReactNode => {
     const followed = followOf(p);
     const a = agentFor(p);
-    if (p.panel === 'empty') return lone ? welcome : picker(p);
-    if (!isKnownPanel(p.panel)) return <Note>{t('layout-panel-unknown', { id: p.panel })}</Note>;
-    if (GLOBAL_PANELS.includes(p.panel)) return renderPanel(p.panel) ?? <Note>{t('layout-panel-unknown', { id: p.panel })}</Note>;
-    if (!a) {
+    const def = panels.get(p.panel);
+    const unknown = <Note>{t('layout-panel-unknown', { id: p.panel })}</Note>;
+    if (!def) return unknown;
+    if (def.kind === 'chooser') return lone ? welcome : picker(p);
+    if (def.binds === 'agent' && !a) {
       if (followed === 'attention') return <Note>{t('attention-empty')}</Note>;
       if (followed === 'selection') return <Note>{t('layout-nothing-selected')}</Note>;
       if (bindOf(p)) return <Note>{t('layout-gone')}</Note>;
-      if (isToolPanel(p.panel)) return renderTool?.(p.panel, undefined, (id) => dispatch({ type: 'bind', pane: p.id, bind: { agent: id }, panel: p.panel })) ?? <Note>{t('layout-files-none')}</Note>;
-      return picker(p);
+      if (def.kind !== 'tool') return picker(p);
     }
-    if (renderTool && isToolPanel(p.panel)) {
-      if (p.panel === 'terminal' && a.terminal === false && !a.closed) return <Note>{t('layout-no-terminal')}</Note>;
-      // A terminal that ended shows what the agent's own view shows (the summary), not a dead screen.
-      if (!(p.panel === 'terminal' && a.closed)) {
-        const view = renderTool(p.panel, a, (id) => dispatch({ type: 'bind', pane: p.id, bind: { agent: id }, panel: p.panel }));
-        if (view) return <Fragment key={`${a.id}:${p.panel}`}>{view}</Fragment>;
-        return <Note>{t('layout-files-none')}</Note>;
-      }
-    }
-    if (p.panel === 'terminal' && a.terminal === false && !a.closed) return <Note>{t('layout-no-terminal')}</Note>;
-    if (p.panel === 'conversation' && a.terminal !== false && !a.closed) return <Note>{t('layout-no-conversation')}</Note>;
-    // Keyed by the agent: a pane that changes agent (following attention) mounts a new view; one that keeps it keeps its terminal.
-    return <Fragment key={a.id}>{renderAgent(a)}</Fragment>;
+    return def.render(contextOf(p, def, a)) ?? unknown;
   };
 
   const picker = (pane: Pane) => {
@@ -243,7 +252,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
           <div className="flex flex-wrap gap-1.5">
             <button type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { follow: 'attention' }, panel: 'agent' })}>{t('layout-follow-attention')}</button>
             <button type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { follow: 'selection' }, panel: 'agent' })}>{t('layout-follow-selection')}</button>
-            {[...(renderTool ? TOOL_PANELS : []), ...GLOBAL_PANELS].map((panel) => <button key={panel} type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, panel })}>{panelLabel(panel)}</button>)}
+            {[...tools, ...globals].map(({ id: panel }) => <button key={panel} type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, panel })}>{panelLabel(panel)}</button>)}
           </div>
         </div>
       </div>
@@ -314,10 +323,6 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       {overlays}
     </div>
   );
-}
-
-function Note({ children }: { children: ReactNode }) {
-  return <div className="grid min-h-0 flex-1 place-items-center p-4 text-center"><p className="muted m-0 max-w-xs">{children}</p></div>;
 }
 
 // The line between two panes: drag it, or focus it and use the arrows (Shift for bigger steps, Home/End for the limits).
