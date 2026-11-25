@@ -67,13 +67,13 @@
 //! | Where | What happens to the text | Covered by |
 //! | --- | --- | --- |
 //! | bridge: message and thought chunks | joined in 150 ms / 4 KiB windows, so a value spans entries | (a) over the stream; its newest words held while the turn runs |
-//! | bridge: tool output, cut to 64 KiB | head and tail kept | cleaned as the node cleans it and redacted before the cut, so its length does not change after it; the node keeps 8 + 8 KiB of it and never this place |
-//! | bridge: arguments (64 KiB), plan step (4 KiB), location path (4 KiB) | head and tail kept | cleaned as the node cleans that field first; the node keeps less of each (8 + 8 KiB, 256 + 256 bytes, 512 + 512 bytes), never this place |
-//! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place |
+//! | bridge: tool output, cut to 64 KiB | head and tail kept | cleaned as the node cleans it and redacted before the cut, so its length does not change after it; the node keeps 8 + 8 KiB of it and never this place; reported all the same (ADR-0111, below) |
+//! | bridge: arguments (64 KiB), plan step (4 KiB), location path (4 KiB) | head and tail kept | cleaned as the node cleans that field first; the node keeps less of each (8 + 8 KiB, 256 + 256 bytes, 512 + 512 bytes), never this place; reported all the same (a plan's place in its entry, which is what the node reads) |
+//! | bridge: diff, cut to 64 KiB | head and tail kept | the node keeps its first 16 KiB, uncleaned: never this place; reported all the same |
 //! | bridge: its own shape check (`[redacted]`) | part of a value replaced | (b): both sides of each mark are edges, also of a mark a later cut (the stderr tail's, the node's) went through. Only tool output and stderr are shape-checked, never the agent's words |
-//! | bridge: stderr tail (400 bytes, cut at its front and marked `…`) | into a notice's parameters | (b): both ends of every notice parameter are edges, and the place just after a leading `…` (just before a trailing one) |
+//! | bridge: stderr tail (400 bytes, cut at its front and marked `…`; lines left out between those kept) | into a notice's parameters | (b): both ends of every notice parameter are edges, and the place just after a leading `…` (just before a trailing one); the bridge also reports the place after its `…`, both sides of each line break where lines were left out, its start when lines before it were left out and its end when lines after it were (ADR-0111) |
 //! | bridge: the stderr tail's home path (`/home/<name>` written `~`) | spliced | **not covered** across the splice |
-//! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | **not covered** (a large plan can reach it) until the bridge reports it (ADR-0111 build step 3) |
+//! | bridge: an item whose line would pass the node's 4 MiB limit (`fit_line`) | every string over 256 bytes in it halved, head and tail kept, until it fits | the bridge reports each place (ADR-0111 build step 3: the earlier places of a string moved by each later halving, at most 64 per item, those of a plan in its entries), read as below |
 //! | an adapter that declared `chat.cuts` (ADR-0111): a cut it reports on a `chat/append` item (`cuts`, checked by the host, kept only for such an adapter by the supervisor) | whatever it cut | recorded as the node's own: carried through the node's cleaning (as one text: a place inside an escape sequence lands where it was, `agora_adapters::text::strip_core_at`) and caps (`chat::tidy_cuts_at`, also at the very end of a field) or kept where the node only cuts the end (text, diff, notice parameter; shifted into a call's or a plan's text); (b) in the field, and for the agent's words in their stream too |
 //! | an adapter without `chat.cuts`, or a cut one that declared it does not report | whatever it cut | **not covered** (#1123) |
 //! | node: cleaning, then the 64 KiB cut and each field's cap (output 16 KiB, thought 8 KiB, arguments 16 KiB, tool name and path 1 KiB, plan step, permission label and refused action 512 bytes) | head and tail kept | the place is recorded (`agora_adapters::text::cap_middle` through `chat::tidy_cuts`, after the isolates' balance): (b) |
@@ -95,8 +95,8 @@
 //! `AGORA_PROPERTY_BASE` for more). Not covered: a value shorter than 8 bytes; a fragment shorter than 4 bytes; a part of 4 bytes or
 //! more of a value that stands at an edge only by chance is replaced too (a stop's flush, words said outside a turn, a turn's end, a
 //! take-up's boundaries); a value whose characters cleaning changes (`\r\n` written `\n`; line breaks and tabs as spaces in one-line
-//! fields) is not found; cuts an adapter makes and does not report (#1123: one without `chat.cuts`, ADR-0111), the bridge's `fit_line`
-//! halving and the stderr tail's home path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
+//! fields) is not found; cuts an adapter makes and does not report (#1123: one without `chat.cuts`, ADR-0111), and the stderr tail's
+//! home path splice; JSON forms of a value other than `serde_json`'s escaping (`\/`, `\uXXXX`) in arguments; and a secret the node does not
 //! hold. The bridge cleans and redacts a tool's whole output before
 //! cutting it (work in proportion to all of it, off the node). Ids (`call_id`, `approval_id`) are never changed: a `call_id` is text
 //! the agent chose and is written as it is.

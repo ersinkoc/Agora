@@ -182,6 +182,15 @@ fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
 
 /// Like [`node_with_acp`]; with `policy` the node's policy file holds it (the kind `acp-bypass` offers a mode that skips permissions).
 fn node_with_acp_policy(tag: &str, policy: Option<&str>) -> Option<(std::path::PathBuf, Node)> {
+    node_with_acp_before(tag, policy, |_| {})
+}
+
+/// Like [`node_with_acp_policy`], with `before` run on the node's home before the node starts.
+fn node_with_acp_before(
+    tag: &str,
+    policy: Option<&str>,
+    before: impl FnOnce(&Path),
+) -> Option<(std::path::PathBuf, Node)> {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return None;
     }
@@ -208,6 +217,7 @@ fn node_with_acp_policy(tag: &str, policy: Option<&str>) -> Option<(std::path::P
         std::fs::create_dir_all(home.join("data")).unwrap();
         std::fs::write(home.join("data/policy"), policy).unwrap();
     }
+    before(&home);
     let mut cmd = Command::new(AGORA);
     cmd.args(["node", "run", "--project"])
         .arg(&repo)
@@ -1466,6 +1476,81 @@ fn terminal_dispatches_need_a_paste_are_held_while_busy_and_lost_prompts_give_th
     let (code, out) = agora(&home, &["agent", "stop", &worker]);
     assert_eq!(code, 0, "{out}");
     wait_open(&home, &author, &t3);
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ADR-0111: the value the fake ACP agent's `cut-secret` tool output holds (`agora_fake_agent::acp::CUT_SECRET`).
+const CUT_SECRET: &str = "violet otter juniper maple quartz";
+
+/// ADR-0111 build step 3, end to end: the bridge halves a tool call whose line would pass the node's 4 MiB limit, and the halving
+/// cuts the tool's output through a value the node holds as a secret. The bridge reports the place, so neither what a window
+/// following the agent is sent nor the saved transcript holds any piece of the value of 4 bytes or more.
+#[test]
+fn a_secret_the_bridge_cuts_while_halving_an_item_leaves_no_piece_in_the_window_or_the_transcript()
+{
+    let Some((home, node)) = node_with_acp_before("cut", None, |home| {
+        let mut child = Command::new(AGORA)
+            .args(["node", "secret", "set", "CUT_KEY"])
+            .env("AGORA_HOME", home)
+            .env("AGORA_LANG", "en")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run agora");
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{CUT_SECRET}\n").as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "secret set");
+    }) else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    prompt(&home, &id, "cut-secret").unwrap();
+    chat.wait("the end of the turn", |c| says(c, "cut-done"));
+    let all = chat.latest();
+    let output = all
+        .iter()
+        .find(|e| e.kind == v1::ChatKind::ToolCall as i32)
+        .map(|e| e.output.clone())
+        .expect("the tool call");
+    // The bridge halved it (1000 bytes, 250 of head and 250 of tail kept), and the node kept all of what it was sent.
+    assert!(
+        output.starts_with("a a ") && output.ends_with("z z ") && output.len() < 600,
+        "{output:?}"
+    );
+    let pieces: Vec<&str> = (0..=CUT_SECRET.len() - 4)
+        .map(|i| &CUT_SECRET[i..i + 4])
+        .collect();
+    let leak = |text: &str| pieces.iter().find(|p| text.contains(**p)).copied();
+    for e in &chat.seen {
+        assert_eq!(leak(&e.output), None, "sent to a window: {:?}", e.output);
+        assert_eq!(leak(&e.text), None, "sent to a window: {:?}", e.text);
+    }
+    // The saved transcript, once the writer took the end of the turn.
+    let dir = home.join("data/transcripts");
+    let end = Instant::now() + Duration::from_secs(30);
+    let saved = loop {
+        let text: String = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|f| std::fs::read_to_string(f.path()).ok())
+            .collect();
+        if text.contains("cut-done") {
+            break text;
+        }
+        assert!(Instant::now() < end, "the transcript was not written");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(saved.contains("z z "), "the tool call is saved");
+    assert_eq!(leak(&saved), None, "in the saved transcript");
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }

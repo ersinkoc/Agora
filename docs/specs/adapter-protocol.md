@@ -54,7 +54,7 @@ declared `chat.cuts`; from any other it ignores the field and keeps the behaviou
 | --- | --- | --- |
 | node → adapter | `session/prompt` | Send user or mesh input |
 | node → adapter | `session/cancel` | Interrupt current turn |
-| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing. A result means the answer was given to the agent (the ACP bridge answers only once its writer wrote it to the agent's stdin and flushed it); one it could not give, or whose delivery it could not confirm within 5 s (the bridge then ends the agent before answering), is an error (`adapter.approval_undelivered`), and the node then records the request cancelled |
+| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing. A result means the answer was given to the agent (the ACP bridge answers only once its writer wrote it to the agent's stdin and flushed it); one it could not give, or whose delivery it could not confirm within 5 s (the bridge then ends the agent before answering), is an error (`adapter.approval_undelivered`), and the node then records the request cancelled. ADR-0110 decision 6: the node may send a second `approval/resolve` for one `approvalId` (the person answered again after the first got no answer in time). An adapter must refuse an answer to a request it no longer holds (it already took an answer, or the request ended) with an error, and send the agent nothing; the ACP bridge does (`-32602`, `unknown approval`) |
 | node → adapter | `mesh/deliver` | Deliver a mesh message |
 | node → adapter | `session/set_config` | ADR-0090, capability `config`: `{sessionId, configId, value}`, one of the ids and values the adapter reported in `session/config` (`value` is a choice id for a select, `"true"` or `"false"` for a boolean). Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | node → adapter | `session/set_option` | ADR-0058: `{kind: SESSION_OPTION_KIND_MODE \| SESSION_OPTION_KIND_MODEL, id}`, one of the ids the adapter reported in `session/options`. Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
@@ -95,8 +95,22 @@ declared `chat.cuts`; from any other it ignores the field and keeps the behaviou
 - **Start failures.** When `initialize` or `session/start` fails with an error whose `data.code` is `adapter.agent_exited`,
   `adapter.agent_refused` or `adapter.option_refused`, the node answers the client with that code and only that code's parameters
   (`docs/specs/error-codes.md`), as strings cut at 600 bytes (`exit_code` is `?` when the adapter sent none). Any other failure is
-  still `internal`. A prompt or the answer to an approval request that the adapter does not take (no answer in time, it exited, or it
-  answered with an error) is `internal` too, with `incident_id` `agent.prompt` or `approval.resolve` (#1150).
+  still `internal`. ADR-0110 widens this rule to a prompt (`session/prompt`) and the answer to an approval request
+  (`approval/resolve`): an error whose `data.code` is `adapter.agent_exited` is passed on in the same way, with the stage the adapter
+  sent (for example `turn`); no answer within the node's 10 s wait is `adapter.no_answer` (`kind`, `call` `prompt` or `approval`,
+  `waited_ms`); any other failure of these two calls (the adapter exited without a reason, or answered with an error that carries
+  none or another code) is `internal`, with `incident_id` `agent.prompt` or `approval.resolve` (#1150). An L3 adapter may send
+  `adapter.agent_exited` for these calls; the ACP bridge does not: it answers a node's `session/prompt` as soon as it has passed it to
+  the agent, so an ACP agent that exits during its turn is reported by the notice and the `log` line, not as the prompt's error.
+  ADR-0110 decision 6, after `adapter.no_answer`: a decision keeps its approval card pending (it can be answered again with a new
+  signature: the same signed answer is refused, so a hub cannot replay it). The node keeps following that answer's call until the
+  request expires (at most 30 minutes; one such call per request and 32 per node, past which the card is cancelled as before), and
+  the request is recorded once, with the first answer an adapter took (made at once or late); it is recorded as cancelled (an answer
+  refused, the expiry, the agent's end) only when no call that may still deliver an answer runs. A prompt stays in the conversation
+  (a queued one is shown sent) with the node's notice `adapter.no_answer` naming its entry instead of being taken back. A request
+  that finds the adapter's input full (it stopped reading) was never written: it is answered `adapter.no_answer` at once with
+  `waited_ms` 0, the card stays pending, and a prompt is taken back without the notice. Other failures are handled as before (the
+  card is cancelled, the prompt taken back or, queued, dropped with `adapter.queue_dropped`).
 - **Usage.** `usage/report` becomes `AgentUsageReported` with the tokens as before, the cost growth (`cost_micros`, only with a
   three-letter `currency`) and the context's level and size.
 
@@ -176,7 +190,17 @@ Every `chat/append` line the bridge makes from the agent's content stays within 
 complete serialized line (envelope and JSON escaping included; the caps in the table count decoded text, and a rich plan carries
 its text twice). A line that would be longer has every string of its item longer than 256 bytes (head and tail kept) and every
 list cut to half, repeatedly, until it fits; the session id is never cut. The item arrives shortened instead of being dropped
-whole by the node. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
+whole by the node. ADR-0111: to a node that said `chat.rich` the bridge declares `chat.cuts` and reports every place it removed text
+from a string of a `chat/append` item ("Reported cuts"): each place of that halving (one halving moves the places an earlier one, or
+the bridge's own cut, left in that string; a place inside what it removes becomes its own), the head-and-tail cuts of a tool's
+arguments, output and location paths, a plan step (in its entry, `/plan/entries/N/text`) and a diff, and in a notice's stderr tail
+the place after its leading `…`, both sides of each line break where lines were left out, its start when lines before it were left
+out and its end when lines after it were. At most 64 places per item: should more be
+needed (only a tool call the bridge did not halve, whose arguments and output are cut and more than 62 of its location paths: a
+title is cut only by halving, which also halves the locations), those of locations 62 and 63 are left out, which is harmless: the node
+keeps only the head and tail of a path (1 KiB), never the place in its middle where the bridge cut a path of over 4 KiB. The `[redacted]` marks of its
+shape check are not reported: the node finds them itself. Not reported: the home folder written `~` in a stderr tail (threat model
+T61). A node without `chat.rich` gets neither the capability nor `cuts`, as before ADR-0090. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
 agent error (`adapter.agent_refused`, `stage` `session`; the notice's `rpc_code` is `0` and its `detail` `session_id_too_long`), and
 a `session/start` whose `resumeSessionId` is longer is answered with JSON-RPC `-32602` and `data` `protocol.invalid_message`
 (`field` `resumeSessionId`) without asking the agent; an id is never cut, as that would name another session. With that, a cut
@@ -269,6 +293,7 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` / `session/set_config_option` with an error | error `data` of `session/set_option` and `session/set_config` |
 | `adapter.restarting` | `attempt` | #902: the adapter ended on its own and the node starts it again (`attempt` of the restart budget); the node's own notice, an adapter does not send it | a `CHAT_KIND_NOTICE` entry |
 | `adapter.gave_up` | `restarts`, `exit_code` (only when known) | #902: the adapter ended on its own once more after its restart budget was spent (or could not be started again), so the node gave up on it; `restarts` is how often it was started again, `exit_code` the value of the `AgentExited` it recorded, left out when the node could not read how the last process ended (that `AgentExited` then carries 1). The node's own notice | a `CHAT_KIND_NOTICE` entry |
+| `adapter.no_answer` | `kind`, `call` (`prompt`), `waited_ms`, `entries` | ADR-0110 decision 6: a prompt's adapter did not answer `session/prompt` within the node's wait; it may hold the prompt, so its entry (`entries`, its id) stays, marked as not confirmed (the node's own notice; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry |
 | `adapter.queue_dropped` | `count` | Prompts that waited behind a turn will not be sent: `AgentCancelTurn` with `drop_queue`, or the adapter ended (the node's own notice, ADR-0090; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry; the dropped prompts' entries leave the transcript |
 
 For `turn_empty` and `turn_failed` the bridge waits 100 ms for the last lines and adds what the agent wrote to stderr during that turn,

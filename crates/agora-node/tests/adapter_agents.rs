@@ -267,16 +267,132 @@ fn a_hung_adapter_stalls_only_its_own_call_not_the_supervisor() {
     let Err(e) = failed else {
         panic!("the hung prompt was answered: {failed:?}")
     };
-    assert!(
-        matches!(e, agora_node::supervisor::SupervisorError::Prompt(_)),
+    // ADR-0110: the caller is told the adapter did not take the prompt in time (`adapter.no_answer`), never `internal`.
+    no_answer(&e, "prompt");
+}
+
+/// ADR-0110: `e` is the stable answer to a call the adapter did not answer within the node's 10 s wait.
+fn no_answer(e: &agora_node::supervisor::SupervisorError, call: &str) {
+    use agora_protocol::ParamValue;
+    let answer = e.to_protocol();
+    assert_eq!(
+        answer.code,
+        agora_protocol::ErrorCode::AdapterNoAnswer,
         "{e:?}"
     );
+    let want = [
+        ("call".to_string(), ParamValue::Str(call.into())),
+        ("kind".to_string(), ParamValue::Str("fake-adapter".into())),
+        ("waited_ms".to_string(), ParamValue::Int(10_000)),
+    ];
+    assert_eq!(answer.params, want.into_iter().collect(), "{e:?}");
+}
+
+/// ADR-0110: `e` passes on the adapter's `adapter.agent_exited` (from `agora-fake-agent --adapter`'s `prompt-exited` and
+/// `ask-exited`) with only that code's parameters, as strings cut at 600 bytes, as a failed start does.
+fn passed_on_exit(e: &agora_node::supervisor::SupervisorError) {
+    use agora_protocol::ParamValue;
     let answer = e.to_protocol();
-    assert_eq!(answer.code, agora_protocol::ErrorCode::Internal);
+    assert_eq!(
+        answer.code,
+        agora_protocol::ErrorCode::AdapterAgentExited,
+        "{e:?}"
+    );
+    let want = [
+        ("exit_code".to_string(), ParamValue::Str("3".into())),
+        ("stage".to_string(), ParamValue::Str("turn".into())),
+        ("stderr_tail".to_string(), ParamValue::Str("x".repeat(600))),
+    ];
+    assert_eq!(answer.params, want.into_iter().collect(), "{e:?}");
+}
+
+/// `e` is still `internal`, with the reference that names the call (#1150).
+fn still_internal(e: &agora_node::supervisor::SupervisorError, incident: &str) {
+    let answer = e.to_protocol();
+    assert_eq!(answer.code, agora_protocol::ErrorCode::Internal, "{e:?}");
     assert_eq!(
         answer.params.get("incident_id"),
-        Some(&agora_protocol::ParamValue::Str("agent.prompt".into()))
+        Some(&agora_protocol::ParamValue::Str(incident.into()))
     );
+}
+
+#[test]
+fn a_prompt_the_adapter_refuses_because_its_agent_exited_is_passed_on() {
+    let e = env("prompt-exited");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "pe");
+    until(&mut s, state_is(AgentState::Idle));
+    let err = s
+        .adapter_prompt(&id, "prompt-exited", false)
+        .expect_err("the adapter refused the prompt");
+    passed_on_exit(&err);
+}
+
+#[test]
+fn a_prompt_the_adapter_refuses_without_a_stable_reason_stays_internal() {
+    let e = env("prompt-error");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "pr");
+    until(&mut s, state_is(AgentState::Idle));
+    let err = s
+        .adapter_prompt(&id, "prompt-error", false)
+        .expect_err("the adapter refused the prompt");
+    still_internal(&err, "agent.prompt");
+}
+
+/// Starts an adapter agent and sends it `prompt` (one of the fake adapter's `ask` prompts), then waits for its request `ap-1`.
+fn asking(name: &str, prompt: &str) -> (Env, Supervisor, AgentId) {
+    let e = env(name);
+    let mut s = supervisor();
+    let id = start(&mut s, &e, name);
+    until(&mut s, state_is(AgentState::Idle));
+    s.adapter_prompt(&id, prompt, false).unwrap();
+    let ev = until(&mut s, |e| {
+        matches!(
+            e,
+            SupervisorEvent::Adapter {
+                event: AdapterEvent::ApprovalRequest { .. },
+                ..
+            }
+        )
+    });
+    assert!(
+        matches!(ev.last(), Some(SupervisorEvent::Adapter { event: AdapterEvent::ApprovalRequest { approval_id, .. }, .. }) if approval_id == "ap-1")
+    );
+    (e, s, id)
+}
+
+#[test]
+fn an_approval_answer_the_adapter_does_not_take_in_time_is_no_answer() {
+    let (_e, s, id) = asking("ask-hang", "ask-hang");
+    let asked = Instant::now();
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter did not take the answer");
+    assert!(
+        asked.elapsed() >= Duration::from_secs(9),
+        "the call ended before its timeout: {:?}",
+        asked.elapsed()
+    );
+    no_answer(&err, "approval");
+}
+
+#[test]
+fn an_approval_answer_the_adapter_refuses_because_its_agent_exited_is_passed_on() {
+    let (_e, s, id) = asking("ask-exited", "ask-exited");
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter refused the answer");
+    passed_on_exit(&err);
+}
+
+#[test]
+fn an_approval_answer_the_adapter_refuses_without_a_stable_reason_stays_internal() {
+    let (_e, s, id) = asking("ask-error", "ask-error");
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter refused the answer");
+    still_internal(&err, "approval.resolve");
 }
 
 #[test]

@@ -306,7 +306,14 @@ fn a_call_to_an_adapter_that_stopped_reading_still_times_out() {
         .recv_timeout(T)
         .expect("the calls returned within their timeouts");
     assert!(matches!(first, Err(HostError::Timeout)), "{first:?}");
-    assert!(rest.iter().all(|r| matches!(r, Err(HostError::Timeout))));
+    // ADR-0110: a call that finds the write queue full was never given to the adapter, and says so (`Busy`), at once.
+    assert!(rest
+        .iter()
+        .all(|r| matches!(r, Err(HostError::Timeout | HostError::Busy))));
+    assert!(
+        rest.iter().any(|r| matches!(r, Err(HostError::Busy))),
+        "{rest:?}"
+    );
     dropped
         .recv_timeout(T)
         .expect("dropping the adapter killed and reaped it");

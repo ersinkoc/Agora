@@ -18,4 +18,15 @@ export const ChatActionsContext = createContext<ChatActions>({});
 
 // The outcome of sending a prompt, when the app tells more than yes or no.
 export interface PromptResult { ok: boolean; queued?: boolean; code?: string }
+/** Why a prompt did not go through, as the composer says it: too many waiting, the agent did not take it in time (ADR-0110), the agent
+ *  stopped (ADR-0110), or anything else. */
+export type PromptFailure = 'full' | 'no_answer' | 'exited' | 'failed';
+export function promptFailure(code: string | undefined): PromptFailure {
+  switch (code) {
+    case 'agent.queue_full': return 'full';
+    case 'adapter.no_answer': return 'no_answer';
+    case 'adapter.agent_exited': return 'exited';
+    default: return 'failed';
+  }
+}
 export type PromptSend = (agent: AgentTileModel, text: string) => Promise<boolean | PromptResult>;

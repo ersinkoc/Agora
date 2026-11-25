@@ -99,10 +99,17 @@ files-outside_root = { $path } is outside the project folder.
 files-secret = { $path } is a secret file and is not shown.
 adapter-signature_invalid = Package { $package } could not be verified.
 adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
-adapter-agent_exited = The agent exited before it was ready (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
+adapter-agent_exited = { $stage ->
+        [turn] The agent exited while it worked (exit code { $exit_code }). Start it again. Its last output: { $stderr_tail }
+       *[other] The agent exited before it was ready (step { $stage }, exit code { $exit_code }). Start it again. Its last output: { $stderr_tail }
+    }
 adapter-agent_refused = The agent refused to start (step { $stage }).
 adapter-option_refused = The agent did not switch to { $id }.
 adapter-permission_unanswerable = The agent asked for “{ $action }” without offering a way to allow it, so it was refused.
+adapter-no_answer = { $call ->
+        [approval] { $kind } did not take your answer within { $waited_ms } ms. The request is still open: wait a moment and answer again.
+       *[prompt] { $kind } did not confirm your request within { $waited_ms } ms. Wait a moment, and send it again only if nothing happens.
+    }
 pair-closed = This hub is not open for new machines right now.
 pair-limit = Too many pairing attempts. Try again in { $seconds } seconds.
 pair-expired = The pairing took too long and was cancelled.

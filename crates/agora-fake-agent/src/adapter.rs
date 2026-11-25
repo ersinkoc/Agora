@@ -7,6 +7,19 @@
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck); writes `hang.txt` in its folder once it has read the
 //!   prompt, so a test knows the prompt reached it.
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
+//! - `ask-hang`: like `ask`, but never answers the decision (an adapter that is stuck while the node waits for it to take an answer,
+//!   ADR-0110).
+//! - `ask-exited`: like `ask`, but answers the decision with an error whose `data` is `adapter.agent_exited` (stage `turn`, exit code
+//!   `3`, a 2000-byte stderr tail and a parameter the code does not have), as an adapter whose agent ended does (ADR-0110).
+//! - `ask-late`: like `ask`, but answers the decision 12 s late, after the node's wait for it ran out (ADR-0110 decision 6).
+//! - `ask-deaf`: like `ask`, but then reads nothing for 60 s (an adapter that stopped reading its input, so the node's writes to it
+//!   fill up; security review of PR #1190, B1).
+//!
+//! A decision for a request it already took an answer to is refused (`-32602`, `unknown approval`) and changes nothing, as
+//! `docs/specs/adapter-protocol.md` requires (ADR-0110 decision 6 can send a second answer for one request).
+//! With `--scopes` it declares `approval_scopes` and its requests offer ONCE and ALWAYS (option `allow-always`, ADR-0101).
+//! - `prompt-error`: answers the prompt with a JSON-RPC error that carries no stable reason (ADR-0110).
+//! - `prompt-exited`: answers the prompt with the error `data` of `ask-exited` (ADR-0110).
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
 //! - `ask:ACTION|DETAIL`: like `ask`, with that action and detail (#1147: words of the agent's own on an approval card).
 //! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
@@ -92,6 +105,13 @@ fn config_options(mode_config: bool, auto: &str) -> Value {
     Value::Array(options)
 }
 
+/// ADR-0110: the error `data` of an adapter whose agent ended during a turn, with a stderr tail longer than the node passes on and a
+/// parameter `adapter.agent_exited` does not have.
+fn exited_reason() -> Value {
+    json!({"code": "adapter.agent_exited",
+           "params": {"stage": "turn", "exit_code": "3", "stderr_tail": "x".repeat(2000), "extra": "no"}})
+}
+
 /// ADR-0111: `text` with `n` bytes (or a little more, to keep whole characters) taken out of its middle, and where they were.
 fn cut_middle(text: &str, n: usize) -> (String, usize) {
     let mut from = text.len().saturating_sub(n) / 2;
@@ -113,6 +133,8 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let mut selected_cwd = Value::Null;
     let mut servers = Value::Array(Vec::new());
     let mut lines = input.lines();
+    // Requests it took an answer to (ADR-0110 decision 6: a second answer for one is refused).
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
     while let Some(line) = lines.next() {
         let line = line?;
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -138,6 +160,9 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 }
                 if modes {
                     caps.extend(["set_mode", "config"]);
+                }
+                if std::env::args().any(|a| a == "--scopes") {
+                    caps.push("approval_scopes");
                 }
                 // `--cuts`: it reports every cut it makes in a chat item's text (ADR-0111).
                 if std::env::args().any(|a| a == "--cuts") {
@@ -225,6 +250,16 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     // A marker in the agent's folder (best effort: a folder it cannot write leaves the prompt as it was).
                     let _ = std::fs::write("hang.txt", "read");
                     std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+                // ADR-0110: the prompt is not taken, with or without one of the stable reasons the node passes on.
+                if let (Some(id), "prompt-error" | "prompt-exited") = (&id, text) {
+                    let error = if text == "prompt-exited" {
+                        json!({"code": -32000, "message": "the agent exited", "data": exited_reason()})
+                    } else {
+                        json!({"code": -32000, "message": "no"})
+                    };
+                    send(out, &json!({"jsonrpc": "2.0", "id": id, "error": error}))?;
+                    continue;
                 }
                 reply(out, json!({}))?;
                 match text {
@@ -330,8 +365,17 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         std::fs::write("later.txt", "done")?;
                     }
                     asked
-                        if matches!(asked, "ask" | "ask-error" | "ask-reserved" | "later-ask")
-                            || asked.starts_with("ask:") =>
+                        if matches!(
+                            asked,
+                            "ask"
+                                | "ask-error"
+                                | "ask-hang"
+                                | "ask-exited"
+                                | "ask-late"
+                                | "ask-deaf"
+                                | "ask-reserved"
+                                | "later-ask"
+                        ) || asked.starts_with("ask:") =>
                     {
                         if text == "later-ask" {
                             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -345,9 +389,21 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         note(
                             out,
                             "approval/request",
-                            json!({"sessionId": session, "approvalId": "ap-1",
-                                   "action": action, "detail": detail}),
+                            if std::env::args().any(|a| a == "--scopes") {
+                                json!({"sessionId": session, "approvalId": "ap-1",
+                                       "action": action, "detail": detail,
+                                       "scopes": ["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"],
+                                       "alwaysLabel": "Always", "alwaysOptionId": "allow-always"})
+                            } else {
+                                json!({"sessionId": session, "approvalId": "ap-1",
+                                       "action": action, "detail": detail})
+                            },
                         )?;
+                        // A new request under the same id.
+                        answered.remove("ap-1");
+                        if text == "ask-deaf" {
+                            std::thread::sleep(std::time::Duration::from_secs(60));
+                        }
                         if text == "later-ask" {
                             std::fs::write("later.txt", "asked")?;
                         }
@@ -367,7 +423,23 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                         )?;
                                         break;
                                     }
+                                    if text == "ask-exited" {
+                                        send(
+                                            out,
+                                            &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000,
+                                                    "message": "the agent exited", "data": exited_reason()}}),
+                                        )?;
+                                        break;
+                                    }
+                                    if text == "ask-hang" {
+                                        // The decision is never answered; everything after it still is.
+                                        break;
+                                    }
+                                    if text == "ask-late" {
+                                        std::thread::sleep(std::time::Duration::from_secs(12));
+                                    }
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;
+                                    answered.insert("ap-1".to_string());
                                 }
                                 let approved = m["params"]["approved"].as_bool().unwrap_or(false);
                                 if text == "ask-reserved" {
@@ -440,6 +512,19 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
             "session/cancel" => {
                 reply(out, json!({}))?;
                 state(out, &session, "IDLE")?;
+            }
+            "approval/resolve"
+                if params
+                    .get("approvalId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|a| answered.contains(a)) =>
+            {
+                if let Some(id) = &id {
+                    send(
+                        out,
+                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": "unknown approval"}}),
+                    )?;
+                }
             }
             "session/stop" | "mesh/deliver" | "approval/resolve" => reply(out, json!({}))?,
             "shutdown" => {

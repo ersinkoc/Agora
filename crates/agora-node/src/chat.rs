@@ -103,6 +103,8 @@ const PRE_BOUND: usize = 64 * 1024;
 /// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
 pub const NODE_NOTICES: &[&str] = &[
     "adapter.queue_dropped",
+    // ADR-0110: a prompt whose adapter did not confirm it within the node's wait.
+    "adapter.no_answer",
     "adapter.output_dropped",
     // ADR-0101: the node refused an always-only request under its policy.
     "approval.always_only_forbidden",
@@ -2283,6 +2285,31 @@ impl ChatBoard {
         }
         let mut g = self.lock();
         slot(&mut g, agent, self.wake.as_ref()).drop_queued(entry_ids, now_ms);
+    }
+
+    /// ADR-0110 decision 6: the prompt of entry `entry_id` went to an adapter of `kind` that did not answer within `waited_ms`, so it
+    /// may hold it. The entry stays (a queued one is shown sent), and a notice with the stable code `adapter.no_answer`, `kind`, `call`
+    /// `prompt`, `waited_ms` and `entries` (the entry's id, as for `adapter.queue_dropped`) marks it as not confirmed.
+    pub fn unconfirmed(
+        &self,
+        agent: &AgentId,
+        entry_id: u64,
+        kind: &str,
+        waited_ms: u64,
+        now_ms: u64,
+    ) {
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        t.modify(entry_id, now_ms, false, |e| e.queued = false);
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = "adapter.no_answer".into();
+        n.params = HashMap::from([
+            ("kind".to_string(), kind.to_string()),
+            ("call".to_string(), "prompt".to_string()),
+            ("waited_ms".to_string(), waited_ms.to_string()),
+            ("entries".to_string(), entry_id.to_string()),
+        ]);
+        t.add(n, now_ms);
     }
 
     /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code
@@ -5725,23 +5752,15 @@ mod every_cut {
                 ("fn clip(s: &str, max: usize) -> String {", "ids, names and words, not chat text"),
                 ("s[..end].to_string()", "ids, names and words, not chat text"),
                 ("|o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(\"\"), max);", "ids, names and words, not chat text"),
-                ("let mut cut = false;", "`fit_line` and its helper: a residual (T61)"),
-                ("cut |= halve(v);", "`fit_line` and its helper: a residual (T61)"),
-                ("if !cut {", "`fit_line` and its helper: a residual (T61)"),
-                ("*s = head_tail(s, s.len() / 2);", "`fit_line` and its helper: a residual (T61)"),
-                ("let mut cut = a.len() > 1;", "`fit_line` and its helper: a residual (T61)"),
-                ("a.truncate(a.len().div_ceil(2));", "`fit_line` and its helper: a residual (T61)"),
-                ("cut |= halve(e);", "`fit_line` and its helper: a residual (T61)"),
-                ("cut", "`fit_line` and its helper: a residual (T61)"),
-                ("Value::Object(o) => o.values_mut().fold(false, |cut, e| halve(e) | cut),", "`fit_line` and its helper: a residual (T61)"),
-                ("fn head_tail(s: &str, max: usize) -> String {", "`fit_line` and its helper: a residual (T61)"),
-                ("crate::text::cap_middle(s.to_string(), max).0", "`fit_line` and its helper: a residual (T61)"),
                 (".map(|c| clip(c, 40));", "ids, names and words, not chat text"),
                 ("v[\"current\"] = json!(clip(", "ids, names and words, not chat text"),
-                ("cut_kept(redact(&clean), OUTPUT_MAX)", "cleaned (and redacted) first: the node never keeps this place"),
-                ("cut_kept(", "cleaned (and redacted) first: the node never keeps this place"),
-                ("fn cut_kept(text: String, max: usize) -> String {", "cleaned (and redacted) first: the node never keeps this place"),
-                ("crate::text::cap_middle(text, max).0", "cleaned (and redacted) first: the node never keeps this place"),
+                ("cut_kept(redact(&clean), OUTPUT_MAX)", "ADR-0111: the place is reported (cleaned, and redacted, first: the node does not keep it either)"),
+                ("cut_kept(", "ADR-0111: the place is reported (cleaned, and redacted, first: the node does not keep it either)"),
+                ("fn cut_kept(text: String, max: usize) -> (String, Option<usize>) {", "ADR-0111: the place is reported (cleaned, and redacted, first: the node does not keep it either)"),
+                ("let (kept, place) = crate::text::cap_middle(text, max);", "ADR-0111: the place is reported (cleaned, and redacted, first: the node does not keep it either)"),
+                ("let (kept, place) = crate::text::cap_middle(std::mem::take(s), max);", "`fit_line`'s halving: the place is reported (ADR-0111)"),
+                ("a.truncate(keep);", "`fit_line`'s halving: whole elements of a list dropped, with the places in them (ADR-0111)"),
+                ("at.truncate(base);", "ADR-0111: a JSON pointer being built, not a text"),
                 ("match tail[..end].rfind('@') {", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
                 ("out.push_str(&tail[at..end]);", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
                 ("None => out.push_str(&tail[..end]),", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
@@ -5750,8 +5769,7 @@ mod every_cut {
                 ("let run = &rest[..end];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
                 ("rest = &rest[end..];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
                 ("let word = &rest[..end];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
-                ("let tail = kept[kept.len().saturating_sub(STDERR_LINES)..]", "whole lines of a stderr tail"),
-                ("format!(\"…{}\", &tail[start..])", "a stderr tail's front cut: the node counts the place after `…` as an edge"),
+                ("(format!(\"…{}\", &tail[start..]), moved)", "a stderr tail's front cut: reported (ADR-0111), and the node counts the place after `…` as an edge"),
                 ("let seg = &rest[..sep];", "the bridge's shape check: copies its text and drops nothing (its marks are edges)"),
                 ("let at = &lower[i..];", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
                 ("&& (at[1..].starts_with(\":\\\\users\\\\\") || at[1..].starts_with(\":/users/\"));", "the stderr tail's home path, spliced to `~`: a residual (T61)"),
@@ -5772,9 +5790,9 @@ mod every_cut {
                 ("\"description\": clip(c.get(\"description\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_DESCRIPTION_MAX),", "ids, names and words, not chat text"),
                 ("\"inputHint\": clip(c.pointer(\"/input/hint\").and_then(Value::as_str).unwrap_or(\"\"), OPTION_NAME_MAX),", "ids, names and words, not chat text"),
                 ("\"status\": clip(e.get(\"status\").and_then(Value::as_str).unwrap_or(\"\"), 40),", "ids, names and words, not chat text"),
-                ("\"priority\": clip(e.get(\"priority\").and_then(Value::as_str).unwrap_or(\"\"), 40)}))", "ids, names and words, not chat text"),
-                ("Some(json!({\"path\": cut_kept(path, PATH_MAX),", "cleaned (and redacted) first: the node never keeps this place"),
-                ("json!({\"diff\": {\"path\": path, \"unifiedDiff\": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),", "cleaned (and redacted) first: the node never keeps this place"),
+                ("\"priority\": clip(e.get(\"priority\").and_then(Value::as_str).unwrap_or(\"\"), 40)}));", "ids, names and words, not chat text"),
+                ("let (path, place) = cut_kept(", "ADR-0111: the place is reported (cleaned, and redacted, first: the node does not keep it either)"),
+                ("let (diff, place) = cut_kept(replace_diff(path, old, new), DIFF_MAX);", "ADR-0111: the place is reported (the node keeps a diff's first 16 KiB only, so not this place either)"),
                 ("let detail = call.get(\"rawInput\").map(short).unwrap_or_default();", "an approval's detail, not chat text"),
                 ("state.model = clip(m, MODEL_MAX);", "ids, names and words, not chat text"),
                 ("state.model = clip(&id, MODEL_MAX);", "ids, names and words, not chat text"),
