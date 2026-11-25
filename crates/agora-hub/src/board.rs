@@ -469,6 +469,21 @@ impl Boards {
                     .collect()
             })
             .unwrap_or_default();
+        let next = v["next"].as_u64().unwrap_or(1);
+        let mut ids = BTreeSet::new();
+        for task in &tasks {
+            let Some(number) = task
+                .id
+                .as_str()
+                .strip_prefix("t-")
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                return;
+            };
+            if number == 0 || number >= next || !ids.insert(task.id.clone()) {
+                return;
+            }
+        }
         let restarted = self
             .restarted
             .lock()
@@ -478,7 +493,7 @@ impl Boards {
         let mesh = g
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
-        mesh.import_tasks(v["next"].as_u64().unwrap_or(1), &tasks);
+        mesh.import_tasks(next, &tasks);
         let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = v["leases"]
             .as_array()
             .map(|a| {
@@ -1298,6 +1313,54 @@ mod tests {
             .to_string()
     }
 
+    fn handed_off_task() -> (Boards, View, String, Handoff) {
+        let boards = Boards::new();
+        let shared = view(&["alpha", "beta", "gamma"]);
+        let made = run(
+            &boards,
+            &shared,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(
+            &boards,
+            &shared,
+            "alpha",
+            "task_claim",
+            json!({"task_id": id}),
+            2,
+        );
+        let handoff = run(
+            &boards,
+            &shared,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        (boards, shared, id, handoff)
+    }
+
+    fn saved_task<'a>(snapshot: &'a Value, id: &str) -> &'a Value {
+        snapshot["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == id)
+            .unwrap()
+    }
+
     #[test]
     fn workspace_status_lists_the_projects_agents_on_online_nodes_with_their_board_work() {
         let b = Boards::new();
@@ -1998,5 +2061,260 @@ mod tests {
             )),
             ""
         );
+    }
+
+    #[test]
+    fn f397_a_failed_handoff_does_not_return_a_task_to_a_giver_that_ended() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let handoff = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        let mut gone = v.clone();
+        gone.agents.get_mut("alpha/a").unwrap().running = false;
+        run(&b, &gone, "beta", "task_list", json!({}), 4);
+        println!("CONTROL OK");
+
+        b.revert_handoff(&handoff);
+        let saved: Value = serde_json::from_slice(&b.snapshot("p", 5).unwrap()).unwrap();
+        let actual = saved["tasks"][0]["owner"].as_str();
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, None);
+    }
+
+    #[test]
+    fn f398_a_failed_handoff_returns_an_open_task_when_only_the_receiver_ended() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let handoff = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        let mut gone = v.clone();
+        gone.agents.get_mut("beta/a").unwrap().running = false;
+        run(&b, &gone, "alpha", "task_list", json!({}), 4);
+        let before: Value = serde_json::from_slice(&b.snapshot("p", 4).unwrap()).unwrap();
+        assert!(before["tasks"][0]["owner"].is_null());
+        println!("CONTROL OK");
+
+        b.revert_handoff(&handoff);
+        let saved: Value = serde_json::from_slice(&b.snapshot("p", 5).unwrap()).unwrap();
+        let actual = saved["tasks"][0]["owner"].as_str();
+        println!("EXPECTED: Some(\"alpha/a\")");
+        println!("ACTUAL: {actual:?}");
+        if actual == Some("alpha/a") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Some("alpha/a"));
+    }
+
+    #[test]
+    fn f399_a_snapshot_whose_next_id_collides_with_a_task_is_ignored() {
+        let correct = Boards::new();
+        let snapshot = json!({
+            "next": 2,
+            "tasks": [{"id": "t-1", "title": "kept", "detail": "", "depends_on": [],
+                       "done": false, "owner": null, "summary": null}],
+            "leases": []
+        });
+        correct.load("p", snapshot.to_string().as_bytes(), 0);
+        let listed = run(
+            &correct,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_list",
+            json!({}),
+            1,
+        );
+        let list: Value = serde_json::from_str(&text(&listed)).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        let snapshot = json!({
+            "next": 1,
+            "tasks": [{"id": "t-1", "title": "must not load", "detail": "", "depends_on": [],
+                       "done": false, "owner": null, "summary": null}],
+            "leases": []
+        });
+        damaged.load("p", snapshot.to_string().as_bytes(), 0);
+        let listed = run(
+            &damaged,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_list",
+            json!({}),
+            1,
+        );
+        let actual: Value = serde_json::from_str(&text(&listed)).unwrap();
+        println!("EXPECTED: []");
+        println!("ACTUAL: {actual}");
+        if actual.as_array().is_some_and(Vec::is_empty) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, json!([]));
+    }
+
+    #[test]
+    fn verifies_f397_failed_handoff_giver_liveness_boundaries() {
+        let (normal, _, id, handoff) = handed_off_task();
+        normal.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&normal.snapshot("p", 4).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "alpha/a");
+
+        let (giver_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("alpha/a").unwrap().running = false;
+        run(&giver_gone, &view, "beta", "task_list", json!({}), 4);
+        giver_gone.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&giver_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert!(saved_task(&snapshot, &id)["owner"].is_null());
+
+        let (both_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("alpha/a").unwrap().running = false;
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(&both_gone, &view, "gamma", "task_list", json!({}), 4);
+        both_gone.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&both_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert!(saved_task(&snapshot, &id)["owner"].is_null());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f398_failed_handoff_receiver_race_boundaries() {
+        let (receiver_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(&receiver_gone, &view, "alpha", "task_list", json!({}), 4);
+        receiver_gone.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&receiver_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "alpha/a");
+
+        let (claimed_elsewhere, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(
+            &claimed_elsewhere,
+            &view,
+            "gamma",
+            "task_claim",
+            json!({"task_id": id}),
+            4,
+        );
+        claimed_elsewhere.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&claimed_elsewhere.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "gamma/a");
+
+        let (completed, view, id, handoff) = handed_off_task();
+        run(
+            &completed,
+            &view,
+            "beta",
+            "task_complete",
+            json!({"task_id": id, "summary": "done"}),
+            4,
+        );
+        completed.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&completed.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "beta/a");
+        assert_eq!(saved_task(&snapshot, &id)["done"], true);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f399_snapshot_task_id_boundaries() {
+        let load = |snapshot: Value| {
+            let boards = Boards::new();
+            boards.load("p", snapshot.to_string().as_bytes(), 0);
+            let listed = run(
+                &boards,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_list",
+                json!({}),
+                1,
+            );
+            serde_json::from_str::<Value>(&text(&listed)).unwrap()
+        };
+        let task = |id: &str| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": [],
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert_eq!(
+            load(json!({"next": 3, "tasks": [task("t-1"), task("t-2")], "leases": []}))
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("t-2")], "leases": []})),
+            json!([])
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("t-1"), task("t-1")], "leases": []})),
+            json!([])
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("other")], "leases": []})),
+            json!([])
+        );
+        println!("FIX VERIFIED");
     }
 }

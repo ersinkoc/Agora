@@ -1263,20 +1263,30 @@ impl Mesh {
         (tasks, leases)
     }
 
-    /// Moves a claimed task from `from` to `to` if `from` is not the owner any more (a handoff that could not be delivered is
-    /// undone this way). Returns whether it moved.
+    /// Undoes a handoff that could not be delivered. A task still owned by `from` is released;
+    /// an open task is returned to `to` only while that agent is still registered. Returns whether
+    /// the task changed.
     pub fn reassign_task(&mut self, id: &str, from: &AgentId, to: &AgentId) -> bool {
         let tid = TaskId::new(id);
+        let target_is_live = self.agents.contains_key(to);
         let Some(rec) = self.tasks.get_mut(&tid) else {
             return false;
         };
-        if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
-            return false;
+        let changed = match rec.task.state() {
+            TaskState::Claimed(owner) if owner == from => {
+                let _ = rec.task.release(from);
+                if target_is_live {
+                    let _ = rec.task.claim(to);
+                }
+                true
+            }
+            TaskState::Open if target_is_live => rec.task.claim(to).is_ok(),
+            _ => false,
+        };
+        if changed {
+            self.task_changed(&tid);
         }
-        let _ = rec.task.release(from);
-        let moved = rec.task.claim(to).is_ok();
-        self.task_changed(&tid);
-        moved
+        changed
     }
 
     /// Gives back claimed tasks whose owner is not a registered agent (it ended, or the broker was restored without it).
