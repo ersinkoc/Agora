@@ -888,6 +888,13 @@ impl Mesh {
         reply_to: Option<&str>,
         now_ms: u64,
     ) -> Result<String, MeshError> {
+        if let Some(expired) = reply_to.filter(|id| {
+            self.asks
+                .get(*id)
+                .is_some_and(|a| a.answer.is_none() && now_ms >= a.deadline_ms)
+        }) {
+            self.asks.remove(expired);
+        }
         let answers = reply_to.and_then(|r| {
             self.asks
                 .get(r)
@@ -2065,6 +2072,83 @@ mod tests {
             // A late reply is still delivered as an ordinary message.
             assert_eq!(m.inbox(&id("a"), None, 10).unwrap()[0].body, "reply");
         }
+    }
+
+    #[test]
+    fn f394_a_reply_refused_at_the_deadline_cannot_return_after_clock_rollback() {
+        let mut control = mesh();
+        let control_ask = control.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        control
+            .send_message(&id("b"), "a", "on time", &[], Some(&control_ask), 9)
+            .unwrap();
+        assert!(matches!(
+            control.ask_status(&control_ask, 10),
+            AskStatus::Answered { .. }
+        ));
+        println!("CONTROL OK");
+
+        let mut target = mesh();
+        let ask = target.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        target
+            .send_message(&id("b"), "a", "late", &[], Some(&ask), 10)
+            .unwrap();
+        target
+            .send_message(&id("b"), "a", "rollback", &[], Some(&ask), 9)
+            .unwrap();
+        let actual = target.ask_status(&ask, 9);
+        println!("EXPECTED: TimedOut");
+        println!("ACTUAL: {actual:?}");
+        if actual == AskStatus::TimedOut {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, AskStatus::TimedOut);
+    }
+
+    #[test]
+    fn verifies_f394_ask_reply_deadline_boundaries() {
+        let mut on_time = mesh();
+        let ask = on_time.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        on_time
+            .send_message(&id("b"), "a", "yes", &[], Some(&ask), 9)
+            .unwrap();
+        assert!(matches!(
+            on_time.ask_status(&ask, 100),
+            AskStatus::Answered { reply, .. } if reply == "yes"
+        ));
+
+        let mut exact = mesh();
+        let ask = exact.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        exact
+            .send_message(&id("b"), "a", "late", &[], Some(&ask), 10)
+            .unwrap();
+        exact
+            .send_message(&id("b"), "a", "rollback", &[], Some(&ask), 9)
+            .unwrap();
+        assert_eq!(exact.ask_status(&ask, 9), AskStatus::TimedOut);
+
+        let mut late = mesh();
+        let ask = late.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        late.send_message(&id("b"), "a", "late", &[], Some(&ask), 50)
+            .unwrap();
+        late.send_message(&id("b"), "a", "rollback", &[], Some(&ask), 1)
+            .unwrap();
+        assert_eq!(late.ask_status(&ask, 1), AskStatus::TimedOut);
+
+        let mut accepted = mesh();
+        let ask = accepted.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        accepted
+            .send_message(&id("b"), "a", "kept", &[], Some(&ask), 1)
+            .unwrap();
+        accepted
+            .send_message(&id("b"), "a", "later", &[], Some(&ask), 20)
+            .unwrap();
+        assert!(matches!(
+            accepted.ask_status(&ask, 20),
+            AskStatus::Answered { reply, .. } if reply == "kept"
+        ));
+        println!("FIX VERIFIED");
     }
 
     #[test]

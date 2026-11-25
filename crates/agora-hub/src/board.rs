@@ -765,10 +765,17 @@ impl Boards {
     }
 
     fn joining(&self, project: &str, now_ms: u64) -> bool {
-        let j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        if j.pending
+            .get(project)
+            .is_some_and(|(until, _)| now_ms >= *until)
+        {
+            j.pending.remove(project);
+            return false;
+        }
         j.pending
             .get(project)
-            .is_some_and(|(until, nodes)| !nodes.is_empty() && now_ms < *until)
+            .is_some_and(|(_, nodes)| !nodes.is_empty())
     }
 
     /// Puts what `node` handed over for `project` on the board (ADR-0039 amendment B): each lease for its holder, refused (and both
@@ -1018,6 +1025,92 @@ mod tests {
             1_000 + JOIN_WAIT_MS,
         );
         assert!(text(&late).contains("lease_id"), "{}", text(&late));
+    }
+
+    #[test]
+    fn f393_an_ended_join_wait_cannot_return_after_clock_rollback() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        b.membership(&view(&["alpha"]), 0);
+        b.membership(&v, 1_000);
+        let early = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["early"], "ttl_s": 60}),
+            1_000 + JOIN_WAIT_MS - 1,
+        );
+        assert!(text(&early).contains("board.unavailable"));
+        println!("CONTROL OK");
+
+        let ended = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["ended"], "ttl_s": 60}),
+            1_000 + JOIN_WAIT_MS,
+        );
+        assert!(text(&ended).contains("lease_id"), "{}", text(&ended));
+        let actual = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["rollback"], "ttl_s": 60}),
+            1_001,
+        );
+        let granted = text(&actual).contains("lease_id");
+        println!("EXPECTED: true");
+        println!("ACTUAL: {granted}");
+        if granted {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(granted, "{}", text(&actual));
+    }
+
+    #[test]
+    fn verifies_f393_join_wait_deadline_boundaries() {
+        fn pending() -> (Boards, View) {
+            let boards = Boards::new();
+            let shared = view(&["alpha", "beta"]);
+            boards.membership(&view(&["alpha"]), 0);
+            boards.membership(&shared, 1_000);
+            (boards, shared)
+        }
+        let acquire = |boards: &Boards, shared: &View, path: &str, now| {
+            text(&run(
+                boards,
+                shared,
+                "alpha",
+                "lease_acquire",
+                json!({"paths": [path], "ttl_s": 60}),
+                now,
+            ))
+        };
+
+        let (active, shared) = pending();
+        assert!(
+            acquire(&active, &shared, "active", 1_000 + JOIN_WAIT_MS - 1)
+                .contains("board.unavailable")
+        );
+
+        let (exact, shared) = pending();
+        assert!(acquire(&exact, &shared, "exact", 1_000 + JOIN_WAIT_MS).contains("lease_id"));
+        assert!(acquire(&exact, &shared, "exact-rollback", 1_001).contains("lease_id"));
+
+        let (late, shared) = pending();
+        assert!(acquire(&late, &shared, "late", 1_000 + JOIN_WAIT_MS + 500).contains("lease_id"));
+        assert!(acquire(&late, &shared, "late-rollback", 1_002).contains("lease_id"));
+
+        let (settled, shared) = pending();
+        settled.join_settled("alpha", "p");
+        settled.join_settled("beta", "p");
+        assert!(acquire(&settled, &shared, "settled", 1_001).contains("lease_id"));
+        println!("FIX VERIFIED");
     }
 
     #[test]
