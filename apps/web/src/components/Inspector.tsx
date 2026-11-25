@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { money, type UsageSummary } from '../net/usage';
@@ -10,11 +9,13 @@ import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
 
 import { PairCards, type PairingUi } from './Pairing';
+import type { DetailsSection, DetailsTab } from './detailsTabs';
 
-type Tab = 'needs' | 'changes' | 'board' | 'messages' | 'cost';
-
-// The right panel: one subject at a time, in tabs (at most two panels are ever visible, visual-language.md).
-export function Inspector({ attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onCollapse, pairing }: {
+// The right panel: one subject at a time, picked from the vertical menu at the window's end (at most two
+// panels are ever visible, visual-language.md). Its top carries the name of what is open, not a row of tabs.
+export function Inspector({ sections, tab, attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onCollapse, pairing }: {
+  sections: readonly [DetailsSection, ...DetailsSection[]];
+  tab: DetailsTab;
   attention: readonly AgentTileModel[];
   approvals: readonly ApprovalModel[];
   notice?: string;
@@ -30,40 +31,24 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   // ADR-0065: machines asking to join, answered in their full cards here.
   pairing?: PairingUi;
 }) {
-  const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
-  const tabs: { id: Tab; label: string; badge?: number }[] = [
-    { id: 'needs', label: t('attention-title'), badge: needs },
-    { id: 'changes', label: t('ide-tab-changes'), badge: changed.length },
-    ...(boards.length > 0 ? [{ id: 'board' as const, label: t('board-title') }] : []),
-    { id: 'messages', label: t('ide-tab-messages'), badge: messages.length },
-    ...(usage && usage.totalMicroUsd > 0 ? [{ id: 'cost' as const, label: t('ide-tab-cost') }] : []),
-  ];
-  const [tab, setTab] = useState<Tab>('needs');
-  // Something new that needs the user wins over a tab that is quietly open; one that goes away does not pull the user back.
-  const seen = useRef(0);
-  useEffect(() => { if (needs > seen.current) setTab('needs'); seen.current = needs; }, [needs]);
-  const active = tabs.some(x => x.id === tab) ? tab : 'needs';
+  // A section that is gone (no shared tasks any more, nothing spent) falls back to what needs you.
+  const active = sections.find((x) => x.id === tab) ?? sections[0];
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-s" aria-label={t('console-activity')}>
-    <div className="flex h-9 flex-none items-stretch border-b border-line">
-      <div role="tablist" aria-label={t('ide-details')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
-        {tabs.map(x => <button key={x.id} type="button" role="tab" aria-selected={active === x.id} onClick={() => setTab(x.id)}
-          className="ide-tab max-w-none border-e-0 px-2.5 text-xs whitespace-nowrap">
-          {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-xs ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}
-        </button>)}
-      </div>
-      <button type="button" className="ide-iconbtn m-1" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelRight" /></button>
+    <div className="flex h-9 flex-none items-center gap-2 border-b border-line ps-3 pe-1">
+      <h2 className="m-0 min-w-0 flex-1 truncate text-xs">{active.label}</h2>
+      {!!active.badge && <span className={`ide-chip ${active.id === 'needs' ? 'text-needs-you' : ''}`}>{active.badge}</span>}
+      <button type="button" className="ide-iconbtn" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelRight" /></button>
     </div>
-    <div className="min-h-0 flex-1 overflow-y-auto p-3" role="tabpanel" aria-label={tabs.find(x => x.id === active)?.label}>
-      <Details tab={active} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
+    <div id="details-panel" className="min-h-0 flex-1 overflow-y-auto p-3" role="tabpanel" aria-label={active.label}>
+      <Details tab={active.id} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
     </div>
   </aside>;
 }
 
-// One subject of the details, on its own: the Inspector's tabs and the layout's panels (ADR-0068) draw the same thing.
-export type DetailsTab = Tab;
+// One subject of the details, on its own: the Inspector's sections and the layout's panels (ADR-0068) draw the same thing.
 export function Details({ tab, attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, pairing }: {
-  tab: Tab;
+  tab: DetailsTab;
   attention: readonly AgentTileModel[];
   approvals: readonly ApprovalModel[];
   notice?: string;

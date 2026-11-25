@@ -4,6 +4,14 @@
 *.log
 .DS_Store
 
+.claude/
 .dfmt/
 apps/web/node_modules/
 apps/web/src/gen/
+.temp_files/
+
+.wrongstack/
+!/.wrongstack/
+/.wrongstack/*
+!/.wrongstack/project.json
+acp-sessions/

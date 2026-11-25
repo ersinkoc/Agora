@@ -21,6 +21,8 @@ import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
+import { DetailsRail } from './DetailsRail';
+import { detailsSections, type DetailsTab } from './detailsTabs';
 import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
 import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/prefs';
@@ -33,7 +35,7 @@ import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 import type { StartChoice } from './StartApproval';
 import { HelperGrants, type HelperGrant } from './HelperGrants';
-import { Details, type DetailsTab } from './Inspector';
+import { Details } from './Inspector';
 import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
@@ -57,6 +59,8 @@ const isNarrow = () => typeof window !== 'undefined' && !!window.matchMedia?.(NA
 // The layout's global panels and the details tab that draws each.
 // The layout's first panel is Home itself: the fleet console.
 const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'changes', tasks: 'board', messages: 'messages', usage: 'cost' };
+// The vertical menu of the details sections at the window's end: its width is a column of the window's own.
+const RAIL_WIDTH = 44;
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
@@ -151,6 +155,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
   const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
+  // The section the details panel shows, picked from the vertical menu at the window's end.
+  const [detailsTab, setDetailsTab] = useState<DetailsTab>('needs');
   const [leftWidth, setLeftWidth] = useState(saved?.leftWidth ?? 272);
   const [rightWidth, setRightWidth] = useState(saved?.rightWidth ?? 336);
   const [reviewing, setReviewing] = useState<string | undefined>();
@@ -204,8 +210,17 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
+  // The sections the details panel holds, in one list: its title and the menu at the window's end read it.
+  const sections = detailsSections({ attention, approvals, changed, boards, messages, usage, pairing });
+  // Something new that needs the user wins over a section that is quietly open; one that goes away does not pull the user back.
+  const seenNeeds = useRef(0);
+  useEffect(() => { if (needs > seenNeeds.current) setDetailsTab('needs'); seenNeeds.current = needs; }, [needs]);
+  // A section that is gone (no shared tasks any more, nothing spent) falls back to what needs you.
+  const activeTab = sections.some((x) => x.id === detailsTab) ? detailsTab : 'needs';
+  // Any section opens the panel: the menu stands at the window's end, the panel beside it.
+  const openSection = (id: DetailsTab) => { setDetailsTab(id); setShowDetails(true); };
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
-  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
+  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''} ${RAIL_WIDTH}px`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
   // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
@@ -324,12 +339,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
         {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
-        {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
+        {!showDetails && <button type="button" className="ide-iconbtn lg:hidden" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>
 
       <div className="relative grid min-h-0 grid-cols-1 overflow-y-auto max-lg:auto-rows-max lg:overflow-visible lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
-        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
+        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth + RAIL_WIDTH }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
@@ -337,8 +352,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} renderFiles={filesOf ? (a) => { const f = filesOf(a); return f ? <FilesView files={f} load={loadDiff && a.git !== false ? (path) => loadDiff(a, path) : undefined} changed={a.filesChanged} compact /> : undefined; } : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
 
-        {showDetails && <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+        {showDetails && <Inspector sections={sections} tab={activeTab} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
+
+        {/* The sections of the details panel, as a vertical menu at the window's end: it stays when the panel is closed. */}
+        <DetailsRail sections={sections} active={activeTab} open={showDetails} onSelect={openSection} />
       </div>
 
       <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>

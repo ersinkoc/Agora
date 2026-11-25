@@ -82,20 +82,27 @@ pub fn locale_from_env() -> String {
 }
 
 impl Catalog {
+    /// Stores one message. Fluent trims a message's value when it is parsed, before anything is
+    /// interpolated; trimming the rendered text instead would eat the whitespace a string literal asks for
+    /// (`{" "}· removed`).
+    fn store(&mut self, id: String, body: String) {
+        self.messages.insert(id, body.trim().to_string());
+    }
+
     /// Parse Fluent source and add its messages (later sources override earlier ones).
     pub fn add_source(&mut self, src: &str) {
         let mut current: Option<(String, String)> = None;
         for line in src.lines() {
             if let Some((id, rest)) = starts_message(line) {
                 if let Some((id, body)) = current.take() {
-                    self.messages.insert(id, body);
+                    self.store(id, body);
                 }
                 current = Some((id.to_string(), rest.to_string()));
             } else if line.starts_with('#') || line.trim().is_empty() {
                 // Comments end a message; blank lines inside a selector are harmless to keep.
                 if line.starts_with('#') {
                     if let Some((id, body)) = current.take() {
-                        self.messages.insert(id, body);
+                        self.store(id, body);
                     }
                 }
             } else if let Some((_, body)) = current.as_mut() {
@@ -104,7 +111,7 @@ impl Catalog {
             }
         }
         if let Some((id, body)) = current {
-            self.messages.insert(id, body);
+            self.store(id, body);
         }
     }
 
@@ -147,10 +154,12 @@ impl Catalog {
         self.messages.keys().map(String::as_str)
     }
 
-    /// Render message `id`. Missing placeholders render as the empty string.
+    /// Render message `id`. Missing placeholders render as the empty string. A message's value is trimmed where it
+    /// is parsed (Fluent's rule, in [`add_source`](Self::add_source)), never after: a string literal at either end
+    /// asks for the whitespace it holds (`{" "}· removed`), so the rendered text keeps it.
     pub fn render(&self, id: &str, args: &[(&str, Arg)]) -> Option<String> {
         let body = self.messages.get(id)?;
-        Some(render_text(body, args).trim().to_string())
+        Some(render_text(body, args))
     }
 }
 
@@ -194,6 +203,10 @@ fn render_text(s: &str, args: &[(&str, Arg)]) -> String {
 
 fn render_expr(inner: &str, args: &[(&str, Arg)]) -> String {
     let inner = inner.trim();
+    // A string literal before the selector check: its text may itself hold `->`.
+    if let Some(literal) = string_literal(inner) {
+        return literal;
+    }
     match inner.split_once("->") {
         None => inner
             .strip_prefix('$')
@@ -208,6 +221,39 @@ fn render_expr(inner: &str, args: &[(&str, Arg)]) -> String {
             select_variant(variants, value, args)
         }
     }
+}
+
+/// A Fluent string literal, quotes included (`{" "}`, `{ "" }`): its text with the spec's escapes (`\\`, `\"`,
+/// `\uXXXX`) undone. `None` when `inner` is something else. An escape the spec does not define keeps its
+/// backslash, so an unknown one shows up instead of changing the text unseen.
+fn string_literal(inner: &str) -> Option<String> {
+    let text = inner.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('\\') | Some('"') => {
+                out.extend(chars.next());
+            }
+            Some('u') => {
+                chars.next();
+                let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) if hex.len() == 4 => out.push(c),
+                    _ => {
+                        out.push_str("\\u");
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            _ => out.push('\\'),
+        }
+    }
+    Some(out)
 }
 
 /// Variants look like `[one] text` / `*[other] text`, each starting a (possibly indented) line.
@@ -296,6 +342,77 @@ mod tests {
             Some("Running")
         );
         assert_eq!(c.render("s", &[]).as_deref(), Some("Running"));
+    }
+
+    #[test]
+    fn string_literals_keep_the_whitespace_they_hold() {
+        // A Fluent string literal is text, not a placeholder: `{" "}` is one space (locales/en/cli.ftl:198).
+        let c = cat("a = {\" \"}· removed\nb = {\"\"}\nc = x{ \"  \" }y\n");
+        assert_eq!(c.render("a", &[]).as_deref(), Some(" · removed"));
+        assert_eq!(c.render("b", &[]).as_deref(), Some(""));
+        assert_eq!(c.render("c", &[]).as_deref(), Some("x  y"));
+    }
+
+    #[test]
+    fn a_string_literal_keeps_the_space_at_an_end_of_a_line() {
+        // The real messages: the state is the last thing on the line, and the space before the bullet is
+        // what keeps it from running into the timestamp (`agora hub devices`, `agora hub metrics-token list`).
+        let en = Catalog::english();
+        assert_eq!(
+            en.render("cli-device-state-revoked", &[]).as_deref(),
+            Some(" · removed")
+        );
+        assert_eq!(
+            en.render("cli-metrics-token-state-revoked", &[]).as_deref(),
+            Some(" · revoked")
+        );
+        let state = en
+            .render("cli-device-state-revoked", &[])
+            .unwrap_or_default();
+        let args: Vec<(&str, Arg)> = vec![
+            ("name", "laptop".into()),
+            ("fingerprint", "SHA256:abc".into()),
+            ("id", "d1".into()),
+            ("user", "u1".into()),
+            ("created", "2026-01-01 00:00".into()),
+            ("used", "2026-11-24 10:00".into()),
+            ("state", state.into()),
+        ];
+        assert_eq!(
+            en.render("cli-hub-device-line", &args).as_deref(),
+            Some("laptop · SHA256:abc · d1 · u1 · registered 2026-01-01 00:00 · last used 2026-11-24 10:00 · removed")
+        );
+        // The Turkish lines use the same literals.
+        assert_eq!(
+            Catalog::turkish()
+                .render("cli-device-state-revoked", &[])
+                .as_deref(),
+            Some(" · kaldırıldı")
+        );
+    }
+
+    #[test]
+    fn a_string_literal_escape_is_undone_and_an_unknown_one_is_not_dropped() {
+        let c = cat(
+            "q = {\"a\\\"b\"}\nbs = {\"a\\\\b\"}\nu = {\"\\u2192\"}\nbad = {\"\\uZZZZ\"}\nmixed = {\"x\"}y\n",
+        );
+        assert_eq!(c.render("q", &[]).as_deref(), Some("a\"b"));
+        assert_eq!(c.render("bs", &[]).as_deref(), Some("a\\b"));
+        assert_eq!(c.render("u", &[]).as_deref(), Some("→"));
+        // `\t` is not a Fluent escape: it stays visible as written instead of becoming an unseen tab.
+        assert_eq!(c.render("bad", &[]).as_deref(), Some("\\uZZZZ"));
+        // A literal sits inside a message's text: only the quoted part is literal.
+        assert_eq!(c.render("mixed", &[]).as_deref(), Some("xy"));
+    }
+
+    #[test]
+    fn multiline_values_still_start_and_end_at_their_text() {
+        // Fluent trims a message value where it is parsed. Moving that trim must not leave the indentation of
+        // the first line or a trailing newline in what a caller prints (`agora --help` prints `cli-usage`).
+        let en = Catalog::english();
+        let usage = en.render("cli-usage", &[]).unwrap_or_default();
+        assert!(usage.starts_with("Usage:"), "{usage:?}");
+        assert_eq!(usage, usage.trim_end());
     }
 
     #[test]

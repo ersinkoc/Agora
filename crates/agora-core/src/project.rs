@@ -86,11 +86,22 @@ impl fmt::Display for ProjectId {
 /// Normalize a git remote to `host/owner/repo`: scheme, user info, port, a trailing `.git`, and trailing
 /// slashes are dropped; the host is lowercased; the path keeps its case.
 /// Handles `https://`, `http://`, `ssh://`, `git://`, and scp-like `user@host:path` forms.
+/// Bracketed IPv6 hosts are preserved; their colons are not port or path separators.
 pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let url = url.trim();
     let (host_part, path) = if let Some((_, rest)) = url.split_once("://") {
         let (authority, path) = rest.split_once('/').ok_or(ProjectError::InvalidRemote)?;
         (authority.to_string(), path.to_string())
+    } else if let Some((authority, path)) = url.split_once("]:").filter(|(authority, _)| {
+        authority.starts_with('[')
+            || authority
+                .rsplit_once('@')
+                .is_some_and(|(user, host)| !user.contains(':') && host.starts_with('['))
+    }) {
+        if authority.contains('/') {
+            return Err(ProjectError::InvalidRemote);
+        }
+        (format!("{authority}]"), path.to_string())
     } else if let Some((authority, path)) = url.split_once(':') {
         // scp-like: [user@]host:path (no slash before the colon)
         if authority.contains('/') {
@@ -101,11 +112,13 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
         return Err(ProjectError::InvalidRemote);
     };
     let host_port = host_part.rsplit('@').next().unwrap_or(&host_part);
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or(host_port)
-        .to_ascii_lowercase();
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']').ok_or(ProjectError::InvalidRemote)?;
+        &host_port[..=end]
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    }
+    .to_ascii_lowercase();
     let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")

@@ -35,6 +35,11 @@ const PATHS = {
   move: 'M2.5 8h10M9.5 5l3 3-3 3',
   think: 'M6 12.5h4M6.5 14h3M8 2a4 4 0 0 0-2.3 7.3c.5.4.8.9.8 1.5V11h3v-.2c0-.6.3-1.1.8-1.5A4 4 0 0 0 8 2z',
   step: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  // The details panel's sections, as the vertical menu at the window's end: what waits for you, what was
+  // said, what was spent.
+  bell: 'M8 2.5c-1.7 0-3 1.3-3 3v2L3.5 11h9L11 7.5v-2c0-1.7-1.3-3-3-3zM8 11v1.5',
+  message: 'M2.5 4.5h11v6h-4.5L6 13v-2.5H2.5z',
+  chart: 'M3 13.5h10M4.5 13.5v-5M8 13.5v-8M11.5 13.5v-3',
 } as const;
 export type IconName = keyof typeof PATHS;
 

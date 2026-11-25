@@ -20,13 +20,16 @@ describe('"Needs you" is never hidden', () => {
   const props = { agents: [agent('a')], machines: [], approvals: [ask('a')], messages: [], terminalFor: () => demoSource('x'), onOpen: noop, onResolve: noop, link: 'live' as const };
   const panel = (html: string) => html.slice(html.lastIndexOf('<aside'), html.lastIndexOf('</aside>'));
 
-  it('on Home the console lists it and the right panel keeps its Needs you tab and list too', () => {
+  it('on Home the console lists it and the right panel keeps its Needs you title and list too', () => {
     const html = renderToStaticMarkup(<Console {...props} />);
     expect(html).toContain('fleet-attention');
     const aside = panel(html);
-    expect(aside).toContain('role="tablist"');
-    expect(aside).toContain('>Needs you');
+    // The panel's top names what is open (the tabs moved to the menu at the window's end), and the list is still in it.
+    expect(aside).toMatch(/<h2[^>]*>Needs you<\/h2>/);
     expect(aside).toContain('Edit src/auth.rs');
+    // The menu at the window's end stands on its own, with every section in it.
+    expect(html).toContain('aria-orientation="vertical"');
+    expect(html).toContain('>Needs you</span>');
   });
   it('the status bar count opens that panel', () => {
     expect(renderToStaticMarkup(<Console {...props} />)).toContain('1 needs you');

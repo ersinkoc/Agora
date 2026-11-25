@@ -142,7 +142,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     const a = agentFor(front);
     const ring = tiled && focused ? 'shadow-[inset_0_2px_0_var(--accent)]' : a?.state === 'needs-you' ? 'shadow-[inset_0_2px_0_var(--state-needs-you)]' : '';
     return (
-      <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch border-b border-line bg-surface-1 ${ring}`}
+      <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch overflow-hidden border-b border-line bg-surface-1 ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
           <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">

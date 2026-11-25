@@ -148,7 +148,7 @@ describe('quick win: 44px hit areas on touch', () => {
   it('buttons, tabs, rows, icon buttons, chips and inputs get --tap as their least height under a coarse pointer', () => {
     for (const sel of ['.button', '.ide-iconbtn', '.ide-tab', '.ide-row', '.menu-tile', 'button.ide-chip', '.ide-bar > a', '.ide-bar > button', '.touch-row']) expect(block, sel).toContain(sel);
     expect(block).toMatch(/min-height: var\(--tap\)/);
-    expect(block).toMatch(/\.ide-iconbtn, \.menu-tile \{ min-width: var\(--tap\)/);
+    expect(block).toMatch(/\.ide-iconbtn, \.ide-rail-item, \.menu-tile \{ min-width: var\(--tap\)/);
     expect(read('src/design/tokens.css')).toMatch(/--tap: 44px;/);
   });
   it('only on touch: nothing outside the coarse block sets that height', () => {

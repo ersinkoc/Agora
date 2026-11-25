@@ -48,6 +48,14 @@
   .ide-row[aria-current='true'] { @apply bg-surface-2; box-shadow: inset 2px 0 0 var(--accent); }
   .ide-tab { @apply flex h-9 min-w-0 max-w-56 flex-none items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
   .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
+  /* The details sections as a vertical menu at the window's end: it stays on screen when the panel is closed, so every
+     section is one click away and the panel opens from any of them. */
+  .ide-rail { @apply hidden min-h-0 flex-none flex-col items-center gap-0.5 border-s border-line bg-surface-1 py-1 lg:flex; }
+  .ide-rail-item { @apply relative grid size-8 place-items-center rounded-xs text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  .ide-rail-item[aria-selected='true'] { @apply bg-surface-2 text-ink; }
+  /* The mark of the open section sits on the edge that faces the panel, in the reading direction of the window. */
+  .ide-rail-item[aria-selected='true']::before { content: ''; position: absolute; inset-block: 5px; inset-inline-start: 0; width: 2px; border-radius: 1px; background: var(--accent); }
+  .ide-rail-badge { @apply pointer-events-none absolute end-0 bottom-0 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-xs leading-none; }
   .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
   .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted; }
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
@@ -212,11 +220,11 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .ide-rail-item, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
-  .ide-iconbtn, .menu-tile { min-width: var(--tap); }
+  .ide-iconbtn, .ide-rail-item, .menu-tile { min-width: var(--tap); }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }
