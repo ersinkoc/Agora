@@ -783,7 +783,7 @@ impl MeshServer {
                 .filter(|record| {
                     let delivery = &record.delivery;
                     delivery.agent_id == agent.as_str()
-                        && delivery.project_id == project
+                        && agora_core::same_project(&delivery.project_id, project)
                         && delivery.receiver_run_id.as_slice() == run
                 })
                 .map(|record| (record.number, handoff_message(record)));
@@ -878,17 +878,18 @@ impl MeshServer {
         if !handoffs
             .runs
             .get(&agent)
-            .is_some_and(|(p, r)| p == &delivery.project_id && *r == run)
+            .is_some_and(|(p, r)| agora_core::same_project(p, &delivery.project_id) && *r == run)
             || !mesh
                 .agent_info(&agent)
-                .is_some_and(|info| info.project == delivery.project_id)
+                .is_some_and(|info| agora_core::same_project(&info.project, &delivery.project_id))
         {
             return Err(recipient_unknown());
         }
         let runs = &handoffs.runs;
         handoffs.store.prune(now, |d| {
-            runs.get(&AgentId::new(&d.agent_id))
-                .is_some_and(|(p, r)| p == &d.project_id && d.receiver_run_id.as_slice() == *r)
+            runs.get(&AgentId::new(&d.agent_id)).is_some_and(|(p, r)| {
+                agora_core::same_project(p, &d.project_id) && d.receiver_run_id.as_slice() == *r
+            })
         });
         let refused = |e| match e {
             crate::handoff_store::InsertError::Full { resource, limit } => {

@@ -376,6 +376,20 @@ refused (`directory.path`): the path travels as text, and a lossy spelling would
 normal file, at most 4096 bytes, with a valid UUID, checked again on the open file before it is read (a link swapped in after
 the check is refused). An owner confirms its association; metadata is not an access grant.
 
+A Git project's id is `<host>/<path>#<root commit>` (`#<root commit>` without a remote): the `origin` URL without scheme, user,
+port, trailing `.git` and slashes, the host lowercased, the root commit in lowercase hex. ADR-0115: on the hosts `github.com`,
+`gitlab.com`, `bitbucket.org` and `codeberg.org` (exactly; not their subdomains) the path is lowercased as well, so
+`https://github.com/Owner/Repo` and `git@github.com:owner/repo.git` give one id; on every other host the path keeps its case.
+An older node still sends such an id in its remote's case. The hub reads it folded wherever it reads a `project_id` from an
+event (`CheckoutDiscovered`, `WorkspaceRegistered`, `AgentStarted`, `AgentInterrupted`, `TaskChanged`, `TaskDispatched`: its view,
+snapshots, board membership, the events it sends a window) or a `BoardCall`; stored events are not rewritten. It remembers the
+spelling each node last reported for a project (its `CheckoutDiscovered`/`WorkspaceRegistered`) and puts a project id it sends that
+node (`AgentStart`, `TaskUpdate`, `TaskDispatch`, `BoardJoin`, `DeliverTaskHandoff`) in that spelling; a signed `AgentLaunch` is
+never changed. A board stored under an older spelling is loaded and stored again under the folded id. A node compares a confirmed
+folder binding, a resumed agent's recorded project, a signed launch's project and a device's `device.<id>.projects` with the
+folder's id after folding both, so an id that differs only by this fold is the same project (no `directory.identity_changed`,
+no `agent.folder_changed`); any other change still needs `accept_identity_change`.
+
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts

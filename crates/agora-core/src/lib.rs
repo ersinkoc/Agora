@@ -18,6 +18,9 @@ pub use agent::{Agent, AgentState, IntegrationLevel, StateSource, Terminal, Term
 pub use events::{Consumer, EventLog, ProducerId, Receive};
 pub use ids::{AgentId, CheckoutId, NodeId, TaskId, TerminalId, WorktreeId};
 pub use lease::{Lease, LeaseError, LeaseTable};
-pub use project::{normalize_remote, ProjectError, ProjectId};
+pub use project::{
+    fold_project_id, normalize_remote, same_project, ProjectError, ProjectId,
+    CASE_INSENSITIVE_HOSTS,
+};
 pub use task::{Task, TaskError, TaskState};
 pub use worktree::{Checkout, Worktree, WorktreeError};

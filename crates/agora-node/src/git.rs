@@ -1363,7 +1363,7 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         // Spelled as this system spells it, not only equal as a path: the web compares the text, and on Windows git answers
         // `C:/...` where every other path the node reports is `C:\...`, so one folder showed up twice.
         assert_eq!(info.root.as_os_str(), r.dir.as_os_str());
-        assert_eq!(info.project.remote(), Some("github.com/Owner/Repo"));
+        assert_eq!(info.project.remote(), Some("github.com/owner/repo"));
         assert_eq!(info.project.root_commit().len(), 40);
     }
 

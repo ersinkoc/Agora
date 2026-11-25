@@ -271,7 +271,9 @@ impl Grants {
         let Some(project) = place_of(place) else {
             return false;
         };
-        signed_project.is_none_or(|p| p == project) && self.limits.allows_project(device, &project)
+        // ADR-0115: signed for the folder's id in an older spelling is the same project.
+        signed_project.is_none_or(|p| agora_core::same_project(p, &project))
+            && self.limits.allows_project(device, &project)
     }
 
     pub fn with_directory_nonce_file(mut self, path: std::path::PathBuf) -> Self {

@@ -78,7 +78,14 @@ impl Env {
         .unwrap();
         std::fs::write(root.join("manifests/probe.toml"), format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n")).unwrap();
         std::fs::write(root.join("manifests/adapter.toml"), format!("kind = \"adapter\"\ndisplay_name = \"Adapter\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{}, \"--adapter\"]\n", serde_json::to_string(&fake()).unwrap())).unwrap();
-        let node = Node::start(&NodeConfig {
+        let node = Node::start(&Self::config(&root)).unwrap();
+        Self {
+            root,
+            node: Some(node),
+        }
+    }
+    fn config(root: &Path) -> NodeConfig {
+        NodeConfig {
             resume_all: false,
             node_id: "node-directory".into(),
             socket: root.join("n.sock"),
@@ -87,12 +94,13 @@ impl Env {
             manifests_dir: root.join("manifests"),
             projects: vec![],
             limits: NodeLimits::default(),
-        })
-        .unwrap();
-        Self {
-            root,
-            node: Some(node),
         }
+    }
+    /// Stops the node, lets `between` change its files, and starts it again on the same folders.
+    fn restart(&mut self, between: impl FnOnce(&Path)) {
+        self.node = None;
+        between(&self.root);
+        self.node = Some(Node::start(&Self::config(&self.root)).unwrap());
     }
     fn client(&self) -> Client {
         Client::connect(self.node.as_ref().unwrap().socket().unwrap()).unwrap()
@@ -292,6 +300,83 @@ fn an_explicit_worktree_uses_the_selected_subfolder_and_never_switches_the_origi
     git(created_root, &["add", "."]);
     assert!(!git(created_root, &["diff", "--cached", "--name-only"]).contains(".mcp.json"));
     assert_eq!(git(&repo, &["branch", "--show-current"]).trim(), "main");
+}
+
+/// ADR-0115: a folder an older node confirmed with its GitHub remote's own case (`Owner/Repo`) is the same project once this node
+/// folds the id: it launches without `accept_identity_change`, and the confirmation is written back folded. Another identity still
+/// asks.
+#[test]
+fn a_folder_confirmed_in_another_case_of_its_github_remote_launches_without_asking_again() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("case-fold");
+    let folder = e.root.join("Repo");
+    std::fs::create_dir_all(&folder).unwrap();
+    git(&folder, &["init", "-q"]);
+    git(
+        &folder,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Owner/Repo.git",
+        ],
+    );
+    git(&folder, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    let root = git(&folder, &["rev-list", "--max-parents=0", "HEAD"])
+        .trim()
+        .to_string();
+    let info = inspect(&mut e.client(), &folder, false);
+    assert_eq!(info.project_id, format!("github.com/owner/repo#{root}"));
+    let bindings = e
+        .root
+        .join("worktrees")
+        .join(agora_node::directory::BINDINGS_FILE);
+    let confirm = |id: String| {
+        let path = info.path.clone();
+        let bindings = bindings.clone();
+        move |_: &Path| {
+            std::fs::create_dir_all(bindings.parent().unwrap()).unwrap();
+            std::fs::write(
+                &bindings,
+                serde_json::to_vec(&serde_json::json!({ path: id })).unwrap(),
+            )
+            .unwrap();
+        }
+    };
+    e.restart(confirm(format!("github.com/Owner/Repo#{root}")));
+    let mut c = e.client();
+    let info = inspect(&mut c, &folder, false);
+    assert_eq!(info.previous_project_id, "");
+    assert!(!launch(&mut c, &info, "probe", false).agent_id.is_empty());
+    let written: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&bindings).unwrap()).unwrap();
+    assert_eq!(written[&info.path], info.project_id);
+    drop(c);
+    // Another repository confirmed in this folder is still a changed identity.
+    let other = format!("github.com/owner/other#{root}");
+    e.restart(confirm(other.clone()));
+    let mut c = e.client();
+    let info = inspect(&mut c, &folder, false);
+    assert_eq!(info.previous_project_id, other);
+    let refused = c
+        .call(Cmd::AgentLaunch(v1::AgentLaunch {
+            path: info.path.clone(),
+            project_id: info.project_id.clone(),
+            kind: "probe".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, "protocol.invalid_message");
+    assert!(
+        refused
+            .params
+            .iter()
+            .any(|p| format!("{p:?}").contains("directory.identity_changed")),
+        "{refused:?}"
+    );
 }
 
 #[test]
