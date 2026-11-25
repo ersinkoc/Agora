@@ -7,6 +7,16 @@ use std::sync::Mutex;
 
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Whether `project` is one of `projects`. ADR-0115: an id written in another case for a repository on a case-insensitive host (the
+/// policy line written before this node folded it, or an agent recorded before) is the same repository and root commit, so the same
+/// project; nothing else is matched loosely.
+fn in_projects(projects: &BTreeSet<String>, project: &str) -> bool {
+    projects.contains(project)
+        || projects
+            .iter()
+            .any(|p| agora_core::same_project(p, project))
+}
+
 #[derive(Default)]
 pub struct DeviceLimits {
     /// Device id to the projects it may act in. An entry with no projects is a device that may act in none.
@@ -72,7 +82,7 @@ impl DeviceLimits {
 
     /// May `device` act in `project`? A device that is not limited may.
     pub fn allows_project(&self, device: &str, project: &str) -> bool {
-        self.limit(device).is_none_or(|p| p.contains(project))
+        self.limit(device).is_none_or(|p| in_projects(&p, project))
     }
 
     /// May `device` act for `agent`? A limited device may only when the agent's project is known and its own.
@@ -84,7 +94,7 @@ impl DeviceLimits {
         guard
             .as_ref()
             .and_then(|f| f(agent))
-            .is_some_and(|p| projects.contains(&p))
+            .is_some_and(|p| in_projects(&projects, &p))
     }
 
     /// May `device` sign a grant of this scope (`node`, `agent:ID`, `project:ID`)? A limited device never signs a whole-machine grant.
@@ -101,12 +111,14 @@ impl DeviceLimits {
 }
 
 /// A device's limit from the policy file and the one it inherited: both apply (their intersection); either alone applies as is.
+/// ADR-0115: a project is in both when the other names it in another case of a GitHub, GitLab, Bitbucket or Codeberg path (the same
+/// repository and root commit); it is kept as the first set spells it, so two sets that spell it alike combine exactly as before.
 pub fn combine(
     policy: Option<BTreeSet<String>>,
     inherited: Option<BTreeSet<String>>,
 ) -> Option<BTreeSet<String>> {
     match (policy, inherited) {
-        (Some(p), Some(i)) => Some(p.intersection(&i).cloned().collect()),
+        (Some(p), Some(i)) => Some(p.into_iter().filter(|x| in_projects(&i, x)).collect()),
         (p, i) => p.or(i),
     }
 }
@@ -127,6 +139,58 @@ mod tests {
             _ => None,
         }));
         l
+    }
+
+    /// ADR-0115: a policy line and an inherited limit that spell one GitHub project in two cases still share it; another repository
+    /// or host does not.
+    #[test]
+    fn a_policy_and_an_inherited_limit_in_two_cases_of_one_github_project_share_it() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let set = |ids: &[String]| Some(ids.iter().cloned().collect::<BTreeSet<String>>());
+        let cased = format!("github.com/O/R#{root}");
+        let folded = format!("github.com/o/r#{root}");
+        let self_hosted = format!("git.example.org/O/R#{root}");
+        let both = combine(
+            set(&[cased.clone(), self_hosted.clone()]),
+            set(&[folded.clone(), format!("git.example.org/o/r#{root}")]),
+        )
+        .unwrap();
+        assert_eq!(both, BTreeSet::from([cased.clone()]));
+        // Alike: exactly as before.
+        assert_eq!(
+            combine(
+                set(std::slice::from_ref(&folded)),
+                set(std::slice::from_ref(&folded))
+            ),
+            set(std::slice::from_ref(&folded))
+        );
+        assert_eq!(
+            combine(
+                set(std::slice::from_ref(&folded)),
+                set(&[format!("github.com/o/r2#{root}")])
+            ),
+            Some(BTreeSet::new())
+        );
+        let l = DeviceLimits::new(BTreeMap::from([("eda".to_string(), both)]));
+        assert!(l.allows_project("eda", &folded));
+    }
+
+    /// ADR-0115: a policy line written with a GitHub project's id in another case still names that project once the node folds it;
+    /// nothing else matches loosely.
+    #[test]
+    fn a_limit_written_in_another_case_names_the_same_github_project() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let l = DeviceLimits::new(BTreeMap::from([(
+            "eda".to_string(),
+            BTreeSet::from([
+                format!("github.com/O/R#{root}"),
+                format!("git.example.org/O/R#{root}"),
+            ]),
+        )]));
+        assert!(l.allows_project("eda", &format!("github.com/o/r#{root}")));
+        assert!(l.allows_scope("eda", &format!("project:github.com/o/r#{root}")));
+        assert!(!l.allows_project("eda", &format!("github.com/o/r2#{root}")));
+        assert!(!l.allows_project("eda", &format!("git.example.org/o/r#{root}")));
     }
 
     #[test]

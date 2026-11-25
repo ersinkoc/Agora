@@ -595,6 +595,66 @@ fn the_hubs_folder_is_closed_to_other_users() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// ADR-0112: `agora hub fleet` says whether agents see every machine and agent; the switch matters once the hub has people, and a
+/// machine without a hub folder is told so (nothing is created).
+#[test]
+fn the_fleet_view_is_turned_on_and_off_from_the_command_line() {
+    let root = tmp("fleet");
+    let run = |dir: &Path, args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(dir)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let warning = "is on for this hub";
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(
+        code == Some(0) && out.contains("nobody but you") && !out.contains("switch is on"),
+        "{out}"
+    );
+    // F2 of the #1205 review: on a solo hub the stored switch is said too, and adding a person while it is on warns.
+    let (code, out, _) = run(&root, &["hub", "fleet", "on"]);
+    assert!(
+        code == Some(0) && out.contains("nobody but you") && out.contains("The switch is on"),
+        "{out}"
+    );
+    let (code, _, err) = run(&root, &["hub", "user", "add", "Eda", "--role", "member"]);
+    assert!(code == Some(0) && err.contains(warning), "{err}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(code == Some(0) && out.contains("also in projects"), "{out}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "off"]);
+    assert!(
+        code == Some(0) && out.contains("only the machines and agents of their own projects"),
+        "{out}"
+    );
+    let (code, _, err) = run(&root, &["hub", "user", "add", "Bo", "--role", "viewer"]);
+    assert!(code == Some(0) && !err.contains(warning), "{err}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(code == Some(0) && out.contains("own projects"), "{out}");
+    for bad in [
+        &["hub", "fleet", "maybe"][..],
+        &["hub", "fleet"],
+        &["hub", "fleet", "on", "off"],
+    ] {
+        let (code, _, err) = run(&root, bad);
+        assert!(
+            code == Some(2) && err.contains("arguments"),
+            "{bad:?}: {err}"
+        );
+    }
+    let none = root.join("no-hub");
+    let (code, _, _) = run(&none, &["hub", "fleet", "status"]);
+    assert_eq!(code, Some(1));
+    assert!(!none.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");
@@ -730,6 +790,68 @@ fn seed_projects(hub_dir: &Path) {
     put("n2", checkout("n2", "c1", "#ops2", "/opt/ops"));
     put("n3", online("n3", "box"));
     put("n3", checkout("n3", "c1", "#ops3", "/opt/ops"));
+}
+
+/// ADR-0115: a grant an older hub stored in a GitHub repository's own case is taken back by the folded id the machines now report
+/// (and the other way round), leaving no row that keeps the access; a new grant is stored folded.
+#[test]
+fn a_grant_stored_in_another_case_of_a_github_project_is_revoked_by_the_folded_id() {
+    let root = tmp("grant-case");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let (ok, _, err) = run(&["hub", "user", "add", "Ayse"]);
+    assert!(ok, "{err}");
+    let commit = "db6f7d0123456789abcdef0123456789abcdef01";
+    let cased = format!("github.com/ersinkoc/Agora#{commit}");
+    let folded = format!("github.com/ersinkoc/agora#{commit}");
+    let rows = || -> Vec<String> {
+        let c = rusqlite::Connection::open(root.join("hub.db")).unwrap();
+        let mut st = c
+            .prepare("SELECT node || '/' || project FROM grants WHERE user_id = 'ayse' ORDER BY 1")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let store_cased = || {
+        rusqlite::Connection::open(root.join("hub.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO grants (user_id, node, project) VALUES ('ayse', 'mac', ?1)",
+                [&cased],
+            )
+            .unwrap();
+    };
+    // As an older hub stored it; the person is shown the project as the machines now report it.
+    store_cased();
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && out.contains(&format!("mac/{folded}")), "{out}");
+    // Revoked by the folded id: no row is left.
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "mac", &folded]);
+    assert!(ok, "{err}");
+    assert!(rows().is_empty(), "{:?}", rows());
+    // And the other way round: a folded row revoked by the cased id.
+    {
+        let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+        let users = agora_hub::users::Users::new(&store);
+        assert!(users.grant("ayse", "mac", &cased).unwrap());
+    }
+    assert_eq!(rows(), [format!("mac/{folded}")]);
+    store_cased();
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "mac", &cased]);
+    assert!(ok, "{err}");
+    assert!(rows().is_empty(), "{:?}", rows());
 }
 
 #[test]

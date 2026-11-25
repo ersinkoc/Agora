@@ -67,6 +67,8 @@ fn hubside(node_id: &str) -> Hubside {
                 "agent.launch_settings".into(),
                 // ADR-0108
                 "agent.forget.local".into(),
+                // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
+                agora_protocol::handshake::FLEET_STATUS_V1.into(),
             ],
             required: vec![],
         },
@@ -1917,6 +1919,205 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     let (_, err) = call(&mut ac, "inbox", json!({}));
     assert!(!err);
     drop((a, b, b1));
+}
+
+/// ADR-0112: three machines with different projects on a real hub. An agent on a solo hub sees every machine that agreed on the view
+/// and the other machines' agents of other projects (`machines_list`, `agents_list {scope: "hub"}`), while the default `agents_list`
+/// still lists only its own projects. Once the hub has a member it refuses (`partial: true`, this machine alone) until the owner turns
+/// the view on. A machine whose policy says `mesh.fleet = false` neither offers the capability nor lists the tool, answers from itself,
+/// and (Amendment A) is left out of everyone's view with its agents.
+#[test]
+fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine_say_no() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use serde_json::{json, Value};
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start =
+        |name: &str, agent: &str, project: &str, policy: &str, cert: String, key: String| {
+            let dir = tmp(&format!("fleet-{name}"));
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            std::fs::write(dir.join("data").join("policy"), policy).unwrap();
+            let cfg = agora_node::daemon::NodeConfig {
+                resume_all: false,
+                node_id: name.into(),
+                socket: dir.join("c.sock"),
+                data_dir: dir.join("data"),
+                worktree_root: dir.join("wt"),
+                manifests_dir: dir.join("manifests"),
+                projects: vec![],
+                limits: Default::default(),
+            };
+            let node = agora_node::daemon::Node::start(&cfg).unwrap();
+            let out = MeshOut::new();
+            node.mesh.set_remote(out.clone());
+            let mut link = hub.link(addr);
+            (link.cert_pem, link.key_pem) = (cert, key);
+            link.commands = Some(cfg.socket.clone());
+            link.mesh_out = Some(out);
+            link.mesh = Some(Arc::clone(&node.mesh));
+            let up = spawn(Arc::clone(&node.events), link).unwrap();
+            let folder = format!("/work/{project}");
+            node.events
+                .checkout_discovered(name, project, Path::new(&folder));
+            let id = AgentId::new(agent);
+            node.events.agent_launched(
+                &id,
+                project,
+                name,
+                Path::new(&folder),
+                Path::new(&folder),
+                "",
+                "shell",
+                true,
+            );
+            let socket = node
+                .mesh
+                .register(AgentInfo {
+                    id: id.clone(),
+                    kind: "shell".into(),
+                    node: name.into(),
+                    project: project.into(),
+                    label: String::new(),
+                    worktree: folder.clone(),
+                    state: "idle".into(),
+                })
+                .unwrap();
+            let mut conn = agora_platform::local_connect(&socket).unwrap();
+            mcp(
+                &mut conn,
+                1,
+                "initialize",
+                json!({"protocolVersion": "2025-03-26"}),
+            );
+            (node, up, conn, dir)
+        };
+    let (ca, cb, cg) = (hub.enroll("alpha"), hub.enroll("beta"), hub.enroll("gamma"));
+    let (a, ua, mut ac, adir) = start("alpha", "a1", "p", "", ca.0, ca.1);
+    let (b, ub, mut bc, bdir) = start("beta", "b1", "q", "mesh.fleet = false\n", cb.0, cb.1);
+    let (g, ug, _gc, gdir) = start("gamma", "g1", "r", "", cg.0, cg.1);
+    for (node, agent) in [
+        ("alpha", "alpha/a1"),
+        ("beta", "beta/b1"),
+        ("gamma", "gamma/g1"),
+    ] {
+        wait(&format!("{node} and {agent} to reach the hub"), || {
+            let (v, _) = hub.state.hub.view();
+            v.nodes.get(node).is_some_and(|n| n.online) && v.agents.contains_key(agent)
+        });
+    }
+    let names = |c: &mut agora_platform::LocalStream| -> Vec<String> {
+        mcp(c, 8, "tools/list", json!({}))["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let call = |c: &mut agora_platform::LocalStream, name: &str, args: Value| -> Value {
+        let r = mcp(c, 9, "tools/call", json!({"name": name, "arguments": args}));
+        assert_eq!(r["isError"], false, "{r}");
+        serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let ids = |v: &Value, key: &str| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[key].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    // The hub's `Welcome` reached alpha's mesh: the tool is listed there.
+    wait("alpha to offer machines_list", || {
+        names(&mut ac).iter().any(|n| n == "machines_list")
+    });
+
+    // Solo hub: every machine that agreed, and gamma's agent in its own project. beta (`mesh.fleet = false`) is left out with its
+    // agent and folder (Amendment A).
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(m["partial"], false, "{m}");
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "gamma"], "{m}");
+    assert!(
+        m["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["online"] == true),
+        "{m}"
+    );
+    let rows = call(&mut ac, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1", "gamma/g1"], "{rows}");
+    assert!(!rows.to_string().contains("/work/q"), "{rows}");
+    let g1 = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["agent_id"] == "gamma/g1")
+        .unwrap();
+    assert_eq!(g1["project"], "r");
+    assert_eq!(g1["node"], "gamma");
+    assert_eq!(g1["kind"], "shell");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == false),
+        "{rows}"
+    );
+    // The default scope is unchanged: alpha's projects only.
+    let rows = call(&mut ac, "agents_list", json!({}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1"], "{rows}");
+
+    // beta's policy says no: the tool is not listed there, and its view is its own.
+    assert!(!names(&mut bc).iter().any(|n| n == "machines_list"));
+    let rows = call(&mut bc, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["b1"], "{rows}");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == true),
+        "{rows}"
+    );
+    let m = call(&mut bc, "machines_list", json!({}));
+    assert_eq!(
+        (ids(&m["machines"], "id"), &m["partial"]),
+        (vec!["beta".to_string()], &json!(true))
+    );
+
+    // A team hub refuses: alpha answers from itself.
+    agora_hub::users::Users::new(hub.state.hub.store())
+        .add("Eda", agora_hub::users::Role::Member, server::now_ms())
+        .unwrap();
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(
+        (ids(&m["machines"], "id"), &m["partial"]),
+        (vec!["alpha".to_string()], &json!(true))
+    );
+    let rows = call(&mut ac, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1"], "{rows}");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == true),
+        "{rows}"
+    );
+    // ...until the owner turns it on.
+    agora_hub::users::set_fleet_switch(hub.state.hub.store(), true, server::now_ms()).unwrap();
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(m["partial"], false, "{m}");
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "gamma"]);
+
+    drop((ac, bc, _gc, ua, ub, ug, a, b, g));
+    for d in [adir, bdir, gdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -3839,4 +4040,90 @@ fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
     drop(node);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&pick);
+}
+
+/// ADR-0115 end to end: two machines with clones of one GitHub repository whose `origin` differs only in case (`Owner/Repo` and
+/// `owner/repo`, the same root commit) discover one project id. Over mTLS to a real hub, one sends that id and the other the id an
+/// older node makes of the same clone (`github.com/Owner/Repo#…`), and the hub holds them as one project shared by both.
+#[test]
+fn two_machines_with_clones_of_one_github_repository_in_two_cases_are_one_shared_project() {
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("case-fold");
+    let first = dir.join("Repo");
+    std::fs::create_dir_all(&first).unwrap();
+    git(&first, &["init", "-q", "-b", "main"]);
+    git(&first, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    let second = dir.join("repo-clone");
+    git(
+        &dir,
+        &[
+            "clone",
+            "-q",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+    );
+    git(
+        &first,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Owner/Repo.git",
+        ],
+    );
+    git(
+        &second,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:owner/repo.git",
+        ],
+    );
+    let ids: Vec<String> = [&first, &second]
+        .iter()
+        .map(|r| {
+            agora_node::git::discover_checkout(r)
+                .unwrap()
+                .project
+                .to_string()
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1]);
+    assert!(ids[0].starts_with("github.com/owner/repo#"), "{}", ids[0]);
+
+    let older = ids[0].replace("github.com/owner/repo#", "github.com/Owner/Repo#");
+    assert_ne!(older, ids[0]);
+    let (desk_cert, desk_key) = hub.enroll("desk");
+    let mut links = Vec::new();
+    for (node, repo, id, cert) in [
+        ("laptop", &first, &ids[0], None),
+        ("desk", &second, &older, Some((desk_cert, desk_key))),
+    ] {
+        let sink = Arc::new(EventSink::open(&dir.join(format!("{node}-data")), node).unwrap());
+        sink.node_online(node);
+        sink.checkout_discovered(node, id, repo);
+        let mut link = hub.link(addr);
+        if let Some((cert_pem, key_pem)) = cert {
+            link.cert_pem = cert_pem;
+            link.key_pem = key_pem;
+        }
+        links.push((sink.clone(), spawn(sink, link).unwrap()));
+    }
+    wait("both machines' checkouts", || {
+        hub.state.hub.view().0.checkouts.len() == 2
+    });
+    let (view, _) = hub.state.hub.view();
+    assert!(view.checkouts.values().all(|(_, p, _)| p == &ids[0]));
+    assert_eq!(
+        agora_hub::board::nodes_with(&view, &ids[0]),
+        ["desk", "laptop"]
+    );
+    // A command about the project reaches the older machine in its own spelling.
+    assert_eq!(view.spelled_for("desk", &ids[0]), older);
+    assert_eq!(view.spelled_for("laptop", &ids[0]), ids[0]);
+    drop(links);
+    let _ = std::fs::remove_dir_all(&dir);
 }

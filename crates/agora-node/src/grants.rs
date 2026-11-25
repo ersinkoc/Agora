@@ -271,7 +271,9 @@ impl Grants {
         let Some(project) = place_of(place) else {
             return false;
         };
-        signed_project.is_none_or(|p| p == project) && self.limits.allows_project(device, &project)
+        // ADR-0115: signed for the folder's id in an older spelling is the same project.
+        signed_project.is_none_or(|p| agora_core::same_project(p, &project))
+            && self.limits.allows_project(device, &project)
     }
 
     pub fn with_directory_nonce_file(mut self, path: std::path::PathBuf) -> Self {
@@ -651,7 +653,10 @@ impl Grants {
                 && match g.scope.split_once(':') {
                     None => g.scope == "node",
                     Some(("agent", id)) => subject.agent.as_deref() == Some(id),
-                    Some(("project", id)) => project.as_deref() == Some(id),
+                    // ADR-0115: a grant signed for a GitHub project's id in another case (before this node folded it) is that project's.
+                    Some(("project", id)) => project
+                        .as_deref()
+                        .is_some_and(|p| agora_core::same_project(p, id)),
                     Some(_) => false,
                 }
         });
@@ -859,6 +864,52 @@ mod tests {
         g.create(&grant("g2", "node", &["agent.prompt"], NOW + HOUR), NOW)
             .unwrap();
         assert!(g.gate(&prompt("a-2"), NOW).is_ok());
+    }
+
+    /// ADR-0115: a project grant signed with a GitHub repository's id in its remote's case covers the project once this node folds the
+    /// id, and the other way round; another repository or host does not match loosely.
+    #[test]
+    fn a_project_grant_in_another_case_of_a_github_id_covers_the_folded_project() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let start = |p: String| {
+            Cmd::AgentStart(v1::AgentStart {
+                project_id: p,
+                ..Default::default()
+            })
+        };
+        let g = grants(&["agent.start"]);
+        g.create(
+            &grant(
+                "g1",
+                &format!("project:github.com/O/R#{root}"),
+                &["agent.*"],
+                NOW + HOUR,
+            ),
+            NOW,
+        )
+        .unwrap();
+        g.create(
+            &grant(
+                "g2",
+                &format!("project:git.example.org/O/R#{root}"),
+                &["agent.*"],
+                NOW + HOUR,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert!(g
+            .gate(&start(format!("github.com/o/r#{root}")), NOW)
+            .is_ok());
+        assert!(g
+            .gate(&start(format!("github.com/O/R#{root}")), NOW)
+            .is_ok());
+        assert!(refused(
+            g.gate(&start(format!("github.com/o/r2#{root}")), NOW)
+        ));
+        assert!(refused(
+            g.gate(&start(format!("git.example.org/o/r#{root}")), NOW)
+        ));
     }
 
     #[test]

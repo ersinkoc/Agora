@@ -5,7 +5,8 @@
 //! Ids are local to the machine that made them (`agent-1` exists on every node), so every entity is keyed by
 //! `<producer>/<local id>` in this view (`laptop/agent-1`). Node ids are limited to `[A-Za-z0-9._-]` by the
 //! certificate authority, so `/` never appears inside one and the hub can split a key to route a command back to
-//! the right node. Project ids are machine-independent already (normalized remote + root commit) and stay as is.
+//! the right node. Project ids are machine-independent already (normalized remote + root commit) and stay as is, except that an
+//! older node's id for a repository on a case-insensitive host is folded as a newer node now spells it (ADR-0115, [`fold_event`]).
 //!
 //! Unknown or out-of-order facts are tolerated (a worktree event for an unseen checkout still records the
 //! worktree); the log is the truth, this is a cache.
@@ -206,6 +207,46 @@ pub struct View {
     /// ADR-0103: the newest mesh messages per project, for a window's snapshot. Shared, so a clone of the view under the hub lock copies
     /// one pointer; folded in by [`View::apply_at`] only (a message needs its log position).
     pub messages: Arc<MessageRings>,
+    /// ADR-0115: `<producer>/<folded project id>` → the spelling that producer gave it, when that is not the folded one: an older
+    /// node's current spelling (from its latest `CheckoutDiscovered` or `WorkspaceRegistered`, which also clears it once the node
+    /// spells it folded), so a command about the project reaches that node in the spelling it knows ([`View::spelled_for`]); and an
+    /// older hub's spelling of a shared board's project (its `TaskChanged`, kept), so the board it stored is found
+    /// ([`View::spellings_of`]). The view itself holds folded ids only.
+    pub spellings: BTreeMap<String, String>,
+}
+
+/// ADR-0115: the project id an event carries, if it carries one.
+fn project_id_of(body: &Body) -> Option<&String> {
+    match body {
+        Body::CheckoutDiscovered(e) => Some(&e.project_id),
+        Body::AgentStarted(e) => Some(&e.project_id),
+        Body::AgentInterrupted(e) => Some(&e.project_id),
+        Body::TaskChanged(e) => Some(&e.project_id),
+        Body::TaskDispatched(e) => Some(&e.project_id),
+        Body::WorkspaceRegistered(e) => Some(&e.project_id),
+        _ => None,
+    }
+}
+
+/// ADR-0115: `ev` with its project id folded ([`agora_core::fold_project_id`]) when folding changes it: what an older node sends for a
+/// repository on a case-insensitive host then names the project a newer node names. `None`: nothing to fold (most events, and every
+/// event of a newer node), so the caller keeps the event it has. The stored event is never rewritten; this is applied as it is read.
+pub fn fold_event(ev: &Event) -> Option<Event> {
+    let id = project_id_of(ev.body.as_ref()?)?;
+    let std::borrow::Cow::Owned(folded) = agora_core::fold_project_id(id) else {
+        return None;
+    };
+    let mut ev = ev.clone();
+    match &mut ev.body {
+        Some(Body::CheckoutDiscovered(e)) => e.project_id = folded,
+        Some(Body::AgentStarted(e)) => e.project_id = folded,
+        Some(Body::AgentInterrupted(e)) => e.project_id = folded,
+        Some(Body::TaskChanged(e)) => e.project_id = folded,
+        Some(Body::TaskDispatched(e)) => e.project_id = folded,
+        Some(Body::WorkspaceRegistered(e)) => e.project_id = folded,
+        _ => return None,
+    }
+    Some(ev)
 }
 
 /// ADR-0103: the newest messages the hub keeps per project ring, and their most encoded bytes (whichever is smaller); past either the
@@ -438,6 +479,49 @@ pub(crate) fn is_forged(ev: &Event) -> bool {
         }
 }
 
+impl View {
+    /// ADR-0115: keeps the spelling `ev`'s producer gave its project, when it is not the folded one (see [`View::spellings`]).
+    fn note_spelling(&mut self, ev: &Event) {
+        let Some(body) = &ev.body else { return };
+        let current = matches!(
+            body,
+            Body::CheckoutDiscovered(_) | Body::WorkspaceRegistered(_)
+        ) && ev.producer_id != RESERVED_HUB_ID;
+        let board = matches!(body, Body::TaskChanged(_)) && ev.producer_id == RESERVED_HUB_ID;
+        if !current && !board {
+            return;
+        }
+        let Some(id) = project_id_of(body) else {
+            return;
+        };
+        let folded = agora_core::fold_project_id(id);
+        let key = qualified(&ev.producer_id, &folded);
+        if folded != id.as_str() {
+            self.spellings.insert(key, id.clone());
+        } else if current {
+            self.spellings.remove(&key);
+        }
+    }
+
+    /// ADR-0115: `project` as `node` spells it: the spelling it last reported for that project when an older node spelled it in
+    /// another case; otherwise `project` itself.
+    pub fn spelled_for<'a>(&'a self, node: &str, project: &'a str) -> &'a str {
+        let folded = agora_core::fold_project_id(project);
+        self.spellings
+            .get(&qualified(node, &folded))
+            .map_or(project, String::as_str)
+    }
+
+    /// ADR-0115: every other spelling a producer gave the (folded) `project`, in key order (by producer), for finding what was stored
+    /// under an older spelling.
+    pub fn spellings_of<'a>(&'a self, project: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.spellings
+            .iter()
+            .filter(move |(k, _)| split_key(k).is_some_and(|(_, p)| p == project))
+            .map(|(_, raw)| raw.as_str())
+    }
+}
+
 /// The hub-wide key of an entity a producer named with a local id.
 pub fn qualified(producer: &str, local_id: &str) -> String {
     format!("{producer}/{local_id}")
@@ -619,6 +703,10 @@ impl View {
     }
 
     pub fn apply(&mut self, ev: &Event) {
+        // ADR-0115: an older node's project id for a repository on a case-insensitive host is read folded, and its spelling kept.
+        self.note_spelling(ev);
+        let folded = fold_event(ev);
+        let ev = folded.as_ref().unwrap_or(ev);
         let producer = ev.producer_id.as_str();
         let q = |id: &str| qualified(&ev.producer_id, id);
         let Some(body) = &ev.body else { return };
@@ -1458,6 +1546,41 @@ mod tests {
             }),
         ));
         assert!(!v.nodes["n2"].online);
+    }
+
+    /// ADR-0115: what a window is sent and the view reads: an older node's id for a GitHub repository folded, every other event and
+    /// id as it is (no copy).
+    #[test]
+    fn an_older_nodes_project_id_is_read_folded_and_nothing_else_is_touched() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let cased = ev(
+            "old",
+            1,
+            Body::TaskDispatched(agora_protocol::v1::TaskDispatched {
+                project_id: format!("github.com/O/R#{root}"),
+                task_id: "t".into(),
+                agent_id: "a".into(),
+                ..Default::default()
+            }),
+        );
+        let folded = fold_event(&cased).unwrap();
+        assert!(matches!(
+            &folded.body,
+            Some(Body::TaskDispatched(d)) if d.project_id == format!("github.com/o/r#{root}") && d.task_id == "t"
+        ));
+        assert_eq!((folded.producer_id.as_str(), folded.seq), ("old", 1));
+        assert!(fold_event(&folded).is_none());
+        assert!(fold_event(&ev("old", 2, started("a"))).is_none());
+        assert!(fold_event(&ev("old", 2, state("a", AgentState::Working, true))).is_none());
+        let other = ev(
+            "old",
+            3,
+            Body::CheckoutDiscovered(agora_protocol::v1::CheckoutDiscovered {
+                project_id: format!("git.example.org/O/R#{root}"),
+                ..Default::default()
+            }),
+        );
+        assert!(fold_event(&other).is_none());
     }
 
     #[test]

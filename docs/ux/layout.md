@@ -7,8 +7,8 @@
 The centre of the window is a **layout**: a tree of splits, tab groups and panes that the user arranges, saves and shares. The
 layout is plain, versioned JSON so every client (web today; the terminal client and any native client later, ADR-0068 rung 5–6)
 reads and writes the same file. This page is the format's specification and the web window's behaviour. Rung 1 covers the
-model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry and keybindings are later rungs and are
-not described here.
+model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry (rung 3) is under "Panels" below;
+keybindings are a later rung and are not described here.
 
 ## Format, version 1
 
@@ -50,6 +50,53 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 A panel id this client does not know (a newer client's panel) is kept in the layout and drawn as a visible
 **"unknown panel"** placeholder; it never fails the layout. A `bind` this client does not understand is dropped, the pane
 shows unbound.
+
+### The panel registry (rung 3)
+
+The web window draws every pane from a **registry** of panels (`apps/web/src/layout/panels.ts`; the built-in panels'
+drawings are in `builtinPanels.tsx`). The pane body, the pane's name, **Show…**, the empty pane's chooser and the command
+palette's tools look the id up in it. The layout model still names its two defaults itself: a new pane is `empty`, and showing
+an agent makes a pane `agent`.
+
+- **What a panel registers:** its id; the Fluent key of its name; its **kind**; what it **binds** to; whether it **streams**;
+  whether it stands **alone** without a pane bar; and its drawing.
+  - Kinds:
+    - `global`: about no one agent; offered in Show… and the chooser.
+    - `tool`: one agent's folder or terminal; offered too, and bound to nothing it draws its own folder chooser.
+    - `agent`: the agent's own view; reached by showing an agent, never offered.
+    - `chooser`: the empty pane, which the window draws from the registry.
+  - Binds: `nothing` or `agent` (a key, following attention or following the selection).
+  - Order: Show… lists the global panels, then the tools; the chooser lists the tools, then the global panels. The registry
+    keeps the order they were registered in.
+- **Inputs:** a drawing is a function of one context, frozen at the top level (TypeScript `readonly` keeps the built-in
+  panels from changing what is inside it):
+  - the pane's id and the panel id;
+  - its binding and the agent that resolves to now, for a panel bound to an agent only;
+  - read-only slices of the window's state (agents, machines, requests, tasks, messages, usage, the time, the link);
+  - the reads the window can make (an agent's chat, files, diff, history, helper grants), each absent when it cannot;
+  - the bound agent's terminal, only for a panel that streams.
+
+  A drawing never gets the layout, the connection, the store or the signing key. It draws only the pane's body; the window
+  draws the pane bar (name, avatar, state, tools), where ADR-0114's plugin marker goes.
+- **Outputs:** a typed set of actions the window gives it, wrapping the paths the window already uses: rebind this pane to
+  another agent, open an agent or a tool, review, history, files, Needs you, Changes, remove, resume, start, retry, answer a
+  request, send a prompt, an agent's settings, close an agent, give a task. Every command a panel sends goes through them;
+  the paths the app installs as React context (close, an agent's settings, give) are provided again inside each built-in panel
+  from its own actions. Anything signed is signed by the window behind the action, never by the panel. Local preferences (text
+  size, grouping, the theme editor's own themes) are not commands and stay where they are.
+- **Streaming:** `streams` (Terminal and the agent's own view) is what the stream plan reads, and only such a panel is given a
+  terminal. Only panes on screen are drawn, so only they subscribe (see Performance).
+- **Unknown ids:** an id the registry does not have, or a panel that cannot draw in this window, shows the "unknown panel"
+  placeholder under the window's pane bar. An id is registered once: a later panel with a taken id is left out.
+- **Host-set facts:** `kind` (above all `chooser`), `streams`, `lone` and `label` are the window's to set. A plugin bridge
+  sets them itself and never takes them from a plugin's manifest: `lone` would drop the window's pane bar and with it the
+  plugin marker, `streams` would hand out a terminal, and a plugin's own `label` (a Fluent key) could pose as "Needs you".
+- **Not for plugins as it is:** this context is the built-in panels' and carries much that ADR-0114 says a plugin may never
+  have: requests and the answers to them (resolve, the answer guard), pairing, helper grants, sending a prompt, starting and
+  resuming agents, terminal sessions that can type (`sendInput`), and each agent's terminal preview. A plugin panel never
+  receives `PanelContext`, `PanelState` or `PanelActions` as they are, only a separate projection the plugin bridge builds,
+  filtered by the capabilities the person granted (`pane.context`, `agents.read`, …).
+- **Not yet:** loading panels from outside the window (plugins, ADR-0114) is a later step that builds on this contract.
 
 ## Reading a layout (validation)
 

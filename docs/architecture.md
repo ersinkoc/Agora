@@ -105,7 +105,12 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
   UUID `project_id`. Only an explicit owner action creates it; committing/copying it groups clones across nodes.
   Otherwise use normalized remote URL + root commit (no remote: root commit alone), so two clones of one repository share
   a shared project (and its board) only when they have the same `origin`: a clone from a local path and one from GitHub are two
-  projects (`agora project init` gives them one explicit id). A standalone folder has a
+  projects (`agora project init` gives them one explicit id). The remote is normalized to `host/path` (host lowercased); on
+  `github.com`, `gitlab.com`, `bitbucket.org` and `codeberg.org`, which ignore the case of owner and repository names, the
+  path is lowercased too, so clones of `Owner/Repo` and `owner/repo` are one project; every other host keeps the path's case.
+  The hub folds an older node's ids for those hosts as it reads its events and board calls, and sends a command about the
+  project to that node in the node's own spelling; a node treats a confirmed binding that differs only by this fold as the
+  same project (ADR-0115). A standalone folder has a
   node-local identity, without a fabricated Git commit. Metadata never grants access. Changed confirmed bindings
   require explicit owner confirmation. (ADR-0003, ADR-0052)
   The hub resolves board membership from both discovered checkouts and registered selected workspaces, by project identity

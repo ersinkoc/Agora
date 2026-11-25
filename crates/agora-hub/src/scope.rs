@@ -43,6 +43,12 @@ pub fn without_full_binary(ev: &Event) -> Option<Event> {
     }
 }
 
+/// A project's hub-wide key on a machine (`node/project`), its id folded (ADR-0115): an older node's spelling of a repository on a
+/// case-insensitive host, in an event, a command or a grant made before, is the same project as the folded one the view holds.
+fn pq(node: &str, project: &str) -> String {
+    qualified(node, &agora_core::fold_project_id(project))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     /// Granted projects, `node/project`.
@@ -108,6 +114,14 @@ fn path_parts(path: &str, unix: bool) -> Option<Vec<&str>> {
 impl Scope {
     /// The scope of `projects` over what the hub already knows.
     pub fn from_view(projects: BTreeSet<String>, view: &View) -> Self {
+        // ADR-0115: a grant given in an older spelling is the folded project's.
+        let projects = projects
+            .into_iter()
+            .map(|p| match split_key(&p) {
+                Some((node, project)) => pq(node, project),
+                None => p,
+            })
+            .collect();
         let mut s = Self {
             projects,
             ..Self::default()
@@ -115,7 +129,7 @@ impl Scope {
         // The machine is the one that reported it (the key's producer), never the node id inside the event.
         for (k, (_, project, path)) in &view.checkouts {
             if let Some((node, _)) = split_key(k) {
-                s.checkouts.insert(k.clone(), qualified(node, project));
+                s.checkouts.insert(k.clone(), pq(node, project));
                 s.add_folder(format!("checkout:{k}"), node, project, path);
             }
         }
@@ -126,7 +140,7 @@ impl Scope {
         }
         for (k, w) in &view.workspaces {
             s.workspaces
-                .insert(k.clone(), qualified(&w.node_id, &w.project_id));
+                .insert(k.clone(), pq(&w.node_id, &w.project_id));
             s.add_folder(
                 format!("workspace:{k}"),
                 &w.node_id,
@@ -136,7 +150,7 @@ impl Scope {
         }
         for (k, a) in &view.agents {
             if let Some((node, _)) = split_key(k) {
-                s.agents.insert(k.clone(), qualified(node, &a.project_id));
+                s.agents.insert(k.clone(), pq(node, &a.project_id));
             }
         }
         for (k, t) in &view.terminals {
@@ -159,7 +173,7 @@ impl Scope {
             Folder {
                 node: node.into(),
                 path: path.into(),
-                project: qualified(node, project),
+                project: pq(node, project),
             },
         );
     }
@@ -279,7 +293,7 @@ impl Scope {
                 self.granted(self.workspaces.get(&q(&e.workspace_id)))
             }
             Body::WorkspaceRegistered(e) => {
-                let p = qualified(node, &e.project_id);
+                let p = pq(node, &e.project_id);
                 self.workspaces.insert(q(&e.workspace_id), p.clone());
                 self.add_folder(
                     format!("workspace:{}", q(&e.workspace_id)),
@@ -302,7 +316,7 @@ impl Scope {
             Body::NodeTrustedDevices(_) => self.node_visible(node),
             // A node speaks for itself only: the project is placed on the producer, whatever `node_id` the event names.
             Body::CheckoutDiscovered(e) => {
-                let p = qualified(node, &e.project_id);
+                let p = pq(node, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());
                 self.add_folder(
                     format!("checkout:{}", q(&e.checkout_id)),
@@ -330,7 +344,7 @@ impl Scope {
             // ADR-0088 (schema only): who may see a preview event is decided with the hub step; until then nobody is sent one.
             Body::PreviewSuggested(_) | Body::PreviewChanged(_) => false,
             Body::AgentStarted(e) => {
-                let p = qualified(node, &e.project_id);
+                let p = pq(node, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());
                 self.projects.contains(&p)
             }
@@ -339,7 +353,7 @@ impl Scope {
                 let p = self
                     .agents
                     .entry(q(&e.agent_id))
-                    .or_insert_with(|| qualified(node, &e.project_id))
+                    .or_insert_with(|| pq(node, &e.project_id))
                     .clone();
                 self.projects.contains(&p)
             }
@@ -448,7 +462,7 @@ impl Scope {
             // An existing worktree to start in must be the person's too (a node refuses this today; the check is here for when it does not).
             C::WorkspaceQuery(c) => self.granted(self.workspaces.get(&q(&c.workspace_id))),
             C::AgentStart(c) => {
-                self.projects.contains(&qualified(node, &c.project_id))
+                self.projects.contains(&pq(node, &c.project_id))
                     && (c.worktree_id.is_empty()
                         || self.granted(self.worktrees.get(&q(&c.worktree_id))))
             }
@@ -476,10 +490,10 @@ impl Scope {
             C::WorktreeCreate(c) => self.granted(self.checkouts.get(&q(&c.checkout_id))),
             C::WorktreeRemove(c) => self.granted(self.worktrees.get(&q(&c.worktree_id))),
             C::ApprovalResolve(c) => self.granted(self.approvals.get(&q(&c.approval_id))),
-            C::TaskUpdate(c) => self.projects.contains(&qualified(node, &c.project_id)),
+            C::TaskUpdate(c) => self.projects.contains(&pq(node, &c.project_id)),
             // ADR-0095: the person needs the project and the agent (the node checks that the agent is of that project).
             C::TaskDispatch(c) => {
-                self.projects.contains(&qualified(node, &c.project_id))
+                self.projects.contains(&pq(node, &c.project_id))
                     && self.granted(self.agents.get(&q(&c.agent_id)))
             }
             // What agents a machine can start is not private to a project, but only for machines the person works on.
@@ -495,8 +509,7 @@ impl Scope {
             // is refused there) and only when that folder is of the project named.
             C::AgentLaunch(c) => {
                 !c.accept_identity_change
-                    && self.granted_folder(node, &c.path)
-                        == Some(qualified(node, &c.project_id).as_str())
+                    && self.granted_folder(node, &c.path) == Some(pq(node, &c.project_id).as_str())
             }
             _ => false,
         }
@@ -583,6 +596,50 @@ mod tests {
             granted.iter().map(ToString::to_string).collect(),
             &View::default(),
         )
+    }
+
+    /// ADR-0115: a grant given in an older spelling of a GitHub repository, an older node's event in that spelling and a newer node's
+    /// folded one are the same project for a member: cut view, live events and commands agree. Another host keeps its case.
+    #[test]
+    fn a_member_granted_a_project_in_either_case_sees_it_in_both() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let (cased, folded) = (
+            format!("github.com/O/Repo#{root}"),
+            format!("github.com/o/repo#{root}"),
+        );
+        let mut full = View::default();
+        for e in [
+            checkout("n1", "c1", &cased),
+            agent("n1", "a1", &cased),
+            agent("n1", "a2", &folded),
+        ] {
+            full.apply(&e);
+        }
+        for granted in [format!("n1/{cased}"), format!("n1/{folded}")] {
+            let s = Scope::from_view(BTreeSet::from([granted.clone()]), &full);
+            let cut = s.filter_view(&full);
+            assert!(cut.checkouts.contains_key("n1/c1"), "{granted}");
+            assert!(cut.agents.contains_key("n1/a1") && cut.agents.contains_key("n1/a2"));
+            let mut live = Scope::from_view(BTreeSet::from([granted.clone()]), &View::default());
+            assert!(live.admit(&agent("n1", "a3", &cased)), "{granted}");
+            assert!(live.admit(&agent("n1", "a4", &folded)), "{granted}");
+            assert!(!live.admit(&agent("n2", "a5", &folded)), "{granted}");
+            for project in [&cased, &folded] {
+                let update = C::TaskUpdate(v1::TaskUpdate {
+                    project_id: project.to_string(),
+                    ..Default::default()
+                });
+                assert!(live.command_allowed("n1", &update), "{granted} {project}");
+            }
+        }
+        let other = format!("git.example.org/O/Repo#{root}");
+        let mut s = scope(&[&format!("n1/{other}")]);
+        assert!(s.admit(&agent("n1", "a1", &other)));
+        assert!(!s.admit(&agent(
+            "n1",
+            "a2",
+            &format!("git.example.org/o/repo#{root}")
+        )));
     }
 
     #[test]
