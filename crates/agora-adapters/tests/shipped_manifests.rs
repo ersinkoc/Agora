@@ -141,6 +141,11 @@ fn title_rules_agree_with_every_captured_screen() {
             "Blocked title_action_required",
         ),
         ("codex", "\u{1b}]0;work3\u{7}", "none"),
+        // Only the captured shapes: not a folder that merely looks like one, nor another spinner set.
+        ("codex", "\u{1b}]0;[ ! ] Action Requiredness\u{7}", "none"),
+        ("codex", "\u{1b}]0;\u{2800} work3\u{7}", "none"),
+        ("codex", "\u{1b}]0;\u{280b}work3\u{7}", "none"),
+        ("claude-code", "\u{1b}]0;\u{280b} Claude Code\u{7}", "none"),
     ];
     let detect = |d: &Detector, term: &AlacrittyTerminal| {
         d.detect(term).map_or_else(

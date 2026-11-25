@@ -1,6 +1,6 @@
 kind = "claude-code"
 display_name = "Claude Code"
-version = "2026.11.17.1"
+version = "2026.11.25.1"
 min_engine = 4
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
@@ -101,9 +101,9 @@ priority = 800
 region = "bottom_non_empty_lines(12)"
 contains = "esc to interrupt"
 
-# The terminal title (OSC 0/2): while a turn runs Claude Code puts a spinner in front of it (half circles `◐◑◒◓` in the captured
-# 2.1.319 screens; Braille dots in older versions), and `✳` when it is not working (also while it asks for permission, so `✳` is not
-# a rule: it would hide a dialog). Its place: below the dialog rules (900) and `esc_to_interrupt` (800), above `prompt_box` (100),
+# The terminal title (OSC 0/2): while a turn runs Claude Code puts a spinner in front of it (`◐◑` in the captured 2.1.319 screens;
+# the rule takes the four half circles `◐◑◒◓` followed by a space and nothing else), and `✳` when it is not working (also while it
+# asks for permission, so `✳` is not a rule: it would hide a dialog). Its place: below the dialog rules (900) and `esc_to_interrupt` (800), above `prompt_box` (100),
 # because the input box stays on screen while a turn runs, so a rule below it would never decide. So a spinner left in the title
 # over an idle screen reads as working until Claude Code rewrites the title (it does when a turn ends: `answered.screen` ends on
 # `✳`). Every captured screen agrees with it (`title_rules_agree_with_every_captured_screen`).
@@ -112,7 +112,7 @@ id = "title_spinner"
 state = "working"
 priority = 790
 region = "title"
-regex = '^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}] '
+regex = '^[◐◑◒◓] '
 
 [[rules]]
 id = "prompt_box"
