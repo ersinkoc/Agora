@@ -73,8 +73,8 @@ has (unacknowledged events dropped by the cap, or a hub restored from a backup o
 node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer, sends
 `SnapshotRequired`, and replays from its oldest retained event. The announcement states facts (ADR-0055): the
 `CheckoutDiscovered` and `WorkspaceRegistered` it knows; for each agent running now `AgentWorkspaceBound` where it applies,
-`AgentStarted`, `AgentStateChanged` with its current state, `AgentSessionReported` when known and `TerminalOpened` when it has
-one; for each agent of this process that has ended `AgentExited` with the last exit code the node recorded for it
+`AgentStarted`, `AgentStateChanged` with its current state and where it came from, `AgentSessionReported` when known and
+`TerminalOpened` when it has one; for each agent of this process that has ended `AgentExited` with the last exit code the node recorded for it
 (`i32::MIN` when none was) and `TerminalClosed` when it had a terminal; `ApprovalResolved` again for the last 256 approvals
 resolved in this process; then `ApprovalRequested` for every approval still waiting. It begins with `NodeOnline` only when
 the node's last `NodeOnline` (its process start, or an earlier announcement's) is in the lost range, at or after `from_seq`
@@ -141,9 +141,13 @@ the hub lost that start, section 3) and `NodeOffline` on a clean stop; a
 `CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
 node is silent; `memory_used_bytes` is the resident memory of every running agent's process tree, measured then and every 30 s
 while agents run, and sent again only when it moved by more than a quarter or 256 MiB since the last report); and for each agent `WorktreeCreated`, `AgentStarted`,
-`TerminalOpened` in that order, then `AgentStateChanged` as the screen changes, and on the end `AgentExited` and
-`TerminalClosed` (once). A stop on request reports exit code `i32::MIN` (unknown), the same convention as the terminal
-exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
+`TerminalOpened` in that order, then `AgentStateChanged` as the screen changes or the agent reports its state, and on the end
+`AgentExited` and `TerminalClosed` (once). `AgentStateChanged.reported` is true only for a state the agent itself gave (through
+its ACP bridge or adapter); a state read from the screen, or one the node sets itself (a start, a stop, an end, a crash), is false. A
+report of the state the screen already showed is sent again with `reported` true; a node fact that leaves the state as it was (a
+stop of an agent that said it was done) sends nothing, except that an `Unknown` the agent gave is sent again with `reported` false
+when its process crashes or ends. A stop on request reports exit code `i32::MIN` (unknown), the same
+convention as the terminal exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
 
 Hub-wide ids: ids in events are local to the machine that made them (`agent-1` exists on every node). The hub's view keys
 every entity by `<producer>/<local id>` (`laptop/agent-1`; node ids are limited to `[A-Za-z0-9._-]`, so the split is
