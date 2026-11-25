@@ -2,14 +2,14 @@
 // only: what a pane may show, which folder a pane offers, how the file manager sorts and names what it lists.
 import type { AgentTileModel } from '../model';
 import type { FileItem } from './files';
+import type { ToolPanel } from '../layout/panels';
 
 // One collator for every name comparison: building one per comparison is what made sorting thousands of names slow.
 const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 export const compareNames = (a: string, b: string): number => COLLATOR.compare(a, b);
 
-export const TOOL_PANELS = ['terminal', 'changes', 'files', 'manager'] as const;
-export type ToolPanel = (typeof TOOL_PANELS)[number];
-export const isToolPanel = (p: string): p is ToolPanel => (TOOL_PANELS as readonly string[]).includes(p);
+// Which panels are tools is the panel registry's to say (layout/panels.ts).
+export { TOOL_PANELS, isToolPanel, type ToolPanel } from '../layout/panels';
 // The panels that need a workspace (a folder the node holds); Terminal needs only the agent's terminal.
 export const needsFolder = (p: string): boolean => p === 'changes' || p === 'files' || p === 'manager';
 

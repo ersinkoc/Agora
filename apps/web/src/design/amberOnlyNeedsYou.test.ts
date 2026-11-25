@@ -44,7 +44,8 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
 const TAB_ID: Record<string, { uses: number; why: string }> = {
   'components/rail.ts': { uses: 4, why: "the tab id: in the RailTab type, the tab's entry, the fallback tab and the tab order" },
   'components/Inspector.tsx': { uses: 3, why: 'the tab id: opening the Needs you tab and showing its list' },
-  'components/Console.tsx': { uses: 4, why: 'the tab id: the panel tab of approvals, the first tab, and Review and the status bar count opening it' },
+  'components/Console.tsx': { uses: 3, why: 'the tab id: the first tab, and Review and the status bar count opening it' },
+  'layout/builtinPanels.tsx': { uses: 1, why: 'the tab id: the Needs you panel (approvals) draws that tab of the side panel' },
 };
 
 const SRC = 'src';
