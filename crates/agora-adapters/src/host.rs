@@ -267,6 +267,9 @@ pub enum HostError {
     Io(io::Error),
     /// No answer within the timeout.
     Timeout,
+    /// ADR-0110: the request was never given to the adapter: its input is full (the pipe and the write queue), because it stopped
+    /// reading. Nothing was written, so the adapter cannot act on it.
+    Busy,
     /// The adapter exited (or its output ended) before answering.
     Exited,
     /// ADR-0104 O2: the node let the adapter go (it is stopping; the holder keeps the process) while this call waited, after its line
@@ -288,6 +291,10 @@ impl std::fmt::Display for HostError {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Timeout => write!(f, "the adapter did not answer in time"),
+            Self::Busy => write!(
+                f,
+                "the adapter is not reading its input; the request was not given"
+            ),
             Self::Exited => write!(f, "the adapter exited"),
             Self::Detached => write!(f, "the node let the adapter go before it answered"),
             Self::Rpc { code, .. } => match self.reason() {
@@ -374,7 +381,7 @@ impl From<Sender<Result<Value, HostError>>> for Waiter {
 
 type Pending = Arc<Mutex<PendingState>>;
 
-/// Requests that may wait for the writer before a call gives up with [`HostError::Timeout`]: the pipe itself holds the
+/// Requests that may wait for the writer before a call gives up with [`HostError::Busy`]: the pipe itself holds the
 /// first ones, so the queue only fills when the adapter has stopped reading its input.
 const WRITE_QUEUE: usize = 64;
 
@@ -464,7 +471,7 @@ impl Caller {
                 Ok(()) => {
                     p.map.insert(id, tx.into());
                 }
-                Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
+                Err(TrySendError::Full(_)) => return Err(HostError::Busy),
                 Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
             }
         }

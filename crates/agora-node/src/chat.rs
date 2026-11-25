@@ -103,6 +103,8 @@ const PRE_BOUND: usize = 64 * 1024;
 /// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
 pub const NODE_NOTICES: &[&str] = &[
     "adapter.queue_dropped",
+    // ADR-0110: a prompt whose adapter did not confirm it within the node's wait.
+    "adapter.no_answer",
     "adapter.output_dropped",
     // ADR-0101: the node refused an always-only request under its policy.
     "approval.always_only_forbidden",
@@ -2283,6 +2285,31 @@ impl ChatBoard {
         }
         let mut g = self.lock();
         slot(&mut g, agent, self.wake.as_ref()).drop_queued(entry_ids, now_ms);
+    }
+
+    /// ADR-0110 decision 6: the prompt of entry `entry_id` went to an adapter of `kind` that did not answer within `waited_ms`, so it
+    /// may hold it. The entry stays (a queued one is shown sent), and a notice with the stable code `adapter.no_answer`, `kind`, `call`
+    /// `prompt`, `waited_ms` and `entries` (the entry's id, as for `adapter.queue_dropped`) marks it as not confirmed.
+    pub fn unconfirmed(
+        &self,
+        agent: &AgentId,
+        entry_id: u64,
+        kind: &str,
+        waited_ms: u64,
+        now_ms: u64,
+    ) {
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        t.modify(entry_id, now_ms, false, |e| e.queued = false);
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = "adapter.no_answer".into();
+        n.params = HashMap::from([
+            ("kind".to_string(), kind.to_string()),
+            ("call".to_string(), "prompt".to_string()),
+            ("waited_ms".to_string(), waited_ms.to_string()),
+            ("entries".to_string(), entry_id.to_string()),
+        ]);
+        t.add(n, now_ms);
     }
 
     /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code

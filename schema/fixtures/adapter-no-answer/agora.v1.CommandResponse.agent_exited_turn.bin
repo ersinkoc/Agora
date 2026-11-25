@@ -1,0 +1,9 @@
+
+r2s
+adapter.agent_exited
+	exit_code
+38
+stderr_tail)
+'Error: the provider refused the request
+stage
+turn
