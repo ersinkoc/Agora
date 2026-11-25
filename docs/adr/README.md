@@ -128,3 +128,5 @@ Date: YYYY-MM-DD
 | 0109 | Recover a cross-node task handoff after a hub restart | Accepted |
 | 0110 | A prompt or decision the adapter does not take is a stable error | Accepted |
 | 0111 | Adapters report where they cut text, so redaction sees every edge | Accepted |
+| 0113 | Deep themes and community themes, and a theme is always data | Proposed |
+| 0114 | Community plugins run sandboxed in the window and ask for what they see | Proposed |
