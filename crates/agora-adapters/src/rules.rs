@@ -12,7 +12,7 @@ use crate::manifest::{Condition, Manifest, Rule, RuleState};
 
 /// Which text a rule looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Region {
+pub enum Region {
     Title,
     BottomLines(usize),
     BottomNonEmptyLines(usize),
@@ -44,6 +44,15 @@ impl Region {
             return n(arg).map(Self::BottomNonEmptyLines);
         }
         None
+    }
+
+    /// The region as a manifest writes it (`title`, `bottom_lines(8)`): data, shown by `agora agent explain`.
+    pub fn name(self) -> String {
+        match self {
+            Self::Title => "title".to_string(),
+            Self::BottomLines(n) => format!("bottom_lines({n})"),
+            Self::BottomNonEmptyLines(n) => format!("bottom_non_empty_lines({n})"),
+        }
     }
 
     fn text(self, term: &dyn Terminal) -> String {
@@ -173,6 +182,61 @@ impl CompiledRule {
     }
 }
 
+impl CompiledRule {
+    /// The first condition that kept the rule from matching, checked in the order [`CompiledRule::matches`] reads them, or
+    /// [`RuleOutcome::Matched`]. Only `agora agent explain` asks; detection uses `matches`.
+    fn outcome(&self, text: &RegionText) -> RuleOutcome {
+        if self.own.as_ref().is_some_and(|m| !m.is_match(text)) {
+            return RuleOutcome::OwnMissing;
+        }
+        if let Some(i) = self.all.iter().position(|m| !m.is_match(text)) {
+            return RuleOutcome::AllMissing(i);
+        }
+        if !self.any.is_empty() && !self.any.iter().any(|m| m.is_match(text)) {
+            return RuleOutcome::AnyMissing;
+        }
+        if let Some(i) = self.not.iter().position(|m| m.is_match(text)) {
+            return RuleOutcome::NotPresent(i);
+        }
+        RuleOutcome::Matched
+    }
+}
+
+/// Why one rule did or did not match a screen (`agora agent explain`). Indexes count from 0 in the manifest's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleOutcome {
+    /// Every condition held.
+    Matched,
+    /// The rule's own `contains`/`regex` was not found.
+    OwnMissing,
+    /// This `all` condition was not found.
+    AllMissing(usize),
+    /// None of the `any` conditions was found.
+    AnyMissing,
+    /// This `not` condition was found.
+    NotPresent(usize),
+}
+
+/// One rule checked against a screen, in the order detection reads them (highest priority first, file order on ties).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleCheck {
+    pub id: String,
+    pub state: AgentState,
+    pub priority: i32,
+    pub region: Region,
+    pub outcome: RuleOutcome,
+}
+
+/// Every rule of a [`Detector`] checked against one screen, the text of each region they read, and what detection decides: the
+/// first matching rule, exactly as [`Detector::detect`] would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explanation {
+    pub checks: Vec<RuleCheck>,
+    /// Each region the rules read, once, in the order first read, with its text.
+    pub regions: Vec<(Region, String)>,
+    pub decided: Option<Detection>,
+}
+
 fn state_of(s: RuleState) -> AgentState {
     match s {
         RuleState::Working => AgentState::Working,
@@ -248,6 +312,44 @@ impl Detector {
             }
         }
         None
+    }
+}
+
+impl Detector {
+    /// Every rule checked against `term`, not only up to the first match, with the reason each one failed. For `agora agent explain`
+    /// and manifest authors; detection calls [`Detector::detect`], which stops at the first match.
+    pub fn explain(&self, term: &dyn Terminal) -> Explanation {
+        let mut regions: Vec<(Region, RegionText)> = Vec::new();
+        let mut checks = Vec::with_capacity(self.rules.len());
+        let mut decided = None;
+        for rule in &self.rules {
+            let idx = match regions.iter().position(|(r, _)| *r == rule.region) {
+                Some(i) => i,
+                None => {
+                    regions.push((rule.region, RegionText::new(rule.region.text(term))));
+                    regions.len() - 1
+                }
+            };
+            let outcome = rule.outcome(&regions[idx].1);
+            if outcome == RuleOutcome::Matched && decided.is_none() {
+                decided = Some(Detection {
+                    state: rule.state,
+                    rule_id: rule.id.clone(),
+                });
+            }
+            checks.push(RuleCheck {
+                id: rule.id.clone(),
+                state: rule.state,
+                priority: rule.priority,
+                region: rule.region,
+                outcome,
+            });
+        }
+        Explanation {
+            checks,
+            regions: regions.into_iter().map(|(r, t)| (r, t.raw)).collect(),
+            decided,
+        }
     }
 }
 

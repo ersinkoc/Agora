@@ -168,6 +168,14 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 `title`, `bottom_lines(n)`, `bottom_non_empty_lines(n)`. Reported state (hooks, ACP, adapter) always overrides
 rule results.
 
+`agora agent explain KIND --file SCREEN [--size COLSxROWS] [--manifests DIR]` shows how these rules read a captured screen,
+offline (no node, no socket): the kind is loaded as the node loads it (registry, built-in, then the manifests folder), the file is
+replayed on a terminal of `--size`, of the size its name carries (`trust@24x20.screen`) or 120x40, and every rule is listed in the
+order detection reads them with the first condition that kept it from matching (its own text, `all[i]`, the `any` list, `not[i]`),
+then the decision. `Detector::explain` decides exactly as `Detector::detect` (checked on every shipped fixture); it is not on the
+detection path. The region text it prints has control characters replaced and is cut to 40 lines of 200 characters; a file over
+16 MiB is refused. A kind with no screen rules (an ACP agent) says so.
+
 `[[ready]]` (ADR-0057, optional): rules of the same shape with `state = "idle"` that match only an empty input box waiting for a
 request, stricter than an `idle` rule (whose prompt marker can also be the selected row of a menu or dialog). The node types a helper's
 first prompt only when a fresh look at the live screen matches them and the kind's rules detect idle; a kind without them never gets
