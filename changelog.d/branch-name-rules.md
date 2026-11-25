@@ -1,1 +1,0 @@
-- A worktree branch name that git would refuse (for example one with a part starting with `.` or ending in `.lock`) is now refused at once with a clear reason, instead of failing with an internal error.
