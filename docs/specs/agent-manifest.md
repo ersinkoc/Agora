@@ -147,7 +147,9 @@ regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 
 Common validation: `display_name` is non-empty visible text on one line (no terminal controls or hidden formatting). Every command
 argv a manifest declares (`process.launch`, `adapter.command`, structured ACP `argv`, and the resume variants) names a non-empty
-program first and contains no NUL; later arguments may be empty. A structured-only manifest may leave `process.launch` empty.
+program first and contains no NUL; later arguments may be empty. Session-id arguments and MCP flag arguments contain no NUL too.
+Environment names are non-empty and contain neither `=` nor NUL, and values contain no NUL. A structured-only manifest may leave
+`process.launch` empty.
 
 Engine details (`agora-adapters`):
 - A rule matches when its own `contains`/`regex` (if present) match, every `all` condition matches, at least one

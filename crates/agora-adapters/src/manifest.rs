@@ -423,6 +423,13 @@ fn spawnable_argv(argv: &[String]) -> bool {
         && argv.iter().all(|arg| !arg.contains('\0'))
 }
 
+/// Environment entries accepted by `std::process::Command` on every supported platform.
+fn spawnable_env(env: &BTreeMap<String, String>) -> bool {
+    env.iter().all(|(name, value)| {
+        !name.is_empty() && !name.contains(['=', '\0']) && !value.contains('\0')
+    })
+}
+
 /// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks,
 /// structured) are accepted and ignored so newer manifests still load.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -623,6 +630,9 @@ impl Manifest {
         if !self.process.launch.is_empty() && !spawnable_argv(&self.process.launch) {
             return Err(invalid("process.launch"));
         }
+        if !spawnable_env(&self.process.env) {
+            return Err(invalid("process.env"));
+        }
         if let Some(r) = &self.resume {
             r.validate()?;
         }
@@ -645,12 +655,27 @@ impl Manifest {
             return Err(invalid("adapter.command"));
         }
         if self
+            .adapter
+            .as_ref()
+            .is_some_and(|a| !spawnable_env(&a.env))
+        {
+            return Err(invalid("adapter.env"));
+        }
+        if self
             .structured
             .as_ref()
             .and_then(|s| s.acp.as_ref())
             .is_some_and(|a| !spawnable_argv(&a.argv))
         {
             return Err(invalid("structured.acp.argv"));
+        }
+        if self
+            .structured
+            .as_ref()
+            .and_then(|s| s.acp.as_ref())
+            .is_some_and(|a| !spawnable_env(&a.env))
+        {
+            return Err(invalid("structured.acp.env"));
         }
         if let Some(u) = self.usage.as_ref().and_then(|u| u.file.as_ref()) {
             let paths_ok = [&u.cwd, &u.model, &u.input, &u.output]
@@ -697,7 +722,9 @@ impl Manifest {
         if let Some(m) = &self.mcp {
             let ok = match m.method {
                 McpMethod::ConfigFile => m.path.as_deref().is_some_and(|p| !p.is_empty()),
-                McpMethod::CliFlag => !m.flag.is_empty(),
+                McpMethod::CliFlag => {
+                    !m.flag.is_empty() && m.flag.iter().all(|arg| !arg.contains('\0'))
+                }
                 McpMethod::Env => !m.env.is_empty(),
             };
             if !ok || m.format.as_deref().is_some_and(|f| f != "json") {
@@ -705,8 +732,9 @@ impl Manifest {
             }
         }
         if let Some(sp) = &self.session {
-            let args_ok =
-                sp.id_args.is_empty() || sp.id_args.iter().any(|a| a.contains("{session_id}"));
+            let args_ok = sp.id_args.is_empty()
+                || (sp.id_args.iter().any(|a| a.contains("{session_id}"))
+                    && sp.id_args.iter().all(|a| !a.contains('\0')));
             let file_ok = sp.file.as_ref().is_none_or(|f| {
                 f.glob.starts_with("{home}/")
                     && !f.glob.split('/').any(|c| c == "..")
@@ -1197,6 +1225,190 @@ mod launch_tests {
             Err(ManifestError::Invalid { field }) if field == "resume.continue_argv"
         ));
         println!("FIX VERIFIED: F454 resume, fresh, and continue argv are spawnable");
+    }
+
+    #[test]
+    fn proof_f455_session_id_arguments_reject_nul() {
+        let control = Manifest::parse(&plain(
+            "[session]\nid_args = [\"--session-id\", \"{session_id}\"]\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[session]\nid_args = [\"--session-id\", \"{session_id}\\u0000\"]\n",
+        ));
+        println!("EXPECTED: session id argv containing NUL is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f456_terminal_environment_rejects_unspawnable_values() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\nenv = { OK = \"value\" }\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\nenv = { OK = \"bad\\u0000value\" }\n",
+        ));
+        println!("EXPECTED: L1 environment values containing NUL are rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f457_adapter_environment_rejects_unspawnable_names() {
+        let control = Manifest::parse(&plain(
+            "[adapter]\ncommand = [\"tool\"]\nenv = { OK = \"value\" }\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[adapter]\ncommand = [\"tool\"]\nenv = { \"BAD=NAME\" = \"value\" }\n",
+        ));
+        println!("EXPECTED: L3 environment names containing '=' are rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f458_acp_environment_rejects_unspawnable_values() {
+        let control = Manifest::parse(&plain(
+            "[structured.acp]\nargv = [\"tool\"]\nenv = { OK = \"value\" }\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[structured.acp]\nargv = [\"tool\"]\nenv = { OK = \"bad\\u0000value\" }\n",
+        ));
+        println!("EXPECTED: L2 environment values containing NUL are rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f459_mcp_cli_flags_reject_unspawnable_arguments() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\", \"{socket}\"]\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\\u0000\"]\n",
+        ));
+        println!("EXPECTED: MCP argv additions containing NUL are rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f455_session_id_argv_rejects_nul_but_keeps_empty_arguments() {
+        for args in [
+            "[\"bad\\u0000\", \"{session_id}\"]",
+            "[\"--id\", \"{session_id}\\u0000\"]",
+        ] {
+            let src = plain(&format!("[session]\nid_args = {args}\n"));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "session")
+            );
+        }
+        assert!(Manifest::parse(&plain(
+            "[session]\nid_args = [\"--id\", \"\", \"{session_id}\"]\n"
+        ))
+        .is_ok());
+        println!("FIX VERIFIED: F455 session id argv cannot fail at OS spawn");
+    }
+
+    #[test]
+    fn verify_f456_terminal_environment_rejects_bad_names_and_values() {
+        for env in [
+            "{ \"\" = \"v\" }",
+            "{ \"BAD=NAME\" = \"v\" }",
+            "{ \"BAD\\u0000NAME\" = \"v\" }",
+            "{ OK = \"bad\\u0000value\" }",
+        ] {
+            let src = plain(&format!("[process]\nlaunch = [\"tool\"]\nenv = {env}\n"));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "process.env")
+            );
+        }
+        assert!(Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\nenv = { OK = \"\" }\n"
+        ))
+        .is_ok());
+        println!("FIX VERIFIED: F456 L1 environment is spawnable");
+    }
+
+    #[test]
+    fn verify_f457_adapter_environment_rejects_bad_names_and_values() {
+        for env in ["{ \"BAD=NAME\" = \"v\" }", "{ OK = \"bad\\u0000value\" }"] {
+            let src = plain(&format!("[adapter]\ncommand = [\"tool\"]\nenv = {env}\n"));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "adapter.env")
+            );
+        }
+        assert!(Manifest::parse(&plain(
+            "[adapter]\ncommand = [\"tool\"]\nenv = { OK = \"v\" }\n"
+        ))
+        .is_ok());
+        println!("FIX VERIFIED: F457 L3 environment is spawnable");
+    }
+
+    #[test]
+    fn verify_f458_acp_environment_rejects_bad_names_and_values() {
+        for env in ["{ \"BAD=NAME\" = \"v\" }", "{ OK = \"bad\\u0000value\" }"] {
+            let src = plain(&format!(
+                "[structured.acp]\nargv = [\"tool\"]\nenv = {env}\n"
+            ));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "structured.acp.env")
+            );
+        }
+        assert!(Manifest::parse(&plain(
+            "[structured.acp]\nargv = [\"tool\"]\nenv = { OK = \"v\" }\n"
+        ))
+        .is_ok());
+        println!("FIX VERIFIED: F458 L2 environment is spawnable");
+    }
+
+    #[test]
+    fn verify_f459_mcp_cli_flags_reject_nul_but_keep_empty_arguments() {
+        for flags in ["[\"bad\\u0000\"]", "[\"--mcp\", \"bad\\u0000arg\"]"] {
+            let src = plain(&format!(
+                "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"cli_flag\"\nflag = {flags}\n"
+            ));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "mcp")
+            );
+        }
+        assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\", \"\"]\n")).is_ok());
+        println!("FIX VERIFIED: F459 MCP argv additions are spawnable");
     }
 
     #[test]
