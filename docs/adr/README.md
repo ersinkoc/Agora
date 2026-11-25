@@ -131,3 +131,4 @@ Date: YYYY-MM-DD
 | 0112 | An agent can see every machine and agent of its hub | Accepted |
 | 0113 | Deep themes and community themes, and a theme is always data | Accepted |
 | 0114 | Community plugins run sandboxed in the window and ask for what they see | Accepted |
+| 0115 | A repository on a case-insensitive host is one project, whatever the case of its URL | Proposed |
