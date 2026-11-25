@@ -230,7 +230,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">
           {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : card(row.key, `fleet-ask fleet-ask--many${each.has(row.key) ? ' fleet-ask--open' : ''}`, 'stack',
-            <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</span>,
+            <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: visible(row.agentKind), machine: visible(row.machine) }) : t('fleet-same-ask-any', { count: row.items.length, machine: visible(row.machine) })}</span>,
             <>
               <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>
               {each.has(row.key) && <ul className="fleet-queue fleet-ask__each">{row.items.map((it) => rowOf(it, false))}</ul>}
@@ -389,7 +389,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
               {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: visible(g.name) })} title={t('fleet-start-on', { machine: visible(g.name) })}><Icon name="plus" /></button>}
             </header>
             {by === 'machine' && !g.online && <p className="muted m-0">{t('fleet-offline-note')}</p>}
-            {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.join(', ') })}</p>}
+            {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.map(visible).join(', ') })}</p>}
             {by === 'project' && spread.get(g.key) && <ProjectHint spread={spread.get(g.key) as ProjectSpread} />}
             {g.agents.length === 0 ? (g.online ? <p className="muted m-0">{t('fleet-no-agents-here')}</p> : null) : (
               <div className="fleet-grid">

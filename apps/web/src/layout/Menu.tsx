@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { t } from '../i18n';
+import { visible } from '../net/view';
 import { placeMenu } from './placement';
 import { Icon } from '../components/Icon';
 
@@ -115,13 +116,13 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
 
   return (
     <span className="relative inline-flex max-w-full">
-      <button ref={button} type="button" className={className} aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label}
+      <button ref={button} type="button" className={className} aria-haspopup="menu" aria-expanded={open} aria-label={visible(label)} title={visible(label)}
         onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={(e) => { if (e.key === 'ArrowDown' && !open) { e.preventDefault(); setOpen(true); } }}>
         {children}
       </button>
       {open && createPortal(
-        <div ref={list} role="menu" aria-label={trail.length ? trail[trail.length - 1]?.label : label} onKeyDown={onKey}
+        <div ref={list} role="menu" aria-label={visible((trail.length ? trail[trail.length - 1]?.label : label) ?? '')} onKeyDown={onKey}
           style={{ position: 'fixed', left: 0, top: 0 }}
           className="z-50 grid min-w-56 max-w-[min(20rem,calc(100vw-1rem))] gap-px overflow-y-auto overscroll-contain rounded-s border border-line bg-surface-1 p-1 text-[0.8125rem] text-ink shadow-card">
           {trail.length > 0 && (
@@ -135,7 +136,7 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
               <div key={`${i}-${item.label}`} className="grid gap-1">
                 <div className="grid grid-cols-3 gap-1" data-tiles>
                   {run(page, i).map((x, j) => (
-                    <button key={x.label} type="button" role="menuitemradio" aria-checked={!!x.checked} aria-label={x.label} title={x.label} data-index={i + j} data-tile disabled={x.disabled}
+                    <button key={x.label} type="button" role="menuitemradio" aria-checked={!!x.checked} aria-label={visible(x.label)} title={visible(x.label)} data-index={i + j} data-tile disabled={x.disabled}
                       tabIndex={x.checked || (j === 0 && !run(page, i).some((y) => y.checked)) ? 0 : -1}
                       className="menu-tile" onClick={() => choose(x)} onPointerEnter={() => setHint(x.label)} onPointerLeave={() => setHint(undefined)} onFocus={() => setHint(x.label)} onBlur={() => setHint(undefined)}>
                       {x.tile}
@@ -143,7 +144,7 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
                   ))}
                 </div>
                 {/* The name of the tile you are on, or of the chosen one: the pictures alone are not the only way to tell them apart. */}
-                <p className="m-0 min-h-4 px-1 text-xs text-muted" aria-hidden>{hint ?? run(page, i).find((x) => x.checked)?.label ?? ''}</p>
+                <p className="m-0 min-h-4 px-1 text-xs text-muted" aria-hidden>{visible(hint ?? run(page, i).find((x) => x.checked)?.label ?? '')}</p>
               </div>
             )
           ) : (
@@ -153,9 +154,9 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
                 <span className="flex min-w-0 items-center gap-2">
                   {item.checked !== undefined && <span aria-hidden className={`size-1.5 flex-none rounded-full ${item.checked ? 'bg-accent' : ''}`} />}
                   {item.lead}
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate">{visible(item.label)}</span>
                 </span>
-                {item.hint && <span className="flex-none text-xs text-muted">{item.hint}</span>}
+                {item.hint && <span className="flex-none text-xs text-muted">{visible(item.hint)}</span>}
                 {item.items && <Icon name="chevron" className="size-3 rtl:rotate-180" />}
               </button>
             </div>
