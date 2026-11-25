@@ -12,6 +12,7 @@ import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, isKnownPanel, panesOf } from './tree';
 import { TOOL_PANELS, isToolPanel, type ToolPanel } from '../net/paneTools';
+import { visible as visibleText } from '../net/hidden';
 
 const BAR = '2.25rem'; // the height of a pane's bar (h-9)
 const DRAG_TYPE = 'application/x-agora-pane';
@@ -60,7 +61,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   const byId = useMemo(() => new Map(fleet.map((a) => [a.id, a])), [fleet]);
   const agentFor = (p: Pane) => { const id = agentOf(p, bindings); return id ? byId.get(id) : undefined; };
   // A pane's name: the agent it shows; for a tool (Terminal, Changes, Files, File manager) the tool first, so two panes of one agent differ.
-  const label = (p: Pane) => { const a = agentFor(p); return a ? (isToolPanel(p.panel) ? t('layout-tool-of', { what: panelLabel(p.panel), name: a.name }) : a.name) : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel); };
+  const label = (p: Pane) => { const a = agentFor(p); return visibleText(a ? (isToolPanel(p.panel) ? t('layout-tool-of', { what: panelLabel(p.panel), name: a.name }) : a.name) : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel)); };
   const [drag, setDrag] = useState<string | undefined>();
   const [drop, setDrop] = useState<{ frame: string; place: Place } | undefined>();
   const single = all.length === 1;

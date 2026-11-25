@@ -192,6 +192,65 @@ describe.each(surfaces)('request cards on %s keep T44 (#1048 item 4)', (_name, d
   });
 });
 
+describe('node-supplied phone labels', () => {
+  it('makes machine group headings visible', () => {
+    const raw = 'lap\u3164top\u202e';
+    act(() => root.render(<PhoneHome agents={[{ ...agent, machine: raw }]} machines={[{ ...machines[0]!, name: raw }]} approvals={[]} onResolve={() => {}} link="live" onOpen={() => {}} />));
+    const group = [...host.querySelectorAll<HTMLElement>('.phone-section[aria-label]')].at(-1)!;
+    expect(group.getAttribute('aria-label')).toBe('lap\\u{3164}top\\u{202e}');
+    expect(group.querySelector('h2')?.textContent).toContain('lap\\u{3164}top\\u{202e}');
+  });
+
+  it('verifies machine headings across format, control, and private-use characters', () => {
+    for (const [char, escaped] of [['\u200b', '\\u{200b}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw = `lap${char}top`;
+      act(() => root.render(<PhoneHome agents={[{ ...agent, machine: raw }]} machines={[{ ...machines[0]!, name: raw }]} approvals={[]} onResolve={() => {}} link="live" onOpen={() => {}} />));
+      const group = [...host.querySelectorAll<HTMLElement>('.phone-section[aria-label]')].at(-1)!;
+      expect(group.getAttribute('aria-label')).toBe(`lap${escaped}top`);
+      expect(group.textContent).toContain(`lap${escaped}top`);
+    }
+  });
+
+  it('makes agent identity and work labels visible in fleet rows', () => {
+    const shown = { ...agent, name: 'clau\u034fde\ue000', project: 'lo\u2066gin', branch: 'fix\u0007now' };
+    act(() => root.render(<PhoneHome agents={[shown]} machines={machines} approvals={[]} onResolve={() => {}} link="live" onOpen={() => {}} />));
+    const row = host.querySelector('.phone-row') as HTMLElement;
+    expect(row.textContent).toContain('clau\\u{34f}de\\u{e000}');
+    expect(row.textContent).toContain('lo\\u{2066}gin · fix\\u{7}now');
+  });
+
+  it('verifies fleet row labels without changing the raw agent identity', () => {
+    const opened = vi.fn();
+    for (const [char, escaped] of [['\u061c', '\\u{61c}'], ['\u0085', '\\u{85}'], ['\ue000', '\\u{e000}']] as const) {
+      const shown = { ...agent, name: `co${char}dex`, workspace: `wo${char}rk`, project: '', branch: `ma${char}in` };
+      act(() => root.render(<PhoneHome agents={[shown]} machines={machines} approvals={[]} onResolve={() => {}} link="live" onOpen={opened} />));
+      const row = host.querySelector<HTMLButtonElement>('.phone-row')!;
+      expect(row.textContent).toContain(`co${escaped}dex`);
+      expect(row.textContent).toContain(`wo${escaped}rk · ma${escaped}in`);
+      act(() => row.click());
+      expect(opened).toHaveBeenLastCalledWith(agent.id);
+    }
+  });
+
+  it('makes the focused agent and machine labels visible', () => {
+    const shown = { ...agent, name: 'clau\u200bde\u202e', machine: 'lap\u3164top\ue000' };
+    act(() => root.render(<PhoneAgent agent={shown} agents={[shown]} machines={machines} approvals={[]} onResolve={() => {}} onOpen={() => {}} onBack={() => {}} />));
+    expect(host.querySelector('.phone__main')?.getAttribute('aria-label')).toBe('clau\\u{200b}de\\u{202e}');
+    expect(host.querySelector('h1')?.textContent).toBe('clau\\u{200b}de\\u{202e}');
+    expect(host.querySelector('h1')?.parentElement?.textContent).toContain('lap\\u{3164}top\\u{e000}');
+  });
+
+  it('verifies focused labels across isolate, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u2066', '\\u{2066}'], ['\u0007', '\\u{7}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const shown = { ...agent, name: `cl${char}aude`, machine: `ma${char}chine` };
+      act(() => root.render(<PhoneAgent agent={shown} agents={[shown]} machines={machines} approvals={[]} onResolve={() => {}} onOpen={() => {}} onBack={() => {}} />));
+      expect(host.querySelector('.phone__main')?.getAttribute('aria-label')).toBe(`cl${escaped}aude`);
+      expect(host.querySelector('h1')?.textContent).toBe(`cl${escaped}aude`);
+      expect(host.querySelector('h1')?.parentElement?.textContent).toContain(`ma${escaped}chine`);
+    }
+  });
+});
+
 describe('the phone bar keeps T44 with the shared guard (#1048 item 4)', () => {
   const bar = () => host.querySelector('.phone-dock') as HTMLElement;
   const barBtn = (name: string) => [...bar().querySelectorAll('button')].find((b) => b.textContent === name) as HTMLButtonElement;

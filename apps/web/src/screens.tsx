@@ -52,6 +52,7 @@ import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
+import { visible } from './net/hidden';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -533,7 +534,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                       <a className="set-item set-item--link" href={`#/machines/${encodeURIComponent(m.id)}`}>
                         <SystemTile system={m.os} />
                         <span className="set-item__main">
-                          <span className="set-item__name"><bdi>{m.name}</bdi></span>
+                          <span className="set-item__name"><bdi>{visible(m.name)}</bdi></span>
                           <span className="set-item__meta">
                             {systemName(m.os) && <span>{peerText(systemName(m.os))}</span>}
                             <span>{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
@@ -541,7 +542,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                           </span>
                         </span>
                         <span className="set-item__end">
-                          {m.build && <span title={t('network-build')}><Tag mono>{m.build}</Tag></span>}
+                          {m.build && <span title={t('network-build')}><Tag mono>{visible(m.build)}</Tag></span>}
                           <Pill tone={m.online ? 'finished' : 'idle'} icon={<span aria-hidden className="set-dot" />}>{t(m.online ? 'machine-online' : 'machine-offline')}</Pill>
                         </span>
                       </a>

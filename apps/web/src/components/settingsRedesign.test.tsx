@@ -86,6 +86,25 @@ describe('the Settings page', () => {
     expect(host.querySelector('#settings-machines')!.textContent).toContain('2 of 3 online');
     expect(host.querySelector('.set-group__head a[href="#/machines"]')?.textContent).toContain('Manage machines');
   });
+
+  it('makes node-supplied machine names and builds visible', () => {
+    const raw: MachineModel = { ...machines[0]!, name: 'lap\u3164top\u202e', build: 'v1\u034f.2\ue000' };
+    render(page({ machines: [raw] }));
+    const row = host.querySelector('#settings-machines a.set-item')!;
+    expect(row.textContent).toContain('lap\\u{3164}top\\u{202e}');
+    expect(row.textContent).toContain('v1\\u{34f}.2\\u{e000}');
+  });
+
+  it('verifies machine labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u2069', '\\u{2069}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw: MachineModel = { ...machines[0]!, name: `lap${char}top`, build: `v1${char}.2` };
+      render(page({ machines: [raw] }));
+      const row = host.querySelector('#settings-machines a.set-item')!;
+      expect(row.textContent).toContain(`lap${escaped}top`);
+      expect(row.textContent).toContain(`v1${escaped}.2`);
+      expect(row.getAttribute('href')).toBe('#/machines/laptop');
+    }
+  });
 });
 
 describe('Appearance, This device and Passkey', () => {

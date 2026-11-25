@@ -114,6 +114,34 @@ describe('pane tabs and bars', () => {
     expect(solo.querySelector('[data-no-ask]')?.className).not.toContain('ide-chip');
   });
 
+  it('makes node-supplied pane labels visible', () => {
+    const raw = 'clau\u3164de\u202e · teal\ue000';
+    const hiddenFleet = [{ ...fleet[0]!, name: raw }];
+    const one = workspaceOf({ version: LAYOUT_VERSION, root: { type: 'tabs', active: 0, children: [{ type: 'pane', id: 'p-hidden', panel: 'agent', bind: { agent: hiddenFleet[0]!.id } }] } });
+    act(() => root.render(<div style={{ position: 'relative', width: 600, height: 400 }}>
+      <Workspace ws={one} dispatch={() => {}} fleet={hiddenFleet} bindings={{ attention: new Map() }} narrow={false}
+        renderAgent={(a) => <p>{a.name}</p>} renderPanel={() => undefined} welcome={null} />
+    </div>));
+    const tab = host.querySelector<HTMLElement>('#tab-p-hidden')!;
+    expect(tab.title).toBe('clau\\u{3164}de\\u{202e} · teal\\u{e000}');
+    expect(tab.querySelector('[data-pane-name]')?.textContent).toBe('clau\\u{3164}de\\u{202e} · teal\\u{e000}');
+  });
+
+  it('verifies pane labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u200d', '\\u{200d}'], ['\u0085', '\\u{85}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw = `co${char}dex · teal`;
+      const hiddenFleet = [{ ...fleet[0]!, name: raw }];
+      const one = workspaceOf({ version: LAYOUT_VERSION, root: { type: 'tabs', active: 0, children: [{ type: 'pane', id: 'p-edge', panel: 'agent', bind: { agent: hiddenFleet[0]!.id } }] } });
+      act(() => root.render(<div style={{ position: 'relative', width: 600, height: 400 }}>
+        <Workspace ws={one} dispatch={() => {}} fleet={hiddenFleet} bindings={{ attention: new Map() }} narrow={false}
+          renderAgent={(a) => <p>{a.name}</p>} renderPanel={() => undefined} welcome={null} />
+      </div>));
+      const tab = host.querySelector<HTMLElement>('#tab-p-edge')!;
+      expect(tab.title).toBe(`co${escaped}dex · teal`);
+      expect(tab.querySelector('[data-pane-name]')?.textContent).toBe(`co${escaped}dex · teal`);
+    }
+  });
+
   it('still moves between tabs with the arrow keys, Home and End', () => {
     act(() => root.render(<Harness ws={split} />));
     const first = host.querySelector<HTMLElement>('#tab-p-a1') as HTMLElement;
