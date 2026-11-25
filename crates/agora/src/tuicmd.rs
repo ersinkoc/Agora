@@ -58,6 +58,8 @@ fn forget_notice(say: &Say, result: Result<(), ErrorInfo>) -> String {
                 .unwrap_or(error.code)
         }
     };
+    // A sentence that ends in an empty or padded parameter must not leave a space before the closing text.
+    let reason = reason.trim().to_string();
     // Error parameters come from the hub; they must not become terminal control sequences.
     plain(&say.text(key!("tui-forget-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
 }
@@ -218,7 +220,9 @@ fn resume_notice(say: &Say, error: &ErrorInfo) -> String {
     let reason = say
         .0
         .render(&error.code.replace('.', "-"), &args)
-        .unwrap_or_else(|| error.code.clone());
+        .unwrap_or_else(|| error.code.clone())
+        .trim()
+        .to_string();
     // Parameters come from the node; they must not become terminal control sequences.
     plain(&say.text(key!("tui-resume-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
 }
