@@ -153,6 +153,8 @@ kind = "k"
 display_name = "K"
 version = "1"
 min_engine = 1
+[process]
+launch = ["k"]
 [[rules]]
 id = "r"
 state = "idle"
@@ -172,7 +174,7 @@ fn with_typed(ready: &str, typed: &str) -> Result<Manifest, ManifestError> {
         format!("[[{section}]]\nid = \"r\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\n{conditions}\n")
     };
     Manifest::parse(&format!(
-        "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{}{}",
+        "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"k\"]\n{}{}",
         rule("ready", ready),
         rule("typed", typed)
     ))
@@ -235,6 +237,8 @@ kind = "k"
 display_name = "K"
 version = "1"
 min_engine = 1
+[process]
+launch = ["k"]
 [[rules]]
 id = "r"
 state = "idle"

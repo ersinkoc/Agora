@@ -8,6 +8,9 @@ use serde::Deserialize;
 /// 6: `[structured] allow_always` (ADR-0101).
 pub const ENGINE_VERSION: u32 = 6;
 
+/// Longest stable agent-kind id. Kinds are ASCII, so this is both bytes and characters.
+pub const MAX_KIND_BYTES: usize = 64;
+
 /// ADR-0066: most `[[launch.setting]]`s one manifest may declare, most allowed values one may list, and most arguments one may add.
 pub const MAX_LAUNCH_SETTINGS: usize = 8;
 const MAX_SETTING_VALUES: usize = 32;
@@ -612,12 +615,16 @@ impl Manifest {
             });
         }
         let kind_ok = !self.kind.is_empty()
+            && self.kind.len() <= MAX_KIND_BYTES
             && self
                 .kind
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         if !kind_ok {
             return Err(invalid("kind"));
+        }
+        if self.min_engine == 0 {
+            return Err(invalid("min_engine"));
         }
         if self.display_name.trim().is_empty()
             || self
@@ -626,6 +633,11 @@ impl Manifest {
                 .any(|c| c.is_control() || agora_core::text::is_hidden(c))
         {
             return Err(invalid("display_name"));
+        }
+        let structured =
+            self.adapter.is_some() || self.structured.as_ref().is_some_and(|s| s.acp.is_some());
+        if self.process.launch.is_empty() && !structured {
+            return Err(invalid("process.launch"));
         }
         if !self.process.launch.is_empty() && !spawnable_argv(&self.process.launch) {
             return Err(invalid("process.launch"));
@@ -721,13 +733,20 @@ impl Manifest {
         }
         if let Some(m) = &self.mcp {
             let ok = match m.method {
-                McpMethod::ConfigFile => m.path.as_deref().is_some_and(|p| !p.is_empty()),
+                McpMethod::ConfigFile => m
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty() && !p.contains('\0')),
                 McpMethod::CliFlag => {
-                    !m.flag.is_empty() && m.flag.iter().all(|arg| !arg.contains('\0'))
+                    m.path
+                        .as_deref()
+                        .is_none_or(|p| !p.is_empty() && !p.contains('\0'))
+                        && !m.flag.is_empty()
+                        && m.flag.iter().all(|arg| !arg.contains('\0'))
                 }
                 McpMethod::Env => !m.env.is_empty(),
             };
-            if !ok || m.format.as_deref().is_some_and(|f| f != "json") {
+            if !ok || !spawnable_env(&m.env) || m.format.as_deref().is_some_and(|f| f != "json") {
                 return Err(invalid("mcp"));
             }
         }
@@ -1150,10 +1169,7 @@ mod launch_tests {
             ));
         }
         assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\", \"\"]\n")).is_ok());
-        assert!(
-            Manifest::parse(&plain("")).is_ok(),
-            "a structured-only manifest may omit launch"
-        );
+        assert!(Manifest::parse(&plain("[structured]\nacp = { argv = [\"tool\"] }\n")).is_ok());
         println!(
             "FIX VERIFIED: F451 L1 launch argv is spawnable without rejecting empty arguments"
         );
@@ -1230,12 +1246,12 @@ mod launch_tests {
     #[test]
     fn proof_f455_session_id_arguments_reject_nul() {
         let control = Manifest::parse(&plain(
-            "[session]\nid_args = [\"--session-id\", \"{session_id}\"]\n",
+            "[process]\nlaunch = [\"tool\"]\n[session]\nid_args = [\"--session-id\", \"{session_id}\"]\n",
         ));
         assert!(control.is_ok());
         println!("CONTROL OK");
         let actual = Manifest::parse(&plain(
-            "[session]\nid_args = [\"--session-id\", \"{session_id}\\u0000\"]\n",
+            "[process]\nlaunch = [\"tool\"]\n[session]\nid_args = [\"--session-id\", \"{session_id}\\u0000\"]\n",
         ));
         println!("EXPECTED: session id argv containing NUL is rejected");
         println!("ACTUAL: accepted = {}", actual.is_ok());
@@ -1333,13 +1349,15 @@ mod launch_tests {
             "[\"bad\\u0000\", \"{session_id}\"]",
             "[\"--id\", \"{session_id}\\u0000\"]",
         ] {
-            let src = plain(&format!("[session]\nid_args = {args}\n"));
+            let src = plain(&format!(
+                "[process]\nlaunch = [\"tool\"]\n[session]\nid_args = {args}\n"
+            ));
             assert!(
                 matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "session")
             );
         }
         assert!(Manifest::parse(&plain(
-            "[session]\nid_args = [\"--id\", \"\", \"{session_id}\"]\n"
+            "[process]\nlaunch = [\"tool\"]\n[session]\nid_args = [\"--id\", \"\", \"{session_id}\"]\n"
         ))
         .is_ok());
         println!("FIX VERIFIED: F455 session id argv cannot fail at OS spawn");
@@ -1412,6 +1430,185 @@ mod launch_tests {
     }
 
     #[test]
+    fn proof_f460_mcp_environment_rejects_unspawnable_entries() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"env\"\n[mcp.env]\nOK = \"value\"\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"env\"\n[mcp.env]\n\"BAD=NAME\" = \"value\"\n",
+        ));
+        println!("EXPECTED: MCP environment names containing '=' are rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f461_mcp_paths_reject_nul() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"config_file\"\npath = \".mcp.json\"\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"config_file\"\npath = \"bad\\u0000.json\"\n",
+        ));
+        println!("EXPECTED: an MCP config path containing NUL is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f462_manifest_kinds_fit_the_visible_approval_identity() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(
+            &plain("[process]\nlaunch = [\"tool\"]\n")
+                .replace("kind = \"k\"", &format!("kind = \"{}\"", "k".repeat(65))),
+        );
+        println!("EXPECTED: a kind longer than the 64-character approval identity is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f463_engine_versions_start_at_one() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(
+            &plain("[process]\nlaunch = [\"tool\"]\n").replace("min_engine = 1", "min_engine = 0"),
+        );
+        println!("EXPECTED: engine version zero is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f464_terminal_manifests_need_a_launch_command() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n",
+        );
+        println!("EXPECTED: a terminal manifest without process.launch is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f460_mcp_environment_is_spawnable() {
+        let src = |entry: &str| {
+            plain(&format!(
+                "[process]\nlaunch = [\"tool\"]\n[mcp]\nmethod = \"env\"\n[mcp.env]\n{entry}\n"
+            ))
+        };
+        for entry in [
+            "\"\" = \"v\"",
+            "\"BAD=NAME\" = \"v\"",
+            "\"BAD\\u0000NAME\" = \"v\"",
+            "OK = \"bad\\u0000value\"",
+        ] {
+            assert!(
+                matches!(Manifest::parse(&src(entry)), Err(ManifestError::Invalid { field }) if field == "mcp")
+            );
+        }
+        assert!(Manifest::parse(&src("OK = \"\"")).is_ok());
+        println!("FIX VERIFIED: F460 MCP environment entries are spawnable");
+    }
+
+    #[test]
+    fn verify_f461_mcp_file_paths_reject_nul_and_empty_values() {
+        let manifest =
+            |tail: &str| plain(&format!("[process]\nlaunch = [\"tool\"]\n[mcp]\n{tail}"));
+        for tail in [
+            "method = \"config_file\"\npath = \"bad\\u0000.json\"\n",
+            "method = \"cli_flag\"\npath = \"bad\\u0000.json\"\nflag = [\"--mcp\"]\n",
+            "method = \"cli_flag\"\npath = \"\"\nflag = [\"--mcp\"]\n",
+        ] {
+            assert!(
+                matches!(Manifest::parse(&manifest(tail)), Err(ManifestError::Invalid { field }) if field == "mcp")
+            );
+        }
+        assert!(Manifest::parse(&manifest(
+            "method = \"config_file\"\npath = \".mcp.json\"\n"
+        ))
+        .is_ok());
+        assert!(Manifest::parse(&manifest("method = \"cli_flag\"\nflag = [\"--mcp\"]\n")).is_ok());
+        println!("FIX VERIFIED: F461 MCP file paths are usable OS paths");
+    }
+
+    #[test]
+    fn verify_f462_kind_length_boundary() {
+        let manifest = |len| {
+            plain("[process]\nlaunch = [\"tool\"]\n")
+                .replace("kind = \"k\"", &format!("kind = \"{}\"", "k".repeat(len)))
+        };
+        assert!(Manifest::parse(&manifest(MAX_KIND_BYTES)).is_ok());
+        assert!(
+            matches!(Manifest::parse(&manifest(MAX_KIND_BYTES + 1)), Err(ManifestError::Invalid { field }) if field == "kind")
+        );
+        println!("FIX VERIFIED: F462 kind ids fit their 64-character contract");
+    }
+
+    #[test]
+    fn verify_f463_engine_version_lower_and_upper_boundaries() {
+        let manifest = |engine| {
+            plain("[process]\nlaunch = [\"tool\"]\n")
+                .replace("min_engine = 1", &format!("min_engine = {engine}"))
+        };
+        assert!(
+            matches!(Manifest::parse(&manifest(0)), Err(ManifestError::Invalid { field }) if field == "min_engine")
+        );
+        assert!(Manifest::parse(&manifest(1)).is_ok());
+        assert!(Manifest::parse(&manifest(ENGINE_VERSION)).is_ok());
+        assert!(matches!(
+            Manifest::parse(&manifest(ENGINE_VERSION + 1)),
+            Err(ManifestError::EngineTooOld { .. })
+        ));
+        println!("FIX VERIFIED: F463 engine versions begin at one");
+    }
+
+    #[test]
+    fn verify_f464_only_structured_manifests_may_omit_terminal_launch() {
+        assert!(
+            matches!(Manifest::parse(&plain("")), Err(ManifestError::Invalid { field }) if field == "process.launch")
+        );
+        assert!(Manifest::parse(&plain("[adapter]\ncommand = [\"tool\"]\n")).is_ok());
+        assert!(Manifest::parse(&plain("[structured]\nacp = { argv = [\"tool\"] }\n")).is_ok());
+        assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n")).is_ok());
+        println!("FIX VERIFIED: F464 terminal manifests name a launch command");
+    }
+
+    #[test]
     fn proof_f447_launch_options_require_the_engine_that_understands_them() {
         let control = Manifest::parse(&with(SKIP));
         assert!(control.is_ok());
@@ -1466,13 +1663,14 @@ mod launch_tests {
     #[test]
     fn verify_f447_launch_option_engine_floor_and_plain_engine_one_manifest() {
         assert!(Manifest::parse(&with("").replace("min_engine = 2", "min_engine = 1")).is_ok());
-        for engine in [0, 1] {
-            let src = with(SKIP).replace("min_engine = 2", &format!("min_engine = {engine}"));
-            assert!(matches!(
-                Manifest::parse(&src),
-                Err(ManifestError::Invalid { field }) if field == "launch.option"
-            ));
-        }
+        let zero = with(SKIP).replace("min_engine = 2", "min_engine = 0");
+        assert!(
+            matches!(Manifest::parse(&zero), Err(ManifestError::Invalid { field }) if field == "min_engine")
+        );
+        let one = with(SKIP).replace("min_engine = 2", "min_engine = 1");
+        assert!(
+            matches!(Manifest::parse(&one), Err(ManifestError::Invalid { field }) if field == "launch.option")
+        );
         assert!(Manifest::parse(&with(SKIP)).is_ok());
         println!("FIX VERIFIED: F447 launch options require engine 2 or newer");
     }
@@ -1608,7 +1806,7 @@ mod usage_tests {
 
     fn with(file: &str) -> String {
         format!(
-            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[usage]\nsource = \"file\"\n[usage.file]\n{file}"
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"k\"]\n[usage]\nsource = \"file\"\n[usage.file]\n{file}"
         )
     }
 
@@ -1619,7 +1817,7 @@ mod usage_tests {
 
     fn quota(min_engine: u32, usage: bool, tail: &str) -> String {
         let head = format!(
-            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = {min_engine}\n"
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = {min_engine}\n[process]\nlaunch = [\"k\"]\n"
         );
         let u = if usage {
             format!("[usage]\nsource = \"file\"\n[usage.file]\n{GOOD}")
@@ -1692,7 +1890,7 @@ mod usage_tests {
 mod session_tests {
     use super::*;
 
-    const BASE: &str = "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n";
+    const BASE: &str = "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"k\"]\n";
     const FILE: &str =
         "[session.file]\nglob = \"{home}/.x/*.jsonl\"\nid = \"payload.id\"\ncwd = \"payload.cwd\"\n";
 
@@ -1722,7 +1920,7 @@ mod mcp_tests {
 
     fn load(mcp: &str) -> Result<Manifest, ManifestError> {
         Manifest::parse(&format!(
-            "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[mcp]\n{mcp}"
+            "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"x\"]\n[mcp]\n{mcp}"
         ))
     }
 
