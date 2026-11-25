@@ -13,7 +13,7 @@ Never reuse or renumber a field; add new fields and messages instead.
 
 CI runs `agora-schema-check` against the target branch. Renaming, retyping, or removing a field, message,
 enum, or enum value fails the build, as does changing a published field's oneof membership or wire
-encoding options. Additions are allowed. Run the descriptor check locally:
+encoding options or enum alias precedence. Additions are allowed. Run the descriptor check locally:
 `cargo run -p agora-schema-check -- <base schema dir> schema`.
 
 ## Golden fixtures

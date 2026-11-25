@@ -334,6 +334,32 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
         if !ranges_cover(&enum_ranges(be), &enum_ranges(he)) {
             out.push(format!("enum {name}: reserved number range was narrowed"));
         }
+        let mut base_first_names = BTreeMap::new();
+        for value in &be.value {
+            base_first_names
+                .entry(value.number())
+                .or_insert_with(|| value.name());
+        }
+        for (number, base_name) in base_first_names {
+            if !he
+                .value
+                .iter()
+                .any(|value| value.number() == number && value.name() == base_name)
+            {
+                continue;
+            }
+            let head_name = he
+                .value
+                .iter()
+                .find(|value| value.number() == number)
+                .map(|value| value.name());
+            if head_name != Some(base_name) {
+                out.push(format!(
+                    "enum {name}: canonical JSON name for value {number} changed from `{base_name}` to `{}`",
+                    head_name.unwrap_or("")
+                ));
+            }
+        }
         for bv in &be.value {
             if he
                 .value
