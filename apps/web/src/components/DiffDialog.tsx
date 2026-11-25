@@ -5,6 +5,7 @@ import type { AgentTileModel } from '../model';
 import type { DiffSource } from '../net/diff';
 import { ChangesView } from './ChangesView';
 import { Icon } from './Icon';
+import { visible } from '../net/hidden';
 
 // What one agent's workspace holds that is not committed, as a review screen (docs/ux/review.md): changed files on the left, one
 // file's changes on the right. The agent's tile is replaced on every fleet update; the changes are read again only when asked, or
@@ -30,11 +31,11 @@ export function DiffDialog({ agent, load, read, onClose }: {
           className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-l border border-line bg-surface-1 shadow-card md:inset-x-[3vw] md:inset-y-[4vh]">
           <header className="flex flex-none items-center justify-between gap-3 border-b border-line px-4 py-2.5">
             <div className="min-w-0">
-              <Dialog.Title className="m-0 truncate text-base font-semibold tracking-normal text-ink normal-case">{t('diff-title', { name: agent.name })}</Dialog.Title>
+              <Dialog.Title className="m-0 truncate text-base font-semibold tracking-normal text-ink normal-case">{t('diff-title', { name: visible(agent.name) })}</Dialog.Title>
               <p className="muted m-0 flex min-w-0 items-center gap-1.5 truncate text-xs">
-                <Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{agent.machine}</span>
-                <Icon name="folder" className="ms-1 size-3.5 flex-none" /><span className="truncate">{agent.project || agent.workspace}</span>
-                {agent.branch && <><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{agent.branch}</span></>}
+                <Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{visible(agent.machine)}</span>
+                <Icon name="folder" className="ms-1 size-3.5 flex-none" /><span className="truncate">{visible(agent.project || agent.workspace)}</span>
+                {agent.branch && <><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{visible(agent.branch)}</span></>}
               </p>
             </div>
             <Dialog.Close className="button">{t('diff-close')}</Dialog.Close>
