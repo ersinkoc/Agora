@@ -577,7 +577,7 @@ pub fn always_lines(a: &agora_protocol::v1::ApprovalSnapshot, t: Text<'_>) -> Ve
 /// ADR-0058: a notice in the conversation, in words. The code picks the message; parameters are the agent's text, shown plain.
 pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
     let p = |k: &str| Arg::Str(plain(e.params.get(k).map_or("", String::as_str)));
-    match e.code.as_str() {
+    let text = match e.code.as_str() {
         "adapter.turn_failed" => t(
             key!("tui-notice-turn_failed"),
             &[
@@ -637,7 +637,10 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
         ),
-    }
+    };
+    // Some sentences end in the agent's text (`stderr_tail`), which may be missing or end in a line break: the notice ends at its
+    // words, without a space or an empty row after them.
+    text.trim_end().to_string()
 }
 
 /// ADR-0058: the line above a chat agent's conversation: its mode, model and how full its context is, when it reported them.
@@ -1199,6 +1202,23 @@ mod tests {
             Some("tui-chat-watching[]")
         );
         assert!(viewer.iter().any(|l| l.contains("done")));
+    }
+
+    #[test]
+    fn a_notice_without_the_agents_text_ends_at_its_words() {
+        // The sentence ends in the agent's text, which can be missing or end in a line break.
+        let en = agora_i18n::Catalog::english();
+        let t = |id: &str, args: &[(&str, Arg)]| en.render(id, args).unwrap_or_default();
+        let mut e = ChatEntry {
+            kind: ChatKind::Notice as i32,
+            code: "adapter.turn_empty".into(),
+            ..Default::default()
+        };
+        let said = notice_text(&e, &t);
+        assert!(said.ends_with("request)"), "{said:?}");
+        e.params.insert("stderr_tail".into(), "boom\n".into());
+        let said = notice_text(&e, &t);
+        assert!(said.ends_with("request) boom"), "{said:?}");
     }
 
     #[test]

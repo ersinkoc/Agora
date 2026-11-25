@@ -1,5 +1,5 @@
-//! A small message catalog for the Fluent subset Agora's own locale files use: `{ $name }` placeholders and
-//! `{ $name -> [one] … *[other] … }` selectors (English plural rule: exactly 1 is `one`). It exists so
+//! A small message catalog for the Fluent subset Agora's own locale files use: `{ $name }` placeholders,
+//! `{ $name -> [one] … *[other] … }` selectors (English plural rule: exactly 1 is `one`) and `{" "}` string literals. It exists so
 //! command-line output can come from `locales/` today; a full Fluent runtime can replace it behind the same
 //! `render` call when richer grammar is needed.
 //!
@@ -147,23 +147,44 @@ impl Catalog {
         self.messages.keys().map(String::as_str)
     }
 
-    /// Render message `id`. Missing placeholders render as the empty string.
+    /// Render message `id`. Missing placeholders render as the empty string. As in Fluent, the blank around a message's
+    /// value is trimmed from its source, before anything is interpolated, never from the result: a string literal at either
+    /// end (`{" "}· removed`) and an argument's own spaces stay in the rendered text.
     pub fn render(&self, id: &str, args: &[(&str, Arg)]) -> Option<String> {
         let body = self.messages.get(id)?;
-        Some(render_text(body, args).trim().to_string())
+        Some(render_text(body.trim_matches(FLUENT_BLANK), args))
     }
 }
+
+/// What Fluent counts as blank around a message's value: spaces and line ends (a tab or a no-break space is text).
+const FLUENT_BLANK: [char; 3] = [' ', '\n', '\r'];
 
 fn arg<'a>(args: &'a [(&str, Arg)], name: &str) -> Option<&'a Arg> {
     args.iter().find(|(n, _)| *n == name).map(|(_, a)| a)
 }
 
-/// Find the `}` matching the `{` at `open`, honouring nesting.
+/// Find the `}` matching the `{` at `open`, honouring nesting. A string literal right after a `{` is skipped, so the braces in
+/// `{"{"}` and `{"}"}` are text.
 fn matching_brace(s: &str, open: usize) -> Option<usize> {
     let mut depth = 0usize;
-    for (i, c) in s[open..].char_indices() {
+    let mut chars = s[open..].char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         match c {
-            '{' => depth += 1,
+            '{' => {
+                depth += 1;
+                while chars.next_if(|&(_, c)| FLUENT_BLANK.contains(&c)).is_some() {}
+                if chars.next_if(|&(_, c)| c == '"').is_some() {
+                    while let Some((_, c)) = chars.next() {
+                        match c {
+                            '\\' => {
+                                chars.next();
+                            }
+                            '"' => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
             '}' => {
                 depth -= 1;
                 if depth == 0 {
@@ -194,6 +215,10 @@ fn render_text(s: &str, args: &[(&str, Arg)]) -> String {
 
 fn render_expr(inner: &str, args: &[(&str, Arg)]) -> String {
     let inner = inner.trim();
+    // A string literal before the selector check: its text may itself hold `->`.
+    if let Some(literal) = string_literal(inner) {
+        return literal;
+    }
     match inner.split_once("->") {
         None => inner
             .strip_prefix('$')
@@ -208,6 +233,52 @@ fn render_expr(inner: &str, args: &[(&str, Arg)]) -> String {
             select_variant(variants, value, args)
         }
     }
+}
+
+/// A Fluent string literal, quotes included (`{" "}`, `{ "" }`): its text with the spec's escapes undone (`\\`, `\"`, `\uHHHH`,
+/// `\UHHHHHH`; a code point that is not a Unicode scalar value, such as a surrogate or one above U+10FFFF, becomes U+FFFD as in
+/// Fluent). `None` when `inner` is something else. An escape the spec does not define, or one with too few hex digits, keeps
+/// its backslash, so it shows up instead of changing the text unseen.
+fn string_literal(inner: &str) -> Option<String> {
+    let text = inner.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // Another quote ends the literal early: `"a" "b"` is not one literal.
+            '"' => return None,
+            '\\' => match chars.peek().copied() {
+                Some(e @ ('\\' | '"')) => {
+                    chars.next();
+                    out.push(e);
+                }
+                Some(e @ ('u' | 'U')) => {
+                    chars.next();
+                    let want = if e == 'u' { 4 } else { 6 };
+                    let mut hex = String::with_capacity(want);
+                    while hex.len() < want {
+                        match chars.next_if(char::is_ascii_hexdigit) {
+                            Some(h) => hex.push(h),
+                            None => break,
+                        }
+                    }
+                    match u32::from_str_radix(&hex, 16) {
+                        Ok(n) if hex.len() == want => {
+                            out.push(char::from_u32(n).unwrap_or(char::REPLACEMENT_CHARACTER))
+                        }
+                        _ => {
+                            out.push('\\');
+                            out.push(e);
+                            out.push_str(&hex);
+                        }
+                    }
+                }
+                _ => out.push('\\'),
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
 }
 
 /// Variants look like `[one] text` / `*[other] text`, each starting a (possibly indented) line.
@@ -296,6 +367,149 @@ mod tests {
             Some("Running")
         );
         assert_eq!(c.render("s", &[]).as_deref(), Some("Running"));
+    }
+
+    #[test]
+    fn string_literals_keep_the_whitespace_they_hold() {
+        // A Fluent string literal is text, not a placeholder: `{" "}` is one space (`cli-device-state-revoked`).
+        let c = cat("a = {\" \"}· removed\nb = {\"\"}\nc = x{ \"  \" }y\n");
+        assert_eq!(c.render("a", &[]).as_deref(), Some(" · removed"));
+        assert_eq!(c.render("b", &[]).as_deref(), Some(""));
+        assert_eq!(c.render("c", &[]).as_deref(), Some("x  y"));
+    }
+
+    #[test]
+    fn a_string_literal_keeps_the_space_at_an_end_of_a_line() {
+        // The real messages: the state is the last thing on the line, and the space before the bullet is
+        // what keeps it from running into the timestamp (`agora hub devices`, `agora hub metrics-token list`).
+        let en = Catalog::english();
+        assert_eq!(
+            en.render("cli-device-state-revoked", &[]).as_deref(),
+            Some(" · removed")
+        );
+        assert_eq!(
+            en.render("cli-metrics-token-state-revoked", &[]).as_deref(),
+            Some(" · revoked")
+        );
+        let state = en
+            .render("cli-device-state-revoked", &[])
+            .unwrap_or_default();
+        let args: Vec<(&str, Arg)> = vec![
+            ("name", "laptop".into()),
+            ("fingerprint", "SHA256:abc".into()),
+            ("id", "d1".into()),
+            ("user", "u1".into()),
+            ("created", "2026-01-01 00:00".into()),
+            ("used", "2026-11-24 10:00".into()),
+            ("state", state.into()),
+        ];
+        assert_eq!(
+            en.render("cli-hub-device-line", &args).as_deref(),
+            Some("laptop · SHA256:abc · d1 · u1 · registered 2026-01-01 00:00 · last used 2026-11-24 10:00 · removed")
+        );
+        let token_args: Vec<(&str, Arg)> = vec![
+            ("name", "grafana".into()),
+            ("created", "2026-01-01 00:00".into()),
+            ("used", "2026-11-24 10:00".into()),
+            ("expires", "2027-01-01 00:00".into()),
+            (
+                "state",
+                en.render("cli-metrics-token-state-revoked", &[])
+                    .unwrap_or_default()
+                    .into(),
+            ),
+        ];
+        let token = en
+            .render("cli-metrics-token-line", &token_args)
+            .unwrap_or_default();
+        assert!(token.ends_with("2027-01-01 00:00 · revoked"), "{token:?}");
+        // The Turkish lines use the same literals.
+        let tr = Catalog::turkish();
+        assert_eq!(
+            tr.render("cli-device-state-revoked", &[]).as_deref(),
+            Some(" · kaldırıldı")
+        );
+        assert_eq!(
+            tr.render("cli-metrics-token-state-revoked", &[]).as_deref(),
+            Some(" · iptal edildi")
+        );
+    }
+
+    #[test]
+    fn an_argument_keeps_its_own_spaces() {
+        // Only the message's source is trimmed; what a caller passes in is shown as it came.
+        let c = cat("a = { $x }\nb = [{ $x }]\n");
+        assert_eq!(
+            c.render("a", &[("x", " pad ".into())]).as_deref(),
+            Some(" pad ")
+        );
+        assert_eq!(
+            c.render("b", &[("x", " pad ".into())]).as_deref(),
+            Some("[ pad ]")
+        );
+    }
+
+    #[test]
+    fn a_six_digit_escape_is_undone_and_a_bad_one_is_kept_or_replaced() {
+        let c = cat(concat!(
+            "smile = {\"\\U01F602\"}\n",
+            "upper = {\"\\U00004A\"}\n",
+            "short = {\"\\U01F6\"}\n",
+            "sign = {\"\\u+123\"}\n",
+            "big = {\"\\U110000\"}\n",
+            "surrogate = {\"\\uD800\"}\n",
+            "then = {\"\\U01F602x\"}\n",
+        ));
+        assert_eq!(c.render("smile", &[]).as_deref(), Some("\u{1F602}"));
+        assert_eq!(c.render("upper", &[]).as_deref(), Some("J"));
+        // Too few hex digits, or a sign `from_str_radix` would take: kept as written.
+        assert_eq!(c.render("short", &[]).as_deref(), Some("\\U01F6"));
+        assert_eq!(c.render("sign", &[]).as_deref(), Some("\\u+123"));
+        // Well-formed, but not a Unicode scalar value: U+FFFD, as Fluent does.
+        assert_eq!(c.render("big", &[]).as_deref(), Some("\u{FFFD}"));
+        assert_eq!(c.render("surrogate", &[]).as_deref(), Some("\u{FFFD}"));
+        // Six digits at most: the next character is text.
+        assert_eq!(c.render("then", &[]).as_deref(), Some("\u{1F602}x"));
+    }
+
+    #[test]
+    fn a_brace_in_a_string_literal_is_text() {
+        let c = cat("open = a{\"{\"}b\nclose = a{ \"}\" }b\nsel = { $n ->\n    [one] {\"}\"}\n   *[other] {\"{\"} { $n }\n}\n");
+        assert_eq!(c.render("open", &[]).as_deref(), Some("a{b"));
+        assert_eq!(c.render("close", &[]).as_deref(), Some("a}b"));
+        assert_eq!(c.render("sel", &[("n", 1.into())]).as_deref(), Some("}"));
+        assert_eq!(c.render("sel", &[("n", 2.into())]).as_deref(), Some("{ 2"));
+    }
+
+    #[test]
+    fn only_spaces_and_line_ends_around_a_value_are_trimmed() {
+        // Fluent's blank is spaces and line ends; a no-break space a translation ends with is text.
+        let c = cat("a =   x\u{a0}\n");
+        assert_eq!(c.render("a", &[]).as_deref(), Some("x\u{a0}"));
+    }
+
+    #[test]
+    fn a_string_literal_escape_is_undone_and_an_unknown_one_is_not_dropped() {
+        let c = cat(
+            "q = {\"a\\\"b\"}\nbs = {\"a\\\\b\"}\nu = {\"\\u2192\"}\nbad = {\"\\uZZZZ\"}\nmixed = {\"x\"}y\n",
+        );
+        assert_eq!(c.render("q", &[]).as_deref(), Some("a\"b"));
+        assert_eq!(c.render("bs", &[]).as_deref(), Some("a\\b"));
+        assert_eq!(c.render("u", &[]).as_deref(), Some("→"));
+        // `\uZZZZ` is not a Fluent escape (no hex digits): it stays visible as written instead of being dropped.
+        assert_eq!(c.render("bad", &[]).as_deref(), Some("\\uZZZZ"));
+        // A literal sits inside a message's text: only the quoted part is literal.
+        assert_eq!(c.render("mixed", &[]).as_deref(), Some("xy"));
+    }
+
+    #[test]
+    fn multiline_values_still_start_and_end_at_their_text() {
+        // Fluent trims a message value where it is parsed. Moving that trim must not leave the indentation of
+        // the first line or a trailing newline in what a caller prints (`agora --help` prints `cli-usage`).
+        let en = Catalog::english();
+        let usage = en.render("cli-usage", &[]).unwrap_or_default();
+        assert!(usage.starts_with("Usage:"), "{usage:?}");
+        assert_eq!(usage, usage.trim_end());
     }
 
     #[test]
