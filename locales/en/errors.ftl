@@ -72,6 +72,7 @@ device-not_in_scope = The approval of the device { $device_id } is not for the m
 device-revoked = The device { $device_id } was removed after it was approved.
 lease-held = { $path } is in use by agent { $holder_agent_id } until { $expires_at }.
 board-unavailable = The shared board for { $project_id } is not reachable right now. Your work continues locally.
+board-not_allowed = This hub does not show every machine and agent to agents, because other people use it. The hub's owner can turn this on.
 mesh-recipient_unknown = No agent or channel named { $to }.
 mesh-rate_limited = You are sending messages too fast. Try again in a moment.
 mesh-body_too_large = The message is too large (limit: { $limit }). Send a reference instead.

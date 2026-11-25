@@ -67,6 +67,8 @@ fn hubside(node_id: &str) -> Hubside {
                 "agent.launch_settings".into(),
                 // ADR-0108
                 "agent.forget.local".into(),
+                // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
+                agora_protocol::handshake::FLEET_STATUS_V1.into(),
             ],
             required: vec![],
         },
@@ -1917,6 +1919,196 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     let (_, err) = call(&mut ac, "inbox", json!({}));
     assert!(!err);
     drop((a, b, b1));
+}
+
+/// ADR-0112: two machines with different projects on a real hub. An agent on a solo hub sees every machine and the other machine's
+/// agent of another project (`machines_list`, `agents_list {scope: "hub"}`), while the default `agents_list` still lists only its own
+/// projects. Once the hub has a member it refuses (`partial: true`, this machine alone) until the owner turns the view on. A machine
+/// whose policy says `mesh.fleet = false` neither offers the capability nor lists the tool, and answers from itself.
+#[test]
+fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine_say_no() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use serde_json::{json, Value};
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start =
+        |name: &str, agent: &str, project: &str, policy: &str, cert: String, key: String| {
+            let dir = tmp(&format!("fleet-{name}"));
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            std::fs::write(dir.join("data").join("policy"), policy).unwrap();
+            let cfg = agora_node::daemon::NodeConfig {
+                resume_all: false,
+                node_id: name.into(),
+                socket: dir.join("c.sock"),
+                data_dir: dir.join("data"),
+                worktree_root: dir.join("wt"),
+                manifests_dir: dir.join("manifests"),
+                projects: vec![],
+                limits: Default::default(),
+            };
+            let node = agora_node::daemon::Node::start(&cfg).unwrap();
+            let out = MeshOut::new();
+            node.mesh.set_remote(out.clone());
+            let mut link = hub.link(addr);
+            (link.cert_pem, link.key_pem) = (cert, key);
+            link.commands = Some(cfg.socket.clone());
+            link.mesh_out = Some(out);
+            link.mesh = Some(Arc::clone(&node.mesh));
+            let up = spawn(Arc::clone(&node.events), link).unwrap();
+            let folder = format!("/work/{project}");
+            node.events
+                .checkout_discovered(name, project, Path::new(&folder));
+            let id = AgentId::new(agent);
+            node.events.agent_launched(
+                &id,
+                project,
+                name,
+                Path::new(&folder),
+                Path::new(&folder),
+                "",
+                "shell",
+                true,
+            );
+            let socket = node
+                .mesh
+                .register(AgentInfo {
+                    id: id.clone(),
+                    kind: "shell".into(),
+                    node: name.into(),
+                    project: project.into(),
+                    label: String::new(),
+                    worktree: folder.clone(),
+                    state: "idle".into(),
+                })
+                .unwrap();
+            let mut conn = agora_platform::local_connect(&socket).unwrap();
+            mcp(
+                &mut conn,
+                1,
+                "initialize",
+                json!({"protocolVersion": "2025-03-26"}),
+            );
+            (node, up, conn, dir)
+        };
+    let (ca, cb) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (a, ua, mut ac, adir) = start("alpha", "a1", "p", "", ca.0, ca.1);
+    let (b, ub, mut bc, bdir) = start("beta", "b1", "q", "mesh.fleet = false\n", cb.0, cb.1);
+    for (node, agent) in [("alpha", "alpha/a1"), ("beta", "beta/b1")] {
+        wait(&format!("{node} and {agent} to reach the hub"), || {
+            let (v, _) = hub.state.hub.view();
+            v.nodes.get(node).is_some_and(|n| n.online) && v.agents.contains_key(agent)
+        });
+    }
+    let names = |c: &mut agora_platform::LocalStream| -> Vec<String> {
+        mcp(c, 8, "tools/list", json!({}))["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let call = |c: &mut agora_platform::LocalStream, name: &str, args: Value| -> Value {
+        let r = mcp(c, 9, "tools/call", json!({"name": name, "arguments": args}));
+        assert_eq!(r["isError"], false, "{r}");
+        serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let ids = |v: &Value, key: &str| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[key].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    // The hub's `Welcome` reached alpha's mesh: the tool is listed there.
+    wait("alpha to offer machines_list", || {
+        names(&mut ac).iter().any(|n| n == "machines_list")
+    });
+
+    // Solo hub: every machine, and beta's agent in its own project.
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(m["partial"], false, "{m}");
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "beta"], "{m}");
+    assert!(
+        m["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["online"] == true),
+        "{m}"
+    );
+    let rows = call(&mut ac, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1", "beta/b1"], "{rows}");
+    let b1 = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["agent_id"] == "beta/b1")
+        .unwrap();
+    assert_eq!(b1["project"], "q");
+    assert_eq!(b1["node"], "beta");
+    assert_eq!(b1["kind"], "shell");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == false),
+        "{rows}"
+    );
+    // The default scope is unchanged: alpha's projects only.
+    let rows = call(&mut ac, "agents_list", json!({}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1"], "{rows}");
+
+    // beta's policy says no: the tool is not listed there, and its view is its own.
+    assert!(!names(&mut bc).iter().any(|n| n == "machines_list"));
+    let rows = call(&mut bc, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["b1"], "{rows}");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == true),
+        "{rows}"
+    );
+    let m = call(&mut bc, "machines_list", json!({}));
+    assert_eq!(
+        (ids(&m["machines"], "id"), &m["partial"]),
+        (vec!["beta".to_string()], &json!(true))
+    );
+
+    // A team hub refuses: alpha answers from itself.
+    agora_hub::users::Users::new(hub.state.hub.store())
+        .add("Eda", agora_hub::users::Role::Member, server::now_ms())
+        .unwrap();
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(
+        (ids(&m["machines"], "id"), &m["partial"]),
+        (vec!["alpha".to_string()], &json!(true))
+    );
+    let rows = call(&mut ac, "agents_list", json!({"scope": "hub"}));
+    assert_eq!(ids(&rows, "agent_id"), ["a1"], "{rows}");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == true),
+        "{rows}"
+    );
+    // ...until the owner turns it on.
+    agora_hub::users::set_fleet_switch(hub.state.hub.store(), true, server::now_ms()).unwrap();
+    let m = call(&mut ac, "machines_list", json!({}));
+    assert_eq!(m["partial"], false, "{m}");
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "beta"]);
+
+    drop((ac, bc, ua, ub, a, b));
+    let _ = std::fs::remove_dir_all(adir);
+    let _ = std::fs::remove_dir_all(bdir);
 }
 
 fn hex(b: &[u8]) -> String {

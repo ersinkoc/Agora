@@ -325,6 +325,42 @@ impl<'a> Users<'a> {
     }
 }
 
+/// ADR-0112: the hub setting with which the owner lets agents see every machine and agent of a hub that has people besides the
+/// owner (`agora hub fleet on|off`). Off when missing. A solo hub (no person in `users`) answers without it.
+pub const FLEET_SETTING: &str = "fleet_status";
+const FLEET_ON: &[u8] = b"on";
+
+/// Whether the owner turned the fleet view on ([`FLEET_SETTING`]).
+pub fn fleet_switch(store: &SqliteStore) -> Result<bool, StoreError> {
+    use crate::store::EventStore;
+    Ok(store.setting(FLEET_SETTING)?.as_deref() == Some(FLEET_ON))
+}
+
+/// Turns the fleet view on or off for a hub with people besides the owner, and records it in the audit trail as the owner's.
+pub fn set_fleet_switch(store: &SqliteStore, on: bool, now_ms: u64) -> Result<(), StoreError> {
+    use crate::store::EventStore;
+    store.set_setting(FLEET_SETTING, if on { FLEET_ON } else { b"off" })?;
+    let _ = crate::audit::Audit::new(store).record(
+        now_ms,
+        "owner",
+        if on { "fleet_on" } else { "fleet_off" },
+        "cli",
+        "ok",
+    );
+    Ok(())
+}
+
+/// ADR-0112: whether agents may see every machine and agent of this hub (`BoardCall{tool: "fleet_status"}`): in solo mode (no
+/// person in `users` at all, ADR-0049: the hub is the owner's alone), or when the owner turned [`FLEET_SETTING`] on. Any person
+/// added, whatever the role, makes it a team hub. A store that cannot be read refuses.
+pub fn fleet_allowed(store: &SqliteStore) -> bool {
+    match Users::new(store).list() {
+        Ok(people) if people.is_empty() => true,
+        Ok(_) => fleet_switch(store).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// What a viewer may still do: everything that only reads. The command names are the schema's, so a new command is refused to
 /// viewers until it is listed here.
 pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> bool {

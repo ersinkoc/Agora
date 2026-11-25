@@ -74,6 +74,9 @@ pub struct McpConnection {
     version: Option<&'static str>,
     /// ADR-0057: the node offers `agent_start`, `agent_wait` and `agent_output` (capability `mesh.spawn`).
     spawn: bool,
+    /// ADR-0112: the node offers `machines_list` and `agents_list {scope: "hub"}` (its hub has `mesh.fleet_status.v1` and its policy
+    /// allows it). Can change while the connection lives (the hub reconnects); `tools/list` says what holds at that moment.
+    fleet: bool,
 }
 
 fn schema(props: &[(&str, Value)], required: &[&str]) -> Value {
@@ -148,6 +151,42 @@ pub fn tools() -> Vec<Value> {
                    ("summary", string("Where things stand and what is next")),
                    ("refs", strings("Paths, commits or tasks that matter"))], &["to", "summary"])),
     ]
+}
+
+/// ADR-0112: `agents_list`'s scopes. `project` is the default and today's answer; `hub` lists every running agent of the hub.
+pub const SCOPE_PROJECT: &str = "project";
+pub const SCOPE_HUB: &str = "hub";
+
+/// ADR-0112: the tool a node offers when its hub answers `fleet_status` and its policy allows it (`mesh.fleet`). The node answers it.
+pub const FLEET_TOOLS: &[&str] = &["machines_list"];
+
+/// Adds what the node offers with the hub-wide view (ADR-0112) to [`tools`]: `scope` on `agents_list`, and `machines_list` after
+/// `workspace_status`.
+pub fn with_fleet(list: &mut Vec<Value>) {
+    if let Some(props) = list
+        .iter_mut()
+        .find(|t| t["name"] == "agents_list")
+        .and_then(|t| t["inputSchema"]["properties"].as_object_mut())
+    {
+        props.insert(
+            "scope".into(),
+            json!({"type": "string", "enum": [SCOPE_PROJECT, SCOPE_HUB],
+                   "description": "project (default): agents of your projects. hub: every running agent on every connected machine of \
+                                   the hub, in any project (rows of other projects name theirs)"}),
+        );
+    }
+    let at = list
+        .iter()
+        .position(|t| t["name"] == "workspace_status")
+        .map_or(list.len(), |i| i + 1);
+    list.insert(
+        at,
+        json!({"name": "machines_list",
+               "description": "List every machine of the hub: its id, whether it is online, its OS, its Agora version, how many \
+                               agents it runs and when it was last seen. partial: true means the hub could not be asked (only this \
+                               machine is listed) or the list was cut.",
+               "inputSchema": schema(&[], &[])}),
+    );
 }
 
 /// ADR-0057: the tools that start helpers and follow them. The node answers them (they need its supervisor and approvals); this
@@ -530,6 +569,7 @@ pub fn board_tool(
         initialized: true,
         version: None,
         spawn: false,
+        fleet: false,
     };
     let params = json!({"name": name, "arguments": args});
     match conn.call(&Value::Null, &params, mesh, now_ms) {
@@ -556,7 +596,13 @@ impl McpConnection {
             initialized: false,
             version: None,
             spawn: false,
+            fleet: false,
         }
+    }
+
+    /// ADR-0112: whether [`FLEET_TOOLS`] are listed and `agents_list` takes `scope`. The node sets it before each line.
+    pub fn set_fleet(&mut self, on: bool) {
+        self.fleet = on;
     }
 
     /// ADR-0057: list [`SPAWN_TOOLS`] too. The node does this when it answers them itself.
@@ -621,6 +667,9 @@ impl McpConnection {
             "ping" => reply(&id, json!({})),
             "tools/list" if self.initialized => {
                 let mut list = tools();
+                if self.fleet {
+                    with_fleet(&mut list);
+                }
                 if self.spawn {
                     list.extend(spawn_tools());
                 }
@@ -654,6 +703,14 @@ impl McpConnection {
                 let Ok(project) = optional_str_arg(&args, "project") else {
                     return bad();
                 };
+                // ADR-0112: the broker knows this node alone, so every scope lists its rows (each `partial: true`); the node
+                // answers `scope: "hub"` itself when it can ask the hub.
+                if !matches!(
+                    optional_str_arg(&args, "scope"),
+                    Ok(None | Some(SCOPE_PROJECT | SCOPE_HUB))
+                ) {
+                    return bad();
+                }
                 let list = mesh.agents_list(project);
                 let rows: Vec<Value> = list
                     .iter()
@@ -967,6 +1024,69 @@ mod tests {
             a.handle(call, &mut mesh, 0),
             Outcome::Reply(Message::ErrorResponse { .. })
         ));
+    }
+
+    /// ADR-0112: `machines_list` and `agents_list`'s `scope` are listed only while the node offers the hub-wide view; the broker
+    /// alone lists this node's rows for either scope and refuses any other.
+    #[test]
+    fn the_fleet_view_is_listed_only_when_offered_and_the_broker_checks_the_scope() {
+        let (mut mesh, mut a, _) = setup();
+        let list = |c: &mut McpConnection, mesh: &mut Mesh| -> Vec<Value> {
+            let Outcome::Reply(Message::Response { result, .. }) =
+                c.handle(r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#, mesh, 0)
+            else {
+                panic!("no list");
+            };
+            result["tools"].as_array().unwrap().clone()
+        };
+        let names = |l: &[Value]| -> Vec<String> {
+            l.iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let off = list(&mut a, &mut mesh);
+        assert!(!names(&off).iter().any(|n| n == "machines_list"));
+        assert!(off[0]["inputSchema"]["properties"].get("scope").is_none());
+        a.set_fleet(true);
+        let on = list(&mut a, &mut mesh);
+        assert_eq!(
+            &names(&on)[..3],
+            ["agents_list", "workspace_status", "machines_list"]
+        );
+        assert_eq!(
+            on[0]["inputSchema"]["properties"]["scope"]["enum"],
+            json!(["project", "hub"])
+        );
+        assert_eq!(on[2]["inputSchema"]["type"], "object");
+        a.set_fleet(false);
+        assert_eq!(list(&mut a, &mut mesh).len(), off.len());
+
+        for scope in [json!("project"), json!("hub"), Value::Null] {
+            let (rows, err) = payload(call(
+                &mut a,
+                &mut mesh,
+                1,
+                "agents_list",
+                json!({"scope": scope}),
+            ));
+            assert!(!err);
+            assert!(
+                rows.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["partial"] == true),
+                "{rows}"
+            );
+        }
+        for bad in [json!("world"), json!(1)] {
+            assert!(matches!(
+                call(&mut a, &mut mesh, 1, "agents_list", json!({"scope": bad})),
+                Outcome::Reply(Message::ErrorResponse {
+                    code: INVALID_PARAMS,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

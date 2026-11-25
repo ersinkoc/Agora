@@ -248,7 +248,6 @@ impl Boards {
     /// machine, state, the board task it claimed, the paths it holds, who started it), the board's open tasks and live leases, and how
     /// many machines are online. Read only; the calling node merges it with what it knows of its own agents.
     fn status(&self, view: &View, project: &str, now_ms: u64) -> Answer {
-        use agora_protocol::v1::AgentState;
         let mut guard = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
         let mesh = guard
             .entry(project.to_string())
@@ -256,13 +255,6 @@ impl Boards {
         Self::sync(mesh, view, project, now_ms);
         mesh.release_orphans();
         mesh.expire_leases(now_ms);
-        let word = |s: AgentState| match s {
-            AgentState::Working => "working",
-            AgentState::Blocked => "blocked",
-            AgentState::Idle => "idle",
-            AgentState::Done => "done",
-            AgentState::Unspecified => "unknown",
-        };
         let agents: Vec<Value> = view
             .agents
             .iter()
@@ -275,7 +267,7 @@ impl Boards {
             .map(|(key, a)| {
                 let id = AgentId::new(key.as_str());
                 json!({
-                    "id": key, "kind": a.kind, "machine": a.node_id, "state": word(a.state),
+                    "id": key, "kind": a.kind, "machine": a.node_id, "state": state_word(a.state),
                     "holds": mesh.holds(&id, now_ms), "task": mesh.claimed_task(&id),
                     "parent": (!a.parent_agent_id.is_empty()).then_some(a.parent_agent_id.as_str()),
                     "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| w.path.as_str()),
@@ -666,6 +658,91 @@ impl Boards {
             fanout: None,
         }
     }
+}
+
+/// The word an agent's state is in an agent's answer (the UI word).
+fn state_word(s: agora_protocol::v1::AgentState) -> &'static str {
+    use agora_protocol::v1::AgentState;
+    match s {
+        AgentState::Working => "working",
+        AgentState::Blocked => "blocked",
+        AgentState::Idle => "idle",
+        AgentState::Done => "done",
+        AgentState::Unspecified => "unknown",
+    }
+}
+
+/// ADR-0112: at most this many machines and agents in a `fleet_status` answer; past either the answer says `partial: true`.
+pub const FLEET_MAX_MACHINES: usize = 64;
+pub const FLEET_MAX_AGENTS: usize = 200;
+/// The longest machine id, agent id, kind, project and folder in a `fleet_status` answer (bytes).
+const FLEET_ID_MAX: usize = 160;
+const FLEET_PATH_MAX: usize = 512;
+
+/// ADR-0112: `fleet_status`, the hub's read-only view for agents of every machine it knows and every running agent on an online
+/// machine. Only facts the hub projects from node events: never a task, a label, `doing`, a message or a file name. A machine the
+/// owner forgot is left out, as it is for windows. Who may see it is the caller's to decide ([`crate::hub::Hub::board_call`]).
+pub fn fleet(view: &View) -> Value {
+    let mut partial = false;
+    let shown: Vec<(&String, &crate::projection::NodeView)> =
+        view.nodes.iter().filter(|(_, n)| !n.forgotten).collect();
+    partial |= shown.len() > FLEET_MAX_MACHINES;
+    let machines: Vec<Value> = shown
+        .iter()
+        .take(FLEET_MAX_MACHINES)
+        .map(|(id, n)| {
+            json!({
+                "id": cut(id, FLEET_ID_MAX), "online": n.online, "os": cut(&n.os, 64),
+                "build": cut(&n.build, 64), "agents_running": n.agents_running,
+                "last_seen_ms": n.last_event_ms,
+            })
+        })
+        .collect();
+    let mut agents: Vec<Value> = Vec::new();
+    for (key, a) in &view.agents {
+        // The machine is the authenticated producer named in the hub-wide key, never the payload's `node_id`.
+        let Some((node, _)) = key.split_once('/') else {
+            continue;
+        };
+        if !a.running
+            || a.forgotten
+            || !view
+                .nodes
+                .get(node)
+                .is_some_and(|n| n.online && !n.forgotten)
+        {
+            continue;
+        }
+        if agents.len() == FLEET_MAX_AGENTS {
+            partial = true;
+            break;
+        }
+        let parent = (!a.parent_agent_id.is_empty()).then(|| cut(&a.parent_agent_id, FLEET_ID_MAX));
+        agents.push(json!({
+            "agent_id": cut(key, FLEET_ID_MAX), "kind": cut(&a.kind, 64), "machine": cut(node, FLEET_ID_MAX),
+            "project": cut(&a.project_id, FLEET_ID_MAX), "state": state_word(a.state),
+            "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| cut(&w.path, FLEET_PATH_MAX)),
+            "parent": parent,
+        }));
+    }
+    json!({"machines": machines, "agents": agents, "partial": partial})
+}
+
+/// [`fleet`] as the MCP tool result a `BoardCall` answers with.
+pub fn fleet_answer(view: &View) -> Answer {
+    answer(Verdict::Done {
+        result: json!({"content": [{"type": "text", "text": fleet(view).to_string()}], "isError": false}),
+        is_error: false,
+    })
+}
+
+/// ADR-0112: the refusal of `fleet_status` on a hub with people besides the owner (no parameters).
+pub fn fleet_refused() -> Answer {
+    let text = json!({"error": {"code": ErrorCode::BoardNotAllowed.as_str(), "params": {}}});
+    answer(Verdict::Done {
+        result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
+        is_error: true,
+    })
 }
 
 /// `s` cut to at most `max` bytes on a character boundary.
@@ -1905,5 +1982,118 @@ mod tests {
             )),
             ""
         );
+    }
+
+    /// ADR-0112: `fleet_status` lists every machine the hub knows (offline ones too) and every running agent on an online machine,
+    /// in every project, with exactly the agreed fields: nothing an agent wrote, no task, label, `doing`, message or file name.
+    #[test]
+    fn fleet_status_lists_every_machine_and_running_agent_with_only_the_agreed_fields() {
+        let mut v = view(&["alpha", "beta"]);
+        v.nodes.get_mut("alpha").unwrap().os = "linux".into();
+        v.nodes.get_mut("alpha").unwrap().build = "0.3.40".into();
+        v.nodes.get_mut("alpha").unwrap().last_event_ms = 77;
+        let beta = v.agents.get_mut("beta/a").unwrap();
+        beta.project_id = "other".into();
+        beta.state = AgentState::Working;
+        beta.parent_agent_id = "beta/boss".into();
+        beta.worktree_id = "w1".into();
+        v.worktrees.insert(
+            "w1".into(),
+            crate::projection::WorktreeView {
+                checkout_id: String::new(),
+                path: "/home/me/other".into(),
+                branch: String::new(),
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                head_commit: String::new(),
+            },
+        );
+        // A machine the owner forgot, and an agent that ended: neither is listed.
+        v.nodes.get_mut("gamma").unwrap().forgotten = true;
+        let mut ended = v.agents["alpha/a"].clone();
+        ended.running = false;
+        v.agents.insert("alpha/old".into(), ended);
+        // Board work that names a task: never in the answer.
+        let b = Boards::new();
+        run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "SECRET-TITLE"}),
+            1,
+        );
+
+        let f = fleet(&v);
+        let machines = f["machines"].as_array().unwrap();
+        let ids: Vec<&str> = machines.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["alpha", "beta"], "{f}");
+        assert_eq!(
+            machines[0],
+            json!({"id": "alpha", "online": true, "os": "linux", "build": "0.3.40", "agents_running": 1, "last_seen_ms": 77})
+        );
+        let agents = f["agents"].as_array().unwrap();
+        let ids: Vec<&str> = agents
+            .iter()
+            .map(|a| a["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["alpha/a", "beta/a"], "{f}");
+        assert_eq!(
+            agents[1],
+            json!({"agent_id": "beta/a", "kind": "shell", "machine": "beta", "project": "other", "state": "working",
+                   "workspace": "/home/me/other", "parent": "beta/boss"})
+        );
+        for a in agents {
+            let mut keys: Vec<&str> = a.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "agent_id",
+                    "kind",
+                    "machine",
+                    "parent",
+                    "project",
+                    "state",
+                    "workspace"
+                ]
+            );
+        }
+        assert_eq!(f["partial"], false);
+        let text = f.to_string();
+        for absent in ["SECRET-TITLE", "doing", "label", "task", "gamma"] {
+            assert!(!text.contains(absent), "{absent} in {text}");
+        }
+        // An agent on an offline machine is not listed; the machine still is.
+        let v = view(&["alpha"]);
+        let f = fleet(&v);
+        assert_eq!(f["machines"].as_array().unwrap().len(), 3);
+        assert_eq!(f["agents"].as_array().unwrap().len(), 1);
+    }
+
+    /// ADR-0112: at most 64 machines and 200 agents; a cut list says `partial: true`.
+    #[test]
+    fn fleet_status_is_cut_at_its_caps_and_says_so() {
+        let mut v = view(&["alpha"]);
+        let template = v.agents["alpha/a"].clone();
+        for i in 0..FLEET_MAX_AGENTS {
+            v.agents.insert(format!("alpha/x{i:03}"), template.clone());
+        }
+        let f = fleet(&v);
+        assert_eq!(f["agents"].as_array().unwrap().len(), FLEET_MAX_AGENTS);
+        assert_eq!(f["partial"], true);
+        // Exactly at the cap is whole.
+        v.agents.remove("alpha/a");
+        assert_eq!(fleet(&v)["partial"], false);
+
+        let mut v = view(&["alpha"]);
+        let node = v.nodes["alpha"].clone();
+        for i in 0..FLEET_MAX_MACHINES {
+            v.nodes.insert(format!("m{i:03}"), node.clone());
+        }
+        let f = fleet(&v);
+        assert_eq!(f["machines"].as_array().unwrap().len(), FLEET_MAX_MACHINES);
+        assert_eq!(f["partial"], true);
     }
 }

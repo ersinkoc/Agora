@@ -71,6 +71,7 @@ device-not_in_scope = { $device_id } cihazının onayı { $node_id } makinesi i�
 device-revoked = { $device_id } cihazı onaylandıktan sonra kaldırıldı.
 lease-held = { $path }, { $expires_at } zamanına kadar { $holder_agent_id } ajanı tarafından kullanılıyor.
 board-unavailable = { $project_id } için ortak panoya şu anda ulaşılamıyor. Çalışmanız bu makinede devam ediyor.
+board-not_allowed = Bu hub'ı başka kişiler de kullandığı için ajanlara her makineyi ve ajanı göstermiyor. Hub'ın sahibi bunu açabilir.
 mesh-recipient_unknown = { $to } adında bir ajan veya kanal yok.
 mesh-rate_limited = Çok hızlı mesaj gönderiyorsunuz. Biraz sonra yeniden deneyin.
 mesh-body_too_large = Mesaj çok büyük (sınır: { $limit }). Bunun yerine bir referans gönderin.

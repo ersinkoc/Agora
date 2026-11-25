@@ -767,6 +767,10 @@ impl Hub {
         if self.write_unrecorded(&mut g).is_err() {
             return refused();
         }
+        // ADR-0112: the hub-wide view for agents is read only and belongs to no project's board.
+        if call.tool == "fleet_status" {
+            return self.fleet_call(&g.view, call);
+        }
         let key = self.restore_board(&call.project_id, now_ms);
         let project = call.project_id.as_str();
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
@@ -822,6 +826,36 @@ impl Hub {
                 refused()
             }
         }
+    }
+
+    /// ADR-0112: `fleet_status`, answered for a solo hub, or a team hub whose owner turned it on; refused `board.not_allowed`
+    /// otherwise. It names no project and takes no arguments.
+    fn fleet_call(
+        &self,
+        view: &crate::projection::View,
+        call: &agora_protocol::v1::BoardCall,
+    ) -> crate::board::Answer {
+        let invalid = |field: &str| crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                    .with("field", field),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
+        if !call.project_id.is_empty() {
+            return invalid("project_id");
+        }
+        if !serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+            .is_ok_and(|v| v.is_object())
+        {
+            return invalid("arguments_json");
+        }
+        if !crate::users::fleet_allowed(&self.store) {
+            return crate::board::fleet_refused();
+        }
+        crate::board::fleet_answer(view)
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
@@ -2279,6 +2313,69 @@ mod tests {
                     (expected.clone(), Vec::new()),
                     "{nodes:?} {end:?}"
                 );
+            }
+        }
+    }
+
+    /// ADR-0112: `fleet_status` is answered on a solo hub, refused `board.not_allowed` (no parameters) once the hub has people
+    /// besides the owner, and answered again when the owner turns it on; it names no project.
+    #[test]
+    fn fleet_status_is_answered_alone_and_on_a_team_only_with_the_owners_switch() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            tool: "fleet_status".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        let answered = |hub: &Hub| match hub.board_call("n1", &call, 5).verdict {
+            crate::board::Verdict::Done { result, is_error } => {
+                let text: serde_json::Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                (text, is_error)
+            }
+            other => panic!("{other:?}"),
+        };
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1", "{text}");
+        assert_eq!(text["partial"], false);
+
+        crate::users::Users::new(hub.store())
+            .add("Eda", crate::users::Role::Member, 2)
+            .unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(is_error);
+        assert_eq!(
+            text,
+            serde_json::json!({"error": {"code": "board.not_allowed", "params": {}}})
+        );
+
+        crate::users::set_fleet_switch(hub.store(), true, 3).unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1");
+        crate::users::set_fleet_switch(hub.store(), false, 4).unwrap();
+        assert!(answered(&hub).1);
+
+        // It names no project and takes an object.
+        for (project, args, field) in [("p", "{}", "project_id"), ("", "[]", "arguments_json")] {
+            let bad = agora_protocol::v1::BoardCall {
+                project_id: project.into(),
+                arguments_json: args.into(),
+                ..call.clone()
+            };
+            match hub.board_call("n1", &bad, 6).verdict {
+                crate::board::Verdict::Invalid(e) => {
+                    assert_eq!(e.code, agora_protocol::ErrorCode::ProtocolInvalidMessage);
+                    assert_eq!(
+                        e.params.get("field"),
+                        Some(&agora_protocol::ParamValue::Str(field.into()))
+                    );
+                }
+                other => panic!("{other:?}"),
             }
         }
     }

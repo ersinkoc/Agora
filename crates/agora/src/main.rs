@@ -532,6 +532,7 @@ fn main() -> ExitCode {
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
+        ["hub", "fleet", op @ ("on" | "off" | "status")] => hubcli::hub_fleet(&say, &opts, op),
         ["hub", "metrics-token"] => hubcli::hub_metrics_token(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
         ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
