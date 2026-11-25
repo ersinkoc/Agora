@@ -7,6 +7,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { terminalTheme } from './palette';
 import { terminalFontFamily } from './fonts';
 import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
 import { clipboardOffer, sanitizePaste } from './clipboard';
@@ -59,39 +60,30 @@ function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-// The 16 colours programs draw with must stay readable on the pane's background: one palette per scheme.
-const ANSI_DARK = ['#3b3b44', '#f87171', '#4ade80', '#fbbf24', '#60a5fa', '#c084fc', '#22d3ee', '#d4d4d8', '#71717a', '#fca5a5', '#86efac', '#fde68a', '#93c5fd', '#d8b4fe', '#67e8f9', '#fafafa'];
-const ANSI_LIGHT = ['#27272a', '#b91c1c', '#15803d', '#a16207', '#1d4ed8', '#7e22ce', '#0e7490', '#52525b', '#52525b', '#dc2626', '#16a34a', '#ca8a04', '#2563eb', '#9333ea', '#0891b2', '#18181b'];
-function palette() {
+// The 16 colours programs draw with must stay readable on the pane's background: one palette per scheme, unless the theme sets its
+// own (terminal/palette.ts).
+function theme() {
   const root = document.documentElement.dataset.theme;
   const light = root ? root === 'light' : !!window.matchMedia?.('(prefers-color-scheme: light)').matches;
-  const a = light ? ANSI_LIGHT : ANSI_DARK;
-  const [black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite] = a;
-  return { black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite };
-}
-const hex6 = (name: string, fallback: string) => { const v = token(name); return /^#[0-9a-f]{6}$/i.test(v) ? v : fallback; };
-// The selection must be clearly visible on the pane (a real terminal inverts it): the accent colour at about a third of its strength, and
-// text keeps its own colour on top; a selection in an unfocused terminal is fainter.
-function theme() {
-  const accent = hex6('--accent', '#8b93ff');
-  return { background: token('--surface-0'), foreground: token('--text'), cursor: token('--accent'), selectionBackground: `${accent}66`, selectionInactiveBackground: `${accent}33`, ...palette() };
+  return terminalTheme(token, light);
 }
 // A token as the browser computed it (a theme may write any CSS colour, and the page's variables are what is drawn): a hidden probe takes
 // the colour and its computed `rgb(…)` is read back as `#rrggbb`.
 let probe: HTMLSpanElement | undefined;
-function computedHex(name: string, fallback: string): string {
+// `under` is the token the variable falls back to when the theme does not set it (the terminal's background is the pane's).
+function computedHex(name: string, fallback: string, under?: string): string {
   if (!probe?.isConnected) {
     probe = document.createElement('span');
     probe.hidden = true;
     document.body.append(probe);
   }
-  probe.style.color = `var(${name}, ${fallback})`;
-  return toHex(getComputedStyle(probe).color) ?? toHex(token(name)) ?? fallback;
+  probe.style.color = under ? `var(${name}, var(${under}, ${fallback}))` : `var(${name}, ${fallback})`;
+  return toHex(getComputedStyle(probe).color) ?? toHex(token(name)) ?? (under ? toHex(token(under)) : undefined) ?? fallback;
 }
 // Search matches in the theme's accent mixed toward the terminal's background (searchColours.ts), read again for every search and on
 // every theme change, so they follow the theme.
 function searchColors() {
-  return searchDecorations(computedHex('--accent', '#8b93ff'), computedHex('--surface-0', '#09090b'), computedHex('--text', '#f4f4f5'));
+  return searchDecorations(computedHex('--accent', '#8b93ff'), computedHex('--terminal-background', '#09090b', '--surface-0'), computedHex('--terminal-foreground', '#f4f4f5', '--text'));
 }
 const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 

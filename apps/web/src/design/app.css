@@ -46,16 +46,49 @@
   --text-page: var(--text-page);
   --text-display: var(--text-display);
   --spacing: var(--space-1);
+  /* The regions a theme may colour on their own (theme format 2, docs/ux/themes.md, ADR-0113): utilities like `bg-sidebar` and
+     `text-card-ink`. Each falls back to the token the region is drawn in without a theme, so nothing changes until a theme sets one. */
+  --color-sidebar: var(--sidebar-surface, var(--surface-1));
+  --color-sidebar-ink: var(--sidebar-text, var(--text));
+  --color-sidebar-line: var(--sidebar-line, var(--border));
+  --color-tabbar: var(--tab-bar-surface, var(--surface-0));
+  --color-tabbar-ink: var(--tab-bar-text, var(--text));
+  --color-tabbar-line: var(--tab-bar-line, var(--border));
+  --color-panebar: var(--pane-bar-surface, var(--surface-1));
+  --color-panebar-ink: var(--pane-bar-text, var(--text));
+  --color-panebar-line: var(--pane-bar-line, var(--border));
+  --color-statusline: var(--status-line-surface, var(--surface-1));
+  --color-statusline-ink: var(--status-line-text, var(--text-muted));
+  --color-statusline-line: var(--status-line-line, var(--border));
+  --color-card: var(--cards-surface, var(--surface-1));
+  --color-card-ink: var(--cards-text, var(--text));
+  --color-card-line: var(--cards-line, var(--border));
+  --color-input: var(--inputs-surface, var(--surface-1));
+  --color-input-ink: var(--inputs-text, var(--text));
+  --color-input-line: var(--inputs-line, var(--border));
+  --color-button: var(--buttons-surface, var(--surface-2));
+  --color-button-ink: var(--buttons-text, var(--text));
+  --color-button-line: var(--buttons-line, var(--border));
+  --color-personentry: var(--person-entries-surface, var(--tint-accent));
+  --color-personentry-ink: var(--person-entries-text, var(--text));
+  --color-personentry-line: var(--person-entries-line, var(--line-accent));
+  --color-codeblock: var(--code-blocks-surface, var(--surface-1));
+  --color-codeblock-ink: var(--code-blocks-text, var(--text));
+  --color-codeblock-line: var(--code-blocks-line, var(--border));
 }
 
 @layer base {
   html { -webkit-text-size-adjust: 100%; font-size: calc(var(--text-scale) * 100%); }
   /* Counts and times line up from one row to the next: figures are tabular. */
-  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; font-variant-numeric: tabular-nums; }
+  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; font-variant-numeric: tabular-nums; font-weight: var(--ui-weight, 400); }
+  /* A theme's line height (format 2 `text`): every text size without a line height of its own takes it. */
+  :root[data-line-height] body { line-height: var(--ui-line-height); }
+  :root[data-line-height] * { --tw-leading: var(--ui-line-height); }
+  :root[data-ligatures='off'] body { font-variant-ligatures: none; }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
-  input, select { @apply rounded-s border border-line bg-surface-1 px-3 py-2 text-ink; font: inherit; }
+  input, select { @apply rounded-s border border-input-line bg-input px-3 py-2 text-input-ink; font: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 
@@ -70,7 +103,7 @@
   /* The row in front (the Agents list, the Files tree, a section list): an accent tint and a bolder label, never a bar on its edge (ADR-0102,
      redesign PR 7). */
   .ide-row[aria-current='true'] { @apply font-semibold text-ink; background: var(--tint-accent); }
-  .ide-tab { @apply flex h-9 min-w-[7rem] max-w-[13.75rem] shrink items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  .ide-tab { @apply flex min-w-[7rem] max-w-[13.75rem] shrink items-center gap-2 border-e border-tabbar-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; height: var(--pane-bar-height, 2.25rem); }
   .tab-strip .ide-tab[data-cut] { visibility: hidden; }
   /* A tab's floor, in rem so it holds at any zoom: an agent's tab keeps its avatar (who it is, always), about eight characters of its name
      and an ellipsis, its state and the close button (more with the bolt); the tab in front a little more. The name gives way from the front,
@@ -86,7 +119,7 @@
   .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: min(11rem, 100%); }
   .ide-tab > :not(.truncate) { flex: none; }
   .ide-tab > .truncate { min-width: 6ch; }
-  .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
+  .ide-tab[aria-selected='true'] { @apply bg-tabbar text-tabbar-ink; box-shadow: inset 0 2px 0 var(--accent); }
   .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
   .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted; }
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
@@ -134,7 +167,7 @@
   .page p, .page h1, .page h2 { margin: 0; }
 
   .button {
-    @apply inline-flex items-center justify-center gap-2 rounded-s border border-line bg-surface-2 px-4 py-2 font-medium text-ink
+    @apply inline-flex items-center justify-center gap-2 rounded-s border border-button-line bg-button px-4 py-2 font-medium text-button-ink
       transition-colors duration-150 hover:bg-surface-1 disabled:cursor-not-allowed disabled:opacity-50;
   }
   .button--primary { @apply border-transparent bg-accent text-on-accent hover:brightness-110 hover:bg-accent; }
@@ -159,7 +192,7 @@
   .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); }
   /* An agent as a tile (ADR-0102: colour is a surface, never a stripe). A flat card with one hairline: who it is is its avatar beside the
      name, its state a pill (tint, colour, shape and word). Hover is a stronger hairline and a one-pixel lift, never a shadow. */
-  .tile { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink transition-[border-color,transform] duration-150; }
+  .tile { @apply grid gap-2 rounded-m border border-card-line bg-card p-4 text-start text-card-ink transition-[border-color,transform] duration-150; }
   .tile:hover { border-color: var(--border-strong); @apply -translate-y-px; }
   .tile__head { @apply flex min-w-0 items-center gap-2.5; }
   .tile__name { @apply min-w-0 flex-1 break-words font-semibold; font-size: var(--text-strong); }
@@ -293,7 +326,7 @@
      the program. The padding is on xterm's element, where the fit looks for it.
      Its size never depends on the terminal inside: the terminal is shown at the node's size, which may be smaller (a smaller
      window watches it too) or, set from elsewhere, bigger; what fits this element is what the window reports (sizing.ts). */
-  .terminal-host { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0; contain: strict; }
+  .terminal-host { @apply h-full min-h-0 overflow-hidden rounded-m; background: var(--terminal-background, var(--surface-0)); contain: strict; }
   .terminal-host > .xterm { @apply p-2; }
   /* Smaller than this window: it sits at the top left, and a hairline marks where it ends. */
   .terminal-host[data-smaller] .xterm-screen { box-shadow: 1px 1px 0 0 var(--border); }
@@ -409,7 +442,8 @@
 
 /* Syntax colours (highlight.js classes) for the file browser and the review screen. Derived from the theme's own colours, each
    mixed toward the text colour so it reads as calmer than a state colour, and so every theme (built-in or a user's, ADR-0068)
-   colours code to match with no tokens of its own. These are not theme tokens and theme files cannot set them. */
+   colours code to match with no tokens of its own. A format-2 theme may set any of them (`syntax`, ADR-0113): it sets the same
+   variable on the page, which wins over these. */
 :root {
   --syntax-keyword: color-mix(in oklab, var(--accent) 80%, var(--text));
   --syntax-string: color-mix(in oklab, var(--state-finished) 70%, var(--text));
@@ -504,7 +538,7 @@
   .kit-tone-idle { --kit-fg: var(--state-idle); --kit-tint: var(--tint-idle); --kit-line: var(--border); }
   .kit-tone-plain { --kit-fg: var(--text-muted); --kit-tint: var(--surface-2); --kit-line: var(--border); }
 
-  .kit-btn { @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-s border border-line bg-surface-2 font-medium text-ink transition-[background-color,border-color,filter] duration-150 disabled:cursor-not-allowed disabled:opacity-50; height: 2rem; padding-inline: 0.875rem; font-size: var(--text-body); }
+  .kit-btn { @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-s border border-button-line bg-button font-medium text-button-ink transition-[background-color,border-color,filter] duration-150 disabled:cursor-not-allowed disabled:opacity-50; height: 2rem; padding-inline: 0.875rem; font-size: var(--text-body); }
   .kit-btn:hover:not(:disabled) { border-color: var(--border-strong); }
   .kit-btn--sm { height: 1.75rem; padding-inline: 0.625rem; font-size: var(--text-caption); }
   .kit-btn--primary, .kit-btn--danger { @apply border-transparent; }
@@ -535,7 +569,7 @@
   .kit-avatar__icon { width: 62%; height: 62%; background-color: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; }
   .kit-avatar__dot { @apply absolute rounded-full bg-needs-you; inset-block-start: -3px; inset-inline-end: -3px; width: 0.5625rem; height: 0.5625rem; box-shadow: 0 0 0 2px var(--surface-1); }
 
-  .kit-card { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink; }
+  .kit-card { @apply grid gap-2 rounded-m border border-card-line bg-card p-4 text-start text-card-ink; }
   /* What a card holds wraps or truncates inside it: a long row or a wide control never makes the card (or the page) wider (issue 1082). */
   .kit-card > * { @apply min-w-0; }
   .kit-card--dense { @apply p-3; }
@@ -827,4 +861,71 @@
 /* People who asked for less motion get none: transitions and animations collapse to an instant change (state is still shown by shape and text). */
 @media (prefers-reduced-motion: reduce) {
   *, ::before, ::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+}
+
+/* Theme format 2 (docs/ux/themes.md, ADR-0113): the chrome values and the regions without a utility of their own. A theme sets data
+   attributes on <html> (each one a word from a fixed list) and a few numeric variables (`--pane-gap`, `--line-width`, whole pixels in
+   a range); no attribute and no variable is set without a theme, and every rule below falls back to today's look. Unlayered on purpose,
+   so a utility on the same element (a `border-b`) cannot undo them. */
+
+/* Panes (layout/Workspace.tsx spaces them by `--pane-split` and draws the layout's background between them). Auto: a line between panes
+   that touch; with a gap, the gap alone. Always: a line around every pane. Off: no lines. */
+[data-layout-root] { --pane-split: calc(var(--pane-gap, 0px) + var(--line-width, 1px)); background: var(--border); }
+:root:is([data-pane-gaps], [data-pane-borders='off'], [data-pane-borders='always']) [data-layout-root] { --pane-split: var(--pane-gap, 0px); background: var(--surface-0); }
+:root[data-pane-borders='always'] [data-layout-root] [data-pane] { border: var(--line-width, 1px) solid var(--border); border-block-start-width: 0; }
+:root[data-pane-borders='always'] [data-layout-root] .pane-bar { border: var(--line-width, 1px) solid var(--pane-bar-line, var(--border)); }
+:root[data-pane-borders='always'][data-tab-bar='bottom'] [data-layout-root] [data-pane] { border-block-start-width: var(--line-width, 1px); border-block-end-width: 0; }
+/* The window's lines: under a pane's bar (over it when the bar is at the bottom), the header, the status line and the sidebar's edge. */
+.pane-bar { border-bottom-width: var(--line-width, 1px); }
+:root[data-tab-bar='bottom'] .pane-bar { border-bottom-width: 0; border-top-width: var(--line-width, 1px); }
+:root[data-tab-bar='bottom'] { --tabs-at-end: 1; }
+.ide > header.ide-bar { border-bottom-width: var(--line-width, 1px); }
+[data-region='status-line'] { border-top-width: var(--line-width, 1px); }
+@media (width >= 64rem) { [data-region='sidebar'] { border-inline-end-width: var(--line-width, 1px); } }
+@media (width < 64rem) { [data-region='sidebar'] { border-bottom-width: var(--line-width, 1px); } }
+
+/* Tab style. Underline: the tab in front has an accent line (today's). Filled: it is filled with the accent. Pill: rounded tabs with no
+   lines between them, the one in front raised. */
+:root[data-tab-style='filled'] .ide-tab[aria-selected='true'] { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+:root[data-tab-style='pill'] .ide-tab { border-inline-end-width: 0; border-radius: var(--radius-full); height: calc(var(--pane-bar-height, 2.25rem) - 0.5rem); margin: 0.25rem 0.125rem; }
+:root[data-tab-style='pill'] .ide-tab[aria-selected='true'] { box-shadow: inset 0 0 0 1px var(--tab-bar-line, var(--border)); }
+
+/* Density: the height of a pane's bar and its tabs, rows and cards. The sidebar's rows keep their size (the list is measured by it). */
+:root[data-density='compact'] { --pane-bar-height: 2rem; }
+:root[data-density='roomy'] { --pane-bar-height: 2.5rem; }
+:root[data-density='compact'] .ide-tab { padding-inline: 0.5rem; }
+:root[data-density='roomy'] .ide-tab { padding-inline: 1rem; }
+:root[data-density='compact'] .kit-row { min-height: 1.625rem; }
+:root[data-density='roomy'] .kit-row { min-height: 2.25rem; }
+:root[data-density='compact'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush) { padding: 0.75rem; }
+:root[data-density='roomy'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush) { padding: 1.25rem; }
+
+/* How a state is shown in rows and tabs: its symbol (today's), a dot, or its word. The word is always in the tooltip and read out; "needs
+   you" always keeps its own symbol (the floor). */
+:root:is([data-state-display='dot'], [data-state-display='word']) :is(.state, .kit-mark):not(.state--needs-you, .kit-tone-needs) > .state__mark { display: none; }
+:root[data-state-display='dot'] :is(.state, .kit-mark):not(.state--needs-you, .kit-tone-needs)::before { content: ''; flex: none; width: 0.5rem; height: 0.5rem; border-radius: var(--radius-full); background: currentColor; }
+:root[data-state-display='word'] :is(.state, .kit-mark):not(.state--needs-you, .kit-tone-needs) > .sr-only { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; clip-path: none; white-space: nowrap; }
+
+/* Shadow strength (overlays and menus; cards and panels stay flat). */
+:root[data-shadow='none'] { --shadow: none; --shadow-pop: none; }
+:root[data-shadow='strong'] { --shadow: 0 2px 4px rgb(0 0 0 / 0.6), 0 14px 36px rgb(0 0 0 / 0.5); --shadow-pop: 0 2px 4px rgb(0 0 0 / 0.6), 0 18px 44px rgb(0 0 0 / 0.6); }
+:root[data-shadow='strong'][data-theme='light'] { --shadow: 0 2px 4px rgb(20 20 40 / 0.12), 0 14px 36px rgb(20 20 40 / 0.18); --shadow-pop: 0 2px 4px rgb(20 20 40 / 0.12), 0 18px 44px rgb(20 20 40 / 0.22); }
+
+/* Motion: follow the system (today's), reduced (as the system's reduced-motion setting), or off. */
+:root:is([data-motion='reduced'], [data-motion='off']) { --motion-fast: 0ms; --motion-base: 0ms; }
+:root[data-motion='reduced'] :is(.state__mark, .chat-dot--pulse, .skeleton) { animation: none !important; }
+:root[data-motion='off'] :is(*, *::before, *::after) { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+
+/* The agent's entries in a conversation sit on the pane; a theme that colours them gives them a box. */
+.chat-agent { background: var(--agent-entries-surface, transparent); color: var(--agent-entries-text, inherit); }
+:root[data-agent-entries] .chat-agent { padding: 0.625rem 0.875rem; border: 1px solid var(--agent-entries-line, transparent); border-radius: var(--radius-l); }
+
+/* The floor (ADR-0113 decision 3): what needs the person (an approval card, a "needs you" card or count) is drawn in the base tokens
+   and the fixed red whatever a theme's regions say, so no theme can restyle, hide or fake it. Its buttons, cards, code and fields take
+   the base colours here, and the focus ring is the base rule's. */
+:is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {
+  --cards-surface: var(--surface-1); --cards-text: var(--text); --cards-line: var(--border);
+  --inputs-surface: var(--surface-1); --inputs-text: var(--text); --inputs-line: var(--border);
+  --buttons-surface: var(--surface-2); --buttons-text: var(--text); --buttons-line: var(--border);
+  --code-blocks-surface: var(--surface-1); --code-blocks-text: var(--text); --code-blocks-line: var(--border);
 }
