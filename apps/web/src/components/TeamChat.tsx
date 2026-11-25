@@ -33,7 +33,7 @@ function Avatar({ m, agent, size }: { m: MessageModel; agent?: AgentTileModel; s
 
 function Meta({ m }: { m: MessageModel }) {
   return <>
-    {m.crossMachine ? <span className="team-msg__tag" title={t('message-cross')}><Tag>{m.toMachine ?? t('message-cross')}</Tag><span className="sr-only">{t('message-cross')}</span></span> : null}
+    {m.crossMachine ? <span className="team-msg__tag" title={t('message-cross')}><Tag>{m.toMachine ? visible(m.toMachine) : t('message-cross')}</Tag><span className="sr-only">{t('message-cross')}</span></span> : null}
     {m.via ? <span className="team-msg__tag" title={t('message-via', { machine: visible(m.via) })}><Tag>{t('message-via', { machine: visible(m.via) })}</Tag></span> : null}
   </>;
 }

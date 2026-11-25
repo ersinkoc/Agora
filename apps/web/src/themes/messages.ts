@@ -1,10 +1,11 @@
 // What a person reads about a theme: names and problems, from locales/<lang>/web.ftl.
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import { MAX_USER_THEMES } from './store';
 import type { KitColour } from './tints';
 import { MAX_NAME, type Theme, type ThemeIssue, type TokenName, isTokenName, kindOf, shownRatio } from './tokens';
 
-export const themeName = (theme: Pick<Theme, 'name' | 'nameKey'>) => (theme.nameKey ? t(theme.nameKey) : theme.name);
+export const themeName = (theme: Pick<Theme, 'name' | 'nameKey'>) => (theme.nameKey ? t(theme.nameKey) : visible(theme.name));
 export const tokenLabel = (name: TokenName) => t(`theme-token-${name}`);
 // A colour the widget kit draws, as a person calls it: a token's own label, the red, a role's background or icon chip, an agent's badge.
 export function kitColourLabel(c: KitColour): string {
