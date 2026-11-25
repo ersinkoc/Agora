@@ -1,6 +1,8 @@
 # 0112. An agent can see every machine and agent of its hub
-Status: Proposed
+Status: Accepted
 Date: 2026-11-25
+
+Accepted: 2026-11-25 (the maintainer, in the macOS session: "0112 kabul", relayed on comms `log/2026-11-25-1047-macos-0112-accepted.md`, and confirmed in the merger chat: "Yes, accept and build"). The open questions were answered the same day ("1 açık değerler iyi, 2 evet gösterilsin"): `mesh.fleet` defaults to `true`, and other projects' workspace paths are shown.
 
 ## Context
 
@@ -72,7 +74,7 @@ agent's tool output can reach a person who has no grant. Widening it needs a dec
   more than an agent needs, and against "mesh messages are untrusted data" on the way back.
 - **Keep it project-scoped and document it:** leaves the field report's question unanswerable for agents.
 
-## Open questions for the maintainer
+## Open questions for the maintainer (answered)
 
-- Default of `mesh.fleet` on a node: `true` (proposed, matches `mesh.remote`) or `false`.
-- Whether `workspace` paths of other projects should be shown, or only the project id.
+- Default of `mesh.fleet` on a node: **`true`** (as proposed, matches `mesh.remote`).
+- Whether `workspace` paths of other projects should be shown: **yes, shown**.
