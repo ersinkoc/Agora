@@ -386,13 +386,15 @@ not built: nothing to check.
 - **Builds:** needs Agora 0.3.38 or newer (or a build of `main` with #1137): `agora agent resume` is in 0.3.38; 0.3.37 has only the
   `interrupted` lines of `agora agent list`. The fake agent comes from the same tag (S2: `--load-session`). On an older release,
   record as **skip** ("not in <version>").
-- **Do:** S1 (with `--resume ask`), S2. Start `rm-acp-resume` and `rm-acp` (S2), then repeat the interrupted restart from RM-20 (the
+- **Do:** S1 (with `--resume ask`), S2. Start `rm-acp-resume` and a Shell (S2), then repeat the interrupted restart from RM-20 (the
   node leaves the agents interrupted instead of bringing them back by themselves). Run `agora agent list`, then `agora agent resume
-  <rm-acp-resume id>`, then `agora agent resume <rm-acp id>` and `agora agent resume <rm-acp id> --again`.
+  <rm-acp-resume id>`, then `agora agent resume <Shell id>` and `agora agent resume <Shell id> --again`.
 - **See:** `agora agent list` prints the interrupted agents in id order with `interrupted` in the fourth column and `resume`
-  (`rm-acp-resume`) or `start-again` (`rm-acp`) in the fifth (`still-running` for one whose process outlived the node); `agora agent
-  resume <rm-acp-resume id>` says "Resumed agent <id> in <folder>"; `agora agent resume <rm-acp id>` refuses with "<id> cannot
-  continue its own session. Start it again instead." and, with `--again`, starts it again in its folder.
+  (`rm-acp-resume`) or `start-again` (the Shell) in the fifth (`still-running` for one whose process outlived the node); `agora agent
+  resume <rm-acp-resume id>` says "Resumed agent <id> in <folder>"; `agora agent resume <Shell id>` refuses with "<id> cannot
+  continue its own session. Start it again instead." and, with `--again`, starts it again in its folder. (A plain `rm-acp` is also
+  offered `resume`: any ACP agent that reported a session is; without `--load-session` it comes back without its conversation, as
+  in RM-20.)
 - **Evidence so far:** none recorded.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
@@ -506,7 +508,7 @@ not built: nothing to check.
   log (unverified)).
 - **See:** before the reload, Team chat shows `RM-63 hello` from the first Shell to `#rm` (on one machine the node delivers it
   without the `[#rm] ` prefix a shared project's copies get); after the reload, in the new tab and in the first tab once it has
-  reconnected, the message is there at once, with no new message sent (up to the newest 50 messages and 256 KiB per project).
+  reconnected, the message is there at once, with no new message sent (a window gets at most the newest 50 messages and 256 KiB across every project it can see).
 - **Evidence so far:** none recorded.
 
 ### RM-29 Shared project board (tasks, leases)
