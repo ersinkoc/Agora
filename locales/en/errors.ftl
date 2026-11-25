@@ -25,16 +25,16 @@ worktree-unmerged = Branch { $branch } has work that is not saved anywhere else.
 agent-not_found = Agent { $agent_id } was not found.
 agent-kind_unknown = Agent type { $kind } is not available.
 agent-publisher_revoked = The adapter for { $kind } comes from { $publisher }, which the registry has revoked. Remove it or install it from another publisher.
-agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), but { $kind } cannot be confined here, so it was not started. { $reason ->
-        [broad_write_grant] A folder it would use lets every user write to it.
-        [control_token_reachable] A folder it would be given contains the key this machine's Agora uses to tell you apart from agents, so it could act as you. Keep this machine's Agora folder outside the folders agents may use; agora doctor names it.
-        [label_failed] A folder it would use cannot be marked for confined agents.
-        [protected_path_unresolved] This machine's own Agora folder cannot be found, so it could not be kept closed to the agent.
-        [protected_path_reachable] A folder it would be given contains or leads to this machine's own Agora files (its data or agent types), and this system cannot keep them closed inside a folder the agent may use. Move them out of it (not under /tmp, /var or /opt); agora doctor names it when a setting is the cause. If it names nothing, a folder the agent is given was a link to them when it started: check that link and remove it.
-        [secrets_reachable] A folder it would be given contains the secrets this machine stores. Remove that folder from this machine's rules for agents.
-        [writable_is_link] A file or folder it may use is reached through a link in a place it may write, so it could have made that link itself. Check that link: if you did not make it, remove it. Agora does not follow such links, also ones you made yourself (a dotfiles link).
-        [writable_has_links] A file it may write also has another name in a different place (a hard link), so writing it would change that place too. Remove that link (or replace it with a copy) and start it again. Links inside node_modules, target and .git are not checked.
-        [worktree_not_folder] Its folder is no longer a plain folder (something, such as a link, was put in its place).
+agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), but { $kind } cannot be confined here, so it was not started.{ $reason ->
+        [broad_write_grant] {" "}A folder it would use lets every user write to it.
+        [control_token_reachable] {" "}A folder it would be given contains the key this machine's Agora uses to tell you apart from agents, so it could act as you. Keep this machine's Agora folder outside the folders agents may use; agora doctor names it.
+        [label_failed] {" "}A folder it would use cannot be marked for confined agents.
+        [protected_path_unresolved] {" "}This machine's own Agora folder cannot be found, so it could not be kept closed to the agent.
+        [protected_path_reachable] {" "}A folder it would be given contains or leads to this machine's own Agora files (its data or agent types), and this system cannot keep them closed inside a folder the agent may use. Move them out of it (not under /tmp, /var or /opt); agora doctor names it when a setting is the cause. If it names nothing, a folder the agent is given was a link to them when it started: check that link and remove it.
+        [secrets_reachable] {" "}A folder it would be given contains the secrets this machine stores. Remove that folder from this machine's rules for agents.
+        [writable_is_link] {" "}A file or folder it may use is reached through a link in a place it may write, so it could have made that link itself. Check that link: if you did not make it, remove it. Agora does not follow such links, also ones you made yourself (a dotfiles link).
+        [writable_has_links] {" "}A file it may write also has another name in a different place (a hard link), so writing it would change that place too. Remove that link (or replace it with a copy) and start it again. Links inside node_modules, target and .git are not checked.
+        [worktree_not_folder] {" "}Its folder is no longer a plain folder (something, such as a link, was put in its place).
        *[other] {""}
     }
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.
