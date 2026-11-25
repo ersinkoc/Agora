@@ -112,7 +112,7 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
     assert!(kinds >= 1);
 }
 
-/// Title rules (`region = "title"`) sit below the screen rules, so they decide only when those have no opinion. They must never say
+/// Title rules (`region = "title"`) sit below the dialog and running-turn rules and above the idle input box. They must never say
 /// what a captured screen contradicts: on every captured screen whose title they match, they give the expected state. A screen that
 /// shows nothing but a title is decided by them.
 #[test]
@@ -160,6 +160,45 @@ fn title_rules_agree_with_every_captured_screen() {
             detect(&Detector::new(&manifest), &term),
             *want,
             "{kind}: {bytes:?}"
+        );
+    }
+    // A title never outranks a dialog or a running turn on screen: a captured screen with a contradicting title written over it
+    // (as a title left from an earlier moment would be) still gives the screen's own answer.
+    let over: &[(&str, &str, &str, &str)] = &[
+        (
+            "codex",
+            "working",
+            "[ ! ] Action Required | work3",
+            "Working esc_to_interrupt",
+        ),
+        (
+            "codex",
+            "permission",
+            "\u{280b} work3",
+            "Blocked permission_prompt",
+        ),
+        (
+            "claude-code",
+            "permission",
+            "\u{25d0} Claude Code",
+            "Blocked permission_prompt",
+        ),
+    ];
+    for (kind, screen, title, want) in over {
+        let manifest =
+            Manifest::parse(&std::fs::read_to_string(root().join(format!("{kind}.toml"))).unwrap())
+                .unwrap();
+        let mut term = AlacrittyTerminal::new(Size {
+            cols: 120,
+            rows: 40,
+        });
+        term.feed(&std::fs::read(root().join(format!("fixtures/{kind}/{screen}.screen"))).unwrap());
+        term.feed(format!("\u{1b}]0;{title}\u{7}").as_bytes());
+        assert_eq!(term.title().as_deref(), Some(*title));
+        assert_eq!(
+            detect(&Detector::new(&manifest), &term),
+            *want,
+            "{kind}/{screen} under {title:?}"
         );
     }
     let mut checked = 0;
