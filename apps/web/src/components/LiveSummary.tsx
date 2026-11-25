@@ -4,6 +4,7 @@ import { duration } from '../net/time';
 import { Icon } from './Icon';
 import { StateBadge } from './StateBadge';
 import { shortCount } from './sessionChoice';
+import { visible } from '../net/hidden';
 
 // The last thing on a terminal agent's screen: its last line that says something, cut to what fits a strip. Only what the window already
 // has (the preview it keeps from the node's cell snapshot); nothing is read from the viewport and nothing is invented.
@@ -23,7 +24,7 @@ export function LiveSummary({ agent, now, onChanges }: { agent: AgentTileModel; 
   return (
     <div className="flex min-w-0 flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface-1 px-3 py-1.5 text-xs" role="group" aria-label={t('live-summary')}>
       <StateBadge state={agent.state} />
-      <span dir="auto" className="min-w-0 flex-1 basis-48 truncate font-mono text-muted" title={line || undefined}>{line}</span>
+      <span dir="auto" className="min-w-0 flex-1 basis-48 truncate font-mono text-muted" title={line ? visible(line) : undefined}>{visible(line)}</span>
       <span className="flex flex-none flex-wrap items-center gap-x-2 gap-y-1">
         {elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}
         {!!agent.tokens && <span className="ide-chip">{t('agent-tokens', { count: shortCount(agent.tokens) })}</span>}

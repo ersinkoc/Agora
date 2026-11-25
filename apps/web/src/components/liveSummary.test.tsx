@@ -24,4 +24,17 @@ describe('live summary of a terminal agent', () => {
   it('says nothing when the window knows nothing', () => {
     expect(renderToStaticMarkup(<LiveSummary now={1} agent={agent()} />)).toBe('');
   });
+  it('makes hidden characters in the live terminal summary visible', () => {
+    const html = renderToStaticMarkup(<LiveSummary now={1} agent={agent({ preview: 'safe\nrun\u3164ning\u202e\ue000' })} />);
+    expect(html).toContain('run\\u{3164}ning\\u{202e}\\u{e000}');
+    expect(html).not.toContain('run\u3164ning');
+  });
+  it('verifies live summary text across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u200b', '\\u{200b}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const html = renderToStaticMarkup(<LiveSummary now={1} agent={agent({ preview: `wor${char}king` })} />);
+      const shown = `wor${escaped}king`;
+      expect(html).toContain(shown);
+      expect(html.split(shown)).toHaveLength(3);
+    }
+  });
 });

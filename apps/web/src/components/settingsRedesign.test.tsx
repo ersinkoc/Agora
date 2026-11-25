@@ -158,6 +158,22 @@ describe('Your other devices', () => {
     expect(rows[2]!.querySelector('.kit-pill')?.textContent).toBe('Removed');
   });
 
+  it('makes trusted machine names visible on other-device rows', () => {
+    const raw = { ...machines[0]!, name: 'lap\u3164top\u202e\ue000' };
+    render(page({ machines: [raw], others: [other({ trustedOn: [raw.id] })] }));
+    expect(host.querySelector('#settings-devices .kit-pill')?.textContent).toBe('Trusted on lap\\u{3164}top\\u{202e}\\u{e000}');
+  });
+
+  it('verifies trusted machine labels while retaining raw trust ids', () => {
+    for (const [char, escaped] of [['\u061c', '\\u{61c}'], ['\u0085', '\\u{85}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw = { ...machines[0]!, name: `ma${char}chine` };
+      const trustedOn = [raw.id];
+      render(page({ machines: [raw], others: [other({ trustedOn })] }));
+      expect(host.querySelector('#settings-devices .kit-pill')?.textContent).toBe(`Trusted on ma${escaped}chine`);
+      expect(trustedOn).toEqual(['laptop']);
+    }
+  });
+
   it('offers Remove only from a trusted browser, and never for a device already removed', () => {
     const onRemove = vi.fn(async () => true);
     render(page({ onRemove, trustedOn: [], others: [other()] }));

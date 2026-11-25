@@ -48,6 +48,30 @@ describe('Close agent: the confirm', () => {
     expect(confirmBox()).toBeNull();
   });
 
+  it('makes agent names visible in the actions menu and confirm title', () => {
+    const raw = 'clau\u3164de\u202e\ue000';
+    act(() => root.render(withClose(async () => undefined, <Rows agents={[agent({ name: raw })]} />)));
+    const trigger = host.querySelector<HTMLButtonElement>('[aria-haspopup=menu]')!;
+    expect(trigger.getAttribute('aria-label')).toContain('clau\\u{3164}de\\u{202e}\\u{e000}');
+    openMenu('n1/a-1'); click(byText(t('close-agent')));
+    expect(confirmTitle()).toContain('clau\\u{3164}de\\u{202e}\\u{e000}');
+  });
+
+  it('verifies visible close labels while closing the raw agent identity', async () => {
+    const close = vi.fn(async () => undefined);
+    for (const [char, escaped] of [['\u2066', '\\u{2066}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const shown = agent({ id: `raw${char}id`, name: `co${char}dex` });
+      act(() => root.render(withClose(close, <Rows agents={[shown]} />)));
+      const trigger = host.querySelector<HTMLButtonElement>('[aria-haspopup=menu]')!;
+      expect(trigger.getAttribute('aria-label')).toContain(`co${escaped}dex`);
+      openMenu(shown.id); click(byText(t('close-agent')));
+      expect(confirmTitle()).toContain(`co${escaped}dex`);
+      click(byText(t('close-agent'), confirmBox()));
+      await flush();
+      expect(close).toHaveBeenLastCalledWith(shown);
+    }
+  });
+
   it('warns that the turn will be lost when the agent is working or waits for an answer', () => {
     for (const state of ['working', 'needs-you'] as const) {
       closeAsk.cancel();
