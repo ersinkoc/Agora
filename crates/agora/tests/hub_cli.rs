@@ -595,6 +595,46 @@ fn the_hubs_folder_is_closed_to_other_users() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// ADR-0112: `agora hub fleet` says whether agents see every machine and agent; the switch matters once the hub has people, and a
+/// machine without a hub folder is told so (nothing is created).
+#[test]
+fn the_fleet_view_is_turned_on_and_off_from_the_command_line() {
+    let root = tmp("fleet");
+    let run = |dir: &Path, args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(dir)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let (ok, out) = run(&root, &["hub", "fleet", "status"]);
+    assert!(ok && out.contains("nobody but you"), "{out}");
+    let (ok, _) = run(&root, &["hub", "user", "add", "Eda", "--role", "member"]);
+    assert!(ok);
+    let (ok, out) = run(&root, &["hub", "fleet", "status"]);
+    assert!(
+        ok && out.contains("only the machines and agents of their own projects"),
+        "{out}"
+    );
+    let (ok, out) = run(&root, &["hub", "fleet", "on"]);
+    assert!(ok && out.contains("also in projects"), "{out}");
+    let (ok, out) = run(&root, &["hub", "fleet", "status"]);
+    assert!(ok && out.contains("also in projects"), "{out}");
+    let (ok, out) = run(&root, &["hub", "fleet", "off"]);
+    assert!(ok && out.contains("own projects"), "{out}");
+    let (ok, _) = run(&root, &["hub", "fleet", "maybe"]);
+    assert!(!ok);
+    let none = root.join("no-hub");
+    let (ok, _) = run(&none, &["hub", "fleet", "status"]);
+    assert!(!ok);
+    assert!(!none.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");

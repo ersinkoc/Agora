@@ -226,20 +226,25 @@ pub fn fleet_machines(hub: &Value) -> Vec<Value> {
         .collect()
 }
 
-/// ADR-0112: `agents_list {scope: "hub"}`: adds the hub's running agents on other machines (its `fleet_status` answer) to this
-/// node's own `rows`, which stay as they are (they know more). An added row has the shape of a row from another machine in
+/// ADR-0112: `agents_list {scope: "hub"}`: adds the hub's running agents on other machines (its `fleet_status` answer) to the rows
+/// of the default scope (this node's own, and those of its shared projects' other machines), which stay as they are (they know
+/// more): an agent already listed is not added again. An added row has the shape of a row from another machine in
 /// [`merge_shared_list`], with its own `project`; `holds`, `since` and `files_changed` are `null` (the hub does not say), and `doing`
 /// is its state in words. With `project`, only that project's agents are added. Every row's `partial` is then the hub's: `true` when
 /// it cut its list.
 pub fn merge_fleet_list(rows: &mut Vec<Value>, hub: &Value, own_node: &str, project: Option<&str>) {
     let prefix = format!("{own_node}/");
+    let listed: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r["agent_id"].as_str().map(str::to_string))
+        .collect();
     let extra: Vec<Value> = hub["agents"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|row| {
             let id = row["agent_id"].as_str()?;
-            if id.starts_with(&prefix) || !id.contains('/') {
+            if id.starts_with(&prefix) || !id.contains('/') || listed.contains(id) {
                 return None;
             }
             let p = clean(row["project"].as_str().unwrap_or(""), 160);

@@ -696,7 +696,14 @@ fn commit_password(say: &Say, store: &SqliteStore, hashed: Option<&str>) -> Exit
 /// `agora hub fleet on|off|status` (ADR-0112): whether agents see every machine and agent of a hub that has people besides the owner.
 /// A hub with no people but the owner always answers; the switch is kept in the hub's settings and read on every call, so a running
 /// hub follows it without a restart.
-pub fn hub_fleet(say: &Say, o: &Opts, op: &str) -> ExitCode {
+pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
+    let op = match o.positional.as_slice() {
+        [op] if matches!(op.as_str(), "on" | "off" | "status") => op.as_str(),
+        _ => {
+            say.err(key!("cli-usage"), &[]);
+            return ExitCode::from(2);
+        }
+    };
     let fail = |e: String| {
         say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
         ExitCode::from(1)

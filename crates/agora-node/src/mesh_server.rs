@@ -516,17 +516,6 @@ fn list_reply(
             .collect();
         (rows, node)
     };
-    if hub_scope {
-        // ADR-0112: the hub's whole view, asked only when this node offers it; otherwise (or without an answer) this node's rows
-        // alone, each `partial: true` as the broker made them.
-        if let Some(h) = fleet.then(|| hub_fleet(conn.agent(), remote)).flatten() {
-            agora_mesh::awareness::merge_fleet_list(&mut rows, &h, &node, filter);
-        }
-        return Some(Message::Response {
-            id,
-            result: agora_mesh::mcp::ok_tool_result(&json!(rows)),
-        });
-    }
     let mut projects: Vec<String> = match filter {
         Some(p) => vec![p.to_string()],
         None => rows
@@ -547,6 +536,14 @@ fn list_reply(
             }
             Some(None) => agora_mesh::awareness::list_complete(&mut rows, project),
             None => {}
+        }
+    }
+    if hub_scope {
+        // ADR-0112: the rows above, then the hub's whole view, asked only when this node offers it. Without it the list is this
+        // node's view alone: every row `partial: true`.
+        match fleet.then(|| hub_fleet(conn.agent(), remote)).flatten() {
+            Some(h) => agora_mesh::awareness::merge_fleet_list(&mut rows, &h, &node, filter),
+            None => rows.iter_mut().for_each(|r| r["partial"] = json!(true)),
         }
     }
     Some(Message::Response {
@@ -862,9 +859,10 @@ impl MeshServer {
         self.fleet.allowed.store(allowed, Ordering::Release);
     }
 
-    /// Whether the policy allows the hub-wide view: the node offers `mesh.fleet_status.v1` to the hub only then.
+    /// Whether the policy allows the hub-wide view (`mesh.fleet`, and `mesh.remote`: a node whose messages stay here asks the hub
+    /// nothing): the node offers `mesh.fleet_status.v1` to the hub only then.
     pub fn fleet_allowed(&self) -> bool {
-        self.fleet.allowed.load(Ordering::Acquire)
+        self.fleet.allowed.load(Ordering::Acquire) && self.remote_allowed.load(Ordering::Acquire)
     }
 
     /// The capabilities the hub agreed on in its `Welcome` (each connection): the view is offered while they include
@@ -4000,6 +3998,8 @@ mod tests {
     struct FleetLink {
         asked: std::sync::atomic::AtomicUsize,
         answer: Mutex<Result<BoardReply, String>>,
+        /// The hub's `workspace_status` answer for every project (shared), or `None` (not shared).
+        status: Option<Value>,
     }
 
     impl RemoteLink for FleetLink {
@@ -4022,9 +4022,15 @@ mod tests {
             done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
         ) {
             if tool != "fleet_status" {
-                return done(Ok(BoardReply {
-                    shared: false,
-                    result_json: String::new(),
+                return done(Ok(match &self.status {
+                    Some(v) => BoardReply {
+                        shared: true,
+                        result_json: agora_mesh::mcp::ok_tool_result(v).to_string(),
+                    },
+                    None => BoardReply {
+                        shared: false,
+                        result_json: String::new(),
+                    },
                 }));
             }
             assert_eq!(project, "", "fleet_status names no project");
@@ -4105,6 +4111,7 @@ mod tests {
         let link = Arc::new(FleetLink {
             asked: std::sync::atomic::AtomicUsize::new(0),
             answer: Mutex::new(Ok(answered(&fleet))),
+            status: None,
         });
         server.set_remote(link.clone() as Arc<dyn RemoteLink>);
         let id = AgentId::new("a1");
@@ -4195,6 +4202,69 @@ mod tests {
         local(&mut c);
         assert_eq!(asked(), 5);
 
+        drop(c);
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ADR-0112: `scope: "hub"` keeps what the default scope says of a shared project (its other machines' agents, with their board
+    /// task), and an agent both answers name is listed once.
+    #[test]
+    fn the_hub_scope_keeps_the_default_scopes_rows_of_a_shared_project() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-fs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let status = json!({"project": "p", "machines_online": 2, "open_tasks": [], "leases": [],
+            "agents": [{"id": "far/c", "kind": "codex", "machine": "far", "state": "working", "task": "review login",
+                        "holds": 1, "parent": null, "workspace": "/far/p"}]});
+        let fleet = json!({"machines": [], "partial": false, "agents": [
+            {"agent_id": "far/c", "kind": "codex", "machine": "far", "project": "p", "state": "working", "workspace": "/far/p", "parent": null},
+            {"agent_id": "far/d", "kind": "codex", "machine": "far", "project": "q", "state": "idle", "workspace": "/far/q", "parent": null}]});
+        let link = Arc::new(FleetLink {
+            asked: std::sync::atomic::AtomicUsize::new(0),
+            answer: Mutex::new(Ok(BoardReply {
+                shared: true,
+                result_json: agora_mesh::mcp::ok_tool_result(&fleet).to_string(),
+            })),
+            status: Some(status),
+        });
+        server.set_remote(link.clone() as Arc<dyn RemoteLink>);
+        server.hub_welcomed(&[agora_protocol::handshake::FLEET_STATUS_V1.to_string()]);
+        let id = AgentId::new("a1");
+        let sock = server
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut c = Client::new(&sock);
+        let rows = c.tool("agents_list", json!({"scope": "hub"}));
+        let ids: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a1", "far/c", "far/d"], "{rows}");
+        assert_eq!(rows[1]["doing"], "working on task: review login");
+        assert_eq!(rows[1]["holds"], 1);
+        assert_eq!(rows[2]["project"], "q");
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["partial"] == false),
+            "{rows}"
+        );
         drop(c);
         server.unregister(&id);
         drop(server);

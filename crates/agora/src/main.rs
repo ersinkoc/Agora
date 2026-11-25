@@ -523,7 +523,7 @@ fn main() -> ExitCode {
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
-        ["hub", "fingerprint" | "audit" | "devices" | "machines"]
+        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet"]
             if !hubcli::hub_dir(&opts).is_dir() =>
         {
             hubcli::not_here(&say, &opts)
@@ -532,7 +532,7 @@ fn main() -> ExitCode {
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
-        ["hub", "fleet", op @ ("on" | "off" | "status")] => hubcli::hub_fleet(&say, &opts, op),
+        ["hub", "fleet"] => hubcli::hub_fleet(&say, &opts),
         ["hub", "metrics-token"] => hubcli::hub_metrics_token(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
         ["hub", "devices"] => hubcli::hub_devices(&say, &opts),

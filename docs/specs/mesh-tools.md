@@ -305,8 +305,9 @@ online machine (`agent_id` is `<node>/<agent>`, what `send_message` takes; `stat
 the list. Never `doing`, a label, a task, a message or a file name.
 
 - **`machines_list {}`** answers `{ machines, partial }` with the hub's machines (text cleaned and cut like the rest of this section).
-- **`agents_list {scope: "hub"}`** lists this node's own rows as the default scope does (all its projects, or the one named with
-  `project`), then adds the hub's agents on other machines (only the named project's when `project` is given): `node` is their machine,
+- **`agents_list {scope: "hub"}`** lists what the default scope lists (this node's agents of all its projects, or of the one named with
+  `project`, and the other machines' agents of its shared projects, with the board's tasks and leases), then adds the hub's other
+  agents on other machines (only the named project's when `project` is given; an agent already listed is not added again): `node` is their machine,
   `project` their own, `doing` their state in words, `label` empty, and `since`, `files_changed` and `holds` `null` (the hub does not
   say). Every row's `partial` is then the hub's. `scope: "project"`, or no `scope`, is the answer above, unchanged; any other value is
   `-32602`.
@@ -315,7 +316,7 @@ the list. Never `doing`, a label, a task, a message or a file name.
   connection) and messages may cross nodes (`mesh.remote`).
 - **Without the hub's answer** (the node does not offer the view, no hub, an older hub, a refusal, an error, or 3 s without an answer)
   both tools answer from this node alone: `machines_list` lists this machine
-  (`online: true`, its OS, its version, its running agents, `last_seen_ms` now), `agents_list` this node's rows; `partial: true`.
+  (`online: true`, its OS, its version, its running agents, `last_seen_ms` now), `agents_list` the default scope's rows; `partial: true` on every row.
 - **Who may see it.** The hub answers only in solo mode, that is while it has no person in its `users` table besides the owner (ADR-0049;
   any person added, whatever the role, makes it a team hub). A team hub refuses with the tool error `board.not_allowed` (no parameters),
   because a member's agent would see projects that member has no grant for, unless the owner turned the view on on the hub's machine:
