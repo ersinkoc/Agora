@@ -182,6 +182,10 @@ fn packed(field: &FieldDescriptorProto, syntax: &str) -> bool {
         })
 }
 
+fn is_proto2(syntax: &str) -> bool {
+    syntax.is_empty() || syntax == "proto2"
+}
+
 /// Returns one line per breaking change; empty means compatible.
 pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> Vec<String> {
     let (b, h) = (index(base), index(head));
@@ -333,6 +337,27 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
         }
         if !ranges_cover(&enum_ranges(be), &enum_ranges(he)) {
             out.push(format!("enum {name}: reserved number range was narrowed"));
+        }
+        if b.enum_syntax.get(name).copied().is_some_and(is_proto2)
+            && h.enum_syntax.get(name).copied().is_some_and(is_proto2)
+        {
+            if let (Some(base_default), Some(head_default)) = (be.value.first(), he.value.first()) {
+                let base_default_still_exists = he.value.iter().any(|value| {
+                    value.number() == base_default.number() && value.name() == base_default.name()
+                });
+                if base_default_still_exists
+                    && (head_default.number() != base_default.number()
+                        || head_default.name() != base_default.name())
+                {
+                    out.push(format!(
+                        "enum {name}: implicit default changed from {} = {} to {} = {}",
+                        base_default.name(),
+                        base_default.number(),
+                        head_default.name(),
+                        head_default.number()
+                    ));
+                }
+            }
         }
         let mut base_first_names = BTreeMap::new();
         for value in &be.value {
