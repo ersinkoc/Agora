@@ -2056,6 +2056,30 @@ mod tests {
         NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])))
     }
 
+    /// #1150: a start request cannot be seen (nor so decided) before its route is in place. A decision that came between the two
+    /// spent the request, found no route and was refused as unknown, while the spawner filed a request nothing would end.
+    #[test]
+    fn a_start_request_is_listed_only_with_its_route() {
+        let n = std::sync::Arc::new(node_approvals());
+        let routes = n.r();
+        let asker = std::sync::Arc::clone(&n);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let p = asker.request_start(&agora_core::AgentId::new("agent-1"), "{}", 1_000);
+            let _ = tx.send(());
+            p
+        });
+        // Without the fix the request is in the queue by now, its route still missing.
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+        assert!(n.waiting().is_empty(), "listed before its route");
+        drop(routes);
+        let p = t.join().unwrap().expect("a request");
+        assert_eq!(n.waiting(), vec![p.clone()]);
+        assert_eq!(n.agent_of(&p.id), Some(agora_core::AgentId::new("agent-1")));
+    }
+
     // ---- ADR-0101: an "always" answer ----
 
     const ONCE: i32 = agora_protocol::v1::ApprovalScope::Once as i32;
