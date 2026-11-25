@@ -1,0 +1,1 @@
+- Stopping an adapter agent the node runs itself no longer waits forever, holding up the whole node, when a program the adapter started keeps its output open.

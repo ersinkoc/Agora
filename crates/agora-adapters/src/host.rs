@@ -1567,8 +1567,12 @@ impl Adapter {
                 stop.store(true, Ordering::Release);
             }
         }
+        // F1720: a process the node's own adapter started can keep its output open after the kill, so that reader is not waited for:
+        // it ends on its own when that output closes (the events it would send have no receiver then).
         if let Some(t) = self.reader.take() {
-            let _ = t.join();
+            if self.is_held() {
+                let _ = t.join();
+            }
         }
     }
 }
@@ -2170,6 +2174,51 @@ mod tests {
         }
         assert!(!alive, "the child is still present after startup failed");
         assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::WouldBlock));
+    }
+
+    /// F1720: a process the adapter started can keep its output open after the adapter is killed (a wrapper's real adapter, a
+    /// helper in the background), so its reader does not end. Ending the adapter (`shutdown` from a stop under the supervisor's lock,
+    /// a drop) still returns once the adapter is killed and reaped. The reader here stands for that open output: it ends only when the
+    /// test lets it, after the drop has returned.
+    #[test]
+    fn ending_an_adapter_does_not_wait_for_output_a_descendant_keeps_open() {
+        if agora_platform::process_identity(std::process::id())
+            .is_err_and(|e| e.kind() == io::ErrorKind::Unsupported)
+        {
+            return;
+        }
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::startup_cleanup_child"])
+            .env("AGORA_TEST_STARTUP_CLEANUP_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let identity = agora_platform::process_identity(child.id()).unwrap();
+        let (release, open) = channel::<()>();
+        let adapter = Adapter::attach_child(child, |stdout, _, _, _, _| {
+            Ok(std::thread::spawn(move || {
+                let _stdout = stdout;
+                let _ = open.recv();
+            }))
+        })
+        .unwrap();
+        let (done, ended) = channel();
+        std::thread::spawn(move || {
+            drop(adapter);
+            let _ = done.send(());
+        });
+        let returned = ended.recv_timeout(Duration::from_secs(10)).is_ok();
+        let alive = agora_platform::process_still_running(&identity);
+        drop(release);
+        if alive {
+            let _ = agora_platform::kill_process_if_same(&identity);
+        }
+        assert!(
+            returned,
+            "ending the adapter waited for output a descendant keeps open"
+        );
+        assert!(!alive, "the adapter was not killed and reaped");
     }
 
     fn line(method: &str, params: Value) -> Vec<u8> {
