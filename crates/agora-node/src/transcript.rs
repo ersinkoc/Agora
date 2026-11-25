@@ -1369,15 +1369,20 @@ impl Store {
         }
         let mut f = agora_platform::open_append_private(&path)?;
         let len = f.metadata()?.len();
+        // The file's length before this batch's lines, with the header or line break written here (F1602).
+        let mut before = len;
         if len == 0 {
-            f.write_all(&header(false))?;
+            let h = header(false);
+            f.write_all(&h)?;
+            before += h.len() as u64;
         } else if !ends_a_line(&path, len) {
             // A write cut short (a full disk) left half a line: ended here, so the next line is whole and only the torn one is lost.
             f.write_all(b"\n")?;
+            before += 1;
         }
         f.write_all(&out)?;
         f.flush()?;
-        if len + out.len() as u64 > self.limits.max_bytes {
+        if before + out.len() as u64 > self.limits.max_bytes {
             drop(f);
             self.rotate(&path, batch.high)?;
         }
@@ -1392,9 +1397,11 @@ impl Store {
         let len = f.metadata()?.len();
         let keep = self.limits.max_bytes / 2;
         let start = len.saturating_sub(keep);
-        f.seek(SeekFrom::Start(start))?;
+        // F1600: the byte before the half too, so a half that begins on a line start keeps that line (its break is skipped).
+        let at = start.saturating_sub(1);
+        f.seek(SeekFrom::Start(at))?;
         let mut tail = Vec::new();
-        f.take(keep).read_to_end(&mut tail)?;
+        f.take(len - at).read_to_end(&mut tail)?;
         let from = if start == 0 {
             0
         } else {
@@ -1582,9 +1589,11 @@ fn read_tail(path: &Path) -> io::Result<Seed> {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     let start = meta.len().saturating_sub(TAIL_READ);
-    f.seek(SeekFrom::Start(start))?;
+    // F1601: the byte before the tail too, so a tail that begins on a line start keeps that line (its break is skipped).
+    let at = start.saturating_sub(1);
+    f.seek(SeekFrom::Start(at))?;
     let mut bytes = Vec::new();
-    f.take(TAIL_READ).read_to_end(&mut bytes)?;
+    f.take(meta.len() - at).read_to_end(&mut bytes)?;
     let from = if start == 0 {
         0
     } else {
