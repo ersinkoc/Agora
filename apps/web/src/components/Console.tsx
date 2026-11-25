@@ -431,7 +431,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           onResolve={onResolve} stale={link !== 'live'} onReview={loadDiff ? setReviewing : undefined} onPane={loadDiff ? (id) => openTool('changes', id) : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
       </div>
 
-      <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>
+      <footer className="ide-bar h-6 flex-wrap border-t border-statusline-line bg-statusline text-xs text-statusline-ink" data-region="status-line" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-idle'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => { setRailTab('needs'); setShowDetails(true); }}>{t('ide-status-needs', { count: needs })}</button>}

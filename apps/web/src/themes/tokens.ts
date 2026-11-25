@@ -1,3 +1,7 @@
+import {
+  CHROME_NAMES, DEFAULT_CHROME, DEFAULT_TEXT, REGIONS, REGION_PARTS, SYNTAX_KEYS, TERMINAL_KEYS, type AnsiName, type Chrome, type FloorItem, type LookExtras,
+  type RegionName, type SyntaxKey, type TextStyle, chromeData, noExtras, regionVar, syntaxVar, terminalVar,
+} from './look';
 import { type Control, INDICATORS, type KitColour, ROLE_TOKEN, TINT_ROLES, type TintRole, kitPalette, roleColours, tints } from './tints';
 
 // Themes are data (ADR-0068 rung 2, docs/ux/themes.md): a theme file names design tokens from design/tokens.css and their values.
@@ -51,14 +55,29 @@ export const DERIVED: Readonly<Record<string, TokenName>> = {
   'space-2': 'space-1', 'space-3': 'space-1', 'space-4': 'space-1', 'space-6': 'space-1', 'space-8': 'space-1',
 };
 
+// One scheme's colours (theme format 2, look.ts): the tokens, and the regions, terminal and syntax colours the theme sets.
+export interface Look extends LookExtras { tokens: Tokens }
+export type Looks = Partial<Record<Scheme, Look>>;
+
 export interface Theme {
   id: string;
   name: string; // a user theme's own name; a built-in theme's is a locale key (`nameKey`)
   nameKey?: string;
+  // The first scheme the theme has (dark before light) and its tokens: what a caller that knows one scheme reads.
   scheme: Scheme;
   tokens: Tokens;
   builtIn?: boolean;
+  // Format 2 (ADR-0113): a look per scheme the theme has, and its chrome and text. A theme without them is a format-1 theme of
+  // `scheme`: one look, today's chrome and text (`looksOf`, `chromeOf`, `textOf`).
+  looks?: Looks;
+  chrome?: Chrome;
+  text?: TextStyle;
 }
+export const looksOf = (t: Pick<Theme, 'scheme' | 'tokens' | 'looks'>): Looks => t.looks ?? { [t.scheme]: { tokens: t.tokens, ...noExtras() } };
+export const chromeOf = (t: Pick<Theme, 'chrome'>): Chrome => t.chrome ?? DEFAULT_CHROME;
+export const textOf = (t: Pick<Theme, 'text'>): TextStyle => t.text ?? DEFAULT_TEXT;
+export const schemesOf = (t: Pick<Theme, 'scheme' | 'tokens' | 'looks'>): Scheme[] => (['dark', 'light'] as const).filter((s) => !!looksOf(t)[s]);
+export const hasScheme = (t: Pick<Theme, 'scheme' | 'tokens' | 'looks'>, s: Scheme) => !!looksOf(t)[s];
 
 const FONT_UI = "'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 const FONT_MONO = "ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace";
@@ -233,16 +252,34 @@ export function themeWarnings(tokens: Tokens, scheme: Scheme): ThemeIssue[] {
 // The file people import and export. Tokens it leaves out come from the default theme of its scheme.
 export interface ThemeFile { 'agora-theme': typeof THEME_FORMAT; name: string; scheme: Scheme; tokens: Partial<Tokens> }
 
-export type ThemeIssue =
-  | { code: 'json' | 'invalid' | 'newer' | 'name' | 'scheme' }
+// Format 2 (file.ts) adds its own problems, and says which scheme a colour problem is in when a theme has both (`scheme`).
+export type ThemeIssue = (
+  | { code: 'json' | 'invalid' | 'newer' | 'name' | 'scheme' | 'no-look' }
   | { code: 'unknown-field'; field: string }
   | { code: 'unknown-token'; token: string }
   | { code: 'derived-token'; token: string; base: TokenName }
+  | { code: 'moved-token'; field: string; token: string; to: 'shape' | 'text' | 'tokens' }
   | { code: 'bad-value'; token: TokenName }
+  | { code: 'bad-field'; field: string; expect: FieldKind; min?: number; max?: number; values?: string }
+  | { code: 'unsafe'; field: string }
+  | { code: 'floor'; field: string; item: FloorItem }
+  | { code: 'text-floor'; field: string; min: number }
+  | { code: 'text-lifted'; from: string; to: string }
+  | { code: 'inherits'; id: string }
   | ({ code: 'contrast' } & ContrastIssue)
+  | ({ code: 'region-contrast' } & RegionIssue)
+  | { code: 'terminal-contrast' | 'cursor-contrast' | 'selection-contrast'; ratio: number; min: number }
+  | { code: 'too-large'; max: number }
+  | { code: 'more'; count: number }
+  | { code: 'ansi-contrast'; colour: AnsiName; ratio: number; min: number }
+  | { code: 'syntax-contrast'; key: SyntaxKey; ratio: number; min: number }
   | ({ code: 'tint-contrast' } & TintIssue)
   | ({ code: 'kit-contrast' } & KitIssue)
-  | ({ code: 'control-contrast' } & ControlIssue);
+  | ({ code: 'control-contrast' } & ControlIssue)
+) & { scheme?: Scheme };
+export type FieldKind = 'color' | 'size' | 'list' | 'font' | 'line-height' | 'switch' | 'group';
+// A region's text, or a theme colour, on the region's surface.
+export interface RegionIssue { region: RegionName; fg: 'region-text' | TokenName; ratio: number; min: number }
 // `warnings` (only when there are some) are problems that do not refuse the theme (`themeWarnings`): text and controls that would be
 // hard to see in the kit's colours.
 export type ParsedTheme = { ok: true; name: string; scheme: Scheme; tokens: Tokens; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] };
@@ -266,7 +303,7 @@ export function parseTheme(value: unknown): ParsedTheme {
   if (value.tokens !== undefined && !isObject(value.tokens)) return { ok: false, issues: [...issues, { code: 'invalid' }] };
   const tokens: Tokens = { ...baseTokens(scheme) };
   for (const [k, v] of Object.entries(value.tokens ?? {})) {
-    if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
+    if (Object.prototype.hasOwnProperty.call(DERIVED, k)) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
     if (!isTokenName(k)) { issues.push({ code: 'unknown-token', token: cleanName(k).slice(0, 40) }); continue; }
     const read = readValue(k, v);
     if (read === undefined) issues.push({ code: 'bad-value', token: k });
@@ -313,13 +350,66 @@ export interface StyleTarget {
   style: { setProperty(name: string, value: string): void; removeProperty(name: string): unknown };
   dataset: Record<string, string | undefined>;
 }
+// Every variable a theme can set beyond the format-1 tokens (look.ts), so a theme that leaves one out removes what the one before set.
+const EXTRA_VARS = [
+  ...REGIONS.flatMap((r) => REGION_PARTS.map((p) => regionVar(r, p))), ...TERMINAL_KEYS.map(terminalVar), ...SYNTAX_KEYS.map(syntaxVar),
+  '--pane-gap', '--line-width', '--ui-weight', '--ui-line-height',
+];
+const CHROME_DATA = [...CHROME_NAMES.filter((n) => n !== 'pane-gap' && n !== 'line-width').map(chromeData), 'paneGaps', 'ligatures', 'lineHeight', 'weight', 'agentEntries'];
+const setData = (root: StyleTarget, key: string, v: string | undefined) => { if (v === undefined) delete root.dataset[key]; else root.dataset[key] = v; };
+
+// The variables and data attributes of one scheme of a theme beyond the format-1 tokens. Every value was checked when the theme was
+// read (colours are #rrggbb, sizes whole pixels in a range); a list value is written as the list's own word, never the file's text.
+export function extraVariables(theme: Pick<Theme, 'chrome' | 'text'>, look: LookExtras): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const r of REGIONS) for (const p of REGION_PARTS) { const v = look.regions[r]?.[p]; if (v) vars[regionVar(r, p)] = v; }
+  for (const k of TERMINAL_KEYS) { const v = look.terminal[k]; if (v) vars[terminalVar(k)] = v; }
+  for (const k of SYNTAX_KEYS) { const v = look.syntax[k]; if (v) vars[syntaxVar(k)] = v; }
+  const chrome = chromeOf(theme);
+  const text = textOf(theme);
+  if (chrome['pane-gap'] !== DEFAULT_CHROME['pane-gap']) vars['--pane-gap'] = `${chrome['pane-gap']}px`;
+  if (chrome['line-width'] !== DEFAULT_CHROME['line-width']) vars['--line-width'] = `${chrome['line-width']}px`;
+  if (text.weight !== DEFAULT_TEXT.weight) vars['--ui-weight'] = String(text.weight);
+  if (text['line-height'] !== 'normal') vars['--ui-line-height'] = String(text['line-height']);
+  return vars;
+}
+export function chromeAttributes(theme: Pick<Theme, 'chrome' | 'text'>, look: LookExtras): Record<string, string> {
+  const chrome = chromeOf(theme);
+  const text = textOf(theme);
+  const data: Record<string, string> = {};
+  for (const n of CHROME_NAMES) {
+    if (n === 'pane-gap' || n === 'line-width') continue;
+    if (chrome[n] !== DEFAULT_CHROME[n]) data[chromeData(n)] = String(chrome[n]);
+  }
+  if (chrome['pane-gap'] > 0) data.paneGaps = 'on';
+  if (!text.ligatures) data.ligatures = 'off';
+  if (text['line-height'] !== 'normal') data.lineHeight = 'set';
+  if (text.weight !== DEFAULT_TEXT.weight) data.weight = 'set';
+  // The agent's entries have no box of their own until a theme colours one.
+  const agent = look.regions['agent-entries'];
+  if (agent?.surface || agent?.line) data.agentEntries = 'filled';
+  return data;
+}
+
 // Dark and Light are design/tokens.css itself: for them the page's own rules are left to work (nothing set inline), so a script
-// or the gallery that flips `data-theme` still sees both schemes. Any other theme sets its variables on the root.
-export function applyTheme(root: StyleTarget, theme: Pick<Theme, 'tokens' | 'scheme'> & Partial<Pick<Theme, 'id' | 'builtIn'>>) {
-  const plain = !!theme.builtIn && theme.id === DEFAULT_THEME[theme.scheme];
-  for (const [k, v] of Object.entries(cssVariables(theme))) {
+// or the gallery that flips `data-theme` still sees both schemes. Any other theme sets its variables on the root, one by one.
+// `scheme` is the one on screen; a theme without it shows its own first scheme.
+export function applyTheme(root: StyleTarget, theme: Pick<Theme, 'tokens' | 'scheme'> & Partial<Pick<Theme, 'id' | 'builtIn' | 'looks' | 'chrome' | 'text'>>, scheme: Scheme = theme.scheme) {
+  const looks = looksOf(theme);
+  const s: Scheme = looks[scheme] ? scheme : theme.scheme;
+  const look = looks[s] ?? { tokens: theme.tokens, ...noExtras() };
+  const plain = !!theme.builtIn && theme.id === DEFAULT_THEME[s];
+  for (const [k, v] of Object.entries(cssVariables(look))) {
     if (plain) root.style.removeProperty(k);
     else root.style.setProperty(k, v);
   }
-  root.dataset.theme = theme.scheme; // the scheme's shadows, `color-scheme` and the terminal's palette follow it
+  const extra = plain ? {} : extraVariables(theme, look);
+  for (const k of EXTRA_VARS) {
+    const v = extra[k];
+    if (v === undefined) root.style.removeProperty(k);
+    else root.style.setProperty(k, v);
+  }
+  const data = plain ? {} : chromeAttributes(theme, look);
+  for (const k of CHROME_DATA) setData(root, k, data[k]);
+  root.dataset.theme = s; // the scheme's shadows, `color-scheme` and the terminal's palette follow it
 }
