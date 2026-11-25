@@ -54,16 +54,16 @@ struct Index<'a> {
     enums: BTreeMap<String, &'a EnumDescriptorProto>,
     enum_syntax: BTreeMap<String, &'a str>,
     extensions: BTreeMap<(String, i32), &'a FieldDescriptorProto>,
+    extension_syntax: BTreeMap<(String, i32), &'a str>,
 }
 
 fn index(fds: &FileDescriptorSet) -> Index<'_> {
     fn walk<'a>(prefix: &str, m: &'a DescriptorProto, syntax: &'a str, ix: &mut Index<'a>) {
         let name = format!("{prefix}.{}", m.name());
         for extension in &m.extension {
-            ix.extensions.insert(
-                (extension.extendee().to_string(), extension.number()),
-                extension,
-            );
+            let key = (extension.extendee().to_string(), extension.number());
+            ix.extension_syntax.insert(key.clone(), syntax);
+            ix.extensions.insert(key, extension);
         }
         for n in &m.nested_type {
             walk(&name, n, syntax, ix);
@@ -80,10 +80,9 @@ fn index(fds: &FileDescriptorSet) -> Index<'_> {
     for f in &fds.file {
         let pkg = f.package();
         for extension in &f.extension {
-            ix.extensions.insert(
-                (extension.extendee().to_string(), extension.number()),
-                extension,
-            );
+            let key = (extension.extendee().to_string(), extension.number());
+            ix.extension_syntax.insert(key.clone(), f.syntax());
+            ix.extensions.insert(key, extension);
         }
         for m in &f.message_type {
             walk(pkg, m, f.syntax(), &mut ix);
@@ -402,6 +401,17 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                 if base_jstype != head_jstype {
                     out.push(format!(
                         "extension {} = {number} of {extendee}: JavaScript type option changed",
+                        bf.name()
+                    ));
+                }
+                let key = (extendee.clone(), *number);
+                let base_syntax = b.extension_syntax.get(&key).copied().unwrap_or("");
+                let head_syntax = h.extension_syntax.get(&key).copied().unwrap_or("");
+                if describe(hf) == describe(bf)
+                    && packed(bf, base_syntax) != packed(hf, head_syntax)
+                {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: packed encoding changed",
                         bf.name()
                     ));
                 }
