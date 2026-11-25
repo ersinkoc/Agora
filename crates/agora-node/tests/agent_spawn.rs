@@ -1448,7 +1448,8 @@ fn a_secret_in_a_helper_starts_prompt_never_reaches_its_card() {
     if !supported() {
         return;
     }
-    let value = "SK-HELPER-0123456789-ABCDEFGHIJ";
+    // Letters only: the card's folder path holds the test's process id, whose digits could match a piece of a value with a digit run.
+    let value = "SK-HELPER-qwertyuiop-ABCDEFGHIJ";
     let e = Env::with_secret("secret", Some(value));
     let folder = e.folder.join(format!("dir-{value}"));
     std::fs::create_dir_all(&folder).unwrap();

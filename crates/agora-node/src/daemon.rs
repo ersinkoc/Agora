@@ -4491,7 +4491,10 @@ mod event_redaction_tests {
         }
         let events = sink.events_after(0);
         assert!(events.len() >= 12);
-        let text = format!("{events:?}");
+        // Only the bodies carry the agent's words: the envelope's time and sequence are digits that can hold a piece of the
+        // value by chance (`at_ms` ending in 2345 failed this test once).
+        let bodies: Vec<_> = events.iter().map(|e| &e.body).collect();
+        let text = format!("{bodies:?}");
         for i in 0..=value.len() - 4 {
             assert!(
                 !text.contains(&value[i..i + 4]),
