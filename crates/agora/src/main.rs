@@ -231,11 +231,13 @@ impl Say {
         let message = self
             .field_reason(e, &args)
             .unwrap_or_else(|| self.text(&e.code.replace('.', "-"), &args));
+        // The sentence ends in a parameter from the other side (`adapter-agent_exited`'s `stderr_tail`), which may be empty or
+        // end in a line break; the line printed ends at its text.
         self.text(
             key!("cli-error"),
             &[
                 ("code", e.code.as_str().into()),
-                ("message", message.into()),
+                ("message", message.trim().into()),
             ],
         )
     }
@@ -1569,6 +1571,20 @@ mod remote_error_tests {
             .to_info();
         let en = Say(Catalog::english()).remote_error_text(&other);
         assert!(en.contains("field: directory.project_id"), "{en}");
+    }
+
+    #[test]
+    fn an_error_whose_last_parameter_is_empty_or_padded_ends_at_its_text() {
+        // `adapter-agent_exited` ends in the agent's last output, which can be empty or end in a line break.
+        for (tail, end) in [("", "output:"), ("boom\n", "output: boom")] {
+            let e = Error::new(ErrorCode::AdapterAgentExited)
+                .with("stage", "turn")
+                .with("exit_code", "1")
+                .with("stderr_tail", tail)
+                .to_info();
+            let en = Say(Catalog::english()).remote_error_text(&e);
+            assert!(en.ends_with(end), "{en:?}");
+        }
     }
 }
 
