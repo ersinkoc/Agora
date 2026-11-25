@@ -3,9 +3,10 @@
 //
 // The colour scheme follows the system, or is forced dark or light (the title bar's picker). Each scheme has its chosen theme,
 // so "follow the system" can switch between, say, Sand by day and Slate by night. Another tab's change applies here at once.
+import { type ThemeData, cloneLooks, deserialise, readTheme, writeTheme } from './file';
 import {
-  BUILT_IN, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
-  applyTheme, deserialiseTheme, parseTheme, themeFile,
+  BUILT_IN, COLOR_TOKENS, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
+  applyTheme, chromeOf, hasScheme, looksOf, schemesOf, textOf,
 } from './tokens';
 
 export type Mode = 'system' | Scheme;
@@ -30,7 +31,7 @@ function json(text: string | null): unknown {
 }
 
 // What this browser had stored. Anything unreadable (another version's, edited by hand) falls back to the defaults; a stored user
-// theme goes through the same checks as an imported file.
+// theme goes through the same checks as an imported file. Themes are stored as format-2 files; one stored before is a format-1 file.
 export function loadState(kv: KV | undefined): ThemeState {
   const m = read(kv, MODE_KEY);
   const mode: Mode = m === 'dark' || m === 'light' ? m : 'system';
@@ -40,15 +41,15 @@ export function loadState(kv: KV | undefined): ThemeState {
     for (const e of list.slice(0, MAX_USER_THEMES)) {
       const id = (e as { id?: unknown })?.id;
       if (typeof id !== 'string' || !/^user-\d{1,6}$/.test(id) || user.some((u) => u.id === id)) continue;
-      const p = parseTheme((e as { file?: unknown }).file);
-      if (p.ok) user.push({ id, name: p.name, scheme: p.scheme, tokens: p.tokens });
+      const p = readTheme((e as { file?: unknown }).file);
+      if (p.ok) user.push({ id, ...p.theme });
     }
   }
   const c = json(read(kv, CHOICE_KEY)) as Partial<Record<Scheme, unknown>> | undefined;
   const all = [...BUILT_IN, ...user];
   const pick = (s: Scheme) => {
     const id = c && typeof c === 'object' ? c[s] : undefined;
-    return all.some((t) => t.id === id && t.scheme === s) ? (id as string) : DEFAULT_THEME[s];
+    return all.some((t) => t.id === id && hasScheme(t, s)) ? (id as string) : DEFAULT_THEME[s];
   };
   return { mode, choice: { dark: pick('dark'), light: pick('light') }, user };
 }
@@ -68,20 +69,26 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
   const byId = (id: string) => all().find((t) => t.id === id);
   const scheme = (): Scheme => (state.mode !== 'system' ? state.mode : env.prefersLight?.() ? 'light' : 'dark');
   const active = (): Theme => byId(state.choice[scheme()]) ?? (BUILT_IN.find((t) => t.id === DEFAULT_THEME[scheme()]) as Theme);
-  const apply = () => { if (env.root) applyTheme(env.root, active()); env.onApply?.(); };
+  const apply = () => { if (env.root) applyTheme(env.root, active(), scheme()); env.onApply?.(); };
   const set = (next: ThemeState) => { state = next; apply(); notify(); };
-  const persistUser = (user: readonly Theme[]) => write(env.kv, USER_KEY, JSON.stringify(user.map((u) => ({ id: u.id, file: themeFile(u, u.name) }))));
+  const persistUser = (user: readonly Theme[]) => write(env.kv, USER_KEY, JSON.stringify(user.map((u) => ({ id: u.id, file: writeTheme(u, u.name) }))));
   const persistChoice = (choice: Record<Scheme, string>) =>
     write(env.kv, CHOICE_KEY, choice.dark === DEFAULT_THEME.dark && choice.light === DEFAULT_THEME.light ? undefined : JSON.stringify(choice));
   const freshId = () => `user-${Math.max(0, ...state.user.map((u) => Number(u.id.slice(5)))) + 1}`;
-  // A new theme becomes the chosen one of its scheme and is shown.
+  // A theme becomes the choice of every scheme it has; a forced scheme it lacks moves to one it has, so the choice shows.
+  const chosen = (theme: Theme) => {
+    const choice = { ...state.choice };
+    for (const s of schemesOf(theme)) choice[s] = theme.id;
+    const mode: Mode = state.mode === 'system' || hasScheme(theme, state.mode) ? state.mode : theme.scheme;
+    return { choice, mode };
+  };
+  // A new theme becomes the chosen one of its schemes and is shown.
   const adopt = (theme: Theme): Saved => {
     if (state.user.length >= MAX_USER_THEMES) return { ok: false, full: true };
     const user = [...state.user, theme];
     persistUser(user);
-    const choice = { ...state.choice, [theme.scheme]: theme.id };
+    const { choice, mode } = chosen(theme);
     persistChoice(choice);
-    const mode = state.mode === 'system' ? 'system' : theme.scheme;
     if (mode !== state.mode) write(env.kv, MODE_KEY, mode);
     set({ mode, choice, user });
     return { ok: true, theme };
@@ -103,36 +110,45 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       write(env.kv, MODE_KEY, mode === 'system' ? undefined : mode);
       set({ ...state, mode });
     },
-    // Use a theme: it becomes its scheme's choice; a forced scheme moves to it so the choice shows.
+    // Use a theme: it becomes the choice of the schemes it has; a forced scheme it lacks moves to one it has.
     choose(id: string) {
       const t = byId(id);
       if (!t) return;
-      const choice = { ...state.choice, [t.scheme]: t.id };
+      const { choice, mode } = chosen(t);
       persistChoice(choice);
-      const mode = state.mode === 'system' ? 'system' : t.scheme;
       if (mode !== state.mode) write(env.kv, MODE_KEY, mode);
       set({ ...state, mode, choice });
     },
-    // A copy of any theme the person can change.
+    // A copy of any theme the person can change: both its schemes, its chrome and its text.
     copy(from: Theme, name: string): Saved {
-      return adopt({ id: freshId(), name: name.slice(0, MAX_NAME), scheme: from.scheme, tokens: { ...from.tokens } });
+      const looks = cloneLooks(looksOf(from));
+      const scheme = from.scheme;
+      return adopt({ id: freshId(), name: name.slice(0, MAX_NAME), scheme, tokens: looks[scheme]?.tokens ?? { ...from.tokens }, looks, chrome: { ...chromeOf(from) }, text: { ...textOf(from) } });
     },
-    // A change to one of the person's themes, checked like an imported file: one that is refused changes nothing.
-    update(id: string, patch: { name?: string; tokens?: Partial<Tokens> }): Saved {
+    // A change to one of the person's themes, checked like an imported file: one that is refused changes nothing. `file` is the whole
+    // theme as the editor holds it (a format-2 file); `tokens` changes the tokens of one scheme (its first, unless `scheme` says).
+    update(id: string, patch: { name?: string; tokens?: Partial<Tokens>; scheme?: Scheme; file?: Record<string, unknown> }): Saved {
       const cur = state.user.find((u) => u.id === id);
       if (!cur) return { ok: false, issues: [{ code: 'invalid' }] };
-      const p = parseTheme(themeFile({ scheme: cur.scheme, tokens: { ...cur.tokens, ...patch.tokens } }, patch.name ?? cur.name));
+      let file = patch.file ?? writeTheme(cur, cur.name);
+      if (patch.tokens) {
+        const s = patch.scheme ?? cur.scheme;
+        const section = file[s] as { tokens?: Record<string, unknown> } | undefined;
+        if (section) file = { ...file, [s]: { ...section, tokens: { ...section.tokens, ...pick(patch.tokens, 'color') } }, shape: { ...(file.shape as object), ...pick(patch.tokens, 'shape') }, text: { ...(file.text as object), ...pick(patch.tokens, 'font') } };
+      }
+      if (patch.name !== undefined) file = { ...file, name: patch.name };
+      const p = readTheme(file);
       if (!p.ok) return p;
-      const theme: Theme = { id, name: p.name, scheme: p.scheme, tokens: p.tokens };
+      const theme: Theme = { id, ...p.theme };
       const user = state.user.map((u) => (u.id === id ? theme : u));
       persistUser(user);
       set({ ...state, user });
       return p.warnings ? { ok: true, theme, warnings: p.warnings } : { ok: true, theme };
     },
     import(text: string): Saved {
-      const p = deserialiseTheme(text);
+      const p = deserialise(text);
       if (!p.ok) return p;
-      const r = adopt({ id: freshId(), name: p.name, scheme: p.scheme, tokens: p.tokens });
+      const r = adopt({ id: freshId(), ...p.theme });
       return r.ok && p.warnings ? { ...r, warnings: p.warnings } : r;
     },
     remove(id: string) {
@@ -152,6 +168,13 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
   };
 }
 export type ThemeStore = ReturnType<typeof createThemeStore>;
+
+// The tokens of a format-1 change, sorted into the format-2 groups they belong to (by name, so a bad value is still judged as one).
+function pick(tokens: Partial<Tokens>, group: 'color' | 'shape' | 'font'): Record<string, string> {
+  const of = (k: string) => (k === 'font-ui' || k === 'font-mono' ? 'font' : (COLOR_TOKENS as readonly string[]).includes(k) ? 'color' : 'shape');
+  return Object.fromEntries(Object.entries(tokens).filter(([k, v]) => v !== undefined && of(k) === group)) as Record<string, string>;
+}
+export type { ThemeData };
 
 // ---- The page's store ---------------------------------------------------------------------------------------------------------
 

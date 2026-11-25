@@ -41,7 +41,7 @@ export function StateBadge({ state, failed, word }: { state: UiState; failed?: b
 // The shape alone, for dense rows and tabs; the state's name stays available to screen readers.
 export function StateMark({ state, failed }: { state: UiState; failed?: boolean }) {
   return (
-    <span className={stateClass(state, failed)}>
+    <span className={stateClass(state, failed)} title={stateWord(state, failed)}>
       <Mark state={state} failed={failed} />
       <span className="sr-only">{stateWord(state, failed)}</span>
     </span>

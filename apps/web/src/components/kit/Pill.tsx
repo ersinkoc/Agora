@@ -28,7 +28,7 @@ export function StatusPill({ state, failed }: { state: UiState; failed?: boolean
 // The state's shape alone, in its kit colour (failed in red), for dense rows and counts; its word stays for screen readers.
 export function StatusMark({ state, failed }: { state: UiState; failed?: boolean }) {
   return (
-    <span className={`kit-mark kit-tone-${failed ? 'danger' : stateTone(state)}`}>
+    <span className={`kit-mark kit-tone-${failed ? 'danger' : stateTone(state)}`} title={t(failed ? 'fleet-failed' : `state-${state}`)}>
       <Mark state={state} failed={failed} />
       <span className="sr-only">{t(failed ? 'fleet-failed' : `state-${state}`)}</span>
     </span>
