@@ -573,7 +573,13 @@ impl Hub {
             .get(node)
             .map_or(0, |n| n.link_generation)
             .saturating_add(1);
-        self.emit(
+        // ADR-0112 Amendment A: a machine is in the hub-wide view only while its latest link agreed on it. A link whose opening the
+        // store refuses is not registered, and the agreement of the link before it does not stay: the machine is left out until a
+        // link is recorded (review of #1205).
+        let agreed = capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1);
+        let opened = self.emit(
             &mut g,
             Body::NodeLink(NodeLink {
                 node_id: node.to_string(),
@@ -583,16 +589,13 @@ impl Hub {
                 last_heard_ms: now_ms,
             }),
             now_ms,
-        )?;
-        // ADR-0112 Amendment A: a machine is in the hub-wide view only while its latest link agreed on it.
-        if capabilities
-            .iter()
-            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1)
-        {
+        );
+        if agreed && opened.is_ok() {
             g.fleet_agreed.insert(node.to_string());
         } else {
             g.fleet_agreed.remove(node);
         }
+        opened?;
         let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
         Ok((registration, commands, generation))
     }
@@ -2143,6 +2146,25 @@ mod tests {
                 (false, NodeLinkReason::Closed as i32, 1),
             ]
         );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0112 Amendment A (review of #1205): a link whose opening the store refuses does not keep the earlier link's agreement on
+    /// the hub-wide view; the machine is left out until a link is recorded.
+    #[test]
+    fn a_refused_link_does_not_keep_the_earlier_agreement_on_the_fleet_view() {
+        let (hub, path) = hub_on_file("fleet-refused-link");
+        let fleet = vec![agora_protocol::handshake::FLEET_STATUS_V1.to_string()];
+        let _first = hub.node_link_opened("n1", fleet.clone(), 1).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_opened("n1", fleet.clone(), 2).is_err());
+        assert!(!hub.lock().fleet_agreed.contains("n1"));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _again = hub.node_link_opened("n1", fleet, 3).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
         drop(hub);
         remove_db(&path);
     }
