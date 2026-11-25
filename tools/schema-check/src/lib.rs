@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use prost_types::{
-    field_descriptor_proto::Label, DescriptorProto, EnumDescriptorProto, FieldDescriptorProto,
-    FileDescriptorSet,
+    field_descriptor_proto::{Label, Type},
+    DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorSet,
 };
 
 /// Compile every `*.proto` below `schema_root/agora/` (recursively) into one descriptor set.
@@ -155,6 +155,34 @@ fn oneof_name<'a>(message: &'a DescriptorProto, field: &FieldDescriptorProto) ->
     message.oneof_decl.get(index).map(|oneof| oneof.name())
 }
 
+fn packed(field: &FieldDescriptorProto, syntax: &str) -> bool {
+    field
+        .options
+        .as_ref()
+        .and_then(|options| options.packed)
+        .unwrap_or_else(|| {
+            syntax == "proto3"
+                && field.label() == Label::Repeated
+                && matches!(
+                    field.r#type(),
+                    Type::Double
+                        | Type::Float
+                        | Type::Int64
+                        | Type::Uint64
+                        | Type::Int32
+                        | Type::Fixed64
+                        | Type::Fixed32
+                        | Type::Bool
+                        | Type::Uint32
+                        | Type::Enum
+                        | Type::Sfixed32
+                        | Type::Sfixed64
+                        | Type::Sint32
+                        | Type::Sint64
+                )
+        })
+}
+
 /// Returns one line per breaking change; empty means compatible.
 pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> Vec<String> {
     let (b, h) = (index(base), index(head));
@@ -254,6 +282,13 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                             "{name}.{}: JavaScript type option changed",
                             bf.name()
                         ));
+                    }
+                    let base_syntax = b.message_syntax.get(name).copied().unwrap_or("");
+                    let head_syntax = h.message_syntax.get(name).copied().unwrap_or("");
+                    if describe(hf) == describe(bf)
+                        && packed(bf, base_syntax) != packed(hf, head_syntax)
+                    {
+                        out.push(format!("{name}.{}: packed encoding changed", bf.name()));
                     }
                     let old_oneof = oneof_name(bm, bf);
                     let new_oneof = oneof_name(hm, hf);
