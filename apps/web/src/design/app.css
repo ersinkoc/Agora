@@ -93,7 +93,7 @@
   :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-weight: 400; }
   /* …and the window's own font (the floor rule at the end of this file sets the font variables there). In the base layer, so a utility on
      the same element (a mono code line) still wins. */
-  :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-family: var(--font-ui); }
+  :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
@@ -939,7 +939,7 @@
 /* The floor (ADR-0113 decision 3): what needs the person (an approval card, a "needs you" card or count) is drawn in the base tokens
    and the fixed red whatever a theme's regions say, so no theme can restyle, hide or fake it. Its buttons, cards, code and fields take
    the base colours here, and the focus ring is the base rule's. */
-:is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {
+:is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {
   /* The window's own fonts: a theme's font list (format 1 or 2) never reaches what needs the person, so no font can turn the action it
      asks about into pictures. Held equal to tokens.css by themes/format2.test.ts. */
   --font-ui: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;

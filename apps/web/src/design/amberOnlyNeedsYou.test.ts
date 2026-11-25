@@ -15,7 +15,7 @@ const AMBER =
 
 const ALLOWED: Record<string, { uses: number; why: string }> = {
   'design/tokens.css': { uses: 3, why: 'the token itself, Dark and Light' },
-  'design/app.css': { uses: 27, why: 'the utility and its Tailwind colour, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the terminal bell, the muted syntax colours mixed from the theme (content, like the diff), and the theme floor that keeps "needs you" out of a theme\'s state display and regions (ADR-0113)' },
+  'design/app.css': { uses: 30, why: 'the utility and its Tailwind colour, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the terminal bell, the muted syntax colours mixed from the theme (content, like the diff), and the theme floor that keeps "needs you" out of a theme\'s state display, regions and fonts (ADR-0113)' },
   'components/kit/KitGallery.tsx': { uses: 4, why: 'the gallery shows the Needs you stat tile and request callout' },
   'components/FleetConsole.tsx': { uses: 2, why: 'the Needs you stat tile and the Needs you count (its request cards are ApprovalRequest)' },
   'components/AttentionLayer.tsx': { uses: 1, why: 'the attention toast (the dialog is ApprovalRequest)' },

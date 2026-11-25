@@ -389,7 +389,7 @@ describe('format 2 in words and in the stylesheet', () => {
 
   it('keeps what needs the person out of every region: the floor resets their variables to the base tokens', () => {
     const css = readFileSync('src/design/app.css', 'utf8').replace(/\r\n/g, '\n');
-    const i = css.indexOf(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {');
+    const i = css.indexOf(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {\n');
     expect(i).toBeGreaterThan(0);
     const floor = css.slice(i, css.indexOf('}', i));
     for (const r of ['cards', 'inputs', 'buttons', 'code-blocks'] as const) for (const p of REGION_PARTS) expect(floor, regionVar(r, p)).toContain(`${regionVar(r, p)}: var(--`);
@@ -429,10 +429,11 @@ describe('the floor in the stylesheet (review of #1206)', () => {
 
   it('keeps the window\'s own fonts in what needs the person, equal to tokens.css', () => {
     const root = block(tokensCss, ':root {');
-    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {');
+    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {\n');
     const value = (src: string, n: string) => new RegExp(`--${n}:\\s*([^;]+);`).exec(src)?.[1]?.trim();
     for (const n of ['font-ui', 'font-mono']) expect(value(floor, n), n).toBe(value(root, n));
-    expect(css).toContain(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-family: var(--font-ui); }');
+    // Every "needs you" scope declares the font, not only the cards: the word in a pill, a state mark or a count too.
+    expect(css).toContain(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) { font-family: var(--font-ui); }');
   });
 
   it('puts one state mark in a tab menu row, not one inside another', () => {

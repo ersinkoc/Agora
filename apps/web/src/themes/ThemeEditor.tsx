@@ -9,7 +9,7 @@ import { ThemePicker } from '../components/ThemePicker';
 import { Icon } from '../components/Icon';
 import { SegmentedControl } from '../components/kit/SegmentedControl';
 import { Toggle } from '../components/kit/Toggle';
-import { FONT_TOKENS, SHAPE_TOKENS, readTheme, regionColour, serialise, terminalColour, withScheme, writeTheme } from './file';
+import { FONT_TOKENS, MAX_FILE_BYTES, SHAPE_TOKENS, readTheme, regionColour, serialise, terminalColour, withScheme, writeTheme } from './file';
 import {
   ANSI_NAMES, CHROME, CHROME_NAMES, FLOOR_ITEMS, LINE_HEIGHT, MIN_BASE_TEXT, REGIONS, REGION_PARTS, SYNTAX_KEYS, WEIGHTS,
   type Chrome, type ChromeName, type RegionName, type RegionPart, type SyntaxKey, type TerminalKey, type TextStyle, type Weight,
@@ -67,7 +67,12 @@ export function ThemeEditor() {
         {!theme.builtIn && <button type="button" className="button" onClick={() => { themeStore.remove(theme.id); setProblems([]); }}>{t('theme-delete')}</button>}
         <button type="button" className="button" onClick={() => { themeStore.reset(); setProblems([]); }}>{t('theme-reset')}</button>
         <input ref={file} type="file" accept=".json,application/json" className="hidden" aria-hidden tabIndex={-1}
-          onChange={async (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) report(themeStore.import(await f.text())); }} />
+          onChange={async (e) => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            // A file over the cap is refused before it is read at all.
+            if (f) report(f.size > MAX_FILE_BYTES ? { ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] } : themeStore.import(await f.text()));
+          }} />
       </div>
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
     </section>
