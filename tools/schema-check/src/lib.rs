@@ -176,6 +176,17 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
         if base_map != head_map {
             out.push(format!("message {name}: map semantics changed"));
         }
+        let base_message_set = bm
+            .options
+            .as_ref()
+            .is_some_and(|o| o.message_set_wire_format());
+        let head_message_set = hm
+            .options
+            .as_ref()
+            .is_some_and(|o| o.message_set_wire_format());
+        if base_message_set != head_message_set {
+            out.push(format!("message {name}: MessageSet wire format changed"));
+        }
         for reserved in &bm.reserved_name {
             if !hm.reserved_name.contains(reserved) {
                 out.push(format!(
