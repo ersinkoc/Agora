@@ -205,9 +205,10 @@ impl Env {
     /// file's tests in parallel (each with its own node and agents) missed the request: 13 of 14 tests failed here on main, and 2
     /// of 11 at v0.3.37. Each test passed alone (about 22-28 s) and the whole file passed single-threaded (#1150, 2026-11-25).
     ///
-    /// Only once the node has announced it (`approval_requested`). The approval queue lists a request a moment before the spawner
-    /// files it, and announces it after. A decision taken in between finds no request and is answered with `mesh.start_denied`.
-    /// Windows CI hit this in `a_decision_handled_as_the_node_stops_starts_no_helper` (#1150).
+    /// Only once the node has announced it (`approval_requested`), as a person sees it. The approval queue lists a request a moment
+    /// before the spawner files and announces it; a decision taken in between waits for the filing (#1150, see
+    /// `a_decision_as_the_request_is_made_finds_it_and_frees_the_caller`; Windows CI hit that window in
+    /// `a_decision_handled_as_the_node_stops_starts_no_helper` before the fix).
     fn request_of(&self, agent: &str) -> Pending {
         let end = Instant::now() + Duration::from_secs(30);
         loop {
@@ -615,6 +616,94 @@ fn a_node_that_is_stopping_starts_no_helper_even_under_a_grant() {
         1,
         "the refusal is not on record"
     );
+}
+
+/// #1150: a decision that comes the moment a start request enters the approval queue (the node may announce what waits at any time,
+/// before the spawner has filed it) finds the request: the asker is answered, the decision is recorded after the request, and the
+/// asker's slot is free, so it can ask again. Before the fix the decision was refused (`mesh.start_denied`), the request was filed
+/// after it, and nothing ever ended it: the asker's `agent_start` calls were refused with `mesh.helper_limit` until it reconnected.
+#[test]
+fn a_decision_as_the_request_is_made_finds_it_and_frees_the_caller() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("decided-at-once");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    // Denied first, then approved: the second start can be asked only if the first one freed the asker's slot.
+    for approved in [false, true] {
+        let (reached, go) = e.node().spawner.pause_next_filing();
+        let call = m.call("agent_start", json!({"kind": "probe", "prompt": "a"}));
+        let id = reached
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the start did not reach the approval queue");
+        // As listed by the queue (what the node would announce now); it is not filed or announced by the spawner yet.
+        let p = e
+            .node()
+            .approvals
+            .waiting()
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("the request is in the queue");
+        let sig = e.sign(&start_signed_message(
+            NODE, &p.id, approved, 0, false, &p.detail,
+        ));
+        let mut client = e.client();
+        let resolve = v1::ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved,
+            signer_device_id: DEVICE.into(),
+            signature: sig,
+            ..Default::default()
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let decider = std::thread::spawn(move || {
+            let _ = done_tx.send(client.call(Cmd::ApprovalResolve(resolve)).unwrap());
+        });
+        // The decision has taken the request out of the queue: it is inside the window.
+        wait_until("the decision took the request", || {
+            !e.node().approvals.waiting().iter().any(|w| w.id == id)
+        });
+        // Without the fix the decision finishes here, before the request is filed. With it, the decision waits for the filing, so
+        // this wait always runs out.
+        let early = done_rx.recv_timeout(Duration::from_millis(500)).ok();
+        go.send(()).unwrap();
+        let decision = early.unwrap_or_else(|| {
+            done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("no answer to the decision")
+        });
+        decider.join().unwrap();
+        assert!(
+            decision.is_ok(),
+            "a decision taken as the request was made: {decision:?}"
+        );
+        if approved {
+            let (v, is_error) = m.result(call);
+            assert!(!is_error, "{v}");
+            let helper = v["agent_id"].as_str().unwrap();
+            assert!(e.running(helper));
+        } else {
+            assert_eq!(m.error_code(call), "mesh.start_denied");
+        }
+        // The hub never hears of a request after its decision.
+        let events = e.node().events.events_after(0);
+        let requested = events.iter().position(
+            |ev| matches!(&ev.body, Some(Body::ApprovalRequested(a)) if a.approval_id == id),
+        );
+        let resolved = events.iter().position(
+            |ev| matches!(&ev.body, Some(Body::ApprovalResolved(r)) if r.approval_id == id && r.approved == approved && r.signer_device_id == DEVICE),
+        );
+        assert!(
+            matches!((requested, resolved), (Some(a), Some(r)) if a < r),
+            "requested at {requested:?}, resolved at {resolved:?}"
+        );
+    }
+    // And again: nothing of the two decisions holds the asker's slot.
+    let call = m.call("agent_start", json!({"kind": "probe", "prompt": "b"}));
+    let p = e.request_of(&parent);
+    e.decide(&p, false, 0, false).unwrap();
+    assert_eq!(m.error_code(call), "mesh.start_denied");
 }
 
 /// How many helpers `parent` has (running or not).

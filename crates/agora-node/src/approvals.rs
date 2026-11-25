@@ -1331,11 +1331,15 @@ impl NodeApprovals {
         detail: &str,
         now_ms: u64,
     ) -> Option<Pending> {
+        // #1150: the route is in place before the request can be decided: a decision reads the route first (the device's limits),
+        // so one that comes at once waits for it instead of spending the request and finding no route (refused as unknown, while
+        // the spawner files a request nothing will end). The routes' lock is taken before the queue's; nothing here takes them the
+        // other way round.
+        let mut routes = self.r();
         let p = self
             .q()
             .request(agent.as_str(), START_ACTION, detail, now_ms, 0)?;
-        self.r()
-            .insert(p.id.clone(), (agent.clone(), String::new()));
+        routes.insert(p.id.clone(), (agent.clone(), String::new()));
         Some(p)
     }
 

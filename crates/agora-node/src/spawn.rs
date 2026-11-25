@@ -212,7 +212,15 @@ pub struct Spawner {
     stopping: Option<Arc<AtomicBool>>,
     names: AtomicU64,
     state: Mutex<State>,
+    /// Test hook (#1150, [`Self::pause_next_filing`]): where the next start says it reached, and what it waits for to go on.
+    pause_filing: Mutex<Option<FilingPause>>,
 }
+
+/// See [`Spawner::pause_next_filing`].
+type FilingPause = (
+    std::sync::mpsc::Sender<String>,
+    std::sync::mpsc::Receiver<()>,
+);
 
 fn helper_limit(rule: &str, limit: usize) -> Error {
     Error::new(ErrorCode::MeshHelperLimit)
@@ -342,7 +350,24 @@ impl Spawner {
             stopping: None,
             names: AtomicU64::new(0),
             state: Mutex::new(State::default()),
+            pause_filing: Mutex::new(None),
         }
+    }
+
+    /// Test hook (#1150): the next start that asks the user stops just after its request enters the approval queue, sends the
+    /// request's id on the first channel, and goes on when the second one is sent to (or dropped). It waits holding the spawner's
+    /// lock, as the start does there, so a decision, an expiry or the asker's end that comes meanwhile waits for the filing.
+    #[doc(hidden)]
+    pub fn pause_next_filing(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        *self.pause_filing.lock().unwrap_or_else(|e| e.into_inner()) = Some((reached_tx, go_rx));
+        (reached_rx, go_tx)
     }
 
     /// Wakes the node's Git watcher after a helper starts (as `ControlContext::with_git_wake`).
@@ -1094,22 +1119,38 @@ impl Helpers for Spawner {
             .map(|v| v.kind)
             .unwrap_or_default();
         let detail = self.detail(&req, &caller_kind);
+        // #1150: the request enters the approval queue, is filed here and is announced under this lock. The queue can be read the
+        // moment the request is in it (the node announces what waits whenever the hub needs it said again), but a decision
+        // (`decided`), an expiry (`expired`) or the asker's end (`agent_ended`) that comes at once waits for this lock: it always
+        // finds the request, so it frees the caller's slot, and it is recorded after the request. Taken before the approvals' locks,
+        // never under them (nothing there calls the spawner); recording takes only the event sink's own locks.
+        let mut st = self.st();
         let Some(p) = self
             .approvals
             .request_start(caller, &detail, crate::daemon::now_ms())
         else {
+            // Before the slot is dropped: it releases itself under this lock.
+            drop(st);
             return Err(Error::new(ErrorCode::Internal).with("incident_id", "approval-id"));
         };
-        let mut st = self.st();
+        let pause = self
+            .pause_filing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((reached, go)) = pause {
+            let _ = reached.send(p.id.clone());
+            let _ = go.recv();
+        }
         req.ticket = Self::new_ticket(&mut st, None);
         let ticket = req.ticket;
         st.requests.insert(p.id.clone(), req);
-        drop(st);
         // The waiting request holds the slot now; its decision, expiry or withdrawal releases it.
         slot.kept = true;
         if let Some(ev) = &self.events {
             ev.approval_requested(&p);
         }
+        drop(st);
         Ok(ticket)
     }
 
