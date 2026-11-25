@@ -379,6 +379,83 @@ fn a_folder_confirmed_in_another_case_of_its_github_remote_launches_without_aski
     );
 }
 
+/// ADR-0115: an agent the older node recorded with its GitHub remote's own case, interrupted by the update's restart, resumes in the
+/// same project after this node folds the id (no `agent.folder_changed`). One recorded for another repository still does not.
+#[test]
+fn an_agent_recorded_in_another_case_of_its_github_remote_resumes_after_the_update() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("case-resume");
+    let folder = e.root.join("Repo");
+    std::fs::create_dir_all(&folder).unwrap();
+    git(&folder, &["init", "-q"]);
+    git(
+        &folder,
+        &["remote", "add", "origin", "git@github.com:Owner/Repo.git"],
+    );
+    git(&folder, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    let mut c = e.client();
+    let info = inspect(&mut c, &folder, false);
+    assert!(info.project_id.starts_with("github.com/owner/repo#"));
+    let first = launch(&mut c, &info, "probe", false).agent_id;
+    let second = launch(&mut c, &info, "probe", false).agent_id;
+    drop(c);
+    // What an older node wrote: its ledger and its confirmation in the remote's case; the second agent as of another repository.
+    let respell = |root: &Path| {
+        let ledger = root.join("data/sessions/ledger.json");
+        let text = std::fs::read_to_string(&ledger).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut seen = 0;
+        let mut walk = vec![&mut v];
+        while let Some(x) = walk.pop() {
+            match x {
+                serde_json::Value::Object(m) => {
+                    let to = match m.get("agent_id").and_then(|a| a.as_str()) {
+                        Some(a) if a == first => Some("github.com/Owner/Repo#"),
+                        Some(a) if a == second => Some("github.com/Owner/Other#"),
+                        _ => None,
+                    };
+                    if let (Some(to), Some(serde_json::Value::String(id))) =
+                        (to, m.get_mut("project_id"))
+                    {
+                        *id = id.replace("github.com/owner/repo#", to);
+                        seen += 1;
+                    }
+                    walk.extend(m.values_mut());
+                }
+                serde_json::Value::Array(a) => walk.extend(a.iter_mut()),
+                _ => {}
+            }
+        }
+        assert_eq!(seen, 2, "{text}");
+        std::fs::write(&ledger, serde_json::to_vec(&v).unwrap()).unwrap();
+        let bindings = root
+            .join("worktrees")
+            .join(agora_node::directory::BINDINGS_FILE);
+        let text = std::fs::read_to_string(&bindings).unwrap();
+        std::fs::write(
+            &bindings,
+            text.replace("github.com/owner/repo#", "github.com/Owner/Repo#"),
+        )
+        .unwrap();
+    };
+    e.restart(respell);
+    let resume = |id: &str| {
+        e.client()
+            .call(Cmd::AgentResume(v1::AgentResume {
+                agent_id: id.into(),
+                new_session: true,
+                authorization: None,
+            }))
+            .unwrap()
+            .map(|_| ())
+            .map_err(|e| e.code)
+    };
+    assert_eq!(resume(&first), Ok(()));
+    assert_eq!(resume(&second), Err("agent.folder_changed".to_string()));
+}
+
 #[test]
 fn adapter_sessions_and_resume_keep_the_selected_non_git_directory() {
     if !supported() {
