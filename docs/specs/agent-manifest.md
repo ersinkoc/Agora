@@ -145,6 +145,10 @@ region = "title"
 regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 ```
 
+Common validation: `display_name` is non-empty visible text on one line (no terminal controls or hidden formatting). Every command
+argv a manifest declares (`process.launch`, `adapter.command`, structured ACP `argv`, and the resume variants) names a non-empty
+program first and contains no NUL; later arguments may be empty. A structured-only manifest may leave `process.launch` empty.
+
 Engine details (`agora-adapters`):
 - A rule matches when its own `contains`/`regex` (if present) match, every `all` condition matches, at least one
   `any` condition matches (if `any` is non-empty), and no `not` condition matches. A rule needs at least one

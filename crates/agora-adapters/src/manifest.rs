@@ -417,6 +417,12 @@ fn windows_device_name(name: &str) -> bool {
     })
 }
 
+/// An argv the operating system can spawn: a real program followed by arguments without NUL (an empty argument is valid).
+fn spawnable_argv(argv: &[String]) -> bool {
+    argv.first().is_some_and(|program| !program.is_empty())
+        && argv.iter().all(|arg| !arg.contains('\0'))
+}
+
 /// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks,
 /// structured) are accepted and ignored so newer manifests still load.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -506,9 +512,7 @@ impl Resume {
     /// ADR-0060 Amendment A: `continue_argv` and `continue` go together; the sentence is one plain line that cannot be read as an option
     /// or as a placeholder; `continue_argv` carries both placeholders, `{continue}` as an argument of its own.
     fn validate(&self) -> Result<(), ManifestError> {
-        if self.argv.first().is_none_or(String::is_empty)
-            || !self.argv.iter().any(|a| a.contains("{session_id}"))
-        {
+        if !spawnable_argv(&self.argv) || !self.argv.iter().any(|a| a.contains("{session_id}")) {
             return Err(invalid("resume.argv"));
         }
         if !self.fresh_argv.is_empty()
@@ -517,7 +521,8 @@ impl Resume {
                 .first()
                 .is_none_or(|p| p.is_empty() || p.contains(['{', '}']))
                 || !self.fresh_argv.iter().any(|a| a.contains("{session_id}"))
-                || self.fresh_argv.iter().any(|a| a.contains("{continue}")))
+                || self.fresh_argv.iter().any(|a| a.contains("{continue}"))
+                || self.fresh_argv.iter().any(|a| a.contains('\0')))
         {
             return Err(invalid("resume.fresh_argv"));
         }
@@ -545,7 +550,7 @@ impl Resume {
                 .count()
         };
         let own_argument = self.continue_argv.iter().any(|a| a == "{continue}");
-        if self.continue_argv.first().is_none_or(String::is_empty)
+        if !spawnable_argv(&self.continue_argv)
             || has("{session_id}") == 0
             || has("{continue}") != 1
             || !own_argument
@@ -607,8 +612,16 @@ impl Manifest {
         if !kind_ok {
             return Err(invalid("kind"));
         }
-        if self.display_name.trim().is_empty() {
+        if self.display_name.trim().is_empty()
+            || self
+                .display_name
+                .chars()
+                .any(|c| c.is_control() || agora_core::text::is_hidden(c))
+        {
             return Err(invalid("display_name"));
+        }
+        if !self.process.launch.is_empty() && !spawnable_argv(&self.process.launch) {
+            return Err(invalid("process.launch"));
         }
         if let Some(r) = &self.resume {
             r.validate()?;
@@ -627,7 +640,7 @@ impl Manifest {
         if self
             .adapter
             .as_ref()
-            .is_some_and(|a| a.command.first().is_none_or(String::is_empty))
+            .is_some_and(|a| !spawnable_argv(&a.command))
         {
             return Err(invalid("adapter.command"));
         }
@@ -635,7 +648,7 @@ impl Manifest {
             .structured
             .as_ref()
             .and_then(|s| s.acp.as_ref())
-            .is_some_and(|a| a.argv.first().is_none_or(String::is_empty))
+            .is_some_and(|a| !spawnable_argv(&a.argv))
         {
             return Err(invalid("structured.acp.argv"));
         }
@@ -873,6 +886,10 @@ mod launch_tests {
 
     const SKIP: &str = "[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--yes\"]\nskips_permissions = true\n";
 
+    fn plain(tail: &str) -> String {
+        format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{tail}")
+    }
+
     #[test]
     fn launch_options_are_read_in_order_and_harmless_by_default() {
         let src = format!("{SKIP}[[launch.option]]\nid = \"resume-last\"\nlabel = \"option-resume-last\"\nargs = [\"--continue\"]\n");
@@ -978,6 +995,208 @@ mod launch_tests {
                 supported: 6
             })
         ));
+    }
+
+    #[test]
+    fn proof_f450_display_names_cannot_control_the_users_terminal() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(
+            &plain("[process]\nlaunch = [\"tool\"]\n")
+                .replace("display_name = \"K\"", "display_name = \"clear\\u001B[2J\""),
+        );
+        println!("EXPECTED: a terminal-active display_name is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f451_terminal_launch_requires_a_real_program() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\", \"--ok\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain("[process]\nlaunch = [\"\"]\n"));
+        println!("EXPECTED: an empty L1 launch program is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f452_adapter_commands_reject_unspawnable_arguments() {
+        let control = Manifest::parse(&plain("[adapter]\ncommand = [\"tool\", \"--ok\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[adapter]\ncommand = [\"tool\", \"bad\\u0000arg\"]\n",
+        ));
+        println!("EXPECTED: an L3 adapter argv containing NUL is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f453_acp_commands_reject_unspawnable_arguments() {
+        let control = Manifest::parse(&plain(
+            "[structured]\nacp = { argv = [\"tool\", \"--ok\"] }\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[structured]\nacp = { argv = [\"tool\\u0000name\"] }\n",
+        ));
+        println!("EXPECTED: an L2 ACP argv containing NUL is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f454_resume_commands_reject_unspawnable_arguments() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"--resume\", \"{session_id}\"]\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"--resume\", \"{session_id}\\u0000\"]\n",
+        ));
+        println!("EXPECTED: a resume argv containing NUL is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f450_display_names_reject_terminal_layout_and_hidden_characters() {
+        for escaped in ["\\u001B", "\\n", "\\t", "\\u202E", "\\u200B"] {
+            let src = plain("[process]\nlaunch = [\"tool\"]\n").replace(
+                "display_name = \"K\"",
+                &format!("display_name = \"safe{escaped}name\""),
+            );
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "display_name"
+            ));
+        }
+        let unicode = plain("[process]\nlaunch = [\"tool\"]\n")
+            .replace("display_name = \"K\"", "display_name = \"Çözüm 工具\"");
+        assert!(Manifest::parse(&unicode).is_ok());
+        println!("FIX VERIFIED: F450 display names are visible inert text");
+    }
+
+    #[test]
+    fn verify_f451_terminal_argv_rejects_bad_programs_and_nul_but_keeps_empty_args() {
+        for launch in [
+            "[\"\"]",
+            "[\"tool\\u0000\"]",
+            "[\"tool\", \"bad\\u0000arg\"]",
+        ] {
+            let src = plain(&format!("[process]\nlaunch = {launch}\n"));
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "process.launch"
+            ));
+        }
+        assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\", \"\"]\n")).is_ok());
+        assert!(
+            Manifest::parse(&plain("")).is_ok(),
+            "a structured-only manifest may omit launch"
+        );
+        println!(
+            "FIX VERIFIED: F451 L1 launch argv is spawnable without rejecting empty arguments"
+        );
+    }
+
+    #[test]
+    fn verify_f452_adapter_argv_rejects_empty_program_and_nul_at_every_position() {
+        for command in [
+            "[]",
+            "[\"\"]",
+            "[\"tool\\u0000\"]",
+            "[\"tool\", \"bad\\u0000arg\"]",
+        ] {
+            let src = plain(&format!("[adapter]\ncommand = {command}\n"));
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "adapter.command"
+            ));
+        }
+        assert!(Manifest::parse(&plain("[adapter]\ncommand = [\"tool\", \"\"]\n")).is_ok());
+        println!("FIX VERIFIED: F452 L3 adapter argv is spawnable");
+    }
+
+    #[test]
+    fn verify_f453_acp_argv_rejects_empty_program_and_nul_at_every_position() {
+        for argv in [
+            "[]",
+            "[\"\"]",
+            "[\"tool\\u0000\"]",
+            "[\"tool\", \"bad\\u0000arg\"]",
+        ] {
+            let src = plain(&format!("[structured]\nacp = {{ argv = {argv} }}\n"));
+            assert!(matches!(
+                Manifest::parse(&src),
+                Err(ManifestError::Invalid { field }) if field == "structured.acp.argv"
+            ));
+        }
+        assert!(
+            Manifest::parse(&plain("[structured]\nacp = { argv = [\"tool\", \"\"] }\n")).is_ok()
+        );
+        println!("FIX VERIFIED: F453 L2 ACP argv is spawnable");
+    }
+
+    #[test]
+    fn verify_f454_every_resume_argv_rejects_nul_and_valid_empty_args_remain() {
+        let main = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"\", \"{session_id}\"]\n",
+        );
+        assert!(Manifest::parse(&main).is_ok());
+        let bad_main = main.replace("{session_id}", "{session_id}\\u0000");
+        assert!(matches!(
+            Manifest::parse(&bad_main),
+            Err(ManifestError::Invalid { field }) if field == "resume.argv"
+        ));
+
+        let bad_fresh = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"{session_id}\"]\nfresh_argv = [\"tool\", \"{session_id}\\u0000\"]\n",
+        );
+        assert!(matches!(
+            Manifest::parse(&bad_fresh),
+            Err(ManifestError::Invalid { field }) if field == "resume.fresh_argv"
+        ));
+
+        let bad_continue = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"{session_id}\"]\ncontinue_argv = [\"tool\", \"bad\\u0000arg\", \"{session_id}\", \"{continue}\"]\ncontinue = \"carry on\"\n",
+        );
+        assert!(matches!(
+            Manifest::parse(&bad_continue),
+            Err(ManifestError::Invalid { field }) if field == "resume.continue_argv"
+        ));
+        println!("FIX VERIFIED: F454 resume, fresh, and continue argv are spawnable");
     }
 
     #[test]
