@@ -1921,10 +1921,11 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     drop((a, b, b1));
 }
 
-/// ADR-0112: two machines with different projects on a real hub. An agent on a solo hub sees every machine and the other machine's
-/// agent of another project (`machines_list`, `agents_list {scope: "hub"}`), while the default `agents_list` still lists only its own
-/// projects. Once the hub has a member it refuses (`partial: true`, this machine alone) until the owner turns the view on. A machine
-/// whose policy says `mesh.fleet = false` neither offers the capability nor lists the tool, and answers from itself.
+/// ADR-0112: three machines with different projects on a real hub. An agent on a solo hub sees every machine that agreed on the view
+/// and the other machines' agents of other projects (`machines_list`, `agents_list {scope: "hub"}`), while the default `agents_list`
+/// still lists only its own projects. Once the hub has a member it refuses (`partial: true`, this machine alone) until the owner turns
+/// the view on. A machine whose policy says `mesh.fleet = false` neither offers the capability nor lists the tool, answers from itself,
+/// and (Amendment A) is left out of everyone's view with its agents.
 #[test]
 fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine_say_no() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
@@ -1994,10 +1995,15 @@ fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine
             );
             (node, up, conn, dir)
         };
-    let (ca, cb) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (ca, cb, cg) = (hub.enroll("alpha"), hub.enroll("beta"), hub.enroll("gamma"));
     let (a, ua, mut ac, adir) = start("alpha", "a1", "p", "", ca.0, ca.1);
     let (b, ub, mut bc, bdir) = start("beta", "b1", "q", "mesh.fleet = false\n", cb.0, cb.1);
-    for (node, agent) in [("alpha", "alpha/a1"), ("beta", "beta/b1")] {
+    let (g, ug, _gc, gdir) = start("gamma", "g1", "r", "", cg.0, cg.1);
+    for (node, agent) in [
+        ("alpha", "alpha/a1"),
+        ("beta", "beta/b1"),
+        ("gamma", "gamma/g1"),
+    ] {
         wait(&format!("{node} and {agent} to reach the hub"), || {
             let (v, _) = hub.state.hub.view();
             v.nodes.get(node).is_some_and(|n| n.online) && v.agents.contains_key(agent)
@@ -2031,10 +2037,11 @@ fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine
         names(&mut ac).iter().any(|n| n == "machines_list")
     });
 
-    // Solo hub: every machine, and beta's agent in its own project.
+    // Solo hub: every machine that agreed, and gamma's agent in its own project. beta (`mesh.fleet = false`) is left out with its
+    // agent and folder (Amendment A).
     let m = call(&mut ac, "machines_list", json!({}));
     assert_eq!(m["partial"], false, "{m}");
-    assert_eq!(ids(&m["machines"], "id"), ["alpha", "beta"], "{m}");
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "gamma"], "{m}");
     assert!(
         m["machines"]
             .as_array()
@@ -2044,16 +2051,17 @@ fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine
         "{m}"
     );
     let rows = call(&mut ac, "agents_list", json!({"scope": "hub"}));
-    assert_eq!(ids(&rows, "agent_id"), ["a1", "beta/b1"], "{rows}");
-    let b1 = rows
+    assert_eq!(ids(&rows, "agent_id"), ["a1", "gamma/g1"], "{rows}");
+    assert!(!rows.to_string().contains("/work/q"), "{rows}");
+    let g1 = rows
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["agent_id"] == "beta/b1")
+        .find(|r| r["agent_id"] == "gamma/g1")
         .unwrap();
-    assert_eq!(b1["project"], "q");
-    assert_eq!(b1["node"], "beta");
-    assert_eq!(b1["kind"], "shell");
+    assert_eq!(g1["project"], "r");
+    assert_eq!(g1["node"], "gamma");
+    assert_eq!(g1["kind"], "shell");
     assert!(
         rows.as_array()
             .unwrap()
@@ -2104,11 +2112,12 @@ fn an_agent_sees_every_machine_and_agent_of_its_hub_unless_people_or_its_machine
     agora_hub::users::set_fleet_switch(hub.state.hub.store(), true, server::now_ms()).unwrap();
     let m = call(&mut ac, "machines_list", json!({}));
     assert_eq!(m["partial"], false, "{m}");
-    assert_eq!(ids(&m["machines"], "id"), ["alpha", "beta"]);
+    assert_eq!(ids(&m["machines"], "id"), ["alpha", "gamma"]);
 
-    drop((ac, bc, ua, ub, a, b));
-    let _ = std::fs::remove_dir_all(adir);
-    let _ = std::fs::remove_dir_all(bdir);
+    drop((ac, bc, _gc, ua, ub, ug, a, b, g));
+    for d in [adir, bdir, gdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 fn hex(b: &[u8]) -> String {

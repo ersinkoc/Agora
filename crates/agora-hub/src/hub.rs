@@ -67,6 +67,10 @@ struct Inner {
     /// compares the online nodes with its last look, so a node that left and came back between two looks (its late end and its
     /// redial's `up` written together, #996) would otherwise look as if it never left.
     left: std::collections::BTreeSet<String>,
+    /// ADR-0112 Amendment A: the machines whose latest link agreed on `mesh.fleet_status.v1`; only they and their agents are in the
+    /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
+    /// machine is left out until it connects again.
+    fleet_agreed: std::collections::BTreeSet<String>,
 }
 
 pub struct Hub {
@@ -191,6 +195,7 @@ impl Hub {
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
+                fleet_agreed: std::collections::BTreeSet::new(),
             }),
         };
         {
@@ -579,6 +584,15 @@ impl Hub {
             }),
             now_ms,
         )?;
+        // ADR-0112 Amendment A: a machine is in the hub-wide view only while its latest link agreed on it.
+        if capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1)
+        {
+            g.fleet_agreed.insert(node.to_string());
+        } else {
+            g.fleet_agreed.remove(node);
+        }
         let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
         Ok((registration, commands, generation))
     }
@@ -769,7 +783,7 @@ impl Hub {
         }
         // ADR-0112: the hub-wide view for agents is read only and belongs to no project's board.
         if call.tool == "fleet_status" {
-            return self.fleet_call(&g.view, call);
+            return self.fleet_call(&g.view, &g.fleet_agreed, call);
         }
         let key = self.restore_board(&call.project_id, now_ms);
         let project = call.project_id.as_str();
@@ -833,6 +847,7 @@ impl Hub {
     fn fleet_call(
         &self,
         view: &crate::projection::View,
+        agreed: &std::collections::BTreeSet<String>,
         call: &agora_protocol::v1::BoardCall,
     ) -> crate::board::Answer {
         let invalid = |field: &str| crate::board::Answer {
@@ -855,7 +870,7 @@ impl Hub {
         if !crate::users::fleet_allowed(&self.store) {
             return crate::board::fleet_refused();
         }
-        crate::board::fleet_answer(view)
+        crate::board::fleet_answer(view, agreed)
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
@@ -2324,6 +2339,17 @@ mod tests {
         let (hub, sup) = (hub(), support());
         let mut s = open_session(&hub, &sup, "n1");
         hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        // Amendment A: n1's link agreed on the view; n2's did not (its policy, or an older node), so it is left out.
+        let _n1 = hub
+            .node_link_opened(
+                "n1",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                2,
+            )
+            .unwrap();
+        let mut s2 = open_session(&hub, &sup, "n2");
+        hub.ingest(&mut s2, &online("n2", 1)).unwrap();
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 3).unwrap();
         let call = agora_protocol::v1::BoardCall {
             from_agent: "a".into(),
             tool: "fleet_status".into(),
@@ -2341,7 +2367,19 @@ mod tests {
         let (text, is_error) = answered(&hub);
         assert!(!is_error, "{text}");
         assert_eq!(text["machines"][0]["id"], "n1", "{text}");
+        assert_eq!(text["machines"].as_array().unwrap().len(), 1, "{text}");
         assert_eq!(text["partial"], false);
+        // Once n2 connects again and agrees, it is listed; a later link that does not agree takes it out again.
+        let _n2 = hub
+            .node_link_opened(
+                "n2",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                4,
+            )
+            .unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 2);
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 5).unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 1);
 
         crate::users::Users::new(hub.store())
             .add("Eda", crate::users::Role::Member, 2)

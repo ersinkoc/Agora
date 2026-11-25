@@ -50,7 +50,8 @@ agent's tool output can reach a person who has no grant. Widening it needs a dec
      it refuses with a new error code `board.not_allowed` (no parameters; English and Turkish Fluent text) unless the owner turned on `fleet_status` in hub settings (off by default there), because
      a member's agent would otherwise see projects that member has no grant for.
    - **Node policy:** `mesh.fleet = true|false` (default `true`, like `mesh.remote`, ADR-0031). With `false` the node neither asks
-     the hub nor lists the tool. The hub can never widen this.
+     the hub nor lists the tool, and (Amendment A) the machine and its agents are left out of everyone's view. The hub can never widen
+     this.
 5. **Docs:** `mesh-tools.md` (the tool, the scope, the caps, the capability), `error-codes.md` (`board.not_allowed`), the `BoardCall` comment in `commands.proto`, the threat
    model (new entry: an agent learns the names, kinds, states and folders of other projects' agents; bounded by solo mode or the
    owner's switch and node policy), and the glossary is unchanged.
@@ -78,3 +79,19 @@ agent's tool output can reach a person who has no grant. Widening it needs a dec
 
 - Default of `mesh.fleet` on a node: **`true`** (as proposed, matches `mesh.remote`).
 - Whether `workspace` paths of other projects should be shown: **yes, shown**.
+
+## Amendment A (accepted by the maintainer 2026-11-25, in the merger chat): a machine that says no hides itself too
+
+Accepted: 2026-11-25 (the maintainer, in the merger chat: "Yes, it hides itself too"). Origin: the review of #1205 (F1), which found
+that `mesh.fleet = false` stopped a machine's agents from using the view but still listed the machine, its agents and their folders to
+every other agent. Decision 4's node-policy bullet points here.
+
+1. **Only machines that agree are in the view.** The hub's `fleet_status` lists only machines whose latest link agreed on
+   `mesh.fleet_status.v1`, and only their agents. A node offers the capability only when its policy allows (`mesh.fleet`, and
+   `mesh.remote`), so a machine with `mesh.fleet = false` is left out with its agents and their folders.
+2. **An older node is left out too.** A node from before this ADR does not offer the capability, so it is not in the view until it is
+   updated: the safe default.
+3. **Offline machines.** The hub remembers, in memory, whether each machine's latest link agreed, and decides an offline machine by that
+   link. After a hub restart a machine is left out until it connects again (its agents, being on an offline machine, were not listed
+   anyway).
+4. Nothing else changes: the tools, the scope, the caps, the capability, solo mode and the owner's switch stay as decided above.

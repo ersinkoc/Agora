@@ -532,7 +532,7 @@ written later. `agora history purge` removes every transcript. Reading older ent
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
 project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`. ADR-0112 adds one tool value, no new
-message or field: `fleet_status` with an empty `project_id`, the hub's read-only view of every machine and running agent for agents
+message or field: `fleet_status` with an empty `project_id`, the hub's read-only view for agents of every machine whose link agreed on the capability and its running agents (Amendment A)
 (`docs/specs/mesh-tools.md#the-hub-wide-view-adr-0112`). A hub that answers it offers the generation 1 capability
 `mesh.fleet_status.v1`, and a node offers it when its policy allows (`mesh.fleet`); the hub answers on a solo hub, or when its owner
 turned it on (`agora hub fleet on`), and otherwise with the tool error `board.not_allowed` (no parameters).

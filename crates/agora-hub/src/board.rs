@@ -689,11 +689,14 @@ const _: () = assert!(2 * FLEET_MAX_BYTES + 1024 < crate::server::MAX_BOARD_RESU
 /// owner forgot is left out, as it is for windows. Who may see it is the caller's to decide ([`crate::hub::Hub::board_call`]).
 /// Every text is put on one line without control or invisible characters (bidi marks included) and cut, as the node does
 /// (`agora_mesh::awareness::clean`); at most [`FLEET_MAX_MACHINES`] machines, [`FLEET_MAX_AGENTS`] agents and [`FLEET_MAX_BYTES`].
-pub fn fleet(view: &View) -> Value {
-    fleet_within(view, FLEET_MAX_BYTES)
+///
+/// Amendment A: only machines in `agreed` (their latest link agreed on `mesh.fleet_status.v1`) are listed, and only their agents. A
+/// machine whose policy says `mesh.fleet = false`, or an older node, does not agree, so it and its agents are left out.
+pub fn fleet(view: &View, agreed: &BTreeSet<String>) -> Value {
+    fleet_within(view, agreed, FLEET_MAX_BYTES)
 }
 
-fn fleet_within(view: &View, max_bytes: usize) -> Value {
+fn fleet_within(view: &View, agreed: &BTreeSet<String>, max_bytes: usize) -> Value {
     use agora_mesh::awareness::clean;
     let mut partial = false;
     let mut room = max_bytes;
@@ -707,7 +710,11 @@ fn fleet_within(view: &View, max_bytes: usize) -> Value {
         ok
     };
     let mut machines: Vec<Value> = Vec::new();
-    for (id, n) in view.nodes.iter().filter(|(_, n)| !n.forgotten) {
+    for (id, n) in view
+        .nodes
+        .iter()
+        .filter(|(id, n)| !n.forgotten && agreed.contains(*id))
+    {
         let row = json!({
             "id": clean(id, FLEET_ID_MAX), "online": n.online, "os": clean(&n.os, 64),
             "build": clean(&n.build, 64), "agents_running": n.agents_running,
@@ -727,6 +734,7 @@ fn fleet_within(view: &View, max_bytes: usize) -> Value {
         };
         if !a.running
             || a.forgotten
+            || !agreed.contains(node)
             || !view
                 .nodes
                 .get(node)
@@ -752,9 +760,9 @@ fn fleet_within(view: &View, max_bytes: usize) -> Value {
 }
 
 /// [`fleet`] as the MCP tool result a `BoardCall` answers with.
-pub fn fleet_answer(view: &View) -> Answer {
+pub fn fleet_answer(view: &View, agreed: &BTreeSet<String>) -> Answer {
     answer(Verdict::Done {
-        result: json!({"content": [{"type": "text", "text": fleet(view).to_string()}], "isError": false}),
+        result: json!({"content": [{"type": "text", "text": fleet(view, agreed).to_string()}], "isError": false}),
         is_error: false,
     })
 }
@@ -2007,6 +2015,36 @@ mod tests {
         );
     }
 
+    /// Every machine of `v`, as if each one's link agreed on the hub-wide view.
+    fn every(v: &View) -> BTreeSet<String> {
+        v.nodes.keys().cloned().collect()
+    }
+
+    /// ADR-0112 Amendment A: a machine whose link did not agree on `mesh.fleet_status.v1` (policy `mesh.fleet = false`, or an older
+    /// node) is left out with its agents, whether it is online or not.
+    #[test]
+    fn fleet_status_leaves_out_machines_that_did_not_agree() {
+        let v = view(&["alpha", "beta", "gamma"]);
+        let agreed: BTreeSet<String> = ["alpha", "gamma"].iter().map(|s| s.to_string()).collect();
+        let f = fleet(&v, &agreed);
+        let ids = |key: &str, field: &str| -> Vec<String> {
+            f[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r[field].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(ids("machines", "id"), ["alpha", "gamma"]);
+        assert_eq!(ids("agents", "agent_id"), ["alpha/a", "gamma/a"]);
+        assert!(!f.to_string().contains("beta"), "{f}");
+        let none = fleet(&v, &BTreeSet::new());
+        assert_eq!(
+            none,
+            json!({"machines": [], "agents": [], "partial": false})
+        );
+    }
+
     /// ADR-0112: `fleet_status` lists every machine the hub knows (offline ones too) and every running agent on an online machine,
     /// in every project, with exactly the agreed fields: nothing an agent wrote, no task, label, `doing`, message or file name.
     #[test]
@@ -2048,7 +2086,7 @@ mod tests {
             1,
         );
 
-        let f = fleet(&v);
+        let f = fleet(&v, &every(&v));
         let machines = f["machines"].as_array().unwrap();
         let ids: Vec<&str> = machines.iter().map(|m| m["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["alpha", "beta"], "{f}");
@@ -2090,7 +2128,7 @@ mod tests {
         }
         // An agent on an offline machine is not listed; the machine still is.
         let v = view(&["alpha"]);
-        let f = fleet(&v);
+        let f = fleet(&v, &every(&v));
         assert_eq!(f["machines"].as_array().unwrap().len(), 3);
         assert_eq!(f["agents"].as_array().unwrap().len(), 1);
     }
@@ -2103,19 +2141,19 @@ mod tests {
         for i in 0..FLEET_MAX_AGENTS {
             v.agents.insert(format!("alpha/x{i:03}"), template.clone());
         }
-        let f = fleet(&v);
+        let f = fleet(&v, &every(&v));
         assert_eq!(f["agents"].as_array().unwrap().len(), FLEET_MAX_AGENTS);
         assert_eq!(f["partial"], true);
         // Exactly at the cap is whole.
         v.agents.remove("alpha/a");
-        assert_eq!(fleet(&v)["partial"], false);
+        assert_eq!(fleet(&v, &every(&v))["partial"], false);
 
         let mut v = view(&["alpha"]);
         let node = v.nodes["alpha"].clone();
         for i in 0..FLEET_MAX_MACHINES {
             v.nodes.insert(format!("m{i:03}"), node.clone());
         }
-        let f = fleet(&v);
+        let f = fleet(&v, &every(&v));
         assert_eq!(f["machines"].as_array().unwrap().len(), FLEET_MAX_MACHINES);
         assert_eq!(f["partial"], true);
     }
@@ -2151,7 +2189,7 @@ mod tests {
                 head_commit: String::new(),
             },
         );
-        let a = fleet_answer(&v);
+        let a = fleet_answer(&v, &every(&v));
         let Verdict::Done { result, .. } = &a.verdict else {
             panic!()
         };
@@ -2187,7 +2225,7 @@ mod tests {
         assert!(f["agents"][0]["workspace"].as_str().unwrap().len() <= FLEET_PATH_MAX);
 
         // A small budget cuts the answer and says so.
-        let cut = fleet_within(&v, 4096);
+        let cut = fleet_within(&v, &every(&v), 4096);
         assert_eq!(cut["partial"], true);
         assert!(
             cut.to_string().len() < 4096 + 64,

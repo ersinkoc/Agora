@@ -144,8 +144,8 @@ receives a notice of kind `delivery_failed` whose body is the error code (`node.
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
 and messages from other nodes are refused with the same code; messages on this node are unaffected. The hub cannot change this
 file. A second line, `mesh.fleet = false` (default `true`, read the same way), is about the hub-wide view (ADR-0112, "The hub-wide
-view" below): this machine's agents neither ask for nor see it (the node neither offers it to the hub nor asks the hub for it, and
-`mesh.remote = false` does the same); the machine and its agents are still listed to others. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines. Both machines record a message between them (`MessagePosted` from the sender's node, `to` = `<node>/<agent>`, and from the receiver's node, `from_agent_id` = `<origin>/<agent>`, each under its own per-node id); the window shows the pair as one row, matched by sender, recipient and text (#905), and a member's scope admits the sender's copy only. A node may write any sender into its own copy, so a copy that names another machine's agent and that neither that machine nor the hub's board has recorded too is shown "reported by" the machine that recorded it, named by its id (which the hub checked against its certificate, never the host name it reports), and two such copies are never paired with each other. The match is by content, not identity: a direct message that failed (recorded only on the sender's machine) can be matched with a later channel copy with the same sender, recipient and text. ADR-0074's `MeshPost.message_id` (Accepted, not built) is the key that would make the match exact.
+view" below): this machine's agents neither ask for nor see it, and the machine and its agents are left out of it (the node neither
+offers it to the hub nor asks the hub for it, and `mesh.remote = false` does the same). `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines. Both machines record a message between them (`MessagePosted` from the sender's node, `to` = `<node>/<agent>`, and from the receiver's node, `from_agent_id` = `<origin>/<agent>`, each under its own per-node id); the window shows the pair as one row, matched by sender, recipient and text (#905), and a member's scope admits the sender's copy only. A node may write any sender into its own copy, so a copy that names another machine's agent and that neither that machine nor the hub's board has recorded too is shown "reported by" the machine that recorded it, named by its id (which the hub checked against its certificate, never the host name it reports), and two such copies are never paired with each other. The match is by content, not identity: a direct message that failed (recorded only on the sender's machine) can be matched with a later channel copy with the same sender, recipient and text. ADR-0074's `MeshPost.message_id` (Accepted, not built) is the key that would make the match exact.
 
 ## Shared board (ADR-0039)
 
@@ -299,8 +299,8 @@ Agents can see every machine of their hub and every agent running on it, in any 
 pick a machine for a helper. The node asks the hub once with `BoardCall{tool: "fleet_status", project_id: "", arguments_json: "{}"}`
 (no new message) and waits at most 3 s. The hub answers with only facts it projects from node events:
 `{ machines: [{ id, online, os, build, agents_running, last_seen_ms }], agents: [{ agent_id, kind, machine, project, state, workspace,
-parent }], partial }`: every machine it knows (offline ones too; a machine the owner forgot is left out), every running agent on an
-online machine (`agent_id` is `<node>/<agent>`, what `send_message` takes; `state` is the window's word: `working`, `blocked`, `idle`,
+parent }], partial }`: every machine it knows whose latest link agreed on `mesh.fleet_status.v1` (offline ones too, by their last link;
+a machine the owner forgot is left out), every running agent on such a machine while it is online (`agent_id` is `<node>/<agent>`, what `send_message` takes; `state` is the window's word: `working`, `blocked`, `idle`,
 `done`, `unknown`; `workspace` is the folder on its machine), at most 64 machines and 200 agents, `partial: true` when either cap cut
 the list. Never `doing`, a label, a task, a message or a file name.
 
@@ -317,12 +317,17 @@ the list. Never `doing`, a label, a task, a message or a file name.
 - **Without the hub's answer** (the node does not offer the view, no hub, an older hub, a refusal, an error, or 3 s without an answer)
   both tools answer from this node alone: `machines_list` lists this machine
   (`online: true`, its OS, its version, its running agents, `last_seen_ms` now), `agents_list` the default scope's rows; `partial: true` on every row.
+- **Who is in it (ADR-0112 Amendment A).** Only machines whose latest link agreed on `mesh.fleet_status.v1`, and their agents. A
+  machine with `mesh.fleet = false` (or `mesh.remote = false`) does not offer the capability, so it and its agents and their folders
+  are left out of every agent's view; so is a node from before ADR-0112, until it is updated (the safe default). The hub keeps, in
+  memory, whether each machine's latest link agreed, and decides an offline machine by that; after a hub restart a machine is left
+  out until it connects again.
 - **Who may see it.** The hub answers only in solo mode, that is while it has no person in its `users` table besides the owner (ADR-0049;
   any person added, whatever the role, even one this build cannot read, makes it a team hub). A team hub refuses with the tool error `board.not_allowed` (no parameters),
   because a member's agent would see projects that member has no grant for, unless the owner turned the view on on the hub's machine:
   `agora hub fleet on|off|status` (the hub setting `fleet_status`, off by default, audited, read on every call so a running hub follows
   it; `status` says the stored switch on a solo hub too, and `agora hub user add` warns while it is on). With node policy `mesh.fleet = false` this machine's agents neither ask for nor see the hub-wide view, whatever the hub offers
-  (the hub cannot change that file); the machine and its agents are still listed to others. The hub cleans every text it puts in the
+  (the hub cannot change that file), and the machine and its agents are left out of it (see "Who is in it"). The hub cleans every text it puts in the
   answer (control and invisible characters, as above) and cuts the answer at 384 KiB of rows (`partial: true`). Like `workspace_status`,
   these read tools have no rate limit.
   What one agent learns about others is information, not instructions (threat model T64).
