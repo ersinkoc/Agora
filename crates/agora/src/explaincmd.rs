@@ -4,7 +4,7 @@
 //! same rule engine detection uses (`Detector::explain`, which decides exactly as `Detector::detect`). No node, no socket, no protocol
 //! message.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -45,7 +45,18 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
         .manifests
         .clone()
         .unwrap_or_else(|| home().join("manifests"));
-    let (loaded, _) = agora_node::manifests::load(&dir);
+    // A folder file that cannot be read is skipped by the node too, so the kind falls back to the built-in one (or is unknown): say
+    // so first, or the report would explain a manifest other than the one being fixed.
+    let (loaded, problems) = agora_node::manifests::load(&dir);
+    for (path, reason) in &problems {
+        say.err(
+            key!("cli-explain-manifest-problem"),
+            &[
+                ("path", path.display().to_string().into()),
+                ("reason", reason.as_str().into()),
+            ],
+        );
+    }
     let Some(found) = loaded.iter().find(|l| l.manifest.kind == *kind) else {
         say.err(
             key!("cli-explain-unknown-kind"),
@@ -86,8 +97,12 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
     let mut term = AlacrittyTerminal::new(size);
     term.feed(&bytes);
     let why = Detector::new(&found.manifest).explain(&term);
+    // A reader that went away (`| head`) ends the report quietly instead of a panic.
+    let mut stdout = std::io::stdout().lock();
     for line in render(say, kind, found.source.name(), size, &why) {
-        println!("{line}");
+        if writeln!(stdout, "{line}").is_err() {
+            break;
+        }
     }
     ExitCode::SUCCESS
 }
@@ -265,7 +280,7 @@ mod tests {
         let text = out.join("\n");
         assert!(
             out[0].contains("claude-code")
-                && out[0].contains("built-in")
+                && out[0].contains("built in")
                 && out[0].contains("120x40"),
             "{text}"
         );
@@ -325,9 +340,32 @@ mod tests {
                 key!("cli-explain-bad-file"),
                 key!("cli-explain-file-too-large"),
                 key!("cli-explain-bad-size"),
+                key!("cli-explain-manifest-problem"),
             ] {
                 assert_ne!(say.text(id, &[]), id, "{id} has no text");
             }
+        }
+    }
+
+    #[test]
+    fn where_the_kind_comes_from_is_said_in_the_person_s_language() {
+        let say = Say(Catalog::for_locale("tr"));
+        let size = DEFAULT_SIZE;
+        let why = Explanation {
+            checks: Vec::new(),
+            regions: Vec::new(),
+            decided: None,
+        };
+        for (source, want) in [
+            ("built-in", "yerleşik"),
+            ("folder", "manifest klasöründen"),
+            ("registry", "ACP kayıt defterinden"),
+        ] {
+            let header = &render(&say, "codex", source, size, &why)[0];
+            assert!(
+                header.contains(want) && !header.contains(source),
+                "{header}"
+            );
         }
     }
 }

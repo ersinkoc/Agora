@@ -174,7 +174,9 @@ replayed on a terminal of `--size`, of the size its name carries (`trust@24x20.s
 order detection reads them with the first condition that kept it from matching (its own text, `all[i]`, the `any` list, `not[i]`),
 then the decision. `Detector::explain` decides exactly as `Detector::detect` (checked on every shipped fixture); it is not on the
 detection path. The region text it prints has control characters replaced and is cut to 40 lines of 200 characters; a file over
-16 MiB is refused. A kind with no screen rules (an ACP agent) says so.
+16 MiB is refused. A kind with no screen rules (an ACP agent, `shell`) says so. A manifests-folder file the node would skip (it
+cannot be read or parsed) is named on stderr with the reason before the report, since the kind then falls back to the built-in one
+or is unknown. A state the agent reports (hooks, ACP, adapter) still wins over every rule shown.
 
 `[[ready]]` (ADR-0057, optional): rules of the same shape with `state = "idle"` that match only an empty input box waiting for a
 request, stricter than an `idle` rule (whose prompt marker can also be the selected row of a menu or dialog). The node types a helper's
