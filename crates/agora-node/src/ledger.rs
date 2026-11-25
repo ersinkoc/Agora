@@ -123,6 +123,9 @@ struct State {
     /// The same for the last state: a state change can be recorded (by the supervision tick) before the control thread records the
     /// agent's `AgentStarted`, and an idle agent reports no further change, so a dropped one would leave `last_state` empty for good.
     early_states: BTreeMap<String, String>,
+    /// F1620: the same for an exit (a process that ended at once, its exit recorded by the tick before its start): the start then
+    /// records an agent that ended, not one that runs, which the next open would offer as interrupted.
+    early_exits: BTreeSet<String>,
     /// ADR-0093 (#932): what each adapter agent last reported of its session, as the node recorded it, in `kept-<id>.pb` beside the
     /// ledger (not in it: a full set of config options is larger than the ledger may be). Filled as the node records, or from the file
     /// when an agent is taken up from the holder.
@@ -901,6 +904,7 @@ impl Ledger {
         let held = st.entries.remove(agent_id).is_some();
         st.early_sessions.remove(agent_id);
         st.early_states.remove(agent_id);
+        st.early_exits.remove(agent_id);
         st.bound.remove(agent_id);
         if st.kept.remove(agent_id).is_some() || held {
             st.mark_kept_pending(agent_id.to_string());
@@ -1188,8 +1192,8 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             if let Some(state) = st.early_states.remove(&a.agent_id) {
                 e.last_state = state;
             }
-            // Running again (a restart after a crash, a resume): neither ended nor interrupted.
-            e.ended = false;
+            // Running again (a restart after a crash, a resume): neither ended nor interrupted. Unless its exit was recorded first.
+            e.ended = st.early_exits.remove(&a.agent_id);
             e.interrupted_at_ms = 0;
             let changed = *e != before;
             if changed {
@@ -1253,6 +1257,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 e.updated_at_ms = now;
                 st.dirty = true;
                 true
+            }
+            // Before the agent's start is recorded: held for it (F1620), as a state is.
+            None if !x.agent_id.is_empty()
+                && x.agent_id.len() <= MAX_FIELD
+                && st.early_exits.len() < MAX_EARLY =>
+            {
+                st.early_exits.insert(x.agent_id.clone());
+                false
             }
             _ => false,
         },
@@ -1393,6 +1405,34 @@ mod tests {
         // The held state is used once: a later start of the same id does not bring it back.
         l.observe(&started("agent-1", "/wt/a", ""), 14);
         assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+    }
+
+    /// F1620: a process that ended at once can have its exit recorded by the tick before the control thread records its start; the
+    /// agent ended all the same, so the next open lists it as ended and never offers it for Resume.
+    #[test]
+    fn an_exit_recorded_before_the_agent_started_ends_it() {
+        let exited = |id: &str| {
+            Body::AgentExited(v1::AgentExited {
+                agent_id: id.into(),
+                exit_code: 1,
+            })
+        };
+        let dir = temp("exit-first");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&exited("agent-1"), 10);
+        assert!(l.get("agent-1").is_none(), "an exit alone made an entry");
+        l.observe(&started("agent-1", "/wt/a", ""), 11);
+        assert!(l.get("agent-1").unwrap().ended);
+        l.observe(&started("agent-2", "/wt/b", ""), 12);
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
+        assert_eq!(offered, vec!["agent-2".to_string()]);
+        assert!(l.get("agent-1").unwrap().ended);
+        // The held exit is used once: a later start of the id (a resume) runs.
+        l.observe(&started("agent-1", "/wt/a", ""), 21);
+        let e = l.get("agent-1").unwrap();
+        assert!(!e.ended && !e.interrupted(), "a resume after it runs");
     }
 
     /// #907: what the launch said of acting without asking is kept with the agent and written, so a node that takes the agent up from
