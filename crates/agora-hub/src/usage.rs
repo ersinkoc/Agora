@@ -90,15 +90,19 @@ fn micro(v: &Value) -> Option<u64> {
         return None;
     }
     let digits = format!("{whole}{fraction}");
+    if digits.bytes().all(|digit| digit == b'0') {
+        return Some(0);
+    }
     let shift = exponent
         .checked_add(6)?
         .checked_sub(i32::try_from(fraction.len()).ok()?)?;
     if shift >= 0 {
         let zeros = usize::try_from(shift).ok()?;
-        if digits.len().saturating_add(zeros) > 20 {
+        let significant = digits.trim_start_matches('0');
+        if significant.len().saturating_add(zeros) > 20 {
             return None;
         }
-        return format!("{digits}{}", "0".repeat(zeros)).parse().ok();
+        return format!("{significant}{}", "0".repeat(zeros)).parse().ok();
     }
     let cut = i64::try_from(digits.len())
         .ok()?
@@ -222,19 +226,26 @@ impl Catalog {
         let root: Value = serde_json::from_str(json)?;
         let mut skipped = 0;
         for (model, p) in root.as_object().into_iter().flatten() {
+            let optional_price = |key| match p.get(key) {
+                Some(value) => micro(value),
+                None => Some(0),
+            };
             match (
                 p.get("input").and_then(micro),
                 p.get("output").and_then(micro),
+                optional_price("cache_read"),
+                optional_price("cache_write"),
             ) {
-                (Some(input), Some(output)) => self.set_override(
-                    model,
-                    Price {
-                        input,
-                        output,
-                        cache_read: p.get("cache_read").and_then(micro).unwrap_or(0),
-                        cache_write: p.get("cache_write").and_then(micro).unwrap_or(0),
-                    },
-                ),
+                (Some(input), Some(output), Some(cache_read), Some(cache_write)) => self
+                    .set_override(
+                        model,
+                        Price {
+                            input,
+                            output,
+                            cache_read,
+                            cache_write,
+                        },
+                    ),
                 _ => skipped += 1,
             }
         }
@@ -919,5 +930,71 @@ mod tests {
         assert_eq!(c.price("equal").unwrap().input, 2);
         assert_eq!(c.price("ambiguous"), None);
         assert_eq!(c.price("first-party").unwrap().input, 5);
+    }
+
+    #[test]
+    fn f365_a_present_invalid_override_cache_price_cannot_silently_become_free() {
+        let mut c = Catalog::default();
+        let skipped = c
+            .load_overrides(r#"{"private/model":{"input":1,"output":2,"cache_read":-1}}"#)
+            .unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(c.price("private/model"), None);
+    }
+
+    #[test]
+    fn a_missing_override_cache_price_still_means_no_separate_cache_charge() {
+        let mut c = Catalog::default();
+        assert_eq!(
+            c.load_overrides(r#"{"private/model":{"input":1,"output":2}}"#)
+                .unwrap(),
+            0
+        );
+        assert_eq!(c.price("private/model").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn f366_a_representable_decimal_with_many_insignificant_zeroes_is_not_rejected() {
+        let value: Value = serde_json::from_str("0.000000000000000000001e21").unwrap();
+        assert_eq!(micro(&value), Some(1_000_000));
+    }
+
+    #[test]
+    fn an_ordinary_representable_exponent_price_remains_usable() {
+        let value: Value = serde_json::from_str("1e-6").unwrap();
+        assert_eq!(micro(&value), Some(1));
+    }
+
+    #[test]
+    fn verifies_f365_override_cache_prices_across_negative_text_overflow_and_missing_values() {
+        let mut c = Catalog::default();
+        let skipped = c
+            .load_overrides(
+                r#"{
+                    "private/negative":{"input":1,"output":2,"cache_read":-1},
+                    "private/text":{"input":1,"output":2,"cache_write":"free"},
+                    "private/overflow":{"input":1,"output":2,"cache_read":1e300},
+                    "private/missing":{"input":1,"output":2}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(skipped, 3);
+        for model in ["negative", "text", "overflow"] {
+            assert_eq!(c.price(&format!("private/{model}")), None, "{model}");
+        }
+        assert_eq!(c.price("private/missing").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn verifies_f366_insignificant_zeroes_across_positive_zero_fractional_and_integer_forms() {
+        for (raw, expected) in [
+            ("0.000000000000000000001e21", 1_000_000),
+            ("0e2147483647", 0),
+            ("0.000000000000000000005e20", 500_000),
+            ("100000000000000000000e-20", 1_000_000),
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(micro(&value), Some(expected), "{raw}");
+        }
     }
 }

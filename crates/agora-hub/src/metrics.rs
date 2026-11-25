@@ -51,7 +51,7 @@ impl Histogram {
             .iter()
             .position(|b| us <= *b)
             .unwrap_or(self.bounds.len());
-        self.buckets[i].fetch_add(1, Relaxed);
+        let _ = self.buckets[i].try_update(Relaxed, Relaxed, |count| Some(count.saturating_add(1)));
         // Saturating: a time from a machine's clock (an approval's answer far in the future) must not wrap the sum (#574 review).
         let _ = self
             .sum_us
@@ -69,21 +69,24 @@ impl Histogram {
     }
 
     pub fn count(&self) -> u64 {
-        self.buckets.iter().map(|b| b.load(Relaxed)).sum()
+        self.buckets
+            .iter()
+            .map(|b| b.load(Relaxed))
+            .fold(0, u64::saturating_add)
     }
 
     fn render(&self, name: &str, out: &mut String) {
         let _ = writeln!(out, "# TYPE {name} histogram");
-        let mut seen = 0;
+        let mut seen = 0u64;
         for (i, bound) in self.bounds.iter().enumerate() {
-            seen += self.buckets[i].load(Relaxed);
+            seen = seen.saturating_add(self.buckets[i].load(Relaxed));
             let _ = writeln!(
                 out,
                 "{name}_bucket{{le=\"{}\"}} {seen}",
                 *bound as f64 / 1e6
             );
         }
-        seen += self.buckets[self.bounds.len()].load(Relaxed);
+        seen = seen.saturating_add(self.buckets[self.bounds.len()].load(Relaxed));
         let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {seen}");
         let _ = writeln!(out, "{name}_sum {}", self.sum_us.load(Relaxed) as f64 / 1e6);
         let _ = writeln!(out, "{name}_count {seen}");
@@ -201,5 +204,111 @@ mod tests {
         h.observe(Duration::from_secs(1));
         assert_eq!(h.sum_us.load(Relaxed), u64::MAX);
         assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn f367_observing_a_saturated_histogram_bucket_does_not_wrap_its_counter() {
+        let h = Histogram::default();
+        h.buckets[0].store(u64::MAX, Relaxed);
+        h.observe(Duration::from_micros(1));
+        assert_eq!(h.buckets[0].load(Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn an_observation_still_increments_a_regular_histogram_bucket() {
+        let h = Histogram::default();
+        h.observe(Duration::from_micros(1));
+        assert_eq!(h.buckets[0].load(Relaxed), 1);
+    }
+
+    #[test]
+    fn f368_histogram_count_saturates_when_several_bucket_counts_overflow_the_total() {
+        let h = Histogram::default();
+        h.buckets[0].store(u64::MAX, Relaxed);
+        h.buckets[1].store(1, Relaxed);
+        assert_eq!(h.count(), u64::MAX);
+    }
+
+    #[test]
+    fn one_full_bucket_remains_a_valid_histogram_count() {
+        let h = Histogram::default();
+        h.buckets[0].store(u64::MAX, Relaxed);
+        assert_eq!(h.count(), u64::MAX);
+    }
+
+    #[test]
+    fn f369_histogram_render_saturates_its_cumulative_bucket_counts() {
+        let h = Histogram::default();
+        h.buckets[0].store(u64::MAX, Relaxed);
+        h.buckets[1].store(1, Relaxed);
+        let mut out = String::new();
+        h.render("x_seconds", &mut out);
+        assert!(out.contains("x_seconds_bucket{le=\"+Inf\"} 18446744073709551615\n"));
+        assert!(out.contains("x_seconds_count 18446744073709551615\n"));
+    }
+
+    #[test]
+    fn histogram_render_keeps_an_exact_unsaturated_cumulative_count() {
+        let h = Histogram::default();
+        h.buckets[0].store(2, Relaxed);
+        h.buckets[1].store(3, Relaxed);
+        let mut out = String::new();
+        h.render("x_seconds", &mut out);
+        assert!(out.contains("x_seconds_bucket{le=\"0.00025\"} 5\n"));
+        assert!(out.contains("x_seconds_count 5\n"));
+    }
+
+    #[test]
+    fn verifies_f367_bucket_saturation_across_first_middle_and_overflow_buckets() {
+        for (bucket, duration) in [
+            (0, Duration::from_micros(1)),
+            (4, Duration::from_micros(2_000)),
+            (9, Duration::from_micros(300_000)),
+        ] {
+            let h = Histogram::default();
+            h.buckets[bucket].store(u64::MAX, Relaxed);
+            h.observe(duration);
+            assert_eq!(h.buckets[bucket].load(Relaxed), u64::MAX, "{bucket}");
+        }
+    }
+
+    #[test]
+    fn verifies_f368_count_saturation_across_early_late_and_many_bucket_totals() {
+        let early = Histogram::default();
+        early.buckets[0].store(u64::MAX, Relaxed);
+        early.buckets[1].store(1, Relaxed);
+        assert_eq!(early.count(), u64::MAX);
+
+        let late = Histogram::default();
+        late.buckets[8].store(u64::MAX - 1, Relaxed);
+        late.buckets[9].store(2, Relaxed);
+        assert_eq!(late.count(), u64::MAX);
+
+        let many = Histogram::default();
+        for bucket in &many.buckets {
+            bucket.store(u64::MAX / 2, Relaxed);
+        }
+        assert_eq!(many.count(), u64::MAX);
+    }
+
+    #[test]
+    fn verifies_f369_render_saturation_across_bounded_overflow_and_near_max_totals() {
+        for (first, second, overflow) in [(u64::MAX, 1, 0), (0, u64::MAX, 1), (u64::MAX - 2, 1, 2)]
+        {
+            let h = Histogram::default();
+            h.buckets[0].store(first, Relaxed);
+            h.buckets[8].store(second, Relaxed);
+            h.buckets[9].store(overflow, Relaxed);
+            let mut out = String::new();
+            h.render("x_seconds", &mut out);
+            assert!(
+                out.contains("x_seconds_bucket{le=\"+Inf\"} 18446744073709551615\n"),
+                "{out}"
+            );
+            assert!(
+                out.contains("x_seconds_count 18446744073709551615\n"),
+                "{out}"
+            );
+        }
     }
 }
