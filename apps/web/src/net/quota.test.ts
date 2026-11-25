@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { chipFor, classify, levelOf, machineKeyOf, quotaView, resetsText, startHint, untilText, windowLabel, windowMinutes, type QuotaObs } from './quota';
+import { chipFor, classify, levelOf, machineKeyOf, quotaView, resetsText, startHint, toolName, untilText, windowLabel, windowMinutes, type QuotaObs } from './quota';
 import { applyEvent, emptyView, quotaObs, shown } from './view';
 
 const MIN = 60_000;
@@ -22,6 +22,24 @@ describe('plan limits (ADR-0091)', () => {
     expect(windowLabel('seven_day')).toBe('Seven days');
     expect(windowLabel('minutes:45')).toBe('45 minutes');
     expect(windowLabel('minutes:1')).toBe('1 minute');
+  });
+
+  it('makes an unknown quota window label visible', () => {
+    expect(windowLabel('roll\u3164ing\u202e')).toBe('roll\\u{3164}ing\\u{202e}');
+  });
+
+  it('verifies unknown quota window labels across isolate, private-use and control characters', () => {
+    expect(windowLabel('burst\u2066')).toBe('burst\\u{2066}');
+    expect(windowLabel('custom\ue000\u0001')).toBe('custom\\u{e000}\\u{1}');
+  });
+
+  it('makes a quota tool name visible', () => {
+    expect(toolName('co\u2800dex\u034f')).toBe('Co\\u{2800}dex\\u{34f}');
+  });
+
+  it('verifies quota tool names across zero-width and private-use characters', () => {
+    expect(toolName('claude\u200b')).toBe('Claude\\u{200b}');
+    expect(toolName('çe\ue000viri')).toBe('Çe\\u{e000}viri');
   });
 
   it('classifies fresh, stale and reset, and a reset never keeps its old percentage', () => {

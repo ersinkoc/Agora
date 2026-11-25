@@ -226,7 +226,7 @@ describe('quick win: the safety badge is one sign and says all of it on demand',
     expect(new Set([started, neutral, approved]).size).toBe(3);
     expect(neutral).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back');
     expect(approved).toContain('with your approval');
-    expect(label(<NoAskBadge agent={{ skipsPermissions: true }} session cause={'Mode: YOLO\u202e'} />)).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: YOLO');
+    expect(label(<NoAskBadge agent={{ skipsPermissions: true }} session cause={'Mode: YOLO\u202e'} />)).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: YOLO\\u{202e}');
   });
   it('says the same in Turkish', () => {
     setLanguage('tr');

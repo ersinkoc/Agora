@@ -248,6 +248,24 @@ describe('the start window, machine, preview and errors', () => {
     expect(document.querySelector('[role=dialog] [data-start-preview]')?.textContent).toBe('Ccodex · … olarak görünecek; rengi başlarken seçilir.');
   });
 
+  it('makes the raw kind id visible in the agent name preview', async () => {
+    const raw = 'co\u3164dex\u202e';
+    await open({ loadKinds: async () => [{ kind: raw, name: 'Codex', installed: true, level: 2 }] });
+    const preview = win().querySelector('[data-start-preview]') as HTMLElement;
+    expect(preview.querySelector('strong')?.textContent).toBe('co\\u{3164}dex\\u{202e} · …');
+    expect(preview.textContent).not.toContain('\u3164');
+    expect(preview.textContent).not.toContain('\u202e');
+  });
+
+  it('verifies the visible preview while starting with the raw kind id', async () => {
+    const raw = 'cla\u2066ude\ue000';
+    const onStart = await open({ loadKinds: async () => [{ kind: raw, name: 'Claude', installed: true, level: 3 }] });
+    const preview = win().querySelector('[data-start-preview]') as HTMLElement;
+    expect(preview.querySelector('strong')?.textContent).toBe('cla\\u{2066}ude\\u{e000} · …');
+    click(button('Start')); await flush();
+    expect(onStart).toHaveBeenCalledWith('n1', expect.anything(), raw, false, false, expect.anything());
+  });
+
   it('shows a refused start in red, and still offers the device approval ask (ADR-0061)', async () => {
     const ask = vi.fn(async () => false);
     await open({ onStart: async () => 'approval-not-trusted', trust: { id: 'd', key: 'k' }, askApproval: { can: () => true, ask } });

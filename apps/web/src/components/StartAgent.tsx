@@ -55,9 +55,10 @@ const OS_ICON: Record<string, IconName> = { linux: 'osLinux', macos: 'osMac', wi
 export function AppearsAs({ kind }: { kind: string }) {
   const MARK = '\u0001';
   const [before = '', after = ''] = t('start-preview', { name: MARK }).split(MARK);
+  const shown = visible(kind);
   return <p data-start-preview="" className="m-0 flex min-w-0 items-center gap-2 text-caption text-muted">
-    <AgentAvatar accent={NO_COLOUR} kind={kind} size="s" />
-    <span className="min-w-0">{before}<strong className="font-semibold text-ink"><bdi>{kind} · …</bdi></strong>{after}</span>
+    <AgentAvatar accent={NO_COLOUR} kind={shown} size="s" />
+    <span className="min-w-0">{before}<strong className="font-semibold text-ink"><bdi>{shown} · …</bdi></strong>{after}</span>
   </p>;
 }
 
