@@ -272,6 +272,7 @@ impl Store {
 /// Writes `record` where [`Store::open`] looks for it, without the store (and without a sync: a
 /// test plants many). Returns the file's size.
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 pub(crate) fn plant(root: &Path, record: &Record) -> usize {
     std::fs::create_dir_all(root).unwrap();
     let bytes = record.bytes().unwrap();
