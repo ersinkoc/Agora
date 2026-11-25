@@ -58,7 +58,8 @@ fixes it.
 
 - [ ] **M1.1 Real-machine checklist**
   - [x] one checklist line per capability in `docs/capabilities.md` (what to do, what to see), in `docs/reviews/real-machine-checklist.md`
-    - RM-01 to RM-65 cover every row of `docs/capabilities.md` (RM-61 to RM-65 added for ADR-0107, ADR-0101, ADR-0103, ADR-0100 and ADR-0102)
+    - RM-01 to RM-65 cover every row of `docs/capabilities.md`; RM-61 to RM-65 (ADR-0107, ADR-0101, ADR-0103, ADR-0100, ADR-0102)
+      need 0.3.34 to 0.3.38, each named in its entry, and have no run yet; RM-62's no-reprompt check needs a person
   - [x] run it on Linux (blackview), then **mac** and **win** through comms; each run is a dated note in `docs/reviews/`
     ([Linux](../reviews/2026-11-21-real-machine-linux.md), [macOS](../reviews/2026-11-21-real-machine-macos.md),
     [Windows](../reviews/2026-11-21-real-machine-windows.md), all 2026-11-21)

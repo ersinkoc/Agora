@@ -2,7 +2,10 @@
 
 One entry per row of [`docs/capabilities.md`](../capabilities.md), in the same order and sections (roadmap M1.1). Each entry says
 which systems it applies to, what to do on a real machine with the released Agora 0.3.33, what to see, and what evidence is already
-written down in this repository. When a row is added to `docs/capabilities.md`, add its entry here in the same pull request.
+written down in this repository. The entries added after 0.3.33 need a newer release, named in each one's **Builds:** line: RM-64
+needs 0.3.34, RM-62 0.3.35, RM-63 and RM-65 0.3.36, and RM-61 0.3.38; on an older release they are recorded as **skip**. A run on a
+newer release builds `agora-fake-agent` from that release's tag (S2). When a row is added to `docs/capabilities.md`, add its entry
+here in the same pull request.
 
 This is a first draft written from the docs and the code, not from a run. Where a step turns out to be wrong on a real machine, fix
 the step in the same pull request as the run's note. A step that ends in **(unverified)** could not be proved from the code or the
@@ -48,13 +51,15 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 
 - **macOS session:** RM-01, RM-03 to RM-07, RM-08 (a private `sshd` on loopback, as on 2026-11-09), RM-10, RM-11 to RM-16 (the
   fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-30, RM-31, RM-34 to RM-36, RM-39 (unconfined), RM-40,
-  RM-44, RM-47, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image), RM-61 to RM-65; in a disposable macOS account or VM only (#900):
+  RM-44, RM-47, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image), RM-61, RM-62 (the fake-agent part), RM-63 to RM-65; in a disposable macOS account or VM only (#900):
   RM-23, RM-33, RM-37, RM-38.
 - **Windows session:** RM-02, RM-03 to RM-07, RM-10, RM-11 to RM-16 (the fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-31, RM-32 (checking the signature only), RM-35,
-  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer), RM-61 to RM-65; in a disposable Windows account or VM only (#900): RM-23
+  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer), RM-61, RM-62 (the fake-agent part), RM-63 to RM-65; in a disposable Windows account or VM only (#900): RM-23
   (confinement is off by default: turned on for that node only).
 - **Needs a person:** the real-agent steps of RM-11 to RM-13, RM-18's install (no person-facing way to make a signed list yet), RM-26 with a second person, RM-32
-  (signing account), RM-45, RM-54 (a real phone), RM-56 (a tailnet), RM-57 (a real tunnel).
+  (signing account), RM-45, RM-54 (a real phone), RM-56 (a tailnet), RM-57 (a real tunnel), RM-62's check that later requests
+  proceed without asking again (an agent that remembers its "Allow always" answer, such as WrongStack's `wstack acp serve`, with a
+  dedicated account: the fake agent does not remember answers).
 
 ## Common setup
 
@@ -72,7 +77,7 @@ other shell of this run sets `RM` to exactly this text). Then `mkdir "$RM/home" 
 (Windows: `New-Item -ItemType Directory (Join-Path $RM 'home'), (Join-Path $RM 'proj')`; `$env:AGORA_HOME = Join-Path $RM 'home'`);
 in `"$RM/proj"`: `git init -b main && git commit --allow-empty -m init` (it uses the identity you already have; set one with `-c user.name=rm -c
 user.email=rm@example.invalid` on that one command if you have none, never with `git config --global`). Check `agora --version`
-says 0.3.33.
+says 0.3.33 (or the newer release the run is for).
 
 **S1. Hub and machine here.** With `AGORA_HOME` set, go into the run folder first (`cd "$RM"`; PowerShell `Set-Location $RM`): `agora` adds the folder it runs in as the node's project, so started from a checkout it serves that checkout (seen on Windows, 2026-11-21). Then type `agora --ui none --resume ask` (`--resume ask` answers the question "Bring
 agents back by themselves after a restart? [Y/n]" for this run, so it is not asked; the machine file records `resume = ask`). To the
@@ -83,7 +88,8 @@ port from 7443, so not the machine's own hub) and the data folder. Without `--ui
 again with `agora`, it means `agora --ui none` with the run's `AGORA_HOME`.
 `agora web` opens the window signed in (accept the hub's own certificate for this run only).
 
-**S2. Fake agents and the Shell.** `agora-fake-agent` is not in the release: build it from the same tag,
+**S2. Fake agents and the Shell.** `agora-fake-agent` is not in the release: build it from the same tag as the release under test
+(`v0.3.33` below; for a newer release, its own tag),
 `git clone --depth 1 --branch v0.3.33 https://github.com/ersinkoc/Agora $RM/src && cargo build --release -p agora-fake-agent
 --manifest-path $RM/src/Cargo.toml`, and use `FAKE=$RM/src/target/release/agora-fake-agent` (`.exe` on Windows). Write these
 manifests into `$AGORA_HOME/manifests/` (the node reads the folder again before it lists or starts agents; on Windows write paths as
@@ -108,6 +114,9 @@ manifest spec and the tests that use the fake agent. The Linux run of 2026-11-21
   of `crates/agora-fake-agent/src/acp.rs` (`plan`, `ask`, `rich`, `usage`, `mcp TOOL JSON`, `slow`, anything else is echoed). The
   shape is the one `crates/agora/tests/acp.rs` writes. It says `loadSession: false`, so a Resume (RM-20) restarts it without its
   conversation.
+- `rm-acp-resume.toml` (for RM-61: a structured agent that can continue its conversation): `rm-acp`'s manifest with its own `kind`
+  and `display_name`, and `[structured]` `acp = { argv = [FAKE, "--acp", "--load-session"] }`. It says `loadSession: true` and keeps
+  what it said in `acp-history.txt` in its folder. The flag is in the fake agent of 0.3.38 and later only.
 - `rm-chat.toml` (a structured agent through an adapter): `[adapter]` `command = [FAKE, "--adapter"]` (prompts `ask`, `cwd`, `crash`). The shape is
   the one `scripts/browser-harness.mjs` writes. Its approval answer is `approved`.
 - `rm-probe.toml`: `launch = [FAKE, "--probe-directory", "$RM/probe-{pid}.json"]`, with the `[[launch.option]]` and
@@ -374,14 +383,16 @@ not built: nothing to check.
 
 ### RM-61 `agora agent list` lists the agents a node found interrupted
 - **OS:** Linux, macOS, Windows (ADR-0107).
-- **Builds:** needs Agora 0.3.37 or newer (or a build of `main` with #1137); on 0.3.33, record as **skip** ("not in 0.3.33").
-- **Do:** repeat the interrupted restart from RM-20 (with `--resume ask`, so the node leaves the agents interrupted instead of
-  bringing them back automatically), starting both a resumable fake agent (like `rm-acp` with `--load-session`, which advertises
-  `loadSession: true`) and `rm-acp` (which advertises `loadSession: false`). Run `agora agent list`, then `agora agent resume
-  <resumable id>`, then `agora agent resume <rm-acp id>` and `agora agent resume --again <rm-acp id>`.
-- **See:** `agora agent list` prints the interrupted agents in id order with `interrupted` and `resume`, `start-again` or
-  `still-running`; `agora agent resume <resumable id>` brings back the resumable agent; `agora agent resume <rm-acp id>` refuses
-  the non-resumable one until `--again` is passed.
+- **Builds:** needs Agora 0.3.38 or newer (or a build of `main` with #1137): `agora agent resume` is in 0.3.38; 0.3.37 has only the
+  `interrupted` lines of `agora agent list`. The fake agent comes from the same tag (S2: `--load-session`). On an older release,
+  record as **skip** ("not in <version>").
+- **Do:** S1 (with `--resume ask`), S2. Start `rm-acp-resume` and `rm-acp` (S2), then repeat the interrupted restart from RM-20 (the
+  node leaves the agents interrupted instead of bringing them back by themselves). Run `agora agent list`, then `agora agent resume
+  <rm-acp-resume id>`, then `agora agent resume <rm-acp id>` and `agora agent resume <rm-acp id> --again`.
+- **See:** `agora agent list` prints the interrupted agents in id order with `interrupted` in the fourth column and `resume`
+  (`rm-acp-resume`) or `start-again` (`rm-acp`) in the fifth (`still-running` for one whose process outlived the node); `agora agent
+  resume <rm-acp-resume id>` says "Resumed agent <id> in <folder>"; `agora agent resume <rm-acp id>` refuses with "<id> cannot
+  continue its own session. Start it again instead." and, with `--again`, starts it again in its folder.
 - **Evidence so far:** none recorded.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
@@ -432,12 +443,15 @@ not built: nothing to check.
 ### RM-62 A structured agent can be allowed always (the agent decides how long it keeps the answer)
 - **OS:** Linux, macOS, Windows (the window and the terminal client; ADR-0101).
 - **Builds:** needs Agora 0.3.35 or newer (or a build of `main` with #1007 and #1012); on 0.3.33, record as **skip** ("not in 0.3.33").
-- **Do:** S1, S2, S4. Start `rm-acp` and send `ask-kinds allow_always,allow_once` (the plain `ask` prompt offers no always-allow
-  option). Answer with the always-allow action in the web window, and repeat in `agora tui`. For the no-reprompt check, use an agent
-  that keeps its always answer (the fake agent asks again on each prompt).
-- **See:** the approval card offers the always-allow choice alongside Allow and Deny, signs the `approval-always-v1` decision, and
-  for an agent that keeps its always answer, subsequent matching requests proceed according to the agent's own scope without
-  re-prompting.
+- **Do:** S1, S2 (the fake agent from 0.3.35 or later: `ask-kinds`), S4. Start `rm-acp` and send `ask-kinds allow_always,allow_once`
+  (the plain `ask` prompt offers no "always" option). On the card, choose "Allow always". Send the same prompt again and answer it in
+  `agora tui`: in the agent's tab or chat, Alt+A opens the request box, and `A` there allows it always. **Needs a person:** the same
+  with an agent that remembers the answer (see "Which entries a platform session can run alone"), then a second matching request.
+- **See:** the card shows "Allow always" beside Allow and Deny, with the note that the agent remembers this answer and decides what it
+  covers and how long it keeps it; the request box's line says "A allows it always (the agent remembers it)"; after each answer the
+  agent replies `selected:allow_always`, and its row shows "Asks less" (`[asks less]` in the terminal client) until it ends or starts
+  again. The fake agent asks again on every prompt, by design. With an agent that remembers the answer (needs a person), a later
+  matching request goes ahead without a card.
 - **Evidence so far:** none recorded.
 
 ### RM-25 Trusting your devices in one step
@@ -483,13 +497,16 @@ not built: nothing to check.
 ### RM-63 A window that opens, reloads or reconnects shows the recent Team chat
 - **OS:** Linux, macOS, Windows (ADR-0103).
 - **Builds:** needs Agora 0.3.36 or newer (or a build of `main` with ADR-0103); on 0.3.33, record as **skip** ("not in 0.3.33").
-- **Do:** S1, S2. Start a Shell in `$RM/proj`, send a Team chat message from the project's Messages/Team chat view (or via S5
-  `send_message` to `#channel`), then: (1) reload the browser window, (2) open a second browser tab to the same hub, and (3)
-  disconnect and reconnect the existing window (e.g. toggle DevTools Offline on and back off, or restart the hub while the window
-  stays open).
-- **See:** after reload, in the newly opened tab, and after reconnecting the existing window, the recent Team chat messages appear
-  immediately from the snapshot without needing a new live message (up to the newest 50 messages / 256 KiB across all project rings
-  visible to that window, so newer messages in one project can crowd out older ones in another).
+- **Do:** S1, S2, S5. Start two Shells in `$RM/proj` (a `#channel` message goes to the project's other running agents, so it needs
+  a second one). Open "Team chat" (it only shows what agents write; the window cannot send there). With S5 as the first Shell, call
+  `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"#rm","body":"RM-63 hello"}}}`.
+  Then: (1) reload the window; (2) open a second browser tab on the same hub; (3) with the first tab still open, restart the hub:
+  `agora down`, then start again with `agora` (the run's `AGORA_HOME`; on Linux and macOS the Shells keep running with their
+  holder; on Windows `agora down` ends them, and the message should stay all the same, since the hub rebuilds its Team chat from its
+  log (unverified)).
+- **See:** before the reload, Team chat shows `[#rm] RM-63 hello` from the first Shell to the second; after the reload, in the new tab
+  and in the first tab once it has reconnected, the message is there at once, with no new message sent (up to the newest 50 messages
+  and 256 KiB per project).
 - **Evidence so far:** none recorded.
 
 ### RM-29 Shared project board (tasks, leases)
@@ -703,16 +720,24 @@ not built: nothing to check.
 ### RM-52 A diff names every changed file even when cut
 not built (the window says how many files are not shown): nothing to check.
 
-### RM-64 A window that attaches late gets the program's modes (mouse, wheel, focus, alternate screen, cursor shape)
+### RM-64 A window that attaches late gets the program's history and modes (mouse, wheel, focus, alternate screen, cursor shape)
 - **OS:** Linux, macOS, Windows (web window and terminal client; ADR-0100).
 - **Builds:** needs Agora 0.3.34 or newer (or a build of `main` with #953, #959, #964); on 0.3.33, record as **skip** ("not in 0.3.33").
-- **Do:** S1, S2. Start a Shell in `$RM/proj` and print enough lines to populate scrollback. First, while still in normal screen,
-  reload the web window, open a second browser tab, and open the agent panel in `agora tui`, scrolling back in each to check the
-  prior history. Then start a full-screen/mouse-aware program (or emit alternate-screen and mouse-mode sequences) and repeat the
-  reload, second tab, and `agora tui` agent panel attachment.
-- **See:** the normal-screen late attachments receive the prior scrollback history before the repaint; the alternate-screen late
-  attachments repaint with the program's active modes (mouse, wheel, focus, alternate screen, cursor shape) intact in one
-  synchronized paint (without normal-screen history).
+- **Do:** S1, S2. Start a Shell in `$RM/proj`.
+  1. **History.** Run `seq 1 300` (PowerShell: `1..300`). Reload the window, open the Shell in a second browser tab, and select it in
+     `agora tui` (its terminal panel); scroll back in each.
+  2. **Mouse, alternate screen, cursor.** In the Shell run `printf '\e[?1049h\e[?1000h\e[6 q'; cat -v` (bash or zsh; it switches to
+     the alternate screen, turns mouse reports on, makes the cursor a bar, and shows what it receives). PowerShell (unverified):
+     `$e = [char]27; [Console]::Write("$e[?1049h$e[?1000h$e[6 q"); while ($true) { $k = [Console]::ReadKey($true); [Console]::Write([int]$k.KeyChar); [Console]::Write(' ') }`
+     (it prints the code of each character it receives; 27 is Esc). Only then reload the window, open a second tab, and open the
+     Shell's terminal in `agora tui` (Enter); in each, click in the terminal.
+  3. **Wheel.** Ctrl-C, then `printf '\e[?1000l'; cat -v` (mouse reports off, still on the alternate screen; PowerShell: the same
+     loop after `[Console]::Write("$e[?1000l")`). Reload, open a second tab and `agora tui` again; in each, turn the wheel over the
+     terminal. Ctrl-C, then `printf '\e[?1049l\e[0 q'` (PowerShell: `[Console]::Write("$e[?1049l$e[0 q")`) to go back.
+- **See:** 1: each late window scrolls back to the earlier lines (up to its history setting; 2000 lines in the terminal client), in
+  their colours, not only the last screen. 2: a click shows a mouse report (`^[[M` and three more characters; in PowerShell `27 91
+  77 …`), so clicks reach the program, and the cursor is a bar. 3: the wheel shows arrow keys (`^[[A` / `^[[B`, three a notch in
+  the terminal client), not history recall and not mouse reports.
 - **Evidence so far:** none recorded.
 
 ### RM-53 A shared terminal takes the smallest window's size
@@ -768,12 +793,17 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-65 A widget kit and one danger colour (red for failed, errors, deletions, destructive actions and acting without asking; amber only for needs you)
 - **OS:** Linux, macOS, Windows (any browser; ADR-0102).
-- **Builds:** needs Agora 0.3.35 or newer (or a build of `main` with ADR-0102 PRs 1–3); on 0.3.33, record as **skip** ("not in 0.3.33").
-- **Do:** open the web window across all six built-in themes (Dark and Light); trigger a "Needs you" approval card (`rm-chat` `ask`),
-  an agent acting without asking (`rm-probe` with `skip-permissions`), and an error/destructive confirmation (such as Forget or
-  Close).
-- **See:** amber is used only for "Needs you" and the quota warning sign; red is used consistently for failed states, errors,
-  deletions, destructive actions and acting-without-asking badges, with readable contrast across all built-in themes.
+- **Builds:** needs Agora 0.3.36 or newer (or a build of `main` with ADR-0102 PRs 1–3); on an older release, record as **skip**
+  ("not in <version>").
+- **Do:** S1, S2. Make four things to look at: a request (`rm-chat`, prompt `ask`); a failed agent (a second `rm-chat`, sent
+  `crash` after each restart until it shows "Ended with an error", as in RM-13); an agent that acts without asking (Start an agent,
+  Which agent: `rm-probe`, How it acts: "Don't ask", then "Start without asking"); and a confirm that destroys something (Close agent
+  on any agent, then leave it with "Keep it running"). Look at each in all six built-in themes: Settings > Appearance > "Edit
+  theme", then under "Dark theme" Dark, High contrast, Large text and Slate, and under "Light theme" Light and Sand (with "Colour
+  scheme" set to the matching Dark or Light).
+- **See:** in every theme amber appears only for "Needs you" (the card, its count) and the quota warning sign; the `rm-probe` agent
+  carries a red lightning bolt named "Runs without asking" (its tooltip); the failed agent and Close agent's button are red;
+  change counts, offline machines and versions are neutral tags; all text stays readable.
 - **Evidence so far:** none recorded.
 
 ### RM-59 Terminal client (TUI)
