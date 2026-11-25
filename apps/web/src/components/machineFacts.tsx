@@ -18,7 +18,7 @@ export function MachineName({ m, id, className = '' }: { m: Pick<MachineModel, '
   return (
     <span className="flex min-w-0 items-baseline gap-2">
       <strong id={id} className={`truncate ${className}`.trim()}>{visible(m.name)}</strong>
-      {m.id !== m.name && <code dir="ltr" className="truncate text-xs font-normal text-muted">{m.id}</code>}
+      {m.id !== m.name && <code dir="ltr" className="truncate text-xs font-normal text-muted">{visible(m.id)}</code>}
     </span>
   );
 }

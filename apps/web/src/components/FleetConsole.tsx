@@ -139,15 +139,15 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   // cards are drawn from these same models), and of each card's status, so an answer settling restarts the dwell.
   const model = (it: Exclude<AttentionItem, { kind: 'pair' }>, inlineOk: boolean): RowModel => {
     const agent = it.agent;
-    const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
+    const name = visible(it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name);
     const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
     const review = !inline && it.kind === 'approval' && reviewsHere(it.approval);
     return {
       name,
       title: it.kind === 'approval' ? askTitle(it.approval, name) : name,
       icon: iconOf(it),
-      machine: agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined),
-      project: agent ? agent.project || agent.workspace : undefined,
+      machine: visible(agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) || '' : '')) || undefined,
+      project: agent ? visible(agent.project || agent.workspace) : undefined,
       ask: askOf(it),
       inline,
       when: knownWait && it.sinceMs ? t('fleet-asked', { when: ago(it.sinceMs, now) }) : undefined,
