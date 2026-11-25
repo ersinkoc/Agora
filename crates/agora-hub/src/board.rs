@@ -439,6 +439,30 @@ impl Boards {
         let Some(task_values) = v["tasks"].as_array() else {
             return;
         };
+        let qualified_agent = |id: &str| {
+            id.split_once('/').is_some_and(|(node, agent)| {
+                !node.is_empty() && !agent.is_empty() && !agent.contains('/')
+            })
+        };
+        for task in task_values {
+            let Some(dependencies) = task["depends_on"].as_array() else {
+                return;
+            };
+            if dependencies
+                .iter()
+                .any(|dependency| !dependency.is_string())
+                || task["done"].as_bool().is_none()
+            {
+                return;
+            }
+            if let Some(owner) = task["owner"].as_str() {
+                if !qualified_agent(owner) {
+                    return;
+                }
+            } else if !task["owner"].is_null() {
+                return;
+            }
+        }
         let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
         let tasks: Vec<TaskEntry> = task_values
             .iter()
@@ -513,8 +537,15 @@ impl Boards {
             ) else {
                 return;
             };
+            if !qualified_agent(holder) {
+                return;
+            }
             let holder = AgentId::new(holder);
-            if expires == 0 || lease_check.acquire(path, &holder, 0, expires).is_err() {
+            let before = lease_check.all().len();
+            if expires == 0
+                || lease_check.acquire(path, &holder, 0, expires).is_err()
+                || lease_check.all().len() != before + 1
+            {
                 return;
             }
             restored_leases.push((path.to_string(), holder, expires));
@@ -2778,6 +2809,333 @@ mod tests {
             0
         );
         assert_eq!(load(json!([lease("../outside", "alpha/a")])), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f405_a_non_array_dependency_field_does_not_silently_lose_dependencies() {
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+        let load = |dependencies: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 3,
+                    "tasks": [task("t-1", json!([])), task("t-2", dependencies)],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load(json!(["t-1"])), 2);
+        println!("CONTROL OK");
+
+        let actual = load(json!("t-1"));
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f406_a_non_boolean_done_field_does_not_reopen_a_completed_task() {
+        let load = |done: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": "alpha/a", "summary": "done"}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+        assert_eq!(load(json!(true)).unwrap()[0]["done"], true);
+        println!("CONTROL OK");
+
+        let actual = load(json!("true"));
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f407_duplicate_snapshot_leases_are_not_partially_collapsed() {
+        let lease =
+            |path: &str| json!({"path": path, "holder": "alpha/a", "expires_at_ms": 10_000});
+        let load = |leases: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load(json!([lease("src/a"), lease("src/b")])), 2);
+        println!("CONTROL OK");
+
+        let actual = load(json!([lease("src/a"), lease("src/a")]));
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f408_a_snapshot_task_owner_must_be_a_hub_qualified_agent() {
+        let load = |owner: &str| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load("alpha/a"), 1);
+        println!("CONTROL OK");
+
+        let actual = load("alpha");
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f409_a_snapshot_lease_holder_must_be_a_hub_qualified_agent() {
+        let load = |holder: &str| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 1,
+                    "tasks": [],
+                    "leases": [{"path": "src", "holder": holder, "expires_at_ms": 10_000}]
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load("alpha/a"), 1);
+        println!("CONTROL OK");
+
+        let actual = load("alpha");
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f405_snapshot_dependency_field_type_boundaries() {
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+        let load = |dependencies: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 3,
+                    "tasks": [task("t-1", json!([])), task("t-2", dependencies)],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!([])));
+        assert!(load(json!(["t-1"])));
+        assert!(!load(json!("t-1")));
+        assert!(!load(Value::Null));
+        assert!(!load(json!(["t-1", 2])));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f406_snapshot_done_field_type_boundaries() {
+        let load = |done: Value, owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!(false), Value::Null));
+        assert!(load(json!(false), json!("alpha/a")));
+        assert!(load(json!(true), json!("alpha/a")));
+        assert!(!load(json!("false"), json!("alpha/a")));
+        assert!(!load(json!(0), json!("alpha/a")));
+        assert!(!load(Value::Null, json!("alpha/a")));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f407_snapshot_duplicate_lease_boundaries() {
+        let load = |paths: &[&str]| {
+            let boards = Boards::new();
+            let leases: Vec<Value> = paths
+                .iter()
+                .map(|path| json!({"path": path, "holder": "alpha/a", "expires_at_ms": 10_000}))
+                .collect();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+
+        assert_eq!(load(&["src/a"]), 1);
+        assert_eq!(load(&["src/a", "src/b"]), 2);
+        assert_eq!(load(&["src", "src/lib"]), 2);
+        assert_eq!(load(&["src/a", "src/a"]), 0);
+        assert_eq!(load(&["src/a", "./src/a"]), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f408_snapshot_task_owner_identity_boundaries() {
+        let load = |owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(Value::Null));
+        assert!(load(json!("alpha/a")));
+        assert!(load(json!(BOARD_AGENT)));
+        assert!(!load(json!("alpha")));
+        assert!(!load(json!("/a")));
+        assert!(!load(json!("alpha/")));
+        assert!(!load(json!("alpha/a/extra")));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f409_snapshot_lease_holder_identity_boundaries() {
+        let load = |holder: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 1,
+                    "tasks": [],
+                    "leases": [{"path": "src", "holder": holder, "expires_at_ms": 10_000}]
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!("alpha/a")));
+        assert!(load(json!(BOARD_AGENT)));
+        assert!(!load(json!("alpha")));
+        assert!(!load(json!("/a")));
+        assert!(!load(json!("alpha/")));
+        assert!(!load(json!("alpha/a/extra")));
+        assert!(!load(json!(7)));
         println!("FIX VERIFIED");
     }
 }
