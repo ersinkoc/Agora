@@ -318,21 +318,19 @@ fn run(mut command: Command, args: &[&str]) -> Result<String, GitError> {
 
 /// Find the checkout containing `path` and compute its machine-independent project identity.
 pub fn discover_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
-    // Run the three read-only git queries concurrently: on Windows each `git.exe` spawn costs
-    // tens to hundreds of milliseconds, so running them in series dominates node cold start.
-    let (root, roots, remote) = std::thread::scope(|s| {
-        let roots = s.spawn(|| git_refs(path, &["rev-list", "--max-parents=0", "HEAD"]));
-        let remote = s.spawn(|| git_refs(path, &["remote", "get-url", "origin"]).ok());
-        let root = git_refs(path, &["rev-parse", "--show-toplevel"]);
-        let roots = roots
-            .join()
-            .unwrap_or_else(|_| Err(GitError::Io("git rev-list thread panicked".into())));
-        let remote = remote.join().ok().flatten();
-        (root, roots, remote)
-    });
-    let root = root.map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
+    let root = git_refs(path, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
     // Rebuilt from its parts so it uses this system's separator: git for Windows answers `C:/...`.
     let root: PathBuf = Path::new(root.trim()).components().collect();
+    // Run the two read-only identity queries concurrently at the resolved checkout root so
+    // root-based `.git` verification (`sandbox::git_dirs`) stays intact while cutting a serial
+    // `git.exe` spawn on Windows.
+    let (roots, remote) = std::thread::scope(|s| {
+        let remote = s.spawn(|| git_refs(&root, &["remote", "get-url", "origin"]).ok());
+        let roots = git_refs(&root, &["rev-list", "--max-parents=0", "HEAD"]);
+        let remote = remote.join().ok().flatten();
+        (roots, remote)
+    });
     // A repository can have several root commits; the lexicographically smallest is a stable choice.
     let roots = roots?;
     let root_commit = roots
