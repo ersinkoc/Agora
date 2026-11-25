@@ -43,9 +43,18 @@ impl Url {
         } else {
             (false, s.strip_prefix("http://")?)
         };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], rest[i..].to_string()),
-            None => (rest, "/".to_string()),
+        let split = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..split];
+        // A fragment belongs to the client and is never part of an HTTP request target. A query without an explicit path uses `/`.
+        let target = rest[split..]
+            .split_once('#')
+            .map_or(&rest[split..], |(p, _)| p);
+        let path = if target.is_empty() {
+            "/".to_string()
+        } else if target.starts_with('?') {
+            format!("/{target}")
+        } else {
+            target.to_string()
         };
         if authority.is_empty()
             || authority.contains('@')
@@ -53,20 +62,50 @@ impl Url {
         {
             return None;
         }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) if !p.is_empty() => (h, p.parse().ok()?),
-            _ => (authority, if https { 443 } else { 80 }),
+        let default_port = if https { 443 } else { 80 };
+        let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+            let (host, tail) = bracketed.split_once(']')?;
+            host.parse::<std::net::Ipv6Addr>().ok()?;
+            let port = if tail.is_empty() {
+                default_port
+            } else {
+                tail.strip_prefix(':')?.parse().ok()?
+            };
+            (host, port)
+        } else {
+            if authority.contains(['[', ']']) || authority.matches(':').count() > 1 {
+                return None;
+            }
+            match authority.rsplit_once(':') {
+                Some((h, p)) if !p.is_empty() => (h, p.parse().ok()?),
+                _ => (authority, default_port),
+            }
         };
-        (!host.is_empty()
-            && host
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+        (port != 0
+            && !host.is_empty()
+            && (host.parse::<std::net::IpAddr>().is_ok()
+                || host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))))
         .then(|| Url {
             https,
             host: host.to_string(),
             port,
             path,
         })
+    }
+
+    fn authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        if self.port == if self.https { 443 } else { 80 } {
+            host
+        } else {
+            format!("{host}:{}", self.port)
+        }
     }
 }
 
@@ -131,9 +170,10 @@ pub fn request(target: &Target, title: &str, text: &str, priority: Priority) -> 
         ),
     };
     let u = &target.url;
+    let authority = u.authority();
     let mut out = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: agora\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        u.path, u.host, body.len()
+        u.path, authority, body.len()
     )
     .into_bytes();
     out.extend_from_slice(&body);
@@ -141,11 +181,14 @@ pub fn request(target: &Target, title: &str, text: &str, priority: Priority) -> 
 }
 
 fn status_of(response: &[u8]) -> Option<u16> {
-    std::str::from_utf8(response.get(..12)?)
-        .ok()?
-        .get(9..12)?
+    let head = std::str::from_utf8(response.get(..12)?).ok()?;
+    if !matches!(head.get(..9), Some("HTTP/1.0 ") | Some("HTTP/1.1 ")) {
+        return None;
+    }
+    head.get(9..12)?
         .parse()
         .ok()
+        .filter(|code| (100..=599).contains(code))
 }
 
 fn exchange<S: Read + Write>(mut s: S, bytes: &[u8]) -> io::Result<u16> {
@@ -203,9 +246,10 @@ pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
 /// chunked. Blocking.
 pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
     let mut s = open(url)?;
+    let authority = url.authority();
     let req = format!(
         "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: agora\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-        url.path, url.host
+        url.path, authority
     );
     s.write_all(req.as_bytes())?;
     let mut all = Vec::new();
@@ -269,6 +313,194 @@ mod tests {
             "https://h/a b",
         ] {
             assert_eq!(Url::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn f345_a_query_without_an_explicit_path_is_still_a_valid_url() {
+        let u = Url::parse("https://ntfy.example?poll=1").expect("query-only URL");
+        assert_eq!(
+            (u.host.as_str(), u.port, u.path.as_str()),
+            ("ntfy.example", 443, "/?poll=1")
+        );
+    }
+
+    #[test]
+    fn a_query_after_an_explicit_path_stays_unchanged() {
+        let u = Url::parse("https://ntfy.example/topic?poll=1").unwrap();
+        assert_eq!(u.path, "/topic?poll=1");
+    }
+
+    #[test]
+    fn f346_a_url_fragment_is_never_sent_in_the_http_request_target() {
+        let u = Url::parse("https://ntfy.example/topic?x=1#private-view").unwrap();
+        assert_eq!(u.path, "/topic?x=1");
+        let target = Target {
+            kind: Kind::Ntfy,
+            url: u,
+        };
+        let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+        assert!(text.starts_with("POST /topic?x=1 HTTP/1.1\r\n"));
+        assert!(!text.contains("#private-view"));
+    }
+
+    #[test]
+    fn a_request_target_without_a_fragment_stays_unchanged() {
+        let target = Target {
+            kind: Kind::Ntfy,
+            url: Url::parse("https://ntfy.example/topic?x=1").unwrap(),
+        };
+        let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+        assert!(text.starts_with("POST /topic?x=1 HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn f347_a_non_default_port_is_present_in_the_http_host_header() {
+        let target = Target {
+            kind: Kind::Webhook,
+            url: Url::parse("https://hooks.example:8443/in").unwrap(),
+        };
+        let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+        assert!(text.contains("\r\nHost: hooks.example:8443\r\n"));
+    }
+
+    #[test]
+    fn a_default_port_keeps_the_plain_http_host_header() {
+        let target = Target {
+            kind: Kind::Webhook,
+            url: Url::parse("https://hooks.example/in").unwrap(),
+        };
+        let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+        assert!(text.contains("\r\nHost: hooks.example\r\n"));
+    }
+
+    #[test]
+    fn f348_only_an_http_1_status_line_can_supply_a_status() {
+        assert_eq!(status_of(b"garbage!!200 everything"), None);
+        assert_eq!(status_of(b"HTTP/9.9 200 made-up"), None);
+        assert_eq!(status_of(b"HTTP/1.1 999 impossible"), None);
+    }
+
+    #[test]
+    fn valid_http_1_status_lines_keep_their_status() {
+        assert_eq!(status_of(b"HTTP/1.0 200 OK\r\n"), Some(200));
+        assert_eq!(status_of(b"HTTP/1.1 503 Busy\r\n"), Some(503));
+    }
+
+    #[test]
+    fn f349_a_bracketed_ipv6_literal_is_a_valid_notification_url() {
+        let u = Url::parse("http://[2001:db8::5]:8080/topic").expect("IPv6 URL");
+        assert_eq!(
+            (u.host.as_str(), u.port, u.path.as_str()),
+            ("2001:db8::5", 8080, "/topic")
+        );
+        let target = Target {
+            kind: Kind::Ntfy,
+            url: u,
+        };
+        let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+        assert!(text.contains("\r\nHost: [2001:db8::5]:8080\r\n"));
+    }
+
+    #[test]
+    fn an_ipv4_literal_notification_url_keeps_working() {
+        let u = Url::parse("http://127.0.0.1:8080/topic").unwrap();
+        assert_eq!(
+            (u.host.as_str(), u.port, u.path.as_str()),
+            ("127.0.0.1", 8080, "/topic")
+        );
+    }
+
+    #[test]
+    fn verifies_f345_query_only_urls_across_schemes_authorities_and_reserved_values() {
+        for (raw, want) in [
+            ("https://notify.example?topic=a", "/?topic=a"),
+            (
+                "http://127.0.0.1:8080?next=%2Fagent%2Fx",
+                "/?next=%2Fagent%2Fx",
+            ),
+            ("https://notify.example?x=1&y=two#local", "/?x=1&y=two"),
+        ] {
+            assert_eq!(
+                Url::parse(raw).map(|u| u.path),
+                Some(want.to_string()),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifies_f346_fragments_are_removed_from_path_query_and_fragment_only_urls() {
+        for (raw, want) in [
+            ("https://notify.example/topic#phone", "/topic"),
+            ("https://notify.example/topic?q=one#phone", "/topic?q=one"),
+            ("https://notify.example#phone", "/"),
+        ] {
+            let u = Url::parse(raw).unwrap();
+            assert_eq!(u.path, want, "{raw}");
+            assert!(!u.path.contains('#'), "{raw}");
+        }
+    }
+
+    #[test]
+    fn verifies_f347_host_authorities_across_https_http_and_default_ports() {
+        for (raw, want) in [
+            ("https://hooks.example:8443/in", "hooks.example:8443"),
+            ("http://127.0.0.1:8080/in", "127.0.0.1:8080"),
+            ("https://hooks.example/in", "hooks.example"),
+        ] {
+            let target = Target {
+                kind: Kind::Webhook,
+                url: Url::parse(raw).unwrap(),
+            };
+            let text = String::from_utf8(request(&target, "t", "body", Priority::Normal)).unwrap();
+            assert!(
+                text.contains(&format!("\r\nHost: {want}\r\n")),
+                "{raw}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifies_f348_status_lines_across_prefix_version_and_code_boundaries() {
+        for bad in [
+            b"not-http! 200 OK".as_slice(),
+            b"HTTP/1.2 200 OK".as_slice(),
+            b"HTTP/1.1 099 Low".as_slice(),
+            b"HTTP/1.0 600 High".as_slice(),
+        ] {
+            assert_eq!(status_of(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
+        assert_eq!(status_of(b"HTTP/1.1 100 Continue"), Some(100));
+        assert_eq!(status_of(b"HTTP/1.0 599 Edge"), Some(599));
+    }
+
+    #[test]
+    fn verifies_f349_ipv6_urls_across_schemes_default_ports_and_queries() {
+        for (raw, host, port, path, authority) in [
+            ("http://[::1]/topic", "::1", 80, "/topic", "[::1]"),
+            (
+                "https://[2001:db8::7]:9443/hook",
+                "2001:db8::7",
+                9443,
+                "/hook",
+                "[2001:db8::7]:9443",
+            ),
+            (
+                "http://[2001:db8::8]?topic=a",
+                "2001:db8::8",
+                80,
+                "/?topic=a",
+                "[2001:db8::8]",
+            ),
+        ] {
+            let u = Url::parse(raw).unwrap();
+            assert_eq!(
+                (u.host.as_str(), u.port, u.path.as_str()),
+                (host, port, path),
+                "{raw}"
+            );
+            assert_eq!(u.authority(), authority, "{raw}");
         }
     }
 
