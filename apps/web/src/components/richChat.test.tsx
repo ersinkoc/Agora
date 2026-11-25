@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { demoRichConversation } from '../demoChat';
 import type { AgentTileModel, ConfigOptionModel, SessionModel } from '../model';
-import type { ChatLine, ChatSource } from '../net/chat';
+import { noticeText, type ChatLine, type ChatSource } from '../net/chat';
 import { transcript } from '../net/transcript';
 import { ChatActionsContext, type ChatActions } from './chatActions';
 import { Item, ToolSteps } from './ChatEntry';
@@ -312,6 +312,34 @@ describe('after Stop turn (#908, RM-44)', () => {
     expect(host.textContent).toContain('Waiting for this turn to end.');
     act(() => push([L(4, { role: 'user', text: 'b', atMs: 8 })]));
     expect(host.textContent).not.toContain('Waiting for this turn to end.');
+  });
+});
+
+describe('a prompt that did not go through (ADR-0110)', () => {
+  it('says to wait and try again when the agent did not take it in time, to start it again when it stopped, and the general words otherwise', async () => {
+    const said = async (code: string | undefined) => {
+      const send = vi.fn(async () => ({ ok: false, code }));
+      act(() => root.render(<PromptBox agent={agent({ state: 'idle' })} source={{ connect(on) { on([], true); return { close() {} }; } }} send={send} />));
+      const box = host.querySelector('textarea') as HTMLTextAreaElement;
+      act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, 'go'); box.dispatchEvent(new Event('input', { bubbles: true })); });
+      await act(async () => { (host.querySelector('form') as HTMLFormElement).requestSubmit(); });
+      expect(send).toHaveBeenCalled();
+      return host.querySelector('[role=status]')?.textContent;
+    };
+    expect(await said('adapter.no_answer')).toBe(t('prompt-no-answer'));
+    expect(t('prompt-no-answer')).toContain('Wait');
+    expect(await said('adapter.agent_exited')).toBe(t('prompt-agent-exited'));
+    expect(t('prompt-agent-exited')).toContain('Start the agent again');
+    expect(await said('agent.queue_full')).toBe(t('prompt-queue-full'));
+    expect(await said('internal')).toBe(t('prompt-failed'));
+    expect(await said(undefined)).toBe(t('prompt-failed'));
+  });
+  it('the node\'s mark on a prompt the agent did not confirm in time is said in words, never as the general notice', () => {
+    const said = noticeText(L(5, { kind: 'notice', code: 'adapter.no_answer', params: { kind: 'claude', call: 'prompt', waited_ms: '10000', entries: '4' } }), t);
+    expect(said).toBe(t('notice-adapter-no_answer', { waited_ms: '10000' }));
+    expect(said).not.toBe(t('notice-other', { code: 'adapter.no_answer' }));
+    expect(t('notice-adapter-no_answer', { waited_ms: '10000' })).toContain('may still be working');
+    for (const lang of ['en', 'tr']) expect(readFileSync(`../../locales/${lang}/web.ftl`, 'utf8')).toMatch(/^notice-adapter-no_answer = /m);
   });
 });
 
@@ -622,7 +650,7 @@ describe('words', () => {
       const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
       const ids = new Set([...src.matchAll(/^([a-z0-9-]+) =/gm)].map((m) => m[1]));
       for (const k of ['tool-status-pending', 'tool-status-running', 'tool-status-done', 'tool-status-failed', 'tool-status-stopped', 'permission-pending', 'permission-approved', 'permission-denied', 'permission-cancelled',
-        'prompt-sent', 'prompt-queued', 'prompt-queue-full', 'prompt-failed', 'session-effort', 'session-mode', 'session-model', 'chat-steps-call-failed']) expect(ids.has(k), `${lang} ${k}`).toBe(true);
+        'prompt-sent', 'prompt-queued', 'prompt-queue-full', 'prompt-failed', 'prompt-no-answer', 'prompt-agent-exited', 'session-effort', 'session-mode', 'session-model', 'chat-steps-call-failed']) expect(ids.has(k), `${lang} ${k}`).toBe(true);
     }
     setLanguage('tr');
     expect(t('turn-stop')).toBe('Turu durdur');

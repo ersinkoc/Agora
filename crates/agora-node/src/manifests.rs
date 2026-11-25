@@ -576,6 +576,20 @@ mod tests {
                 "{}",
                 l.manifest.kind
             );
+            // #1150: every one of them runs behind the ACP bridge (no adapter of its own, no terminal launch), which starts its
+            // package runner outside the project (`Supervisor::runner_folder`).
+            if needs_signed_start(&l.manifest, true) {
+                assert!(
+                    l.manifest.adapter.is_none()
+                        && l.manifest.process.launch.is_empty()
+                        && l.manifest
+                            .structured
+                            .as_ref()
+                            .is_some_and(|s| s.acp.is_some()),
+                    "{}",
+                    l.manifest.kind
+                );
+            }
         }
     }
 

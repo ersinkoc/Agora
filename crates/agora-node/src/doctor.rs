@@ -212,6 +212,11 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     });
 
     out.push(data_dir(&inputs.data_dir));
+    // #1150: registry agents' runner folders the node could not remove in full (`runner_folders::LEFT_SUFFIX`).
+    let left = crate::runner_folders::left_count(&inputs.data_dir.join("runner"));
+    if left > 0 {
+        out.push(check("runner-folders-left", Status::Warn, left.to_string()));
+    }
 
     let running = agora_platform::LOCAL_SOCKETS_SUPPORTED
         && agora_platform::local_connect(&inputs.socket).is_ok();
@@ -852,6 +857,26 @@ mod tests {
         assert_eq!(find(&checks, "version")[0].status, Status::Ok);
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
         assert_eq!(find(&checks, "node")[0].status, Status::Warn);
+        // #1150: no runner folder left in part, no line about them; two left, counted.
+        assert!(find(&checks, "runner-folders-left").is_empty());
+        for n in [
+            "agent-1.0011223344556677.left",
+            "agent-2.8899aabbccddeeff.left",
+            "agent-3.0123456789abcdef",
+        ] {
+            std::fs::create_dir_all(d.join("data/runner").join(n)).unwrap();
+        }
+        let again = run(&Inputs {
+            data_dir: d.join("data"),
+            socket: d.join("nope.sock"),
+            manifests_dir: d.join("manifests"),
+            agora_home: none_home(),
+        });
+        let left = find(&again, "runner-folders-left");
+        assert_eq!(
+            (left[0].status, left[0].detail.as_str()),
+            (Status::Warn, "2")
+        );
         // No manifests folder: the built-in kinds still load.
         assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
         assert_eq!(

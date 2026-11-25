@@ -1853,6 +1853,9 @@ impl Node {
             None
         };
         sup.set_sandbox(sandbox);
+        // #1150: registry kinds that start through a package runner (`npx`, `uvx`) start it in an empty folder of their own here, not
+        // in the project, whose package-manager configuration it would otherwise read.
+        sup.set_runner_root(cfg.data_dir.join("runner"));
         // ADR-0084: the secrets this node holds, and which kind may receive which (the node's own policy; the hub cannot set it).
         sup.set_credentials(crate::credentials::Credentials::new(
             crate::credentials::SecretStore::in_data(&cfg.data_dir),
@@ -2533,17 +2536,36 @@ impl Node {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .prepare_resolve_approval(&agent, &adapter_id, false);
-                            if let Err(e) = call.and_then(|c| c.run()) {
-                                crate::supervisor::log_call_failure("approval refusal", &agent, &e);
+                            // Security review of PR #1190, N3: the agent is told on a thread of its own, so an adapter that does not
+                            // answer never holds the tick (and every other agent's events) for its wait.
+                            if let Ok(call) = call {
+                                let refused = agent.clone();
+                                let told = std::thread::Builder::new()
+                                    .name("agora-approval-expired".into())
+                                    .spawn(move || {
+                                        if let Err(e) = call.run() {
+                                            crate::supervisor::log_call_failure(
+                                                "approval refusal",
+                                                &refused,
+                                                &e,
+                                            );
+                                        }
+                                    });
+                                if let Err(e) = told {
+                                    eprintln!("approval refusal not sent: {}: {e}", agent.as_str());
+                                }
                             }
-                            // ADR-0090: nobody decided in time.
-                            chat.set_permission(
-                                &agent,
-                                &node_approval,
-                                v1::PermissionOutcome::Cancelled,
-                                now,
-                            );
-                            ev.approval_resolved(&node_approval, false, "");
+                            // ADR-0090: nobody decided in time. ADR-0110 (S2): unless an answer call of it still runs; that call
+                            // records it (with the answer, if it reached the agent).
+                            if approvals.flight_ended(&node_approval) {
+                                chat.set_permission(
+                                    &agent,
+                                    &node_approval,
+                                    v1::PermissionOutcome::Cancelled,
+                                    now,
+                                );
+                                ev.approval_resolved(&node_approval, false, "");
+                            }
                         }
                         // Resources are reported when they change, not on a timer, so an idle node is silent: when the number of
                         // running agents changes, and when their memory moved a lot since the last report (checked every
@@ -3058,13 +3080,14 @@ fn chat_event(
         // What a chat agent says goes to its transcript (ADR-0038).
         SupervisorEvent::Adapter {
             agent,
-            event: AdapterEvent::Chat { item, .. },
+            event: AdapterEvent::Chat { item, cuts, .. },
         } => {
             // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
             if let Some(word) = activity_word(item) {
                 mesh.set_activity(agent, word);
             }
-            chat.push_item(agent, item, now);
+            // ADR-0111: the supervisor kept the places only from an adapter that declared `chat.cuts`.
+            chat.push_item_cut(agent, item, cuts, now);
         }
         // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now, not the tick's, which is older
         // than what this tick already said).
@@ -3080,6 +3103,19 @@ fn chat_event(
             }
             // ADR-0095: a dispatch prompt that could not be sent gives its task back.
             if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent) {
+                mesh.give_back(&g);
+            }
+        }
+        // ADR-0110 decision 6: a queued prompt whose adapter did not answer in time stays, marked as not confirmed. A dispatch prompt
+        // gives its task back as for one that was not sent (today's handling).
+        SupervisorEvent::PromptUnconfirmed {
+            agent,
+            tag,
+            kind,
+            waited_ms,
+        } => {
+            chat.unconfirmed(agent, *tag, kind, *waited_ms, now);
+            if let Some(g) = mesh.dispatches().dequeued(agent, *tag, false) {
                 mesh.give_back(&g);
             }
         }

@@ -201,9 +201,11 @@ impl Env {
         Mcp::connect(&self.node().mesh.socket_path(&AgentId::new(agent)))
     }
 
-    /// The `agent.start` request `agent` is waiting on.
+    /// The `agent.start` request `agent` is waiting on. It is awaited for up to 30 s. With 10 s, a busy Windows machine running this
+    /// file's tests in parallel (each with its own node and agents) missed the request: 13 of 14 tests failed here on main, and 2
+    /// of 11 at v0.3.37. Each test passed alone (about 22-28 s) and the whole file passed single-threaded (#1150, 2026-11-25).
     fn request_of(&self, agent: &str) -> Pending {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(p) = self
                 .node()

@@ -475,6 +475,50 @@ const FIT_FLOOR: usize = 256;
 /// one element is then a few KiB, so [`fit_line`] always finds a line that fits.
 const SESSION_ID_MAX: usize = 1024;
 
+/// ADR-0111: where the bridge cut the strings of one `chat/append` item, each as a JSON pointer into the item's params (the `field`
+/// of a `cuts` entry) and the byte offset in that string, as sent, where text was removed (its `at`).
+type Cuts = Vec<(String, usize)>;
+
+/// A JSON pointer token for an object key (RFC 6901: `~` written `~0`, `/` written `~1`).
+fn pointer_token(key: &str) -> std::borrow::Cow<'_, str> {
+    if key.contains(['~', '/']) {
+        key.replace('~', "~0").replace('/', "~1").into()
+    } else {
+        key.into()
+    }
+}
+
+/// ADR-0111: the `cuts` entries of an item, at most [`crate::host::MAX_ITEM_CUTS`]. The node reads a plan with `entries` from its
+/// entries only, so a place in one of its `steps` (the same text sent twice) is left out, as the node would ignore it. Should an item
+/// hold more places than the node reads, the places in the item's own strings come first and then those of its list's elements in
+/// order. Only a tool call the bridge did not halve can: its arguments and output cut and more than 62 of its 64 location paths
+/// (a title is only cut by halving, which also halves the locations to at most 32), so the places of locations 62 and 63 are left
+/// out. That is harmless: the node keeps only the head and tail of each path (`MAX_PATH_BYTES`, 1 KiB), never the bridge's place
+/// in the middle of a path of over 4 KiB.
+fn cuts_value(params: &Value, cuts: &Cuts) -> Value {
+    let entries = params.pointer("/plan/entries").is_some();
+    let mut kept: Vec<(usize, &str, usize)> = cuts
+        .iter()
+        .filter(|(field, _)| !(entries && field.starts_with("/plan/steps/")))
+        .map(|(field, at)| {
+            // A place in the `n`th element of a list ranks after every place outside one, and after those of earlier elements.
+            let element = field
+                .split('/')
+                .find_map(|t| t.parse::<usize>().ok())
+                .map_or(0, |n| n.saturating_add(1));
+            (element, field.as_str(), *at)
+        })
+        .collect();
+    kept.sort_unstable();
+    kept.dedup();
+    Value::Array(
+        kept.into_iter()
+            .take(crate::host::MAX_ITEM_CUTS)
+            .map(|(_, field, at)| json!({"field": field, "at": at}))
+            .collect(),
+    )
+}
+
 /// A `chat/append` line with `params`, serialized as the node will read it. The per-field caps above count decoded bytes, while
 /// JSON escaping can make each one up to six bytes and a rich plan carries its text twice, so the bound is enforced here on the
 /// complete line, envelope and escaping included: while it is longer than `MAX_LINE`, every string of the item longer than
@@ -482,9 +526,27 @@ const SESSION_ID_MAX: usize = 1024;
 /// fits, which is every ordinary one, is sent as it is. Cutting ends once nothing is left to cut; with the session id at most
 /// `SESSION_ID_MAX` the line then fits. Should it not, `Err` with the length reached: the caller drops the item and logs why, so an
 /// overlong line is never sent.
-fn fit_line(params: Value) -> Result<String, usize> {
+///
+/// ADR-0111: `cuts` are the places the bridge already cut the item's strings; each halving adds its own place and moves the earlier
+/// ones of that string, and the line carries them all as `cuts` (counted in its length), so the node knows every place text was
+/// removed. An item without places is sent without `cuts`, byte for byte as before, and so is every item when `cuts` is `None` (a
+/// node without `chat.rich`, which predates ADR-0111).
+fn fit_line(params: Value, cuts: Option<Cuts>) -> Result<String, usize> {
+    let report = cuts.is_some();
+    let mut cuts = cuts.unwrap_or_default();
     let mut line = json!({"jsonrpc": "2.0", "method": "chat/append", "params": params});
     loop {
+        if report {
+            // Written again each round: a halving that drops every element that held a place leaves none, and then no `cuts`.
+            let list = cuts_value(&line["params"], &cuts);
+            if let Some(params) = line.get_mut("params").and_then(Value::as_object_mut) {
+                if list.as_array().is_some_and(|l| !l.is_empty()) {
+                    params.insert("cuts".to_string(), list);
+                } else {
+                    params.remove("cuts");
+                }
+            }
+        }
         let text = line.to_string();
         if text.len() <= MAX_LINE {
             return Ok(text);
@@ -492,41 +554,96 @@ fn fit_line(params: Value) -> Result<String, usize> {
         let Some(params) = line.get_mut("params").and_then(Value::as_object_mut) else {
             return Err(text.len());
         };
-        let mut cut = false;
+        let mut halved = false;
+        let mut at = String::new();
         for (k, v) in params.iter_mut() {
-            if k != "sessionId" {
-                cut |= halve(v);
+            if k != "sessionId" && k != "cuts" {
+                at.clear();
+                at.push('/');
+                at.push_str(&pointer_token(k));
+                halved |= halve(v, &mut at, &mut cuts);
             }
         }
-        if !cut {
+        if !halved {
             return Err(text.len());
         }
     }
 }
 
-/// Cuts every string in `v` longer than `FIT_FLOOR` and every list of more than one element to half; whether anything was cut.
-fn halve(v: &mut Value) -> bool {
+/// Cuts every string in `v` (at the JSON pointer `at`) longer than `FIT_FLOOR` and every list of more than one element to half;
+/// whether anything was cut. ADR-0111: the place of each string's cut is added to `cuts` and its earlier places moved
+/// ([`moved_cuts`]); the places in the elements a list loses go with them.
+fn halve(v: &mut Value, at: &mut String, cuts: &mut Cuts) -> bool {
     match v {
         Value::String(s) if s.len() > FIT_FLOOR => {
-            *s = head_tail(s, s.len() / 2);
+            let max = s.len() / 2;
+            let (kept, place) = crate::text::cap_middle(std::mem::take(s), max);
+            *s = kept;
+            if let Some((head, tail)) = place {
+                moved_cuts(cuts, at, head, tail);
+            }
             true
         }
         Value::Array(a) => {
-            let mut cut = a.len() > 1;
-            a.truncate(a.len().div_ceil(2));
-            for e in a.iter_mut() {
-                cut |= halve(e);
+            let keep = a.len().div_ceil(2);
+            let mut halved = a.len() > keep;
+            a.truncate(keep);
+            dropped_elements(cuts, at, keep);
+            let base = at.len();
+            for (i, e) in a.iter_mut().enumerate() {
+                at.push('/');
+                at.push_str(&i.to_string());
+                halved |= halve(e, at, cuts);
+                at.truncate(base);
             }
-            cut
+            halved
         }
-        Value::Object(o) => o.values_mut().fold(false, |cut, e| halve(e) | cut),
+        Value::Object(o) => {
+            let base = at.len();
+            let mut halved = false;
+            for (k, e) in o.iter_mut() {
+                at.push('/');
+                at.push_str(&pointer_token(k));
+                halved |= halve(e, at, cuts);
+                at.truncate(base);
+            }
+            halved
+        }
         _ => false,
     }
 }
 
-/// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
-fn head_tail(s: &str, max: usize) -> String {
-    crate::text::cap_middle(s.to_string(), max).0
+/// ADR-0111: the places in the string at `field` once the bytes `head..tail` of it are removed: one before `head` stays, one at or
+/// after `tail` moves back by what was removed, one inside the removed bytes is now `head` (text was removed there before and still
+/// is), and `head` itself is the new place.
+fn moved_cuts(cuts: &mut Cuts, field: &str, head: usize, tail: usize) {
+    for (f, place) in cuts.iter_mut() {
+        if f == field {
+            *place = if *place <= head {
+                *place
+            } else if *place >= tail {
+                *place - (tail - head)
+            } else {
+                head
+            };
+        }
+    }
+    cuts.push((field.to_string(), head));
+    cuts.sort_unstable();
+    cuts.dedup();
+}
+
+/// ADR-0111: the places in the elements of the list at `list` from index `keep` on, which it no longer has, are dropped.
+fn dropped_elements(cuts: &mut Cuts, list: &str, keep: usize) {
+    cuts.retain(|(field, _)| {
+        let index = field
+            .strip_prefix(list)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(|rest| rest.split('/').next().unwrap_or(rest));
+        index
+            .and_then(|i| i.parse::<usize>().ok())
+            .is_none_or(|i| i < keep)
+    });
 }
 
 /// ADR-0090: ACP `configOptions` as adapter-protocol options (`session/config`): `{id, name, description, category, type, current,
@@ -612,9 +729,9 @@ fn acp_config(list: Option<&Value>) -> Vec<Value> {
 }
 
 /// ADR-0090: the text a tool call produced, from an ACP `content` array (`content` blocks of type text) or, failing that, its
-/// `rawOutput`: bounded, with anything that looks like a secret replaced (the same removal as for a stderr tail). `None` when the
-/// update carries neither.
-fn tool_output(u: &Value) -> Option<String> {
+/// `rawOutput`: bounded, with anything that looks like a secret replaced (the same removal as for a stderr tail), and the place it
+/// was cut, if it was. `None` when the update carries neither.
+fn tool_output(u: &Value) -> Option<(String, Option<usize>)> {
     let from_content = u.get("content").and_then(Value::as_array).map(|a| {
         a.iter()
             .filter(|c| c.get("type").and_then(Value::as_str) == Some("content"))
@@ -635,7 +752,7 @@ fn tool_output(u: &Value) -> Option<String> {
         (_, Some(r)) => r,
         _ => return None,
     };
-    Some(bounded_output(&text))
+    Some(bounded_output_at(&text))
 }
 
 /// What the bridge sends of a tool's output: cleaned as the node cleans it (`crate::text`, as prose), what looks like a secret
@@ -643,13 +760,18 @@ fn tool_output(u: &Value) -> Option<String> {
 /// output's length: the node, which keeps less of it (16 KiB, head and tail) and cleans it to the same text, never keeps the place
 /// this cut joins, where a value of the node's secrets would leave a piece on each side (review of #1103, rounds 2 and 3).
 pub fn bounded_output(text: &str) -> String {
+    bounded_output_at(text).0
+}
+
+/// [`bounded_output`] and the place it cut the output, if it did (ADR-0111: reported to the node).
+fn bounded_output_at(text: &str) -> (String, Option<usize>) {
     let clean = crate::text::strip_controls(text, crate::text::Style::Prose);
     cut_kept(redact(&clean), OUTPUT_MAX)
 }
 
 /// A tool call's arguments as the bridge sends them: cleaned as the node cleans arguments (as code), then cut to `ARGUMENTS_MAX`,
-/// for the same reason as [`bounded_output`].
-fn bounded_arguments(raw: &str) -> String {
+/// for the same reason as [`bounded_output`]; and the place of the cut, if any.
+fn bounded_arguments(raw: &str) -> (String, Option<usize>) {
     cut_kept(
         crate::text::strip_controls(raw, crate::text::Style::Code),
         ARGUMENTS_MAX,
@@ -657,17 +779,20 @@ fn bounded_arguments(raw: &str) -> String {
 }
 
 /// A plan step as the bridge sends it: cleaned as the node cleans a step, then cut to `max` (the node keeps 512 bytes of it, head
-/// and tail, so it never keeps this cut's place; `usize::MAX`: not cut).
-fn bounded_step(text: &str, max: usize) -> String {
+/// and tail, so it never keeps this cut's place; `usize::MAX`: not cut); and the place of the cut, if any.
+fn bounded_step(text: &str, max: usize) -> (String, Option<usize>) {
     cut_kept(
         crate::text::strip_controls(text, crate::text::Style::Step),
         max,
     )
 }
 
-/// [`crate::text::cap_middle`]: a cut whose place the node is sure to drop (see [`bounded_output`]), so it is not reported.
-fn cut_kept(text: String, max: usize) -> String {
-    crate::text::cap_middle(text, max).0
+/// [`crate::text::cap_middle`], with the place in what it returns where it removed text, if it did. The callers clean (and redact)
+/// first, so the node, which keeps less of each field, does not keep this place either; it is reported all the same (ADR-0111: a
+/// bridge that declares `chat.cuts` reports every cut it makes).
+fn cut_kept(text: String, max: usize) -> (String, Option<usize>) {
+    let (kept, place) = crate::text::cap_middle(text, max);
+    (kept, place.map(|(head, _)| head))
 }
 
 /// A notice's parameters: a reason's parameters with every value as a string.
@@ -781,6 +906,14 @@ fn redact_words(s: &str) -> String {
 /// The last lines of what the agent wrote to stderr, as a short report: control characters and escape sequences removed, the home
 /// folder shown as `~`, secrets replaced, at most `STDERR_LINES` lines and `STDERR_TAIL` bytes (cut at the front).
 pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
+    stderr_tail_at(raw, home).0
+}
+
+/// [`stderr_tail`] and the places in it where text was removed (ADR-0111, reported on the notice that carries it): both sides of
+/// the line break between two kept lines that stood apart, the start when earlier lines were left out, the end when later ones were,
+/// and the place just after the `…` that stands for a cut front. Lines that are blank, and the blanks around a line, go without a
+/// place, as the node's cleaning would treat them; the home folder written `~` is not a place either (T61).
+fn stderr_tail_at(raw: &[u8], home: Option<&str>) -> (String, Vec<usize>) {
     let text = String::from_utf8_lossy(raw);
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -842,25 +975,53 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         .collect();
     // An agent that logs at INFO as well (opencode with `--print-logs`) would bury its error under routine lines: when some lines name
     // a level of ERROR, FATAL or WARN or a failing HTTP status, those are the ones kept; otherwise the last lines are.
-    let serious: Vec<&String> = lines.iter().filter(|l| names_a_problem(l)).collect();
-    let kept: Vec<&String> = if serious.is_empty() {
-        lines.iter().collect()
+    let serious: Vec<(usize, &String)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| names_a_problem(l))
+        .collect();
+    let kept: Vec<(usize, &String)> = if serious.is_empty() {
+        lines.iter().enumerate().collect()
     } else {
         serious
     };
-    let tail = kept[kept.len().saturating_sub(STDERR_LINES)..]
-        .iter()
-        .map(|l| l.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let last = kept.iter().rev().take(STDERR_LINES).rev();
+    let mut tail = String::new();
+    let mut places = Vec::new();
+    let mut before: Option<usize> = None;
+    for &(i, l) in last {
+        match before {
+            Some(b) if i != b + 1 => {
+                places.push(tail.len());
+                tail.push('\n');
+                places.push(tail.len());
+            }
+            Some(_) => tail.push('\n'),
+            None if i > 0 => places.push(0),
+            None => {}
+        }
+        tail.push_str(l);
+        before = Some(i);
+    }
+    if before.is_some_and(|b| b + 1 < lines.len()) {
+        places.push(tail.len());
+    }
     if tail.len() <= STDERR_TAIL {
-        return tail;
+        return (tail, places);
     }
     let mut start = tail.len() - STDERR_TAIL;
     while !tail.is_char_boundary(start) {
         start += 1;
     }
-    format!("…{}", &tail[start..])
+    let mark = '…'.len_utf8();
+    let mut moved = vec![mark];
+    moved.extend(
+        places
+            .into_iter()
+            .filter(|&p| p > start)
+            .map(|p| p - start + mark),
+    );
+    (format!("…{}", &tail[start..]), moved)
 }
 
 /// Characters that end a user name in a path when no `/` or `\` follows it.
@@ -1155,10 +1316,10 @@ struct Bridge<W: Write> {
 impl<W: Write> Bridge<W> {
     /// What the agent wrote to stderr during the current turn, as a report (scrubbed and size-limited like an exit's tail). Its
     /// stderr is read by another thread, so a moment is given for the lines written just before the answer.
-    fn turn_stderr(&self) -> String {
+    fn turn_stderr(&self) -> (String, Vec<usize>) {
         std::thread::sleep(STDERR_SETTLE);
         let k = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
-        stderr_tail(k.since(self.turn_mark), self.home.as_deref())
+        stderr_tail_at(k.since(self.turn_mark), self.home.as_deref())
     }
 
     fn send_node(&mut self, v: &Value) -> io::Result<()> {
@@ -1199,11 +1360,30 @@ impl<W: Write> Bridge<W> {
 
     /// ADR-0058: a reason as a notice in the conversation. It does not count as the agent saying something.
     fn notice(&mut self, code: &str, params: &Value) -> io::Result<()> {
+        self.notice_cut(code, params, "", &[])
+    }
+
+    /// [`Self::notice`] whose parameter `key` was cut at `places` (ADR-0111: a stderr tail, [`stderr_tail_at`]), reported to a node
+    /// that reads rich items (as in [`Self::append`]).
+    fn notice_cut(
+        &mut self,
+        code: &str,
+        params: &Value,
+        key: &str,
+        places: &[usize],
+    ) -> io::Result<()> {
         let sid = self.session.clone().unwrap_or_default();
-        self.note(
-            "chat/append",
-            json!({"sessionId": sid, "notice": {"code": code, "params": notice_params(params)}}),
-        )
+        let mut p =
+            json!({"sessionId": sid, "notice": {"code": code, "params": notice_params(params)}});
+        if self.rich.on && !places.is_empty() && params.get(key).is_some() {
+            let field = format!("/notice/params/{}", pointer_token(key));
+            p["cuts"] = places
+                .iter()
+                .take(crate::host::MAX_ITEM_CUTS)
+                .map(|at| json!({"field": field, "at": at}))
+                .collect();
+        }
+        self.note("chat/append", p)
     }
 
     /// ADR-0058: what the agent offers and uses, sent whenever it changes.
@@ -1222,17 +1402,20 @@ impl<W: Write> Bridge<W> {
         )
     }
 
-    fn chat(&mut self, item: Value, replay_id: Option<&str>) -> io::Result<()> {
+    /// The agent saying something: `item` with the places the bridge cut its strings (ADR-0111).
+    fn chat(&mut self, item: Value, cuts: Cuts, replay_id: Option<&str>) -> io::Result<()> {
         self.said = true;
         let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
         let mut p = item;
         p["sessionId"] = json!(sid);
-        self.append(p)
+        self.append(p, cuts)
     }
 
-    /// A `chat/append` of an item made from the agent's content, kept within the node's line limit (audit F54, [`fit_line`]).
-    fn append(&mut self, params: Value) -> io::Result<()> {
-        match fit_line(params) {
+    /// A `chat/append` of an item made from the agent's content, kept within the node's line limit (audit F54, [`fit_line`]), with
+    /// every place the bridge cut its strings, those of `cuts` and those of `fit_line` (ADR-0111), for a node that reads rich items
+    /// (one that does not predates ADR-0111 and is served byte for byte as before ADR-0090).
+    fn append(&mut self, params: Value, cuts: Cuts) -> io::Result<()> {
+        match fit_line(params, self.rich.on.then_some(cuts)) {
             Ok(line) => {
                 writeln!(self.out, "{line}")?;
                 self.out.flush()
@@ -1256,9 +1439,9 @@ impl<W: Write> Bridge<W> {
             // Thinking is not the agent saying something: a turn of nothing else is still an empty turn.
             let mut p = json!({"thought": {"text": t}});
             p["sessionId"] = json!(sid);
-            return self.append(p);
+            return self.append(p, Cuts::new());
         }
-        self.chat(json!({"text": {"text": t}}), Some(&sid))
+        self.chat(json!({"text": {"text": t}}), Cuts::new(), Some(&sid))
     }
 
     fn flush_on_node_eof(&mut self) -> io::Result<()> {
@@ -1399,7 +1582,12 @@ impl<W: Write> Bridge<W> {
     /// The agent's output ended and it exited (`exit_code` when known). Every request the node still waits for is answered with
     /// `adapter.agent_exited` and the stage it was in; a `log` line says the same, so an exit in the middle of a turn or while
     /// idle is reported too.
-    fn agent_gone(&mut self, exit_code: Option<i32>, stderr_tail: &str) -> io::Result<()> {
+    fn agent_gone(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr_tail: &str,
+        tail_places: &[usize],
+    ) -> io::Result<()> {
         self.flush_text()?;
         // ADR-0101: an answer whose write was not confirmed before the agent ended is not said to have reached it.
         let mut delivering: Vec<(u64, Delivering)> = self.delivering.drain().collect();
@@ -1446,7 +1634,12 @@ impl<W: Write> Bridge<W> {
                 }
             }
         }
-        self.notice("adapter.agent_exited", &params(stage))?;
+        self.notice_cut(
+            "adapter.agent_exited",
+            &params(stage),
+            "stderr_tail",
+            tail_places,
+        )?;
         self.log_reason("ERROR", "adapter.agent_exited", &params(stage))
     }
 
@@ -1487,22 +1680,24 @@ impl<W: Write> Bridge<W> {
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let detail = stderr_tail(message.as_bytes(), self.home.as_deref());
-        self.refused_because(node_id, stage, rpc_code, &detail)
+        let (detail, places) = stderr_tail_at(message.as_bytes(), self.home.as_deref());
+        self.refused_because(node_id, stage, rpc_code, (&detail, &places))
     }
 
-    /// [`Self::refused`] with the notice's `rpc_code` and `detail` given: `0` and a stable reason when the agent's answer was not an
-    /// error but cannot be used (a session id longer than `SESSION_ID_MAX`, `session_id_too_long`).
+    /// [`Self::refused`] with the notice's `rpc_code` and `detail` (and where the detail was cut) given: `0` and a stable reason when
+    /// the agent's answer was not an error but cannot be used (a session id longer than `SESSION_ID_MAX`, `session_id_too_long`).
     fn refused_because(
         &mut self,
         node_id: &Value,
         stage: &str,
         rpc_code: i64,
-        detail: &str,
+        (detail, places): (&str, &[usize]),
     ) -> io::Result<()> {
-        self.notice(
+        self.notice_cut(
             "adapter.agent_refused",
             &json!({"stage": stage, "rpc_code": rpc_code.to_string(), "detail": detail}),
+            "detail",
+            places,
         )?;
         if node_id.is_null() {
             return Ok(());
@@ -1709,7 +1904,7 @@ impl<W: Write> Bridge<W> {
 
     /// What the bridge declares to the node. The ADR-0090 ones only to a node that said `chat.rich`: `thought`, `tool_status`,
     /// `plan_status`, `config`, `commands`, and `turns` (the bridge reports `working` at the start of every prompt turn and `idle` at
-    /// its end, which is what lets the node queue a prompt behind a turn).
+    /// its end, which is what lets the node queue a prompt behind a turn); and to such a node `chat.cuts` (ADR-0111).
     fn capabilities(&self) -> Vec<&'static str> {
         let mut c = vec![
             "chat",
@@ -1731,6 +1926,9 @@ impl<W: Write> Bridge<W> {
                 "config",
                 "commands",
                 "turns",
+                // ADR-0111: every place the bridge removes text from a string of a `chat/append` item is reported in its `cuts`. A
+                // node without `chat.rich` predates it and is served as before ADR-0090, byte for byte.
+                crate::host::CHAT_CUTS,
             ]);
         }
         c
@@ -2012,8 +2210,8 @@ impl<W: Write> Bridge<W> {
             }
             "tool_call" | "tool_call_update" if self.rich.on && self.tool_item(u).is_some() => {
                 self.flush_text()?;
-                if let Some(item) = self.tool_item(u) {
-                    self.chat(json!({"toolCall": item}), replay_id)?;
+                if let Some((item, cuts)) = self.tool_item(u) {
+                    self.chat(json!({"toolCall": item}), cuts, replay_id)?;
                 }
                 self.diffs_in(u, replay_id)?;
             }
@@ -2052,12 +2250,17 @@ impl<W: Write> Bridge<W> {
                     .and_then(Value::as_str)
                     .or_else(|| u.get("kind").and_then(Value::as_str))
                     .unwrap_or("tool");
-                let args = u
+                let (args, place) = u
                     .get("rawInput")
                     .map(|v| bounded_arguments(&v.to_string()))
                     .unwrap_or_default();
+                let cuts = place
+                    .map(|at| ("/toolCall/argumentsJson".to_string(), at))
+                    .into_iter()
+                    .collect();
                 self.chat(
                     json!({"toolCall": {"tool": title, "argumentsJson": args}}),
+                    cuts,
                     replay_id,
                 )?;
                 self.diffs_in(u, replay_id)?;
@@ -2071,6 +2274,7 @@ impl<W: Write> Bridge<W> {
                 } else {
                     (usize::MAX, usize::MAX)
                 };
+                // A rich node reads the entries only, so a step's place is not reported (`cuts_value` would leave it out).
                 let steps: Vec<String> = u
                     .get("entries")
                     .and_then(Value::as_array)
@@ -2079,30 +2283,40 @@ impl<W: Write> Bridge<W> {
                             .filter_map(|e| {
                                 e.get("content")
                                     .and_then(Value::as_str)
-                                    .map(|c| bounded_step(c, text_max))
+                                    .map(|c| bounded_step(c, text_max).0)
                             })
                             .take(most)
                             .collect()
                     })
                     .unwrap_or_default();
                 let mut plan = json!({"steps": steps});
+                let mut cuts = Cuts::new();
                 if self.rich.on {
                     // ADR-0090: the steps' status and priority.
-                    plan["entries"] = json!(u
+                    let mut entries = Vec::new();
+                    for e in u
                         .get("entries")
                         .and_then(Value::as_array)
-                        .map(|a| a
-                            .iter()
-                            .filter_map(|e| {
-                                Some(json!({"text": bounded_step(e.get("content")?.as_str()?, PLAN_TEXT_MAX),
+                        .into_iter()
+                        .flatten()
+                    {
+                        if entries.len() == PLAN_ENTRIES_MAX {
+                            break;
+                        }
+                        let Some(content) = e.get("content").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let (text, place) = bounded_step(content, PLAN_TEXT_MAX);
+                        if let Some(at) = place {
+                            cuts.push((format!("/plan/entries/{}/text", entries.len()), at));
+                        }
+                        entries.push(json!({"text": text,
                                             "status": clip(e.get("status").and_then(Value::as_str).unwrap_or(""), 40),
-                                            "priority": clip(e.get("priority").and_then(Value::as_str).unwrap_or(""), 40)}))
-                            })
-                            .take(PLAN_ENTRIES_MAX)
-                            .collect::<Vec<_>>())
-                        .unwrap_or_default());
+                                            "priority": clip(e.get("priority").and_then(Value::as_str).unwrap_or(""), 40)}));
+                    }
+                    plan["entries"] = Value::Array(entries);
                 }
-                self.chat(json!({"plan": plan}), replay_id)?;
+                self.chat(json!({"plan": plan}), cuts, replay_id)?;
             }
             "usage_update" => self.usage(u, replay_id)?,
             "current_mode_update" => {
@@ -2130,13 +2344,14 @@ impl<W: Write> Bridge<W> {
     /// ADR-0090: an ACP `tool_call` or `tool_call_update` as an adapter-protocol tool item that names its call. `None` when the
     /// update has no usable call id (the older item is sent then). A field the update leaves out is left out here too, so the node
     /// keeps what it holds, as ACP means an update.
-    fn tool_item(&self, u: &Value) -> Option<Value> {
+    fn tool_item(&self, u: &Value) -> Option<(Value, Cuts)> {
         let call = u
             .get("toolCallId")
             .and_then(Value::as_str)
             .filter(|c| !c.is_empty() && c.len() <= 256)?;
         let create = u.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call");
         let mut t = json!({"callId": call});
+        let mut cuts = Cuts::new();
         let title = u.get("title").and_then(Value::as_str);
         let kind = u
             .get("kind")
@@ -2146,7 +2361,9 @@ impl<W: Write> Bridge<W> {
             t["tool"] = json!(title);
         }
         if let Some(raw) = u.get("rawInput").filter(|v| !v.is_null()) {
-            t["argumentsJson"] = json!(bounded_arguments(&raw.to_string()));
+            let (args, place) = bounded_arguments(&raw.to_string());
+            t["argumentsJson"] = json!(args);
+            cuts.extend(place.map(|at| ("/toolCall/argumentsJson".to_string(), at)));
         } else if create {
             t["argumentsJson"] = json!("");
         }
@@ -2161,25 +2378,33 @@ impl<W: Write> Bridge<W> {
             t["status"] = json!(s);
         }
         if let Some(a) = u.get("locations").and_then(Value::as_array) {
-            t["locations"] = json!(a
-                .iter()
-                .filter_map(|l| {
-                    // Cleaned as the node cleans a path and cut in its middle beyond what the node keeps (1 KiB, head and tail),
-                    // so the node never keeps this cut's place.
-                    let path = crate::text::strip_controls(
-                        l.get("path")?.as_str()?,
-                        crate::text::Style::Label,
-                    );
-                    Some(json!({"path": cut_kept(path, PATH_MAX),
-                                "line": l.get("line").and_then(Value::as_u64).unwrap_or(0)}))
-                })
-                .take(LOCATIONS_MAX)
-                .collect::<Vec<_>>());
+            let mut paths = Vec::new();
+            for l in a {
+                if paths.len() == LOCATIONS_MAX {
+                    break;
+                }
+                let Some(path) = l.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                // Cleaned as the node cleans a path and cut in its middle beyond what the node keeps (1 KiB, head and tail),
+                // so the node never keeps this cut's place.
+                let (path, place) = cut_kept(
+                    crate::text::strip_controls(path, crate::text::Style::Label),
+                    PATH_MAX,
+                );
+                if let Some(at) = place {
+                    cuts.push((format!("/toolCall/locations/{}/path", paths.len()), at));
+                }
+                paths.push(json!({"path": path,
+                                  "line": l.get("line").and_then(Value::as_u64).unwrap_or(0)}));
+            }
+            t["locations"] = Value::Array(paths);
         }
-        if let Some(out) = tool_output(u) {
+        if let Some((out, place)) = tool_output(u) {
             t["output"] = json!(out);
+            cuts.extend(place.map(|at| ("/toolCall/output".to_string(), at)));
         }
-        Some(t)
+        Some((t, cuts))
     }
 
     /// ACP `usage_update`: the cost is the session's running total, so the report carries its growth since the last one (like
@@ -2239,8 +2464,14 @@ impl<W: Write> Bridge<W> {
             let new = c.get("newText").and_then(Value::as_str).unwrap_or("");
             let old = c.get("oldText").and_then(Value::as_str);
             self.flush_text()?;
+            let (diff, place) = cut_kept(replace_diff(path, old, new), DIFF_MAX);
+            let cuts = place
+                .map(|at| ("/diff/unifiedDiff".to_string(), at))
+                .into_iter()
+                .collect();
             self.chat(
-                json!({"diff": {"path": path, "unifiedDiff": cut_kept(replace_diff(path, old, new), DIFF_MAX)}}),
+                json!({"diff": {"path": path, "unifiedDiff": diff}}),
+                cuts,
                 replay_id,
             )?;
         }
@@ -2425,7 +2656,7 @@ impl<W: Write> Bridge<W> {
                                     &node_id,
                                     "session",
                                     0,
-                                    "session_id_too_long",
+                                    ("session_id_too_long", &[]),
                                 )?;
                             }
                             Some(sid) if msg.get("error").is_none() => {
@@ -2502,13 +2733,15 @@ impl<W: Write> Bridge<W> {
                             Some((code, mut params)) => {
                                 // A failed or empty turn says nothing about why; what the agent wrote to stderr meanwhile often does
                                 // (an expired login, a provider's refusal).
+                                let mut places = Vec::new();
                                 if code != "adapter.turn_stopped" {
-                                    let tail = self.turn_stderr();
+                                    let (tail, at) = self.turn_stderr();
                                     if !tail.is_empty() {
                                         params["stderr_tail"] = json!(tail);
+                                        places = at;
                                     }
                                 }
-                                self.notice(code, &params)?;
+                                self.notice_cut(code, &params, "stderr_tail", &places)?;
                                 self.log_reason("WARN", code, &params)?;
                                 if !still_open {
                                     self.state_because("IDLE", code)?;
@@ -2586,8 +2819,29 @@ impl<W: Write> Bridge<W> {
     }
 }
 
+/// #1150 (ADR-0092): `agora acp-bridge --runner-cwd DIR -- AGENT...` starts the agent's command in `DIR` instead of the bridge's own
+/// working folder (the agent's worktree). The node passes it for an ACP registry kind that starts through a package runner (`npx`,
+/// `uvx`), so the runner never reads package-manager configuration from the project; the session's folder still reaches the agent as
+/// ACP's `cwd`.
+pub const RUNNER_CWD_FLAG: &str = "--runner-cwd";
+
 /// Runs the bridge until the node asks it to stop, closes its input, or the agent exits. `agent` is the ACP agent's command line.
 pub fn run<R, W>(agent: &[String], input: R, output: W) -> io::Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    run_in(agent, None, input, output)
+}
+
+/// [`run`], with the agent's command started in `agent_cwd` when one is given ([`RUNNER_CWD_FLAG`]); otherwise in the bridge's own
+/// working folder.
+pub fn run_in<R, W>(
+    agent: &[String],
+    agent_cwd: Option<&std::path::Path>,
+    input: R,
+    output: W,
+) -> io::Result<()>
 where
     R: Read + Send + 'static,
     W: Write,
@@ -2596,12 +2850,16 @@ where
         .split_first()
         .ok_or_else(|| io::Error::other("no agent command"))?;
     // A Windows `.cmd` shim (`npx`, which registry agents use) is started by its full path; elsewhere the name is unchanged.
-    let mut child = Command::new(agora_platform::program_path(program, None))
+    let mut command = Command::new(agora_platform::program_path(program, None));
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(dir) = agent_cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command.spawn()?;
     let (stdin, stdout, stderr) =
         match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
             (Some(i), Some(o), Some(e)) => (i, o, e),
@@ -2690,8 +2948,8 @@ where
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .ok();
-        let tail = stderr_tail(&raw, home.as_deref());
-        b.agent_gone(code, &tail)?;
+        let (tail, places) = stderr_tail_at(&raw, home.as_deref());
+        b.agent_gone(code, &tail, &places)?;
         // The node's initialize or session/start may still be on its way. Give it the exit reason too.
         if b.session.is_none() {
             let end = Instant::now() + LATE_REQUEST_WAIT;
@@ -3228,6 +3486,7 @@ mod tests {
 
     #[test]
     fn a_long_output_keeps_its_head_and_tail_on_character_boundaries() {
+        let head_tail = |s: &str, max: usize| cut_kept(s.to_string(), max).0;
         assert_eq!(head_tail("short", 10), "short");
         let long = format!("{}{}{}", "a".repeat(100), "é".repeat(100), "z".repeat(100));
         let cut = head_tail(&long, 50);
@@ -3246,12 +3505,12 @@ mod tests {
         assert_eq!(tool_output(&u), None, "a diff alone is not output");
         let u = json!({"content": [{"type": "content", "content": {"type": "text", "text": "a"}},
                                    {"type": "content", "content": {"type": "text", "text": "b"}}]});
-        assert_eq!(tool_output(&u).as_deref(), Some("a\nb"));
+        assert_eq!(tool_output(&u), Some(("a\nb".to_string(), None)));
         let u = json!({"rawOutput": {"exit": 0}});
-        assert_eq!(tool_output(&u).as_deref(), Some("{\"exit\":0}"));
+        assert_eq!(tool_output(&u), Some(("{\"exit\":0}".to_string(), None)));
         let u = json!({"rawOutput": "token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"});
         assert!(tool_output(&u)
-            .is_some_and(|o| o.contains(REDACTED) && !o.contains("abcdefghijklmnopqrstuv")));
+            .is_some_and(|(o, _)| o.contains(REDACTED) && !o.contains("abcdefghijklmnopqrstuv")));
     }
 
     #[test]
@@ -3438,9 +3697,9 @@ mod tests {
     #[test]
     fn fit_line_gives_up_rather_than_return_a_line_over_the_limit() {
         let small = json!({"sessionId": "s", "plan": {"steps": ["x".repeat(5000)]}});
-        assert!(fit_line(small).is_ok());
+        assert!(fit_line(small, Some(Cuts::new())).is_ok());
         let stuck = json!({"sessionId": "s".repeat(MAX_LINE), "plan": {"steps": ["step"]}});
-        assert!(matches!(fit_line(stuck), Err(n) if n > MAX_LINE));
+        assert!(matches!(fit_line(stuck, Some(Cuts::new())), Err(n) if n > MAX_LINE));
     }
 
     /// A bridge with an open session and no turn, whose agent input goes nowhere (what it is sent is read from its state).
@@ -3841,7 +4100,7 @@ mod tests {
         let mut b = ready(Box::new(stuck))?;
         always(&mut b, 32)?;
         assert!(reply_to(&b.out, 32).is_none());
-        b.agent_gone(Some(1), "")?;
+        b.agent_gone(Some(1), "", &[])?;
         let reply = reply_to(&b.out, 32).ok_or("no reply")?;
         assert_eq!(
             reply["error"]["message"], "adapter.approval_undelivered",
@@ -4228,5 +4487,347 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// ADR-0111: the `chat/append` lines the bridge sent.
+    fn appended(out: &[u8]) -> Vec<Value> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<Value>(l).ok())
+            .filter(|v| v["method"] == "chat/append")
+            .collect()
+    }
+
+    /// ADR-0111: the places a line reports in `field`, in order.
+    fn reported(line: &Value, field: &str) -> Vec<usize> {
+        let mut at: Vec<usize> = line["params"]["cuts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["field"] == field)
+            .filter_map(|c| c["at"].as_u64())
+            .map(|n| n as usize)
+            .collect();
+        at.sort_unstable();
+        at
+    }
+
+    /// ADR-0111: the line as the node's host reads it: the places it keeps, and how many entries it ignored.
+    fn host_read(line: &Value) -> (Vec<crate::host::ReportedCut>, usize) {
+        match crate::host::to_event("chat/append", &line["params"]) {
+            Some(crate::host::AdapterEvent::Chat {
+                cuts, cuts_ignored, ..
+            }) => (cuts, cuts_ignored),
+            other => panic!("not a chat item: {other:?}"),
+        }
+    }
+
+    /// Text in which every 11 bytes name their own position (`<tag + number>`), so any piece of it of 22 bytes or more is found in
+    /// one place only.
+    fn numbered(tag: char, n: usize) -> String {
+        (0..n).map(|i| format!("<{tag}{i:08}>")).collect()
+    }
+
+    /// ADR-0111: `places` cut `sent` into pieces each of which stands in `original` as it is, the first at its start and the last at
+    /// its end, each later one further on with text missing before it: every place where text was removed is reported, and only
+    /// those.
+    fn assert_pieces(original: &str, sent: &str, places: &[usize]) {
+        let mut bounds = vec![0];
+        bounds.extend(places);
+        bounds.push(sent.len());
+        assert!(
+            bounds.windows(2).all(|w| w[0] < w[1]),
+            "places {places:?} in {} bytes",
+            sent.len()
+        );
+        let mut from = 0;
+        for (k, w) in bounds.windows(2).enumerate() {
+            let piece = &sent[w[0]..w[1]];
+            assert!(piece.len() >= 22, "piece {k} too short to place: {piece:?}");
+            let o = from
+                + original[from..].find(piece).unwrap_or_else(|| {
+                    panic!("piece {k} ({}..{}) is not in the original", w[0], w[1])
+                });
+            if k == 0 {
+                assert_eq!(o, 0, "the head is kept");
+            } else {
+                assert!(o > from, "piece {k} follows the one before it with nothing removed: a place reported where nothing was cut");
+            }
+            from = o + piece.len();
+        }
+        assert_eq!(from, original.len(), "the tail is kept");
+    }
+
+    /// ADR-0111 build step 3: an item `fit_line` halves several times (the agent's words, over 16 MiB) carries every place text was
+    /// removed, at its offset in the text as sent; the node's host takes each one.
+    #[test]
+    fn every_place_fit_line_cut_is_reported_at_its_offset_after_several_halvings(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let text = numbered('t', 1_600_000);
+        let mut b = bridge_in_session()?;
+        b.rich.on = true;
+        b.handle_agent(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}}))?;
+        b.flush_text()?;
+        let lines = appended(&b.out);
+        assert_eq!(lines.len(), 1);
+        let sent = lines[0]["params"]["text"]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            sent.len() * 4 < text.len(),
+            "halved at least three times: {}",
+            sent.len()
+        );
+        let places = reported(&lines[0], "/text/text");
+        assert!(!places.is_empty(), "no place reported");
+        assert_pieces(&text, sent, &places);
+        let (cuts, ignored) = host_read(&lines[0]);
+        assert_eq!((cuts.len(), ignored), (places.len(), 0));
+        // A node without `chat.rich` predates ADR-0111: the same item is halved alike and sent without `cuts`.
+        let mut b = bridge_in_session()?;
+        b.handle_agent(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}}))?;
+        let plain = appended(&b.out);
+        assert_eq!(plain[0]["params"]["text"]["text"].as_str(), Some(sent));
+        assert!(plain[0]["params"].get("cuts").is_none());
+        Ok(())
+    }
+
+    /// ADR-0111 build step 3: the bridge's own head-and-tail cuts (a tool's arguments and output, a location's path, a diff) are
+    /// reported where they are to a node that reads rich items, and the host takes each one; a node that does not gets no `cuts`.
+    #[test]
+    fn the_bridges_own_head_and_tail_cuts_are_reported() -> Result<(), Box<dyn std::error::Error>> {
+        let args = numbered('a', 7_000);
+        let output = numbered('o', 7_000);
+        let path = numbered('p', 500);
+        let new = numbered('d', 7_000);
+        let raw_args = json!(args).to_string();
+        let diff = replace_diff("f", None, &new);
+        for rich in [false, true] {
+            let mut b = bridge_in_session()?;
+            b.rich.on = rich;
+            b.handle_agent(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s",
+                "update": {"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Write", "rawInput": args,
+                           "locations": [{"path": "short"}, {"path": path}],
+                           "content": [{"type": "content", "content": {"type": "text", "text": output}},
+                                       {"type": "diff", "path": "f", "newText": new}]}}}))?;
+            let lines = appended(&b.out);
+            assert_eq!(lines.len(), 2, "rich={rich}");
+            if !rich {
+                // A node without `chat.rich` predates ADR-0111: its lines are as before, without `cuts`.
+                assert!(
+                    lines.iter().all(|l| l["params"].get("cuts").is_none()),
+                    "{lines:?}"
+                );
+                continue;
+            }
+            let call = &lines[0]["params"]["toolCall"];
+            let sent = call["argumentsJson"].as_str().unwrap_or_default();
+            assert_pieces(
+                &raw_args,
+                sent,
+                &reported(&lines[0], "/toolCall/argumentsJson"),
+            );
+            let sent = call["output"].as_str().unwrap_or_default();
+            assert_pieces(&output, sent, &reported(&lines[0], "/toolCall/output"));
+            let sent = call["locations"][1]["path"].as_str().unwrap_or_default();
+            assert_pieces(
+                &path,
+                sent,
+                &reported(&lines[0], "/toolCall/locations/1/path"),
+            );
+            assert!(reported(&lines[0], "/toolCall/locations/0/path").is_empty());
+            let (cuts, ignored) = host_read(&lines[0]);
+            assert_eq!((cuts.len(), ignored), (3, 0));
+            let sent = lines[1]["params"]["diff"]["unifiedDiff"]
+                .as_str()
+                .unwrap_or_default();
+            assert_pieces(&diff, sent, &reported(&lines[1], "/diff/unifiedDiff"));
+            assert_eq!(
+                host_read(&lines[1]),
+                (
+                    vec![crate::host::ReportedCut {
+                        field: crate::host::CutField::Text,
+                        at: reported(&lines[1], "/diff/unifiedDiff")[0]
+                    }],
+                    0
+                )
+            );
+        }
+        Ok(())
+    }
+
+    /// ADR-0111 build step 3: a rich plan whose entries the bridge cuts and `fit_line` then halves (each text is sent twice, escaped)
+    /// reports its places in the entries the node reads (at most 64, the first ones), never in its steps, and the host takes all.
+    #[test]
+    fn a_halved_rich_plan_reports_its_places_in_the_first_entries_only(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let content = |i: usize| format!("[{i:04}]{}[{i:04}]", "\"".repeat(4200));
+        let mut b = bridge_in_session()?;
+        b.rich.on = true;
+        b.handle_agent(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s",
+            "update": {"sessionUpdate": "plan",
+                       "entries": (0..PLAN_ENTRIES_MAX).map(|i| json!({"content": content(i)})).collect::<Vec<_>>()}}}))?;
+        let lines = appended(&b.out);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        let entries = line["params"]["plan"]["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            entries.len() < PLAN_ENTRIES_MAX,
+            "the line was halved: {}",
+            entries.len()
+        );
+        let cuts = line["params"]["cuts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(cuts.len(), crate::host::MAX_ITEM_CUTS);
+        for (n, c) in cuts.iter().enumerate() {
+            assert_eq!(c["field"], format!("/plan/entries/{n}/text"), "{c}");
+            let text = entries[n]["text"].as_str().unwrap_or_default();
+            let at = c["at"].as_u64().unwrap_or_default() as usize;
+            // Head and tail of the entry's text, each with its own number, and only quotes removed between them.
+            let tag = format!("[{n:04}]");
+            assert!(
+                text[..at].starts_with(&tag) && text[at..].ends_with(&tag),
+                "{n}: {at}"
+            );
+            assert!(text[tag.len()..text.len() - tag.len()]
+                .bytes()
+                .all(|c| c == b'"'));
+        }
+        assert_eq!(host_read(line).1, 0);
+        Ok(())
+    }
+
+    /// ADR-0111 build step 3: a notice's stderr tail says where lines were left out between those it keeps and where its front
+    /// was cut.
+    #[test]
+    fn a_refusals_detail_reports_where_its_lines_were_left_out_and_its_front_cut(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut b = bridge_in_session()?;
+        b.rich.on = true;
+        let message =
+            "INFO starting\nERROR first problem\nINFO routine\nERROR second problem\nINFO done";
+        b.refused(
+            &Value::Null,
+            "session",
+            &json!({"error": {"code": -32603, "message": message}}),
+        )?;
+        let lines = appended(&b.out);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0]["params"]["notice"]["params"]["detail"],
+            "ERROR first problem\nERROR second problem"
+        );
+        // Before the first kept line, both sides of the break where one was left out, and after the last.
+        assert_eq!(
+            reported(&lines[0], "/notice/params/detail"),
+            [0, 19, 20, 40]
+        );
+        assert_eq!(host_read(&lines[0]).1, 0);
+        let mut b = bridge_in_session()?;
+        b.rich.on = true;
+        let long = format!("ERROR {}\nINFO routine\nERROR end", "x ".repeat(300));
+        b.refused(
+            &Value::Null,
+            "session",
+            &json!({"error": {"code": -32603, "message": long}}),
+        )?;
+        let lines = appended(&b.out);
+        let detail = lines[0]["params"]["notice"]["params"]["detail"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            detail.starts_with('…') && detail.ends_with("x\nERROR end"),
+            "{detail}"
+        );
+        let mark = '…'.len_utf8();
+        let gap = detail.len() - "\nERROR end".len();
+        assert_eq!(
+            reported(&lines[0], "/notice/params/detail"),
+            [mark, gap, gap + 1]
+        );
+        assert_eq!(host_read(&lines[0]).1, 0);
+        Ok(())
+    }
+
+    /// ADR-0111: places of earlier cuts away from a string's middle keep their offsets through several halvings: one before what a
+    /// halving removes stays, one after it moves back by what was removed, one inside it becomes the new place. Places of other
+    /// strings, and of the elements a list keeps, are untouched; those of the elements it loses go.
+    #[test]
+    fn places_off_the_middle_keep_their_offsets_through_several_halvings() {
+        let original = numbered('h', 400);
+        // Two earlier cuts, far from the middle: bytes 220..440 and 3960..4180 removed.
+        let s = format!(
+            "{}{}{}",
+            &original[..220],
+            &original[440..3960],
+            &original[4180..]
+        );
+        let mut cuts: Cuts = vec![("/x".into(), 220), ("/x".into(), 3740), ("/y".into(), 7)];
+        let mut v = json!(s);
+        for _ in 0..3 {
+            let mut at = "/x".to_string();
+            assert!(halve(&mut v, &mut at, &mut cuts));
+            let places: Vec<usize> = cuts
+                .iter()
+                .filter(|(f, _)| f == "/x")
+                .map(|c| c.1)
+                .collect();
+            assert_pieces(&original, v.as_str().unwrap_or_default(), &places);
+        }
+        assert_eq!(
+            cuts.iter()
+                .filter(|(f, _)| f == "/x")
+                .map(|c| c.1)
+                .collect::<Vec<_>>(),
+            [220, 247, 275]
+        );
+        assert!(cuts.contains(&("/y".into(), 7)));
+        let mut cuts: Cuts = vec![
+            ("/plan/entries/0/text".into(), 1),
+            ("/plan/entries/1/text".into(), 2),
+            ("/plan/entries/10/text".into(), 3),
+            ("/plan/entriesX/5".into(), 4),
+            ("/text/text".into(), 5),
+        ];
+        dropped_elements(&mut cuts, "/plan/entries", 2);
+        let fields: Vec<&str> = cuts.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(
+            fields,
+            [
+                "/plan/entries/0/text",
+                "/plan/entries/1/text",
+                "/plan/entriesX/5",
+                "/text/text"
+            ]
+        );
+        // A halving that drops the only element with a place leaves no `cuts` behind.
+        let steps: Vec<String> = (0..300_000).map(|i| format!("{i:020}")).collect();
+        let line = fit_line(
+            json!({"sessionId": "s", "plan": {"steps": steps}}),
+            Some(vec![("/plan/steps/299999".into(), 3)]),
+        )
+        .unwrap_or_default();
+        assert!(
+            line.len() <= MAX_LINE && !line.contains("\"cuts\""),
+            "{}",
+            line.len()
+        );
+        // An item the bridge did not cut is sent as before, without `cuts`.
+        let line = fit_line(
+            json!({"sessionId": "s", "text": {"text": "hi"}}),
+            Some(Cuts::new()),
+        );
+        assert_eq!(
+            line.ok().as_deref(),
+            Some(
+                r#"{"jsonrpc":"2.0","method":"chat/append","params":{"sessionId":"s","text":{"text":"hi"}}}"#
+            )
+        );
     }
 }

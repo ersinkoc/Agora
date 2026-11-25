@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ROLE_REFUSAL } from './startRefusal';
 import { t } from '../i18n';
@@ -45,6 +46,14 @@ describe('why an answer did not go through', () => {
     expect(approvalFailureKey('approval.signature_invalid')).toBe('approval-not-trusted');
     expect(approvalFailureKey('hub.unreachable')).toBe('approval-failed');
     expect(approvalFailureKey(undefined)).toBe('approval-failed');
+  });
+  it('says to wait and try again when the agent did not take the answer in time, and to start it again when it stopped (ADR-0110)', () => {
+    expect(approvalFailureKey('adapter.no_answer')).toBe('approval-no-answer');
+    expect(approvalFailureKey('adapter.agent_exited')).toBe('approval-agent-exited');
+    for (const lang of ['en', 'tr']) {
+      const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
+      for (const k of ['approval-no-answer', 'approval-agent-exited']) expect(src).toMatch(new RegExp(`^${k} = `, 'm'));
+    }
   });
   it('says the person\'s role when the hub refused the answer for it, not this device (#1044)', () => {
     expect(approvalFailureKey(ROLE_REFUSAL)).toBe('approval-role');

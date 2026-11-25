@@ -28,6 +28,7 @@ pub mod link_state;
 pub mod manifests;
 pub mod mesh_server;
 pub mod pairing_client;
+pub mod runner_folders;
 pub mod sandbox;
 pub mod session_files;
 pub mod spawn;

@@ -121,6 +121,9 @@ export function approvalFailureKey(code: string | undefined): string {
     case 'approval.scope_forbidden': return 'approval-scope-forbidden';
     case 'approval.scope_unavailable': return 'approval-scope-unavailable';
     case 'approval.adapter_outdated': return 'approval-adapter-outdated';
+    // ADR-0110: the agent did not take the answer in time (it may still be working), or it stopped.
+    case 'adapter.no_answer': return 'approval-no-answer';
+    case 'adapter.agent_exited': return 'approval-agent-exited';
     default: return 'approval-failed';
   }
 }

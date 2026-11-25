@@ -341,7 +341,20 @@ fn submit_to_adapter(
             match call.run() {
                 Ok(()) => Ok((false, 0)),
                 Err(e) => {
-                    ctx.chat.retract(id, entry);
+                    // ADR-0110 decision 6: a prompt the adapter did not answer in time may be held by it: it stays, marked as not
+                    // confirmed. Any other failure takes it back.
+                    if let crate::supervisor::SupervisorError::NoAnswer {
+                        kind,
+                        waited_ms,
+                        given: true,
+                        ..
+                    } = &e
+                    {
+                        ctx.chat
+                            .unconfirmed(id, entry, kind, *waited_ms, crate::daemon::now_ms());
+                    } else {
+                        ctx.chat.retract(id, entry);
+                    }
                     ctx.sup().adapter_send_failed(id, generation);
                     Err(sup_err(e))
                 }
@@ -638,6 +651,77 @@ fn launch_of(v: &crate::supervisor::AgentView) -> crate::launch_options::LaunchC
 
 fn sup_err(e: SupervisorError) -> Error {
     e.to_protocol()
+}
+
+/// ADR-0110 decision 6: the longest a decision's adapter call is followed after the node's wait ran out, so a late answer can still
+/// settle the card (a request that expires sooner bounds it).
+const LATE_ANSWER_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// What a verified decision the adapter took is recorded as: in the conversation and, for the hub, `ApprovalResolved` (or an always
+/// answer the agent now holds). Made at once after the answer, or by the adapter's late answer (ADR-0110 decision 6).
+#[derive(Clone)]
+struct Settle {
+    chat: Arc<crate::chat::ChatBoard>,
+    events: Option<Arc<EventSink>>,
+    supervisor: Arc<Mutex<Supervisor>>,
+    agent: AgentId,
+    approval_id: String,
+    action: String,
+    signer: String,
+    approved: bool,
+    always: bool,
+    run: Option<u64>,
+}
+
+impl Settle {
+    /// The request ended and no answer reached the agent: the entry shows it cancelled, and the hub is told as for a cancelled turn
+    /// (unsigned, not approved), or it would keep showing an approval the node no longer holds.
+    fn cancelled(&self) {
+        self.chat.set_permission(
+            &self.agent,
+            &self.approval_id,
+            v1::PermissionOutcome::Cancelled,
+            crate::daemon::now_ms(),
+        );
+        if let Some(ev) = &self.events {
+            ev.approval_resolved(&self.approval_id, false, "");
+        }
+    }
+
+    fn settled(&self) {
+        // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
+        self.chat.set_permission_as(
+            &self.agent,
+            &self.approval_id,
+            if self.approved {
+                v1::PermissionOutcome::Approved
+            } else {
+                v1::PermissionOutcome::Denied
+            },
+            self.always,
+            crate::daemon::now_ms(),
+        );
+        if let Some(ev) = &self.events {
+            if self.always {
+                // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
+                // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
+                // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
+                // before the check, which then fails, or after the record. A late answer of a former process is audited as given
+                // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
+                record_always_answer(
+                    &self.supervisor.lock().unwrap_or_else(|e| e.into_inner()),
+                    ev,
+                    &self.agent,
+                    self.run,
+                    &self.approval_id,
+                    &self.action,
+                    &self.signer,
+                );
+            } else {
+                ev.approval_resolved(&self.approval_id, self.approved, &self.signer);
+            }
+        }
+    }
 }
 
 /// ADR-0101 (Codex review of PR #1007): records an always answer the adapter delivered to the run `run` of `agent`'s process. The
@@ -1385,8 +1469,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 return decide_skip(ctx, r, &resolution);
             }
             let (agent, adapter_id, verdict) = (
-                resolution.agent,
-                resolution.adapter_approval_id,
+                resolution.agent.clone(),
+                resolution.adapter_approval_id.clone(),
                 resolution.verdict,
             );
             let approved = verdict == crate::approvals::Verdict::Approved;
@@ -1406,58 +1490,114 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .as_ref()
                 .ok()
                 .map(crate::supervisor::AdapterCall::epoch);
+            let settle = Settle {
+                chat: Arc::clone(&ctx.chat),
+                events: ctx.events.clone(),
+                supervisor: Arc::clone(&ctx.supervisor),
+                agent: agent.clone(),
+                approval_id: r.approval_id.clone(),
+                action: resolution.request.action.clone(),
+                signer: r.signer_device_id.clone(),
+                approved,
+                always,
+                run,
+            };
+            // ADR-0110 decision 6: a decision whose answer the adapter did not take within the node's wait keeps its card pending
+            // (`kept`), and the adapter's late answer, if it comes, settles it. Security review of PR #1190, S2: every answer call of
+            // the request is counted (`flight_*`), so the request is recorded once, with the first answer that reached the agent,
+            // and as cancelled only when no call that may still deliver one runs.
+            let id = r.approval_id.clone();
+            let call = match call {
+                Ok(c) => c,
+                Err(e) => {
+                    if approvals.flight_ended(&id) {
+                        settle.cancelled();
+                    }
+                    return Err(sup_err(e));
+                }
+            };
+            let may_watch = approvals.flight_begin(&id);
+            // `gave_up`: this call is followed by its thread; `kept`: the card was put back (None: not, or an answer was recorded).
+            let (mut gave_up, mut kept): (bool, Option<bool>) = (false, None);
+            let delivered = if may_watch {
+                let late_wait =
+                    Duration::from_millis(resolution.request.expires_ms.saturating_sub(now))
+                        .min(LATE_ANSWER_MAX);
+                let (late_approvals, late_settle) = (Arc::clone(approvals), settle.clone());
+                call.run_keeping_late(
+                    late_wait,
+                    || {
+                        gave_up = true;
+                        approvals.flight_watched(&id);
+                        kept = approvals.restore_unless_recorded(
+                            &resolution,
+                            crate::daemon::now_ms(),
+                            false,
+                        );
+                    },
+                    move |answered| {
+                        let id = late_settle.approval_id.clone();
+                        if answered.is_ok() {
+                            if late_approvals.flight_delivered(&id, true) {
+                                late_approvals.take_pending(&id);
+                                late_settle.settled();
+                            }
+                        } else if late_approvals.flight_undelivered(&id, false, true) {
+                            late_settle.cancelled();
+                        }
+                    },
+                )
+            } else {
+                // N1: another call of this request is already followed: this one is made as before decision 6.
+                call.run()
+            };
             // The adapter answers only once the answer was written to the agent (the ACP bridge waits for its writer), so a success
             // here means the agent was given it.
-            if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
-                // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
-                // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
-                // conversation must not stay pending for good.
-                ctx.chat.set_permission(
-                    &agent,
-                    &r.approval_id,
-                    v1::PermissionOutcome::Cancelled,
-                    crate::daemon::now_ms(),
-                );
-                // The request already left the queue: the hub is told as for a cancelled turn (unsigned, not approved), or it
-                // would keep showing an approval the node no longer holds.
-                if let Some(ev) = &ctx.events {
-                    ev.approval_resolved(&r.approval_id, false, "");
+            let e = match delivered {
+                Ok(()) => {
+                    if approvals.flight_delivered(&id, false) {
+                        settle.settled();
+                    }
+                    return Ok(ok_empty());
                 }
-                return Err(sup_err(e));
-            }
-            // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
-            ctx.chat.set_permission_as(
-                &agent,
-                &r.approval_id,
-                if approved {
-                    v1::PermissionOutcome::Approved
-                } else {
-                    v1::PermissionOutcome::Denied
-                },
-                always,
-                crate::daemon::now_ms(),
-            );
-            if let Some(ev) = &ctx.events {
-                if always {
-                    // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
-                    // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
-                    // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
-                    // before the check, which then fails, or after the record. A late answer of a former process is audited as given
-                    // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
-                    record_always_answer(
-                        &ctx.sup(),
-                        ev,
-                        &agent,
-                        run,
-                        &r.approval_id,
-                        &resolution.request.action,
-                        &r.signer_device_id,
-                    );
-                } else {
-                    ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+                Err(e) => e,
+            };
+            let keep = match (&e, gave_up) {
+                // Followed by its thread: the card was put back (or handed to the expiry sweep) under that thread's lock.
+                (crate::supervisor::SupervisorError::NoAnswer { .. }, true) => false,
+                // B1: never given (the adapter's input is full), or not followed while another call of the request is: nothing
+                // can reach the agent from this call, so the card is put back for another answer.
+                (crate::supervisor::SupervisorError::NoAnswer { given, .. }, false)
+                    if !*given || approvals.flight_is_watched(&id) =>
+                {
+                    true
                 }
+                _ => {
+                    // The decision was verified but the adapter could not be told (it is gone, or no longer holds the request, as
+                    // when an ACP bridge already answered it `cancelled`; or no thread could follow it): the request is over, and
+                    // the entry in the conversation must not stay pending for good. Recorded now unless a followed call may still
+                    // deliver an answer.
+                    if approvals.flight_undelivered(&id, true, false) {
+                        settle.cancelled();
+                    }
+                    return Err(sup_err(e));
+                }
+            };
+            if keep {
+                // R3: ends this call and puts the card back in one step, unless the followed call recorded an answer meanwhile.
+                kept =
+                    approvals.restore_unless_recorded(&resolution, crate::daemon::now_ms(), true);
             }
-            Ok(ok_empty())
+            // A kept card whose agent's run ended during the wait would never be cancelled by that end (it was not in the queue
+            // then): it is ended here, unless an answer took it first.
+            if kept == Some(true)
+                && !run.is_some_and(|run| ctx.sup().runs(&agent, run))
+                && approvals.take_pending(&id)
+                && approvals.flight_ended(&id)
+            {
+                settle.cancelled();
+            }
+            Err(sup_err(e))
         }
         Cmd::GitStatus(g) => {
             let wt = agent_worktree(ctx, &g.worktree_id)?;
@@ -2251,27 +2391,12 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok(Subscribed {
-            agent,
-            history,
-            snap,
-            sub,
-        }) = outcome
-        {
-            let (ctx, writer, alive, stop) = (
-                Arc::clone(ctx),
-                Arc::clone(writer),
-                Arc::clone(alive),
-                Arc::clone(stop),
-            );
+        if let Ok(Subscribed { history, snap, sub }) = outcome {
+            let (writer, alive, stop) = (Arc::clone(writer), Arc::clone(alive), Arc::clone(stop));
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-term".into())
-                .spawn(move || {
-                    pump(
-                        &ctx, &writer, stream_id, &agent, history, &snap, &sub, &alive, &stop,
-                    )
-                });
+                .spawn(move || pump(&writer, stream_id, history, &snap, &sub, &alive, &stop));
         }
         return true;
     }
@@ -2308,10 +2433,9 @@ fn handle_request(
     true
 }
 
-/// An accepted terminal subscription: whose terminal, the history frames the window asked for (ADR-0100), the snapshot they end at,
+/// An accepted terminal subscription: the history frames the window asked for (ADR-0100), the snapshot they end at,
 /// and the live output after it.
 struct Subscribed {
-    agent: AgentId,
     history: Vec<Vec<u8>>,
     snap: Snapshot,
     sub: OutputSubscription,
@@ -2342,7 +2466,6 @@ fn subscribe(
     drop(guard);
     let (history, snap, subscription) = watch.subscribe_with_history(lines);
     Ok(Subscribed {
-        agent: id,
         history,
         snap,
         sub: subscription,
@@ -2369,12 +2492,9 @@ fn size_payload(s: agora_vt::Size) -> Vec<u8> {
     p
 }
 
-#[allow(clippy::too_many_arguments)]
 fn pump(
-    ctx: &ControlContext,
     writer: &SharedWriter,
     stream: u32,
-    agent: &AgentId,
     history: Vec<Vec<u8>>,
     snap: &Snapshot,
     sub: &OutputSubscription,
@@ -2406,24 +2526,19 @@ fn pump(
             }
             // What was dropped can include the exit: a terminal that has ended says so after its last snapshot, and one that is
             // already gone (or a subscription that ends without its exit) gets the unknown exit, so the client still hears it ended.
-            Ok(Output::Lagged) => {
-                let snap = ctx
-                    .sup()
-                    .terminal(agent)
-                    .map(|h| (h.resync(sub), h.exit_status()));
-                match snap {
-                    Some((s, None)) => repaint(&s),
-                    Some((s, Some(st))) => {
-                        let _ = repaint(&s)
-                            .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
-                        return;
-                    }
-                    None => {
-                        let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
-                        return;
-                    }
+            // F1500: always this subscription's own terminal, never the one a restart started for the agent since.
+            Ok(Output::Lagged) => match sub.resync().map(|s| (s.exit, s)) {
+                Some((None, s)) => repaint(&s),
+                Some((Some(st), s)) => {
+                    let _ = repaint(&s)
+                        .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
+                    return;
                 }
-            }
+                None => {
+                    let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                    return;
+                }
+            },
             Err(RecvTimeoutError::Timeout) => Ok(()),
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
@@ -3188,6 +3303,169 @@ mod idempotency_tests {
             assert_eq!(e.code, ErrorCode::ProtocolInvalidMessage, "{bad:?}");
         }
         assert!(path.exists());
+    }
+
+    /// F1500: a subscriber that fell behind a process that crashed is resynced from that process's terminal, never repainted with the
+    /// screen of the process the restart started since (it gets the unknown exit: the crashed terminal is gone).
+    ///
+    /// Unix only: the lag is made by flooding the terminal with output, and through ConPTY on a Windows runner that flood can take
+    /// minutes (it timed out on main after the merge of #1176). A Windows variant that lags without a flood is tracked on #1150.
+    #[cfg(unix)]
+    #[test]
+    fn a_lagged_subscriber_of_a_crashed_process_is_never_repainted_with_the_restarted_one() {
+        if !agora_platform::PTY_SUPPORTED
+            || !agora_platform::LOCAL_SOCKETS_SUPPORTED
+            || !sh_on_path()
+        {
+            return;
+        }
+        let dir = forget_dir("f1500");
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        // Quoted and with forward slashes, so `sh` reads the same folder on every platform.
+        let d = format!("'{}'", dir.to_string_lossy().replace('\\', "/"));
+        // First run: waits for `go`, floods 6 MB (more than 256 chunks of at most 16 KiB, so a subscriber that reads nothing lags),
+        // then crashes. The restarted run prints a marker and stays.
+        let script = format!(
+            "if [ -f {d}/second ]; then echo NEWPROC; exec cat; fi; : > {d}/second; \
+             until [ -f {d}/go ]; do sleep 0.02; done; yes 0123456789abcdef | head -c 6000000; exit 3"
+        );
+        let manifest = format!(
+            "kind = \"crashy\"\ndisplay_name = \"C\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", '''{script}''']\n"
+        );
+        let mut sup = bare_supervisor();
+        sup.register(agora_adapters::Manifest::parse(&manifest).unwrap());
+        let projects = vec![ProjectEntry {
+            id: "p".into(),
+            name: "proj".into(),
+            root: repo,
+        }];
+        let n = Forgetting::new(
+            "f1500",
+            sup,
+            projects,
+            crate::ledger::Ledger::in_memory(),
+            dir.clone(),
+        );
+        let started = execute(
+            &n.ctx,
+            &Cmd::AgentStart(v1::AgentStart {
+                kind: "crashy".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+            panic!("not a start");
+        };
+        let id = AgentId::new(&s.agent_id);
+        let req = v1::TerminalSubscribe {
+            terminal_id: terminal_id_of(&id),
+            ..Default::default()
+        };
+        // Two subscribers of the first process, neither reading: one relayed before the restart, one after it.
+        let control = subscribe(&n.ctx, &req, 3).unwrap();
+        let case = subscribe(&n.ctx, &req, 5).unwrap();
+        std::fs::write(dir.join("go"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let ev = n.ctx.sup().tick(Instant::now());
+            if ev
+                .iter()
+                .any(|e| matches!(e, SupervisorEvent::Exited { .. }))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the first process never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Runs `pump` for one subscription on this thread and returns the frames it wrote.
+        let relay = |s: &Subscribed, stream: u32| -> Vec<Frame> {
+            // The case needs a subscriber that fell behind: say so instead of relaying (and blocking on) a queue that did not
+            // overflow on this platform. Looking does not take the lag away.
+            assert_eq!(
+                s.sub.recv_timeout(Duration::ZERO),
+                Ok(Output::Lagged),
+                "the subscriber did not fall behind"
+            );
+            let sock = dir.join(format!("p{stream}.sock"));
+            let listener = local_listen(&sock).unwrap();
+            let mut client = local_connect(&sock).unwrap();
+            let served = listener.accept().unwrap();
+            let writer: SharedWriter = Arc::new(Mutex::new(served));
+            let (alive, stop) = (AtomicBool::new(true), AtomicBool::new(false));
+            pump(&writer, stream, Vec::new(), &s.snap, &s.sub, &alive, &stop);
+            let _ = writer.lock().map(|w| w.shutdown());
+            drop(writer);
+            let mut bytes = Vec::new();
+            let _ = client.read_to_end(&mut bytes);
+            let mut dec = Decoder::new(DEFAULT_MAX_PAYLOAD);
+            dec.push(&bytes);
+            let mut frames = Vec::new();
+            while let Ok(Some(f)) = dec.next_frame() {
+                frames.push(f);
+            }
+            frames
+        };
+        let has = |p: &[u8], m: &[u8]| p.windows(m.len()).any(|w| w == m);
+        let describe = |frames: &[Frame]| -> String {
+            frames
+                .iter()
+                .map(|f| match f.kind {
+                    KIND_TERM_SNAPSHOT if has(&f.payload, b"NEWPROC") => {
+                        "snapshot(next process)".to_string()
+                    }
+                    KIND_TERM_SNAPSHOT => "snapshot".to_string(),
+                    KIND_TERM_RESIZE => "resize".to_string(),
+                    KIND_TERM_DATA => "data".to_string(),
+                    KIND_TERM_EXIT => format!(
+                        "exit({})",
+                        i32::from_le_bytes(f.payload[..4].try_into().unwrap())
+                    ),
+                    k => format!("kind{k}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        // Lagged, its terminal ended and not restarted yet: the unknown exit, nothing of another process.
+        let frames = relay(&control, 3);
+        let ok = frames.last().is_some_and(|f| f.kind == KIND_TERM_EXIT)
+            && !frames.iter().any(|f| has(&f.payload, b"NEWPROC"));
+        assert!(ok, "{}", describe(&frames));
+
+        // The restart starts the next process (its screen shows the marker) before this subscriber is relayed.
+        let ev = n.ctx.sup().tick(Instant::now() + Duration::from_secs(3600));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, SupervisorEvent::Started { .. })),
+            "no restart: {ev:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !n
+            .ctx
+            .sup()
+            .terminal(&id)
+            .is_some_and(|h| h.snapshot().lines.iter().any(|l| l.contains("NEWPROC")))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the restarted process printed nothing"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let frames = relay(&case, 5);
+        let _ = n.ctx.sup().stop(&id);
+        assert_eq!(
+            describe(&frames),
+            "snapshot, resize, exit(-2147483648)",
+            "nothing of the next process"
+        );
     }
 }
 

@@ -96,6 +96,8 @@ pub enum ErrorCode {
     AdapterOptionRefused,
     /// ADR-0101 (conversation notice): the agent asked without offering a way to allow it, so it was refused.
     AdapterPermissionUnanswerable,
+    /// ADR-0110: an adapter did not answer a call made for a client (a prompt, an approval answer) within the node's wait.
+    AdapterNoAnswer,
     PairClosed,
     PairLimit,
     PairExpired,
@@ -206,6 +208,7 @@ impl ErrorCode {
         ErrorCode::AdapterAgentRefused,
         ErrorCode::AdapterOptionRefused,
         ErrorCode::AdapterPermissionUnanswerable,
+        ErrorCode::AdapterNoAnswer,
         ErrorCode::PairClosed,
         ErrorCode::PairLimit,
         ErrorCode::PairExpired,
@@ -311,6 +314,7 @@ impl ErrorCode {
             ErrorCode::AdapterAgentRefused => "adapter.agent_refused",
             ErrorCode::AdapterOptionRefused => "adapter.option_refused",
             ErrorCode::AdapterPermissionUnanswerable => "adapter.permission_unanswerable",
+            ErrorCode::AdapterNoAnswer => "adapter.no_answer",
             ErrorCode::PairClosed => "pair.closed",
             ErrorCode::PairLimit => "pair.limit",
             ErrorCode::PairExpired => "pair.expired",
@@ -428,6 +432,7 @@ impl ErrorCode {
             ErrorCode::AdapterAgentRefused => &["stage"],
             ErrorCode::AdapterOptionRefused => &["id"],
             ErrorCode::AdapterPermissionUnanswerable => &["action"],
+            ErrorCode::AdapterNoAnswer => &["kind", "call", "waited_ms"],
             ErrorCode::PairClosed => &[],
             ErrorCode::PairLimit => &["seconds"],
             ErrorCode::PairExpired => &[],

@@ -10,7 +10,7 @@ import { endedGroups, flagOf, transcript, windowed } from '../net/transcript';
 import { FilesChanged, Item, Turn } from './ChatEntry';
 import { CloseAgentContext } from './CloseAgent';
 import { closeAsk, isCloseCommand } from '../net/closeAgent';
-import { ChatActionsContext, type PromptResult, type PromptSend } from './chatActions';
+import { ChatActionsContext, promptFailure, type PromptFailure, type PromptResult, type PromptSend } from './chatActions';
 import { IME_GRACE_MS, sendsOnEnter } from './composer';
 import { Icon } from './Icon';
 import { PinnedShort, SHORT_PANE_PX, useBelow } from './ApprovalRequest';
@@ -45,7 +45,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const actions = useContext(ChatActionsContext);
   const canClose = !!useContext(CloseAgentContext);
   const [text, setText] = useState('');
-  const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
+  const [sent, setSent] = useState<'ok' | 'queued' | PromptFailure | undefined>();
   // #908: the newest entry id held when the person last sent: a user entry newer than it is theirs (it has arrived).
   const [sentMark, setSentMark] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -198,7 +198,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     const r = await send(agent, body);
     setBusy(false);
     const res: PromptResult = typeof r === 'boolean' ? { ok: r } : r;
-    setSent(res.ok ? (res.queued ? 'queued' : 'ok') : res.code === 'agent.queue_full' ? 'full' : 'failed');
+    setSent(res.ok ? (res.queued ? 'queued' : 'ok') : promptFailure(res.code));
     // Only what was sent is cleared: text typed while the send was in flight stays.
     if (res.ok) { setText((now) => (now.trim() === body ? '' : now)); toLatest(); }
   };
@@ -250,7 +250,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     field.current.setSelectionRange(caretTo.current, caretTo.current);
     caretTo.current = undefined;
   }, [text]);
-  const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, arrived, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
+  const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, arrived, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', no_answer: 'prompt-no-answer', exited: 'prompt-agent-exited', failed: 'prompt-failed' }[sent]);
 
   return (
     <div ref={pane} className="flex h-full min-h-0 flex-col bg-surface-0">

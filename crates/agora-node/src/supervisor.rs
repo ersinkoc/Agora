@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
     Adapter, AdapterCommand, AdapterConfig, AdapterEvent, Caller, ConfigOption, HostError,
-    McpServer, OptionKind, SessionOption, SessionOptions,
+    McpServer, OptionKind, ReportedCut, SessionOption, SessionOptions, CHAT_CUTS,
 };
 use agora_adapters::perm::{self, Category};
 use agora_adapters::{Detector, Manifest, Pacer};
@@ -156,7 +156,11 @@ pub enum SupervisorEvent {
     /// The node keeps them only for an agent whose transcript is empty (it holds the conversation already otherwise).
     ReplayedChat {
         agent: AgentId,
-        items: Vec<agora_adapters::host::ChatItem>,
+        /// Each item with the places its adapter reported it cut it (ADR-0111; empty from an adapter without `chat.cuts`).
+        items: Vec<(
+            agora_adapters::host::ChatItem,
+            Vec<agora_adapters::host::ReportedCut>,
+        )>,
     },
     /// Native session retained across a resumed/restarted process; copied only on a lifecycle transition.
     SessionReported {
@@ -215,6 +219,15 @@ pub enum SupervisorEvent {
         tag: u64,
         sent: bool,
     },
+    /// ADR-0110 decision 6: a prompt that waited behind a turn was sent and its adapter did not answer within the wait
+    /// (`adapter.no_answer`): it may hold the prompt, so the prompt stays in the conversation, marked as not confirmed. Counts as
+    /// not sent for the turn (as [`Self::PromptDequeued`] with `sent` false does). `kind` and `waited_ms` as in the error.
+    PromptUnconfirmed {
+        agent: AgentId,
+        tag: u64,
+        kind: String,
+        waited_ms: u64,
+    },
     /// ADR-0090: queued prompts that will never be sent, because their adapter ended (the user dropped them through
     /// `AgentCancelTurn` is answered to the caller instead).
     PromptsDropped {
@@ -258,11 +271,22 @@ pub const MAX_QUEUED_PROMPT_BYTES: usize = 64 * 1024;
 /// ignores `session/cancel` must not hold the agent, and what waits behind its turn, for good).
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// ADR-0110 decision 6 (security review of PR #1190, N1): the most threads that follow an approval answer's adapter call after the
+/// node's wait ran out, node-wide; past it a timed-out answer is handled as before decision 6.
+pub const LATE_WATCHERS_MAX: usize = 32;
+static LATE_WATCHERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How long [`AdapterCall::run`] waits for an adapter's answer. A prompt or an approval answer that runs it out is answered
+/// `adapter.no_answer` with this wait (ADR-0110).
+const ADAPTER_CALL_WAIT: Duration = Duration::from_secs(10);
+
 /// A request to an adapter that is made AFTER the supervisor's lock is let go: [`AdapterCall::run`] waits for the adapter's answer
 /// (up to ten seconds), so an adapter that does not answer stalls only its own caller, never the node's tick or another agent's
 /// command. Taken under the lock (which checks everything that can be checked without the adapter), run without it.
 pub struct AdapterCall {
     caller: Caller,
+    /// ADR-0110: the agent's kind, named in `adapter.no_answer`.
+    kind: String,
     session: String,
     op: CallOp,
     generation: u64,
@@ -316,8 +340,111 @@ impl AdapterCall {
     /// Makes the request and waits for the answer. A request whose answer the node will not read because it let the adapter go while
     /// waiting (it is stopping, ADR-0104 O2: [`HostError::Detached`]) was given to the adapter and counts as made: the caller records
     /// it as sent, as it would after an answer, and never as failed.
+    ///
+    /// ADR-0110: a prompt or an approval answer the adapter did not answer within the wait is [`SupervisorError::NoAnswer`]; one it
+    /// refused with `adapter.agent_exited` passes that reason on; any other failure of them is internal with the call's reference.
     pub fn run(self) -> Result<(), SupervisorError> {
-        const WAIT: Duration = Duration::from_secs(10);
+        self.run_for(ADAPTER_CALL_WAIT)
+    }
+
+    /// ADR-0110 decision 6: [`run`](Self::run) for the answer to an approval request, whose adapter may answer after the node's wait.
+    /// The call is made on a thread of its own that waits up to `late_wait` (at least twice the node's wait); the caller waits the
+    /// node's wait for it. When that runs out, `give_up` runs (the caller keeps the request pending) and the caller gets
+    /// [`SupervisorError::NoAnswer`]; the call's own result, when it comes, then goes to `late` instead. `give_up` runs before
+    /// `late` can, so a late answer always finds what `give_up` kept. When no thread can be started, or [`LATE_WATCHERS_MAX`] already
+    /// wait, the call is made as by [`run`](Self::run) and `give_up` never runs (security review of PR #1190, N1: the threads are
+    /// bounded). A request that was never given to the adapter ([`SupervisorError::NoAnswer`] with `given` false) comes back at
+    /// once, without `give_up` either.
+    pub fn run_keeping_late(
+        self,
+        late_wait: Duration,
+        give_up: impl FnOnce(),
+        late: impl FnOnce(Result<(), SupervisorError>) + Send + 'static,
+    ) -> Result<(), SupervisorError> {
+        #[derive(Default)]
+        struct Slot {
+            result: Option<Result<(), SupervisorError>>,
+            gave_up: bool,
+        }
+        /// Holds one of the [`LATE_WATCHERS_MAX`] places while a watching thread lives.
+        struct Place;
+        impl Drop for Place {
+            fn drop(&mut self) {
+                LATE_WATCHERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+        let taken = LATE_WATCHERS.try_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |n| (n < LATE_WATCHERS_MAX).then_some(n + 1),
+        );
+        if taken.is_err() {
+            return self.run();
+        }
+        let place = Place;
+        let (kind, call) = (self.kind.clone(), self.call_name());
+        let shared = Arc::new((Mutex::new(Slot::default()), std::sync::Condvar::new()));
+        let theirs = Arc::clone(&shared);
+        let wait = late_wait.max(ADAPTER_CALL_WAIT * 2);
+        // The call travels to the thread through this cell, so it is still here to make at once if no thread can be started.
+        let cell = Arc::new(Mutex::new(Some(self)));
+        let their_cell = Arc::clone(&cell);
+        let spawned = std::thread::Builder::new()
+            .name("agora-approval-answer".into())
+            .spawn(move || {
+                let _place = place;
+                let taken = their_cell.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let Some(call) = taken else { return };
+                let r = call.run_for(wait);
+                let (slot, ready) = &*theirs;
+                let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+                if s.gave_up {
+                    drop(s);
+                    late(r);
+                } else {
+                    s.result = Some(r);
+                    ready.notify_all();
+                }
+            });
+        if spawned.is_err() {
+            let taken = cell.lock().unwrap_or_else(|e| e.into_inner()).take();
+            return match taken {
+                Some(call) => call.run(),
+                None => Err(SupervisorError::Approval("no thread".into())),
+            };
+        }
+        let (slot, ready) = &*shared;
+        let s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut s, _) = ready
+            .wait_timeout_while(s, ADAPTER_CALL_WAIT, |s| s.result.is_none())
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = s.result.take() {
+            return r;
+        }
+        // Kept under the slot's lock: the thread hands a late result over only after this.
+        s.gave_up = true;
+        give_up();
+        drop(s);
+        Err(SupervisorError::NoAnswer {
+            kind,
+            call,
+            waited_ms: u64::try_from(ADAPTER_CALL_WAIT.as_millis()).unwrap_or(u64::MAX),
+            given: true,
+        })
+    }
+
+    /// The name of this call in `adapter.no_answer` (`prompt` or `approval`; the others are not made for a client's answer).
+    fn call_name(&self) -> &'static str {
+        match self.op {
+            CallOp::Prompt { .. } => "prompt",
+            CallOp::Resolve { .. } => "approval",
+            CallOp::Cancel => "cancel",
+            CallOp::SetConfig { .. } => "set_config",
+            CallOp::SetOption { .. } => "set_option",
+        }
+    }
+
+    fn run_for(self, wait: Duration) -> Result<(), SupervisorError> {
         let given = |r: Result<(), HostError>| match r {
             Err(HostError::Detached) => Ok(()),
             other => other,
@@ -325,18 +452,18 @@ impl AdapterCall {
         let session = self.session.as_str();
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
-                given(self.caller.prompt(session, text, *from_mesh, WAIT))
-                    .map_err(|e| SupervisorError::Prompt(e.to_string()))
+                given(self.caller.prompt(session, text, *from_mesh, wait))
+                    .map_err(client_call_error(&self.kind, "prompt", wait))
             }
             CallOp::Cancel => {
-                given(self.caller.cancel(session, WAIT)).map_err(call_error("cancel"))
+                given(self.caller.cancel(session, wait)).map_err(call_error("cancel"))
             }
             CallOp::SetConfig { id, value } => {
-                given(self.caller.set_config(session, id, value, WAIT))
+                given(self.caller.set_config(session, id, value, wait))
                     .map_err(call_error("set_config"))
             }
             CallOp::SetOption { kind, value } => {
-                given(self.caller.set_option(session, *kind, value, WAIT))
+                given(self.caller.set_option(session, *kind, value, wait))
                     .map_err(call_error("set_option"))
             }
             CallOp::Resolve {
@@ -345,9 +472,9 @@ impl AdapterCall {
                 scope,
             } => given(
                 self.caller
-                    .resolve_approval_scoped(session, approval, *approved, *scope, WAIT),
+                    .resolve_approval_scoped(session, approval, *approved, *scope, wait),
             )
-            .map_err(|e| SupervisorError::Approval(e.to_string())),
+            .map_err(client_call_error(&self.kind, "approval", wait)),
         }
     }
 }
@@ -385,13 +512,22 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
-    /// #1150: an adapter was not given a prompt (it did not answer in time, it exited, or it answered with an error); the text is for
-    /// logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the reference
-    /// `agent.prompt` (no stable code says this yet).
+    /// #1150: an adapter was not given a prompt (it exited, or it answered with an error without a reason the node passes on); the
+    /// text is for logs only. Not a failed start: the node's log says a prompt failed, and the caller gets `internal` with the
+    /// reference `agent.prompt`. ADR-0110: no answer in time is [`Self::NoAnswer`], `adapter.agent_exited` is [`Self::Adapter`].
     Prompt(String),
-    /// #1150: an adapter was not given the answer to one of its approval requests (it did not answer in time, it exited, or it
-    /// answered with an error); the text is for logs only. The caller gets `internal` with the reference `approval.resolve`.
+    /// #1150: an adapter was not given the answer to one of its approval requests (as for [`Self::Prompt`]); the text is for logs
+    /// only. The caller gets `internal` with the reference `approval.resolve`.
     Approval(String),
+    /// ADR-0110: the adapter of an agent of `kind` did not answer a call made for a client (`call`: `prompt` or `approval`) within
+    /// `waited_ms`. The caller gets `adapter.no_answer`. `given` (security review of PR #1190, B1): the request was written to the
+    /// adapter, which may act on it; false when its input was full ([`HostError::Busy`]), so it was never given (`waited_ms` 0).
+    NoAnswer {
+        kind: String,
+        call: &'static str,
+        waited_ms: u64,
+        given: bool,
+    },
     /// #1150: a cancel or a switch (`call`: `cancel`, `set_config`, `set_option`) failed without one of the adapter's stable reasons;
     /// the text is for logs only. The node's log names the call; the caller gets `internal`, as before.
     AdapterCall(&'static str, String),
@@ -485,6 +621,22 @@ impl SupervisorError {
             Self::Approval(text) => {
                 eprintln!("agent approval answer failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "approval.resolve")
+            }
+            Self::NoAnswer {
+                kind,
+                call,
+                waited_ms,
+                ..
+            } => {
+                // The node's log names the call, as for the failures above.
+                eprintln!(
+                    "agent {} failed: the adapter did not answer in {waited_ms} ms",
+                    call_name(call)
+                );
+                Error::new(ErrorCode::AdapterNoAnswer)
+                    .with("kind", kind.as_str())
+                    .with("call", *call)
+                    .with("waited_ms", i64::try_from(*waited_ms).unwrap_or(i64::MAX))
             }
             Self::AdapterCall(call, text) => {
                 eprintln!("agent {call} failed: {text:?}");
@@ -691,8 +843,20 @@ struct Queued {
     tag: u64,
 }
 
-/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, sent, generation)`, written by the threads that made them.
-type SentResults = Arc<Mutex<Vec<(AgentId, u64, bool, u64)>>>;
+/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, outcome, generation)`, written by the threads that made them.
+type SentResults = Arc<Mutex<Vec<(AgentId, u64, SendOutcome, u64)>>>;
+
+/// How the send of a queued prompt ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendOutcome {
+    Sent,
+    NotSent,
+    /// ADR-0110: its adapter did not answer within the wait; it may hold the prompt.
+    NoAnswer {
+        kind: String,
+        waited_ms: u64,
+    },
+}
 
 /// ADR-0090: how long an adapter that reports `idle` but never `working` may take before its `idle` counts as the end of the turn
 /// (an `idle` sooner than this after a prompt is the stray one of the turn before).
@@ -932,6 +1096,28 @@ impl AdapterEntry {
         self.capabilities.iter().any(|c| c == "approval_scopes")
     }
 
+    /// ADR-0111: the places the adapter reported it cut an item's text, kept only when it declared `chat.cuts` (an adapter without
+    /// it is read as before ADR-0111). Ignored entries are logged once per agent: a stable code and the count, never the text.
+    /// Takes the fields it reads (`capabilities`, `cuts_logged`) apart, so it can run while the adapter is borrowed.
+    fn reported_cuts(
+        capabilities: &[String],
+        cuts_logged: &mut bool,
+        id: &AgentId,
+        cuts: Vec<ReportedCut>,
+        ignored: usize,
+    ) -> Vec<ReportedCut> {
+        if !capabilities.iter().any(|c| c == CHAT_CUTS) {
+            return Vec::new();
+        }
+        if ignored > 0 && !std::mem::replace(cuts_logged, true) {
+            eprintln!(
+                "adapter.cuts_ignored: agent={} ignored={ignored}",
+                id.as_str()
+            );
+        }
+        cuts
+    }
+
     /// ADR-0101: the process runs the node's ACP bridge (`<agora> acp-bridge -- <agent>`, [`Manifest::driver`]). Read from the command
     /// it was started with, since every adapter agent's `agent.level` is `L3Adapter`.
     fn behind_acp_bridge(&self) -> bool {
@@ -960,6 +1146,8 @@ struct AdapterEntry {
     options: SessionOptions,
     /// ADR-0090: what the adapter reports beyond modes and models, and the prompts waiting behind its turn.
     rich: AdapterRich,
+    /// ADR-0111: the node's log already says this agent's adapter sent `cuts` entries that were ignored (said once per agent).
+    cuts_logged: bool,
     /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
     /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
     mesh: Option<agora_adapters::inject::Endpoint>,
@@ -1032,6 +1220,9 @@ pub struct Supervisor {
     registry: crate::manifests::RegistryPolicy,
     /// The kinds registered from the ACP registry's converted manifests (by origin, not by name).
     registry_kinds: BTreeSet<String>,
+    /// #1150: the folder below which a registry kind that starts through a package runner gets an empty working folder of its own
+    /// (`runner_folder`); set by the node (`<data>/runner`). `None` refuses such a start.
+    runner_root: Option<PathBuf>,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
     /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
@@ -1058,6 +1249,7 @@ impl Supervisor {
             skip_permissions: SkipPermissions::default(),
             registry: crate::manifests::RegistryPolicy::default(),
             registry_kinds: BTreeSet::new(),
+            runner_root: None,
             holder: None,
             kept_launch: BTreeSet::new(),
         }
@@ -1323,6 +1515,52 @@ impl Supervisor {
     /// ADR-0092 (#1133): the owner's `agents.registry` policy (from the node's policy file; the default offers them all).
     pub fn set_registry_policy(&mut self, policy: crate::manifests::RegistryPolicy) {
         self.registry = policy;
+    }
+
+    /// #1150: where registry kinds that start through a package runner get their empty working folders (the node's `<data>/runner`).
+    pub fn set_runner_root(&mut self, root: PathBuf) {
+        self.runner_root = Some(std::path::absolute(&root).unwrap_or(root));
+    }
+
+    /// #1150 (ADR-0092): the folder the package runner of `kind` is started in, for an ACP registry kind (by origin) that starts
+    /// through one (`npx`, `uvx`: [`crate::manifests::fetches_at_start`]); `None` for every other kind, which starts in its worktree
+    /// as before. A runner reads package-manager configuration from the folder it starts in and the folders above it (a project's
+    /// `.npmrc`, `package.json` and `node_modules`; uv's `uv.toml`, `pyproject.toml` and `.python-version`), which could change what
+    /// the pinned package resolves to; from this folder (inside the node's data folder) it reads only the owner's own user and global
+    /// configuration. The agent still works in its worktree: ACP gives it the session's folder (`cwd`), which an agent must use
+    /// wherever its process was started. Every start gets a new folder ([`crate::runner_folders::new_folder`]); the agent's earlier
+    /// ones are removed on another thread, bounded, outside this lock ([`crate::runner_folders::remove_in_background`]). Only a kind
+    /// run behind the ACP bridge (no `[adapter]` of its own) and an agent with a plain id are started this way; anything else is
+    /// refused.
+    fn runner_folder(&self, kind: &str, id: &AgentId) -> Result<Option<PathBuf>, SupervisorError> {
+        let Some(k) = self.kinds.get(kind) else {
+            return Ok(None);
+        };
+        if !(self.registry_kinds.contains(kind) && crate::manifests::fetches_at_start(&k.manifest))
+        {
+            return Ok(None);
+        }
+        if k.manifest.adapter.is_some() {
+            return Err(SupervisorError::Spawn(
+                "a package runner of a registry kind runs only behind the ACP bridge".into(),
+            ));
+        }
+        if !crate::transcript::plain_id(id.as_str()) {
+            return Err(SupervisorError::Spawn(
+                "package runner folder: not a plain agent id".into(),
+            ));
+        }
+        let root = self
+            .runner_root
+            .as_ref()
+            .ok_or_else(|| SupervisorError::Spawn("no folder for package runners".into()))?;
+        let dir = crate::runner_folders::new_folder(root, id.as_str())
+            .map_err(|e| SupervisorError::Spawn(format!("package runner folder: {e}")))?;
+        if let Some(name) = dir.file_name() {
+            let earlier = crate::runner_folders::earlier_folders(root, id.as_str(), name);
+            crate::runner_folders::remove_in_background(root.clone(), earlier);
+        }
+        Ok(Some(dir))
     }
 
     /// #1133: whether a start of `kind` must be signed by a person's device: a kind from the ACP registry started through a package
@@ -2082,6 +2320,7 @@ impl Supervisor {
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|(profile, file)| {
+                    let runner = self.runner_folder(&req.kind, &id)?;
                     launch_adapter(
                         &id,
                         self.holder.as_ref(),
@@ -2094,6 +2333,7 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                         file,
+                        runner.as_deref(),
                         self.sandbox.enforceable(),
                     )
                 })
@@ -2133,6 +2373,7 @@ impl Supervisor {
                     capabilities,
                     options: SessionOptions::default(),
                     rich: AdapterRich::default(),
+                    cuts_logged: false,
                     mesh,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
@@ -2348,6 +2589,7 @@ impl Supervisor {
         let result = self
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
             .and_then(|(profile, file)| {
+                let runner = self.runner_folder(&req.kind, &id)?;
                 launch_adapter(
                     &id,
                     self.holder.as_ref(),
@@ -2360,6 +2602,7 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                     file,
+                    runner.as_deref(),
                     self.sandbox.enforceable(),
                 )
             })
@@ -2397,6 +2640,7 @@ impl Supervisor {
                 capabilities,
                 options: SessionOptions::default(),
                 rich: AdapterRich::default(),
+                cuts_logged: false,
                 mesh,
                 launch,
                 folder: None,
@@ -2425,27 +2669,33 @@ impl Supervisor {
         }
         let sent = Arc::clone(&self.sent);
         // ADR-0090: a queued prompt that could not be sent is dropped (its entry says so) and the next one goes.
-        let done: Vec<(AgentId, u64, bool, u64)> =
+        let done: Vec<(AgentId, u64, SendOutcome, u64)> =
             std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()));
-        for (id, tag, ok, generation) in done {
-            // Each tag is reported once, when its send ended: sent, or not (its entry then leaves with a notice).
-            match self.adapters.get_mut(&id) {
-                Some(e) => {
-                    let (was_sent, next) = e.rich.send_result(ok, generation, now);
-                    events.push(SupervisorEvent::PromptDequeued {
-                        agent: id.clone(),
-                        tag,
-                        sent: was_sent,
-                    });
-                    if let Some(next) = next.filter(|_| !letting_go) {
-                        begin_send(e, &id, next, &sent, events);
-                    }
-                }
-                None => events.push(SupervisorEvent::PromptDequeued {
+        for (id, tag, outcome, generation) in done {
+            // Each tag is reported once, when its send ended: sent, or not (its entry then leaves with a notice), or not confirmed
+            // (ADR-0110: its entry stays, marked).
+            let ok = outcome == SendOutcome::Sent;
+            let (was_sent, next) = match self.adapters.get_mut(&id) {
+                Some(e) => e.rich.send_result(ok, generation, now),
+                None => (ok, None),
+            };
+            events.push(match outcome {
+                SendOutcome::NoAnswer { kind, waited_ms } => SupervisorEvent::PromptUnconfirmed {
                     agent: id.clone(),
                     tag,
-                    sent: ok,
-                }),
+                    kind,
+                    waited_ms,
+                },
+                _ => SupervisorEvent::PromptDequeued {
+                    agent: id.clone(),
+                    tag,
+                    sent: was_sent,
+                },
+            });
+            if let (Some(next), Some(e)) =
+                (next.filter(|_| !letting_go), self.adapters.get_mut(&id))
+            {
+                begin_send(e, &id, next, &sent, events);
             }
         }
         for (id, e) in &mut self.adapters {
@@ -2474,7 +2724,21 @@ impl Supervisor {
                     let mut rest = Vec::new();
                     for ev in early {
                         match ev {
-                            AdapterEvent::Chat { item, .. } => items.push(item),
+                            AdapterEvent::Chat {
+                                item,
+                                cuts,
+                                cuts_ignored,
+                                ..
+                            } => items.push((
+                                item,
+                                AdapterEntry::reported_cuts(
+                                    &e.capabilities,
+                                    &mut e.cuts_logged,
+                                    id,
+                                    cuts,
+                                    cuts_ignored,
+                                ),
+                            )),
                             other => rest.push(other),
                         }
                     }
@@ -2589,6 +2853,29 @@ impl Supervisor {
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
                         schedule_adapter_restart(id, e, now, &policy, status, events);
                     }
+                    AdapterEvent::Chat {
+                        session_id,
+                        item,
+                        cuts,
+                        cuts_ignored,
+                    } => {
+                        let cuts = AdapterEntry::reported_cuts(
+                            &e.capabilities,
+                            &mut e.cuts_logged,
+                            id,
+                            cuts,
+                            cuts_ignored,
+                        );
+                        events.push(SupervisorEvent::Adapter {
+                            agent: id.clone(),
+                            event: AdapterEvent::Chat {
+                                session_id,
+                                item,
+                                cuts,
+                                cuts_ignored,
+                            },
+                        });
+                    }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
                         event: other,
@@ -2628,6 +2915,13 @@ impl Supervisor {
             .get(id)
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
+        // #1150: a new folder for this start, as at the first (the one the process that ended used is removed off this thread).
+        let runner = self
+            .adapters
+            .get(id)
+            .map(|e| self.runner_folder(&e.agent.kind, id))
+            .transpose()
+            .map(Option::flatten);
         let holder = self.holder.clone();
         let kept_launch = self.kept_launch.contains(id);
         let enforceable = self.sandbox.enforceable();
@@ -2643,6 +2937,7 @@ impl Supervisor {
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
             let (profile, file) = profile?;
+            let runner = runner?;
             launch_adapter(
                 id,
                 holder.as_ref(),
@@ -2655,6 +2950,7 @@ impl Supervisor {
                 creds,
                 held.as_ref(),
                 file,
+                runner.as_deref(),
                 enforceable,
             )
         });
@@ -2702,6 +2998,7 @@ impl Supervisor {
                 .as_ref()
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?
                 .caller(),
+            kind: e.agent.kind.clone(),
             session: e.session_id.clone(),
             op,
             generation: e.rich.generation,
@@ -3905,6 +4202,7 @@ impl Supervisor {
                     capabilities: Vec::new(),
                     options: SessionOptions::default(),
                     rich: AdapterRich::default(),
+                    cuts_logged: false,
                     mesh: None,
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),
@@ -4047,6 +4345,7 @@ impl Supervisor {
                 Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
                 None => (None, None),
             };
+            let runner = self.runner_folder(&entry.agent.kind, id)?;
             let native = entry.agent.session.is_some();
             // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
             let mesh = self.adapter_mesh(
@@ -4067,6 +4366,7 @@ impl Supervisor {
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
                 git_config,
+                runner.as_deref(),
                 self.sandbox.enforceable(),
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
@@ -4644,19 +4944,20 @@ fn begin_send(
         .as_ref()
         .filter(|_| e.running)
         .map(Adapter::caller);
-    let push = |results: &SentResults, ok: bool| {
+    let push = |results: &SentResults, outcome: SendOutcome| {
         results.lock().unwrap_or_else(|e| e.into_inner()).push((
             id.clone(),
             next.tag,
-            ok,
+            outcome,
             generation,
         ));
     };
     let Some(caller) = caller else {
-        return push(sent, false);
+        return push(sent, SendOutcome::NotSent);
     };
     let call = AdapterCall {
         caller,
+        kind: e.agent.kind.clone(),
         session: e.session_id.clone(),
         op: CallOp::Prompt {
             text: next.text.clone(),
@@ -4669,20 +4970,29 @@ fn begin_send(
     let spawned = std::thread::Builder::new()
         .name("agora-queued-prompt".into())
         .spawn(move || {
-            let ok = match call.run() {
-                Ok(()) => true,
+            let outcome = match call.run() {
+                Ok(()) => SendOutcome::Sent,
                 Err(e) => {
                     log_call_failure("prompt", &agent, &e);
-                    false
+                    match e {
+                        // B1: only a prompt that was given may be held by the adapter.
+                        SupervisorError::NoAnswer {
+                            kind,
+                            waited_ms,
+                            given: true,
+                            ..
+                        } => SendOutcome::NoAnswer { kind, waited_ms },
+                        _ => SendOutcome::NotSent,
+                    }
                 }
             };
             results
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((agent, tag, ok, generation));
+                .push((agent, tag, outcome, generation));
         });
     if spawned.is_err() {
-        push(sent, false);
+        push(sent, SendOutcome::NotSent);
     }
 }
 
@@ -4696,6 +5006,10 @@ pub(crate) fn log_call_failure(what: &str, agent: &AgentId, e: &SupervisorError)
         | SupervisorError::AdapterCall(_, cause) => {
             eprintln!("agent {what} failed: {}: {cause:?}", agent.as_str())
         }
+        SupervisorError::NoAnswer { waited_ms, .. } => eprintln!(
+            "agent {what} failed: {}: the adapter did not answer in {waited_ms} ms",
+            agent.as_str()
+        ),
         other => eprintln!("agent {what} failed: {}: {other:?}", agent.as_str()),
     }
 }
@@ -4801,14 +5115,68 @@ fn call_error(call: &'static str) -> impl Fn(HostError) -> SupervisorError {
     move |e| adapter_reason(e).unwrap_or_else(|e| SupervisorError::AdapterCall(call, e.to_string()))
 }
 
+/// ADR-0110: the error of a call made for a client (`call`: `prompt` or `approval`) that the adapter did not take. No answer within
+/// `wait` is [`SupervisorError::NoAnswer`]; `adapter.agent_exited` is passed on with its parameters, as for a start; anything else
+/// is internal with the call's reference (#1150).
+fn client_call_error<'a>(
+    kind: &'a str,
+    call: &'static str,
+    wait: Duration,
+) -> impl Fn(HostError) -> SupervisorError + 'a {
+    move |e| match e {
+        HostError::Timeout => SupervisorError::NoAnswer {
+            kind: kind.to_string(),
+            call,
+            waited_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            given: true,
+        },
+        // Security review of PR #1190, B1: the adapter's input is full, so the request was never written; said at once.
+        HostError::Busy => SupervisorError::NoAnswer {
+            kind: kind.to_string(),
+            call,
+            waited_ms: 0,
+            given: false,
+        },
+        e => {
+            reason_among(e, &[agora_protocol::ErrorCode::AdapterAgentExited]).unwrap_or_else(|e| {
+                if call == "prompt" {
+                    SupervisorError::Prompt(e.to_string())
+                } else {
+                    SupervisorError::Approval(e.to_string())
+                }
+            })
+        }
+    }
+}
+
+/// The node's log name of a client call ([`SupervisorError::NoAnswer`]), as its other lines about these calls say it.
+fn call_name(call: &str) -> &'static str {
+    if call == "prompt" {
+        "prompt"
+    } else {
+        "approval answer"
+    }
+}
+
 /// One of the stable reasons the node passes on, or the error itself when it has none.
 fn adapter_reason(e: HostError) -> Result<SupervisorError, HostError> {
-    if let Some((code, params)) = e.reason() {
-        let known = [
+    reason_among(
+        e,
+        &[
             agora_protocol::ErrorCode::AdapterAgentExited,
             agora_protocol::ErrorCode::AdapterAgentRefused,
             agora_protocol::ErrorCode::AdapterOptionRefused,
-        ];
+        ],
+    )
+}
+
+/// The adapter's reason when it is one of `known` (with only that code's parameters, as strings cut at [`REASON_PARAM_MAX`]), or
+/// the error itself.
+fn reason_among(
+    e: HostError,
+    known: &[agora_protocol::ErrorCode],
+) -> Result<SupervisorError, HostError> {
+    if let Some((code, params)) = e.reason() {
         if let Some(c) = known.iter().find(|c| c.as_str() == code) {
             let code = match c {
                 agora_protocol::ErrorCode::AdapterAgentExited => "adapter.agent_exited",
@@ -4924,12 +5292,41 @@ fn launch_adapter(
     credentials: Vec<(String, String)>,
     folder: Option<&agora_platform::HeldFolder>,
     git_config: Option<crate::gitconfig::LaunchFile>,
+    runner: Option<&Path>,
     enforceable: bool,
 ) -> Result<Launched, SupervisorError> {
     let (program, args) = spec
         .command
         .split_first()
         .ok_or_else(|| SupervisorError::Spawn("empty adapter command".into()))?;
+    let mut args = args.to_vec();
+    // #1150: a registry kind's package runner starts in its own empty folder (`Supervisor::runner_folder`), never in the worktree;
+    // the bridge stays in the worktree and tells the agent its session's folder. Only the ACP bridge can do that: a registry kind
+    // whose runner is its own adapter command (the conversion never writes one) is not started.
+    if let Some(dir) = runner {
+        let dir_text = dir
+            .to_str()
+            .ok_or_else(|| SupervisorError::Spawn("package runner folder is not UTF-8".into()))?;
+        if Path::new(program) != bridge_program()
+            || args.first().map(String::as_str) != Some("acp-bridge")
+        {
+            return Err(SupervisorError::Spawn(
+                "a package runner of a registry kind runs only behind the ACP bridge".into(),
+            ));
+        }
+        args.splice(
+            1..1,
+            [
+                agora_adapters::acp::RUNNER_CWD_FLAG.to_string(),
+                dir_text.to_string(),
+            ],
+        );
+        // Confined: the folder is opened as the worktree is (on macOS it lies below the node's closed home, `reopen`).
+        if let Some(profile) = &mut sandbox {
+            profile.write.push(dir.to_path_buf());
+            profile.reopen.push(dir.to_path_buf());
+        }
+    }
     let mut env: Vec<(String, String)> = spec
         .env
         .iter()
@@ -4956,7 +5353,7 @@ fn launch_adapter(
     }
     let config = AdapterConfig {
         program: program.into(),
-        args: args.to_vec(),
+        args,
         env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,
@@ -6576,6 +6973,66 @@ mod adapter_option_tests {
             adapter_error(HostError::Timeout).to_protocol().code,
             ErrorCode::Internal
         );
+    }
+
+    /// ADR-0110: a prompt or an approval answer the adapter did not answer in time is `adapter.no_answer`; `adapter.agent_exited` is
+    /// passed on (any stage, bounded as for a start); every other failure, a known reason of a start or a switch included, stays
+    /// internal with the call's reference.
+    #[test]
+    fn a_client_call_the_adapter_did_not_take_is_no_answer_an_exit_or_internal() {
+        let wait = Duration::from_millis(1500);
+        let e = client_call_error("k", "approval", wait)(HostError::Timeout).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterNoAnswer);
+        let want: std::collections::BTreeMap<String, agora_protocol::ParamValue> = [
+            ("call", agora_protocol::ParamValue::Str("approval".into())),
+            ("kind", agora_protocol::ParamValue::Str("k".into())),
+            ("waited_ms", agora_protocol::ParamValue::Int(1500)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(e.params, want);
+        let exited = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "adapter.agent_exited",
+                "params": {"stage": "turn", "stderr_tail": "é".repeat(400), "extra": "no"}})),
+        };
+        let e = client_call_error("k", "prompt", wait)(exited).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterAgentExited);
+        let s = |k: &str| match e.params.get(k) {
+            Some(agora_protocol::ParamValue::Str(s)) => s.clone(),
+            other => panic!("{k}: {other:?}"),
+        };
+        assert_eq!(
+            (s("stage").as_str(), s("exit_code").as_str()),
+            ("turn", "?")
+        );
+        // Cut at a character boundary at most 600 bytes in.
+        assert_eq!(s("stderr_tail").len(), REASON_PARAM_MAX);
+        assert_eq!(e.params.len(), 3);
+        for (call, incident) in [("prompt", "agent.prompt"), ("approval", "approval.resolve")] {
+            let refused = HostError::Rpc {
+                code: -32000,
+                data: Some(
+                    serde_json::json!({"code": "adapter.agent_refused", "params": {"stage": "session"}}),
+                ),
+            };
+            for failure in [
+                HostError::Exited,
+                HostError::Rpc {
+                    code: -32000,
+                    data: None,
+                },
+                refused,
+            ] {
+                let e = client_call_error("k", call, wait)(failure).to_protocol();
+                assert_eq!(e.code, ErrorCode::Internal);
+                assert_eq!(
+                    e.params.get("incident_id"),
+                    Some(&agora_protocol::ParamValue::Str(incident.into()))
+                );
+            }
+        }
     }
 
     /// #1150: a cancel or a switch that fails without a stable reason is a failed call of that name, never a failed start (whose

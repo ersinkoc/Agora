@@ -98,10 +98,17 @@ files-outside_root = { $path } proje klasörünün dışında.
 files-secret = { $path } gizli bir dosya ve gösterilmez.
 adapter-signature_invalid = { $package } paketi doğrulanamadı.
 adapter-crashed = { $kind } beklenmedik şekilde durdu (çıkış kodu { $exit_code }).
-adapter-agent_exited = Ajan hazır olmadan kapandı (adım { $stage }, çıkış kodu { $exit_code }). Son çıktısı: { $stderr_tail }
+adapter-agent_exited = { $stage ->
+        [turn] Ajan çalışırken kapandı (çıkış kodu { $exit_code }). Yeniden başlatın. Son çıktısı: { $stderr_tail }
+       *[other] Ajan hazır olmadan kapandı (adım { $stage }, çıkış kodu { $exit_code }). Yeniden başlatın. Son çıktısı: { $stderr_tail }
+    }
 adapter-agent_refused = Ajan başlamayı reddetti (adım { $stage }).
 adapter-option_refused = Ajan { $id } seçeneğine geçmedi.
 adapter-permission_unanswerable = Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi.
+adapter-no_answer = { $call ->
+        [approval] { $kind } yanıtınızı { $waited_ms } ms içinde almadı. İstek hâlâ açık: biraz bekleyip yeniden yanıtlayın.
+       *[prompt] { $kind } isteğinizi { $waited_ms } ms içinde onaylamadı. Biraz bekleyin; bir şey olmazsa yeniden gönderin.
+    }
 pair-closed = Bu hub şu anda yeni makine kabul etmiyor.
 pair-limit = Çok fazla eşleştirme denemesi. { $seconds } saniye sonra yeniden deneyin.
 pair-expired = Eşleştirme çok uzun sürdü ve iptal edildi.

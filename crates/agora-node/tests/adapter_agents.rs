@@ -8,15 +8,19 @@ mod private_home;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agora_adapters::host::{AdapterEvent, ChatItem};
+use agora_adapters::host::{AdapterEvent, ChatItem, CutField, ReportedCut};
 use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
+use agora_node::chat::ChatBoard;
+use agora_node::credentials::{Secret, SecretStore};
 use agora_node::supervisor::{
     NodeLimits, RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorEvent,
 };
 use agora_node::terminal::TerminalOptions;
+use agora_node::transcript::{Limits, Store};
 
 fn fake_agent() -> String {
     let mut p = std::env::current_exe().expect("exe");
@@ -263,16 +267,132 @@ fn a_hung_adapter_stalls_only_its_own_call_not_the_supervisor() {
     let Err(e) = failed else {
         panic!("the hung prompt was answered: {failed:?}")
     };
-    assert!(
-        matches!(e, agora_node::supervisor::SupervisorError::Prompt(_)),
+    // ADR-0110: the caller is told the adapter did not take the prompt in time (`adapter.no_answer`), never `internal`.
+    no_answer(&e, "prompt");
+}
+
+/// ADR-0110: `e` is the stable answer to a call the adapter did not answer within the node's 10 s wait.
+fn no_answer(e: &agora_node::supervisor::SupervisorError, call: &str) {
+    use agora_protocol::ParamValue;
+    let answer = e.to_protocol();
+    assert_eq!(
+        answer.code,
+        agora_protocol::ErrorCode::AdapterNoAnswer,
         "{e:?}"
     );
+    let want = [
+        ("call".to_string(), ParamValue::Str(call.into())),
+        ("kind".to_string(), ParamValue::Str("fake-adapter".into())),
+        ("waited_ms".to_string(), ParamValue::Int(10_000)),
+    ];
+    assert_eq!(answer.params, want.into_iter().collect(), "{e:?}");
+}
+
+/// ADR-0110: `e` passes on the adapter's `adapter.agent_exited` (from `agora-fake-agent --adapter`'s `prompt-exited` and
+/// `ask-exited`) with only that code's parameters, as strings cut at 600 bytes, as a failed start does.
+fn passed_on_exit(e: &agora_node::supervisor::SupervisorError) {
+    use agora_protocol::ParamValue;
     let answer = e.to_protocol();
-    assert_eq!(answer.code, agora_protocol::ErrorCode::Internal);
+    assert_eq!(
+        answer.code,
+        agora_protocol::ErrorCode::AdapterAgentExited,
+        "{e:?}"
+    );
+    let want = [
+        ("exit_code".to_string(), ParamValue::Str("3".into())),
+        ("stage".to_string(), ParamValue::Str("turn".into())),
+        ("stderr_tail".to_string(), ParamValue::Str("x".repeat(600))),
+    ];
+    assert_eq!(answer.params, want.into_iter().collect(), "{e:?}");
+}
+
+/// `e` is still `internal`, with the reference that names the call (#1150).
+fn still_internal(e: &agora_node::supervisor::SupervisorError, incident: &str) {
+    let answer = e.to_protocol();
+    assert_eq!(answer.code, agora_protocol::ErrorCode::Internal, "{e:?}");
     assert_eq!(
         answer.params.get("incident_id"),
-        Some(&agora_protocol::ParamValue::Str("agent.prompt".into()))
+        Some(&agora_protocol::ParamValue::Str(incident.into()))
     );
+}
+
+#[test]
+fn a_prompt_the_adapter_refuses_because_its_agent_exited_is_passed_on() {
+    let e = env("prompt-exited");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "pe");
+    until(&mut s, state_is(AgentState::Idle));
+    let err = s
+        .adapter_prompt(&id, "prompt-exited", false)
+        .expect_err("the adapter refused the prompt");
+    passed_on_exit(&err);
+}
+
+#[test]
+fn a_prompt_the_adapter_refuses_without_a_stable_reason_stays_internal() {
+    let e = env("prompt-error");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "pr");
+    until(&mut s, state_is(AgentState::Idle));
+    let err = s
+        .adapter_prompt(&id, "prompt-error", false)
+        .expect_err("the adapter refused the prompt");
+    still_internal(&err, "agent.prompt");
+}
+
+/// Starts an adapter agent and sends it `prompt` (one of the fake adapter's `ask` prompts), then waits for its request `ap-1`.
+fn asking(name: &str, prompt: &str) -> (Env, Supervisor, AgentId) {
+    let e = env(name);
+    let mut s = supervisor();
+    let id = start(&mut s, &e, name);
+    until(&mut s, state_is(AgentState::Idle));
+    s.adapter_prompt(&id, prompt, false).unwrap();
+    let ev = until(&mut s, |e| {
+        matches!(
+            e,
+            SupervisorEvent::Adapter {
+                event: AdapterEvent::ApprovalRequest { .. },
+                ..
+            }
+        )
+    });
+    assert!(
+        matches!(ev.last(), Some(SupervisorEvent::Adapter { event: AdapterEvent::ApprovalRequest { approval_id, .. }, .. }) if approval_id == "ap-1")
+    );
+    (e, s, id)
+}
+
+#[test]
+fn an_approval_answer_the_adapter_does_not_take_in_time_is_no_answer() {
+    let (_e, s, id) = asking("ask-hang", "ask-hang");
+    let asked = Instant::now();
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter did not take the answer");
+    assert!(
+        asked.elapsed() >= Duration::from_secs(9),
+        "the call ended before its timeout: {:?}",
+        asked.elapsed()
+    );
+    no_answer(&err, "approval");
+}
+
+#[test]
+fn an_approval_answer_the_adapter_refuses_because_its_agent_exited_is_passed_on() {
+    let (_e, s, id) = asking("ask-exited", "ask-exited");
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter refused the answer");
+    passed_on_exit(&err);
+}
+
+#[test]
+fn an_approval_answer_the_adapter_refuses_without_a_stable_reason_stays_internal() {
+    let (_e, s, id) = asking("ask-error", "ask-error");
+    let err = s
+        .adapter_resolve_approval(&id, "ap-1", true)
+        .expect_err("the adapter refused the answer");
+    still_internal(&err, "approval.resolve");
 }
 
 #[test]
@@ -709,4 +829,131 @@ fn only_an_adapter_taken_up_from_the_holder_loses_its_launch_options_at_a_crash_
     // The agent started here is untouched by the other's restart.
     assert_eq!(launch_of(&s, &own), (vec!["skip".to_string()], true));
     let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+/// ADR-0111: a supervisor whose fake adapter declares `chat.cuts` (`--cuts`) or not.
+fn supervisor_cuts(declare: bool) -> Supervisor {
+    let mut s = Supervisor::new(SupervisorConfig {
+        node: NodeId::new("node-1"),
+        restart: RestartPolicy {
+            max_restarts: 0,
+            ..RestartPolicy::default()
+        },
+        terminal: TerminalOptions::default(),
+        limits: NodeLimits::default(),
+    });
+    let extra = if declare { ", \"--cuts\"" } else { "" };
+    s.register(
+        Manifest::parse(&format!(
+            "kind = \"fake-adapter\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"{extra}]\n",
+            fake_agent()
+        ))
+        .unwrap(),
+    );
+    s
+}
+
+/// ADR-0111: a value the adapter cut in the middle (letters only, so nothing else the file holds matches a piece of it).
+const CUT_VALUE: &str = "sk-CUTS-qwertyuiopASDFGHJKLzxcvbnmPOIUYT";
+
+/// The pieces of `v` of 4 bytes from each character (finding none finds no longer one).
+fn pieces_of(v: &str) -> Vec<&str> {
+    (0..v.len().saturating_sub(3))
+        .filter(|&i| v.is_char_boundary(i) && v.is_char_boundary(i + 4))
+        .map(|i| &v[i..i + 4])
+        .collect()
+}
+
+/// The adapter's tool call for `prompt` (`cut:` or `cut-unreported:`), with the places the supervisor passed on; and what a window
+/// following the agent and the saved transcript hold of [`CUT_VALUE`] once the node keeps it.
+fn cut_through_node(name: &str, declare: bool, prompt: &str) -> (Vec<ReportedCut>, Option<String>) {
+    let e = env(name);
+    let mut s = supervisor_cuts(declare);
+    let id = start(&mut s, &e, name);
+    settle(&mut s, &id, AgentState::Idle);
+    s.adapter_prompt(
+        &id,
+        &format!("{prompt}the key is {CUT_VALUE} and more words"),
+        false,
+    )
+    .unwrap();
+    let mut got = None;
+    until(&mut s, |ev| match ev {
+        SupervisorEvent::Adapter {
+            event:
+                AdapterEvent::Chat {
+                    item: item @ ChatItem::Tool(_),
+                    cuts,
+                    ..
+                },
+            ..
+        } => {
+            got = Some((item.clone(), cuts.clone()));
+            true
+        }
+        _ => false,
+    });
+    let (item, cuts) = got.unwrap();
+    // The node keeps it as the daemon does (`chat_event`), with the value in its secret store.
+    let data = e.dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    SecretStore::in_data(&data)
+        .set("TOKEN", &Secret::new(CUT_VALUE).unwrap())
+        .unwrap();
+    let store = Arc::new(Store::new(
+        &data,
+        Limits::default(),
+        Some(SecretStore::in_data(&data)),
+    ));
+    let board = ChatBoard::saving(Arc::clone(&store));
+    let (_, sub) = board.follow(&id);
+    board.push_item_cut(&id, &item, &cuts, 1);
+    for batch in board.take_unsaved() {
+        store.write(&batch).unwrap();
+    }
+    let mut seen = Vec::new();
+    while let Ok(entry) = sub.recv_timeout(Duration::from_millis(200)) {
+        seen.push(entry.output);
+    }
+    seen.extend(
+        store
+            .read(id.as_str())
+            .entries
+            .into_iter()
+            .map(|(e, _)| e.output),
+    );
+    assert!(
+        seen.iter().any(|o| o.ends_with("and more words")),
+        "{seen:?}"
+    );
+    let leak = pieces_of(CUT_VALUE)
+        .into_iter()
+        .find(|p| seen.iter().any(|o| o.contains(p)))
+        .map(|p| format!("{p:?} in {seen:?}"));
+    let _ = s.stop(&id);
+    let _ = std::fs::remove_dir_all(&e.dir);
+    (cuts, leak)
+}
+
+/// ADR-0111: the fake adapter cuts a held value in the middle of a tool's output and reports the cut: the node keeps the place, and
+/// neither what a window is sent nor the saved transcript holds a piece of the value (4 bytes or more).
+#[test]
+fn a_cut_an_adapter_reports_reaches_the_node_and_no_piece_of_the_value_is_kept() {
+    let (cuts, leak) = cut_through_node("cuts-reported", true, "cut:");
+    assert_eq!(cuts.len(), 1, "{cuts:?}");
+    assert_eq!(cuts[0].field, CutField::Output);
+    assert_eq!(leak, None);
+}
+
+/// ADR-0111: an adapter that did not declare `chat.cuts` is read as before, whatever it sends: its places are not used, and the
+/// value's pieces beside the cut stay (the residual T61 keeps for such adapters). One that declared it but did not report a cut
+/// leaves them too: the contract is the adapter's.
+#[test]
+fn an_adapter_without_the_capability_or_without_the_report_is_read_as_before() {
+    let (cuts, leak) = cut_through_node("cuts-undeclared", false, "cut:");
+    assert!(cuts.is_empty(), "{cuts:?}");
+    assert!(leak.is_some(), "a piece beside an unreported cut");
+    let (cuts, leak) = cut_through_node("cuts-unreported", true, "cut-unreported:");
+    assert!(cuts.is_empty(), "{cuts:?}");
+    assert!(leak.is_some(), "a piece beside an unreported cut");
 }
