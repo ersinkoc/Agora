@@ -142,10 +142,11 @@ the hub lost that start, section 3) and `NodeOffline` on a clean stop; a
 node is silent; `memory_used_bytes` is the resident memory of every running agent's process tree, measured then and every 30 s
 while agents run, and sent again only when it moved by more than a quarter or 256 MiB since the last report); and for each agent `WorktreeCreated`, `AgentStarted`,
 `TerminalOpened` in that order, then `AgentStateChanged` as the screen changes or the agent reports its state, and on the end
-`AgentExited` and `TerminalClosed` (once). `AgentStateChanged.reported` is true only for a state the agent itself gave (its hook or
-mesh report, its ACP bridge, its adapter); a state read from the screen, or one the node sets itself (a start, a stop, an end, a
-crash), is false. A report of the state the screen already showed is sent again with `reported` true. A stop on request reports
-exit code `i32::MIN` (unknown), the same convention as the terminal exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
+`AgentExited` and `TerminalClosed` (once). `AgentStateChanged.reported` is true only for a state the agent itself gave (through
+its ACP bridge or adapter); a state read from the screen, or one the node sets itself (a start, a stop, an end, a crash), is false. A
+report of the state the screen already showed is sent again with `reported` true; a node fact that leaves the state as it was (a
+stop of an agent that said it was done) sends nothing. A stop on request reports exit code `i32::MIN` (unknown), the same
+convention as the terminal exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
 
 Hub-wide ids: ids in events are local to the machine that made them (`agent-1` exists on every node). The hub's view keys
 every entity by `<producer>/<local id>` (`laptop/agent-1`; node ids are limited to `[A-Za-z0-9._-]`, so the split is

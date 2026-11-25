@@ -168,8 +168,8 @@ pub enum SupervisorEvent {
     StateChanged {
         agent: AgentId,
         state: AgentState,
-        /// True when the agent itself said this state (its hook or mesh report, its ACP bridge, its adapter); false when it was read
-        /// from the screen or is the node's own fact about the process (a start, a stop, an end, a crash). `AgentStateChanged.reported`.
+        /// True when the agent itself said this state ([`Supervisor::report_state`], its ACP bridge, its adapter); false when it was
+        /// read from the screen or is the node's own fact about the process (a start, a stop, an end, a crash). `AgentStateChanged.reported`.
         reported: bool,
     },
     Exited {
@@ -5555,7 +5555,7 @@ fn gave_up_status(last: Option<ExitStatus>) -> (ExitStatus, Option<i32>) {
 enum Origin {
     /// Read from the terminal's screen.
     Screen,
-    /// The agent itself said it: its hook or mesh report, its ACP bridge, its adapter.
+    /// The agent itself said it: [`Supervisor::report_state`], its ACP bridge, its adapter.
     Agent,
     /// The node's own fact about the process (a stop, an end, a crash): it outranks the screen as a report does, but the agent did not
     /// say it.
@@ -5580,8 +5580,10 @@ fn set_state(
 
 /// Applies `state` from `origin` to `agent`, whose current state it reported itself when `reported`. A [`SupervisorEvent::StateChanged`]
 /// says so when the state or where it came from changed: the agent's own report of the state the screen already showed is news too.
-/// A screen reading never changes where the state came from: either it is taken (the state was not the agent's own) or it is not.
-/// Returns whether the state changed.
+/// A screen reading never changes where the state came from: either it is taken (the state was not the agent's own) or it is not. A
+/// fact of the node's own that leaves the state as it was (a stop of an agent that said it was done) changes nothing either: the state
+/// is still the agent's word, and a second `Done` or `Blocked` would be news to the hub's notifications. Returns whether the state
+/// changed.
 fn apply_state(
     agent: &mut Agent,
     reported: &mut bool,
@@ -5589,12 +5591,16 @@ fn apply_state(
     origin: Origin,
     events: &mut Vec<SupervisorEvent>,
 ) -> bool {
-    let (source, now) = match origin {
-        Origin::Screen => (StateSource::Screen, *reported),
-        Origin::Agent => (StateSource::Reported, true),
-        Origin::Node => (StateSource::Reported, false),
+    let source = match origin {
+        Origin::Screen => StateSource::Screen,
+        Origin::Agent | Origin::Node => StateSource::Reported,
     };
     let changed = agent.observe(state, source);
+    let now = match origin {
+        Origin::Agent => true,
+        Origin::Node if changed => false,
+        Origin::Screen | Origin::Node => *reported,
+    };
     if changed || now != *reported {
         *reported = now;
         events.push(SupervisorEvent::StateChanged {
@@ -5721,6 +5727,52 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// `AgentStateChanged.reported` follows where the state came from: the agent's own report sets it (also for the state the screen
+    /// already showed), a screen reading never changes it, and a fact of the node's own clears it only when it changes the state.
+    #[test]
+    fn the_reported_flag_follows_where_the_state_came_from() {
+        let mut agent = Agent::new(
+            AgentId::new("agent-1"),
+            agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            NodeId::new("n"),
+            None,
+            "fake",
+            IntegrationLevel::L1Manifest,
+        );
+        let mut reported = false;
+        let mut step = |state, origin| {
+            let mut events = Vec::new();
+            apply_state(&mut agent, &mut reported, state, origin, &mut events);
+            let said = events
+                .into_iter()
+                .map(|e| match e {
+                    SupervisorEvent::StateChanged {
+                        state, reported, ..
+                    } => (state, reported),
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>();
+            (said, reported)
+        };
+        use AgentState::{Blocked, Done, Working};
+        assert_eq!(
+            step(Working, Origin::Screen),
+            (vec![(Working, false)], false)
+        );
+        assert_eq!(step(Working, Origin::Screen), (vec![], false));
+        // The agent says what the screen showed: only where it came from changed.
+        assert_eq!(step(Working, Origin::Agent), (vec![(Working, true)], true));
+        assert_eq!(step(Working, Origin::Agent), (vec![], true));
+        // The screen does not outrank it, and does not take the flag away.
+        assert_eq!(step(Blocked, Origin::Screen), (vec![], true));
+        assert_eq!(step(Done, Origin::Agent).0, [(Done, true)]);
+        // A stop of an agent that said it was done: nothing new, the state is still its word.
+        assert_eq!(step(Done, Origin::Node), (vec![], true));
+        // An end that changes the state is the node's fact.
+        assert_eq!(step(Blocked, Origin::Agent).0, [(Blocked, true)]);
+        assert_eq!(step(Done, Origin::Node), (vec![(Done, false)], false));
+    }
 
     /// #896: an agent given the mesh may read (and so run) the mesh bridge it is told to start, the node's own executable, which may
     /// sit in a folder only the user may open; that file is added to what it may read, not its folder.
