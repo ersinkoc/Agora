@@ -1,6 +1,8 @@
 # 0115. A repository on a case-insensitive host is one project, whatever the case of its URL
-Status: Proposed
+Status: Accepted
 Date: 2026-11-25
+
+Accepted: 2026-11-25 (the maintainer, in the macOS session: "0115 kabul", relayed on comms `log/2026-11-25-1129-macos-0115-accepted.md`, and confirmed in the merger chat: "Yes, accept and build"). The open question was not answered; the proposed answer stands: the four hosts, and no owner-added hosts (a later ADR can add that).
 
 ## Context
 
