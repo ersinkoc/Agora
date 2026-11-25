@@ -208,7 +208,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
   };
 
   // What a pane's panel is given: its pane, its binding (for a panel bound to an agent), the window's read-only state and its actions,
-  // with `rebind` for this pane, and a terminal only for a panel that streams. Frozen: a panel reads it, never changes it.
+  // with `rebind` for this pane, and a terminal only for a panel that streams. Frozen at the top level; `readonly` types keep built-ins from changing what is inside.
   const contextOf = (p: Pane, def: PanelDef, a: AgentTileModel | undefined): PanelContext => {
     const bound = def.binds === 'agent';
     const agent = bound ? a : undefined;

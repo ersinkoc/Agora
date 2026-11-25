@@ -68,7 +68,8 @@ an agent makes a pane `agent`.
   - Binds: `nothing` or `agent` (a key, following attention or following the selection).
   - Order: Show… lists the global panels, then the tools; the chooser lists the tools, then the global panels. The registry
     keeps the order they were registered in.
-- **Inputs:** a drawing is a function of one frozen context:
+- **Inputs:** a drawing is a function of one context, frozen at the top level (TypeScript `readonly` keeps the built-in
+  panels from changing what is inside it):
   - the pane's id and the panel id;
   - its binding and the agent that resolves to now, for a panel bound to an agent only;
   - read-only slices of the window's state (agents, machines, requests, tasks, messages, usage, the time, the link);
@@ -87,6 +88,14 @@ an agent makes a pane `agent`.
   terminal. Only panes on screen are drawn, so only they subscribe (see Performance).
 - **Unknown ids:** an id the registry does not have, or a panel that cannot draw in this window, shows the "unknown panel"
   placeholder under the window's pane bar. An id is registered once: a later panel with a taken id is left out.
+- **Host-set facts:** `kind` (above all `chooser`), `streams`, `lone` and `label` are the window's to set. A plugin bridge
+  sets them itself and never takes them from a plugin's manifest: `lone` would drop the window's pane bar and with it the
+  plugin marker, `streams` would hand out a terminal, and a plugin's own `label` (a Fluent key) could pose as "Needs you".
+- **Not for plugins as it is:** this context is the built-in panels' and carries much that ADR-0114 says a plugin may never
+  have: requests and the answers to them (resolve, the answer guard), pairing, helper grants, sending a prompt, starting and
+  resuming agents, terminal sessions that can type (`sendInput`), and each agent's terminal preview. A plugin panel never
+  receives `PanelContext`, `PanelState` or `PanelActions` as they are, only a separate projection the plugin bridge builds,
+  filtered by the capabilities the person granted (`pane.context`, `agents.read`, …).
 - **Not yet:** loading panels from outside the window (plugins, ADR-0114) is a later step that builds on this contract.
 
 ## Reading a layout (validation)

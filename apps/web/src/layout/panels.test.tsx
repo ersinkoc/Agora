@@ -4,15 +4,17 @@
 // only its context, and the window (not the panel) draws the pane bar, where ADR-0114 puts a plugin's marker later.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { act, useState } from 'react';
+import { act, useContext, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { AnswerGuard } from '../components/useAnswerGuard';
 import { CloseAgentContext } from '../components/CloseAgent';
+import { ChatActionsContext, type ChatActions } from '../components/chatActions';
+import { GiveContext, type GiveApi } from '../components/GiveTask';
 import type { TerminalSource } from '../terminal/source';
-import { BUILTIN_REGISTRY, type HostActions } from './builtinPanels';
+import { BUILTIN_REGISTRY, type HostActions, withPaths } from './builtinPanels';
 import { type Action, type Workspace as WorkspaceState, reduce, workspaceOf } from './engine';
 import { BUILTIN_PANELS, PANEL_INFO, TOOL_PANELS, isToolPanel, panelRegistry, type PanelContext, type PanelDef, type PanelState } from './panels';
 import { streamPlan } from './streams';
@@ -214,6 +216,19 @@ describe('a built-in panel sends commands only through its actions', () => {
     expect(menu()).toBeNull();
     act(() => root.render(<CloseAgentContext.Provider value={undefined}>{def.render(ctx(appClose))}</CloseAgentContext.Provider>));
     expect(menu()).not.toBeNull();
+  });
+});
+
+describe('a built-in panel\'s settings and give paths come from its actions', () => {
+  it('gives the panel its actions\' chat and give, not what the app provides around it', () => {
+    const seen: { chat: ChatActions; give?: GiveApi }[] = [];
+    function Probe() { seen.push({ chat: useContext(ChatActionsContext), give: useContext(GiveContext) }); return null; }
+    const chat: ChatActions = { cancelTurn: async () => true };
+    const give = { agents: [], machines: [], send: async () => ({ ok: true }) } as unknown as GiveApi;
+    const panelActions = Object.freeze({ ...actions, rebind: none, chat, give });
+    act(() => root.render(<ChatActionsContext.Provider value={{ setConfig: async () => true }}><GiveContext.Provider value={undefined}>{withPaths(panelActions, <Probe />)}</GiveContext.Provider></ChatActionsContext.Provider>));
+    expect(seen.at(-1)?.chat).toBe(chat);
+    expect(seen.at(-1)?.give).toBe(give);
   });
 });
 

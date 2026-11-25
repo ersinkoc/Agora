@@ -29,6 +29,9 @@ import type { Bind } from './tree';
  *  - `chooser`: the empty pane; the window draws it from this registry. */
 export type PanelKind = 'global' | 'tool' | 'agent' | 'chooser';
 
+// Host-set facts: `kind` (above all `chooser`), `streams`, `lone` and `label` are set by the window, for built-ins here. A plugin bridge
+// (ADR-0114) sets them itself and never takes them from a plugin's manifest: `lone` would drop the host's pane bar and the plugin
+// marker, `streams` would hand out a terminal, and a plugin's `label` (a Fluent key) could pose as "Needs you".
 export interface PanelInfo {
   readonly id: string;
   /** The Fluent key of the panel's name (UI vocabulary). */
@@ -137,7 +140,9 @@ export interface PanelActions {
   readonly give?: GiveApi;
 }
 
-/** Everything one pane's panel is given, frozen. */
+/** Everything one built-in pane's panel is given, frozen at the top level (TypeScript `readonly` keeps built-ins from changing what
+ *  is inside). Not for plugins as it is: it carries requests and their answers, pairing, prompts, starting and resuming agents and
+ *  terminals that can type. A plugin panel (ADR-0114) only ever gets a separate projection the bridge builds from granted capabilities. */
 export interface PanelContext {
   /** The pane's id, and the panel id it shows. */
   readonly pane: string;

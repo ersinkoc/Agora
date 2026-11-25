@@ -166,7 +166,7 @@ const RENDERS: Record<Exclude<BuiltinPanel, 'empty'>, PanelRender> = {
 
 // The window's command paths that a built-in panel's components read from React context (closing an agent, an agent's settings, giving
 // a task), provided again from the panel's own actions, so what a panel can send is exactly what its context gives it. Providers draw nothing.
-function withPaths(actions: PanelActions, view: ReactNode): ReactNode {
+export function withPaths(actions: PanelActions, view: ReactNode): ReactNode {
   return (
     <CloseAgentContext.Provider value={actions.closeAgent}>
       <ChatActionsContext.Provider value={actions.chat}>
