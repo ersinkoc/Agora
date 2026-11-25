@@ -422,7 +422,8 @@ fn windows_device_name(name: &str) -> bool {
 
 /// An argv the operating system can spawn: a real program followed by arguments without NUL (an empty argument is valid).
 fn spawnable_argv(argv: &[String]) -> bool {
-    argv.first().is_some_and(|program| !program.is_empty())
+    argv.first()
+        .is_some_and(|program| !program.trim().is_empty())
         && argv.iter().all(|arg| !arg.contains('\0'))
 }
 
@@ -529,7 +530,7 @@ impl Resume {
             && (self
                 .fresh_argv
                 .first()
-                .is_none_or(|p| p.is_empty() || p.contains(['{', '}']))
+                .is_none_or(|p| p.trim().is_empty() || p.contains(['{', '}']))
                 || !self.fresh_argv.iter().any(|a| a.contains("{session_id}"))
                 || self.fresh_argv.iter().any(|a| a.contains("{continue}"))
                 || self.fresh_argv.iter().any(|a| a.contains('\0')))
@@ -614,12 +615,12 @@ impl Manifest {
                 supported: ENGINE_VERSION,
             });
         }
-        let kind_ok = !self.kind.is_empty()
+        let mut kind_chars = self.kind.chars();
+        let kind_ok = kind_chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
             && self.kind.len() <= MAX_KIND_BYTES
-            && self
-                .kind
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            && kind_chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         if !kind_ok {
             return Err(invalid("kind"));
         }
@@ -1606,6 +1607,192 @@ mod launch_tests {
         assert!(Manifest::parse(&plain("[structured]\nacp = { argv = [\"tool\"] }\n")).is_ok());
         assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n")).is_ok());
         println!("FIX VERIFIED: F464 terminal manifests name a launch command");
+    }
+
+    #[test]
+    fn proof_f465_kind_ids_start_with_an_alphanumeric_character() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(
+            &plain("[process]\nlaunch = [\"tool\"]\n").replace("kind = \"k\"", "kind = \"-kind\""),
+        );
+        println!("EXPECTED: a kind beginning with punctuation is rejected");
+        println!("ACTUAL: accepted = {}", actual.is_ok());
+        if actual.is_ok() {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f466_terminal_programs_are_not_whitespace() {
+        let control = Manifest::parse(&plain("[process]\nlaunch = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain("[process]\nlaunch = [\"   \"]\n"));
+        let spawnable = std::process::Command::new("   ").status().is_ok();
+        println!("EXPECTED: a whitespace-only L1 program is rejected");
+        println!(
+            "ACTUAL: accepted = {}, OS spawned = {spawnable}",
+            actual.is_ok()
+        );
+        if actual.is_ok() && !spawnable {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f467_adapter_programs_are_not_whitespace() {
+        let control = Manifest::parse(&plain("[adapter]\ncommand = [\"tool\"]\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain("[adapter]\ncommand = [\" \"]\n"));
+        let spawnable = std::process::Command::new(" ").status().is_ok();
+        println!("EXPECTED: a whitespace-only L3 program is rejected");
+        println!(
+            "ACTUAL: accepted = {}, OS spawned = {spawnable}",
+            actual.is_ok()
+        );
+        if actual.is_ok() && !spawnable {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f468_acp_programs_are_not_whitespace() {
+        let control = Manifest::parse(&plain("[structured]\nacp = { argv = [\"tool\"] }\n"));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain("[structured]\nacp = { argv = [\"\\t\"] }\n"));
+        let spawnable = std::process::Command::new("\t").status().is_ok();
+        println!("EXPECTED: a whitespace-only L2 program is rejected");
+        println!(
+            "ACTUAL: accepted = {}, OS spawned = {spawnable}",
+            actual.is_ok()
+        );
+        if actual.is_ok() && !spawnable {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn proof_f469_resume_programs_are_not_whitespace() {
+        let control = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"{session_id}\"]\n",
+        ));
+        assert!(control.is_ok());
+        println!("CONTROL OK");
+        let actual = Manifest::parse(&plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"  \", \"{session_id}\"]\n",
+        ));
+        let spawnable = std::process::Command::new("  ").status().is_ok();
+        println!("EXPECTED: a whitespace-only resume program is rejected");
+        println!(
+            "ACTUAL: accepted = {}, OS spawned = {spawnable}",
+            actual.is_ok()
+        );
+        if actual.is_ok() && !spawnable {
+            println!("PROBLEM CONFIRMED");
+        } else {
+            println!("PROBLEM NOT REPRODUCED");
+        }
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn verify_f465_kind_id_start_boundary() {
+        let manifest = |kind: &str| {
+            plain("[process]\nlaunch = [\"tool\"]\n")
+                .replace("kind = \"k\"", &format!("kind = \"{kind}\""))
+        };
+        for valid in ["k", "0", "0-kind", "kind-"] {
+            assert!(Manifest::parse(&manifest(valid)).is_ok(), "{valid}");
+        }
+        for invalid_kind in ["-kind", "--", "_kind"] {
+            assert!(
+                matches!(Manifest::parse(&manifest(invalid_kind)), Err(ManifestError::Invalid { field }) if field == "kind")
+            );
+        }
+        println!("FIX VERIFIED: F465 kind ids start with a lowercase letter or digit");
+    }
+
+    #[test]
+    fn verify_f466_terminal_program_boundary() {
+        for program in [" ", "\\t", "  \\t  "] {
+            let src = plain(&format!("[process]\nlaunch = [\"{program}\"]\n"));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "process.launch")
+            );
+        }
+        assert!(Manifest::parse(&plain("[process]\nlaunch = [\"tool\", \"   \"]\n")).is_ok());
+        println!("FIX VERIFIED: F466 L1 command names a real program");
+    }
+
+    #[test]
+    fn verify_f467_adapter_program_boundary() {
+        for program in [" ", "\\t", "  \\t  "] {
+            let src = plain(&format!("[adapter]\ncommand = [\"{program}\"]\n"));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "adapter.command")
+            );
+        }
+        assert!(Manifest::parse(&plain("[adapter]\ncommand = [\"tool\", \"   \"]\n")).is_ok());
+        println!("FIX VERIFIED: F467 L3 command names a real program");
+    }
+
+    #[test]
+    fn verify_f468_acp_program_boundary() {
+        for program in [" ", "\\t", "  \\t  "] {
+            let src = plain(&format!(
+                "[structured]\nacp = {{ argv = [\"{program}\"] }}\n"
+            ));
+            assert!(
+                matches!(Manifest::parse(&src), Err(ManifestError::Invalid { field }) if field == "structured.acp.argv")
+            );
+        }
+        assert!(Manifest::parse(&plain(
+            "[structured]\nacp = { argv = [\"tool\", \"   \"] }\n"
+        ))
+        .is_ok());
+        println!("FIX VERIFIED: F468 L2 command names a real program");
+    }
+
+    #[test]
+    fn verify_f469_every_resume_program_boundary() {
+        let main =
+            plain("[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\" \", \"{session_id}\"]\n");
+        assert!(
+            matches!(Manifest::parse(&main), Err(ManifestError::Invalid { field }) if field == "resume.argv")
+        );
+        let fresh = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"{session_id}\"]\nfresh_argv = [\"\\t\", \"{session_id}\"]\n",
+        );
+        assert!(
+            matches!(Manifest::parse(&fresh), Err(ManifestError::Invalid { field }) if field == "resume.fresh_argv")
+        );
+        let carry = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"{session_id}\"]\ncontinue_argv = [\"  \", \"{session_id}\", \"{continue}\"]\ncontinue = \"carry on\"\n",
+        );
+        assert!(
+            matches!(Manifest::parse(&carry), Err(ManifestError::Invalid { field }) if field == "resume.continue_argv")
+        );
+        let valid = plain(
+            "[process]\nlaunch = [\"tool\"]\n[resume]\nargv = [\"tool\", \"\", \"{session_id}\"]\n",
+        );
+        assert!(Manifest::parse(&valid).is_ok());
+        println!("FIX VERIFIED: F469 every resume command names a real program");
     }
 
     #[test]

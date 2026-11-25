@@ -149,7 +149,8 @@ Common validation: `kind` is at most 64 ASCII characters and `min_engine` starts
 one line (no terminal controls or hidden formatting). A terminal manifest has a non-empty `process.launch`; only a manifest driven
 by `[adapter]` or `[structured] acp` may omit it. Every command
 argv a manifest declares (`process.launch`, `adapter.command`, structured ACP `argv`, and the resume variants) names a non-empty
-program first and contains no NUL; later arguments may be empty. Session-id arguments and MCP flag arguments contain no NUL too.
+non-whitespace program first and contains no NUL; later arguments may be empty or whitespace. Session-id arguments and MCP flag
+arguments contain no NUL too.
 Environment names, including `[mcp.env]`, are non-empty and contain neither `=` nor NUL, and values contain no NUL. MCP config paths
 contain no NUL.
 
