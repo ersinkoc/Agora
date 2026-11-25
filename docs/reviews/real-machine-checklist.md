@@ -48,10 +48,10 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 
 - **macOS session:** RM-01, RM-03 to RM-07, RM-08 (a private `sshd` on loopback, as on 2026-11-09), RM-10, RM-11 to RM-16 (the
   fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-30, RM-31, RM-34 to RM-36, RM-39 (unconfined), RM-40,
-  RM-44, RM-47, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image); in a disposable macOS account or VM only (#900):
+  RM-44, RM-47, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image), RM-61 to RM-65; in a disposable macOS account or VM only (#900):
   RM-23, RM-33, RM-37, RM-38.
 - **Windows session:** RM-02, RM-03 to RM-07, RM-10, RM-11 to RM-16 (the fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-31, RM-32 (checking the signature only), RM-35,
-  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer); in a disposable Windows account or VM only (#900): RM-23
+  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer), RM-61 to RM-65; in a disposable Windows account or VM only (#900): RM-23
   (confinement is off by default: turned on for that node only).
 - **Needs a person:** the real-agent steps of RM-11 to RM-13, RM-18's install (no person-facing way to make a signed list yet), RM-26 with a second person, RM-32
   (signing account), RM-45, RM-54 (a real phone), RM-56 (a tailnet), RM-57 (a real tunnel).
@@ -372,6 +372,16 @@ not built: nothing to check.
   -9` with `resume = auto`; [supervisor 2026-11-14](2026-11-14-supervisor-and-login-service.md): on Windows a crashed node marks its
   agents interrupted. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
+### RM-61 `agora agent list` lists the agents a node found interrupted
+- **OS:** Linux, macOS, Windows (ADR-0107).
+- **Do:** repeat the interrupted restart from RM-20 (with `--resume ask`, so the node leaves the agent interrupted instead of
+  bringing it back automatically). Run `agora agent list`, then `agora agent resume <agent id>` (and `agora agent resume --again
+  <agent id>` for a kind that cannot resume its session).
+- **See:** `agora agent list` prints the interrupted agents in id order with `interrupted` and `resume`, `start-again` or
+  `still-running`; `agora agent resume <agent id>` brings back a resumable agent and refuses one that cannot resume until
+  `--again` is passed.
+- **Evidence so far:** none recorded.
+
 ### RM-21 An agent starts helpers, with the user's signed approval
 - **OS:** Linux, macOS, Windows.
 - **Do:** S2, S4. Start `rm-acp`; send `mcp agent_start {"kind":"rm-screen","prompt":"hello"}` and answer Allow (`rm-screen` is a
@@ -417,6 +427,14 @@ not built: nothing to check.
   the Allow work; Activity (`#/audit`, or "Activity" in Ctrl K) lists "Started an agent in a folder" and "Answered an approval".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
+### RM-62 A structured agent can be allowed always (the agent decides how long it keeps the answer)
+- **OS:** Linux, macOS, Windows (the window and the terminal client; ADR-0101).
+- **Do:** S1, S2, S4. Start `rm-acp` and trigger a permission request that offers an always-allow option (`ask`). Answer with the
+  always-allow action in the web window, then trigger the same action again; repeat in `agora tui`.
+- **See:** the approval card offers the always-allow choice alongside Allow and Deny, signs the `approval-always-v1` decision, and
+  subsequent matching requests from the agent proceed according to the agent's own scope without re-prompting.
+- **Evidence so far:** none recorded.
+
 ### RM-25 Trusting your devices in one step
 - **OS:** Linux, macOS, Windows.
 - **Do:** S1 with browser A trusted (S4). Sign in from browser B (another profile). In B: Settings > This device > Ask another device to
@@ -456,6 +474,14 @@ not built: nothing to check.
 
 ### RM-28 A reply keeps its link across machines
 not built: nothing to check.
+
+### RM-63 A window that opens, reloads or reconnects shows the recent Team chat
+- **OS:** Linux, macOS, Windows (ADR-0103).
+- **Do:** S1, S2. Start a Shell in `$RM/proj`, send a Team chat message from the project's Messages/Team chat view (or via S5
+  `send_message` to `#channel`), then reload the browser window and also open a second browser tab to the same hub.
+- **See:** after reload and in the newly opened tab, the recent Team chat messages (up to the newest 50 messages / 256 KiB per
+  project that the signed-in person may see) appear immediately from the snapshot without needing a new live message.
+- **Evidence so far:** none recorded.
 
 ### RM-29 Shared project board (tasks, leases)
 - **OS:** Linux, macOS, Windows.
@@ -668,6 +694,16 @@ not built: nothing to check.
 ### RM-52 A diff names every changed file even when cut
 not built (the window says how many files are not shown): nothing to check.
 
+### RM-64 A window that attaches late gets the program's modes (mouse, wheel, focus, alternate screen, cursor shape)
+- **OS:** Linux, macOS, Windows (web window and terminal client; ADR-0100).
+- **Do:** S1, S2. Start a Shell in `$RM/proj`, print enough lines to populate scrollback, then start a full-screen/mouse-aware
+  program (or emit alternate-screen / mouse-mode sequences). Reload the web window, open the same agent in a second browser tab, and
+  open its agent panel in `agora tui`.
+- **See:** the late-attaching web window and `agora tui` agent panel receive the prior scrollback history (when not in alternate
+  screen) and repaint with the program's active modes (mouse, wheel, focus, alternate screen, cursor shape) intact in one synchronized
+  paint.
+- **Evidence so far:** none recorded.
+
 ### RM-53 A shared terminal takes the smallest window's size
 - **OS:** Linux, macOS, Windows.
 - **Do:** open the same Shell in two browser windows of different sizes; in it run `stty size` (Windows: `$Host.UI.RawUI.WindowSize`);
@@ -718,6 +754,15 @@ not built (the window says how many files are not shown): nothing to check.
 - **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text and controls are easy
   to see (WCAG AA)."; before #1054 it said "All text is readable (WCAG AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
 - **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (Chrome, 125 % and 150 %).
+
+### RM-65 A widget kit and one danger colour (red for failed, errors, deletions, destructive actions and acting without asking; amber only for needs you)
+- **OS:** Linux, macOS, Windows (any browser; ADR-0102).
+- **Do:** open the web window across all six built-in themes (Dark and Light); trigger a "Needs you" approval card (`rm-chat` `ask`),
+  an agent acting without asking (`rm-probe` with `skip-permissions`), and an error/destructive confirmation (such as Forget or
+  Close).
+- **See:** amber is used only for "Needs you" and the quota warning sign; red is used consistently for failed states, errors,
+  deletions, destructive actions and acting-without-asking badges, with readable contrast across all built-in themes.
+- **Evidence so far:** none recorded.
 
 ### RM-59 Terminal client (TUI)
 - **OS:** Linux, macOS, Windows (Windows Terminal).
