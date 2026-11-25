@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { setLanguage } from '../i18n';
 import { demoConversation } from '../demoChat';
 import type { ChatLine } from '../net/chat';
@@ -118,5 +120,35 @@ describe('the conversation as drawn', () => {
     const html = renderToStaticMarkup(<FilesChanged lines={transcript(demoConversation()).flatMap((i) => (i.kind === 'diff' ? [i.line] : []))} />);
     expect(html).toContain('5 files changed');
     expect(html).toContain('src/retry.rs');
+  });
+  it('makes standalone diff-card paths visible', () => {
+    const html = draw([line(1, '@@ -1 +1 @@\n-a\n+b\n', { kind: 'diff', path: 'src/Grü\u3164ße\u2800.ts' })]);
+    const text = html.replace(/<[^>]+>/g, '');
+    expect([...text].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(text).toContain('src/Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('verifies diff-card display while preserving its raw identity', () => {
+    const raw = 'src/漢\u202e字\u3164.rs';
+    const html = draw([line(1, '@@ -1 +1 @@\n-a\n+b\n', { kind: 'diff', path: raw })]);
+    expect(html).toContain('漢\\u{202e}字\\u{3164}.rs');
+    expect(html).toContain(`data-diff-path="${raw}"`);
+  });
+  it('makes changed-file chip paths visible', () => {
+    const raw = 'src/Grü\u3164ße\u2800.ts';
+    const html = renderToStaticMarkup(<FilesChanged lines={[line(1, '@@ -1 +1 @@\n-a\n+b\n', { kind: 'diff', path: raw })]} />);
+    expect([...html].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(html).toContain('Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('verifies changed-file display while sending the raw path', () => {
+    const raw = 'src/漢\u202e字\u3164.rs';
+    let selected = '';
+    const host = document.createElement('div'); const root = createRoot(host);
+    act(() => root.render(<FilesChanged lines={[line(1, '@@ -1 +1 @@\n-a\n+b\n', { kind: 'diff', path: raw })]} onGo={(p) => { selected = p; }} />));
+    const button = host.querySelector('button') as HTMLButtonElement;
+    expect(button.textContent).toContain('漢\\u{202e}字\\u{3164}.rs');
+    expect(button.title).toBe('src/漢\\u{202e}字\\u{3164}.rs');
+    act(() => button.click());
+    expect(selected).toBe(raw);
+    act(() => root.unmount());
   });
 });

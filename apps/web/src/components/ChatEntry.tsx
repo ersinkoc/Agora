@@ -324,7 +324,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
     <details open={d.lines.length <= 24} className="group max-w-3xl overflow-hidden rounded-m border border-line bg-surface-1" data-diff-path={line.path}>
       <summary className="flex min-h-9 pointer-coarse:min-h-11 min-w-0 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
         <span aria-hidden className="grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 text-accent"><Icon name="pencil" className="size-3.5" /></span>
-        <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
+        <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{visible(dir)}</span><span className="font-semibold text-ink">{visible(name)}</span></span>
         <Counts added={d.added} removed={d.removed} />
         <Icon name="chevron" className={CHEVRON} />
       </summary>
@@ -349,8 +349,8 @@ export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLi
       <Counts added={added} removed={removed} />
       <ul className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0 pointer-coarse:gap-y-5">
         {files.slice(0, SHOWN_FILES).map((f) => <li key={f.path} className="min-w-0">
-          <button type="button" dir="ltr" title={f.path} className="tap-target inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
-            <span className="truncate">{files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path)}</span>
+          <button type="button" dir="ltr" title={visible(f.path)} className="tap-target inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
+            <span className="truncate">{visible(files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path))}</span>
           </button>
         </li>)}
         {files.length > SHOWN_FILES && <li className="muted self-center text-xs">{t('chat-files-more', { count: files.length - SHOWN_FILES })}</li>}

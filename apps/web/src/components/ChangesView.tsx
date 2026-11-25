@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
+import { visible as visibleText } from '../net/hidden';
 import { decodeText } from '../net/files';
 import { markRanges } from '../net/highlight';
 import { useHighlightedFile, useHighlightedLines } from '../highlight/useHighlight';
@@ -232,21 +233,21 @@ export function ChangesView({ load, read, changed }: {
           {groups.map((g) => {
             const closed = closedFolders.has(g.folder);
             return (
-              <div key={g.folder} role="group" aria-label={g.folder || t('changes-top-folder')}>
+              <div key={g.folder} role="group" aria-label={g.folder ? visibleText(g.folder) : t('changes-top-folder')}>
                 {g.folder !== '' && (
                   <button type="button" className="ide-row text-xs text-muted" aria-expanded={!closed} tabIndex={-1}
                     onClick={() => setClosedFolders((c) => { const n = new Set(c); if (n.has(g.folder)) n.delete(g.folder); else n.add(g.folder); return n; })}>
                     <Icon name="chevron" className={`size-3 flex-none transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
                     <Icon name="folder" className="size-3.5 flex-none" />
-                    <span className="truncate font-mono" dir="ltr">{g.folder}</span>
+                    <span className="truncate font-mono" dir="ltr">{visibleText(g.folder)}</span>
                   </button>
                 )}
                 {!closed && g.files.map((f) => (
                   <div key={f.path} id={optionId(f.path)} role="option" aria-selected={f.path === selected} aria-current={f.path === selected}
-                    onClick={() => select(f.path)} title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
+                    onClick={() => select(f.path)} title={visibleText(f.oldPath ? `${f.oldPath} → ${f.path}` : f.path)}
                     className={`ide-row cursor-pointer ${g.folder !== '' ? 'ps-7' : ''}`}>
                     <StatusBadge status={f.status} />
-                    <span className={`min-w-0 flex-1 truncate font-mono text-xs ${f.status === 'deleted' ? 'text-muted line-through' : ''}`} dir="ltr">{baseName(f.path)}</span>
+                    <span className={`min-w-0 flex-1 truncate font-mono text-xs ${f.status === 'deleted' ? 'text-muted line-through' : ''}`} dir="ltr">{visibleText(baseName(f.path))}</span>
                     {f.partial && <span className="text-xs text-muted" title={t('changes-partial')}>…</span>}
                     {f.secret && <span className="flex-none text-muted" title={t('changes-secret')}><Icon name="lock" className="size-3" /><span className="sr-only">{t('changes-secret')}</span></span>}
                     {!f.binary && <Counts added={f.added} removed={f.removed} />}
@@ -263,10 +264,10 @@ export function ChangesView({ load, read, changed }: {
             <>
               <div className="ide-bar flex-none border-b py-1.5">
                 <StatusBadge status={file.status} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[0.8125rem]" dir="ltr" title={file.path}>
-                  {file.path.includes('/') && <span className="text-muted">{file.path.slice(0, file.path.lastIndexOf('/') + 1)}</span>}
-                  <span className="font-semibold text-ink">{baseName(file.path)}</span>
-                  {file.oldPath && <span className="ms-2 text-xs text-muted">{t('changes-renamed-from', { name: file.oldPath })}</span>}
+                <span className="min-w-0 flex-1 truncate font-mono text-[0.8125rem]" dir="ltr" title={visibleText(file.path)}>
+                  {file.path.includes('/') && <span className="text-muted">{visibleText(file.path.slice(0, file.path.lastIndexOf('/') + 1))}</span>}
+                  <span className="font-semibold text-ink">{visibleText(baseName(file.path))}</span>
+                  {file.oldPath && <span className="ms-2 text-xs text-muted">{t('changes-renamed-from', { name: visibleText(file.oldPath) })}</span>}
                 </span>
                 {!file.binary && <Counts added={file.added} removed={file.removed} />}
                 {read && gapsOf(file).length > 0 && <button type="button" className="ide-iconbtn w-auto px-2 text-xs" aria-pressed={whole.has(file.path)} onClick={() => toggleWhole(file)}>{t('changes-whole-file')}</button>}
