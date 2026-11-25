@@ -73,7 +73,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   const showItems = (p: Pane): MenuItem[] => [
     { label: t('layout-follow-attention'), checked: followOf(p) === 'attention', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'attention' }, panel: 'agent' }) },
     { label: t('layout-follow-selection'), checked: followOf(p) === 'selection', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'selection' }, panel: 'agent' }) },
-    ...fleet.filter((a) => !a.closed).map((a, i) => ({ label: t('layout-show-agent', { name: a.name }), divider: i === 0, checked: bindOf(p) === a.id, run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: a.id }, panel: 'agent' }) })),
+    ...fleet.filter((a) => !a.closed).map((a, i) => ({ label: t('layout-show-agent', { name: visibleText(a.name) }), divider: i === 0, checked: bindOf(p) === a.id, run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: a.id }, panel: 'agent' }) })),
     ...GLOBAL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0, checked: p.panel === panel, run: () => dispatch({ type: 'bind', pane: p.id, panel }) })),
     // The tools: for a pane bound to one agent, the same agent's terminal, changes, files and file manager (an editor's file tree next to
     // its terminal); for any other, the tool's own chooser.
@@ -177,7 +177,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
             <PaneName text={label(front)} className="font-medium" />
             {a && <NoAskBadge agent={a} bare />}
             {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
-            {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
+            {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{visibleText(a.machine)}</span>}
             {followOf(front) && <span className="ide-chip flex-none">{t(`layout-follows-${followOf(front)}`)}</span>}
           </div>
         )}
@@ -225,7 +225,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
         <div className="grid w-full max-w-xs gap-3">
           <h2 className="m-0">{t('layout-empty-title')}</h2>
           {running.length > 0 && <ul className="m-0 grid list-none gap-0.5 p-0">
-            {running.map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { agent: a.id }, panel: 'agent' })}><StateMark state={a.state} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
+            {running.map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { agent: a.id }, panel: 'agent' })}><StateMark state={a.state} /><span className="min-w-0 flex-1 truncate">{visibleText(a.name)}</span><span className="truncate text-xs text-muted">{visibleText(a.machine)}</span></button></li>)}
           </ul>}
           <div className="flex flex-wrap gap-1.5">
             <button type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { follow: 'attention' }, panel: 'agent' })}>{t('layout-follow-attention')}</button>
