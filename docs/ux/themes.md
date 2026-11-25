@@ -328,8 +328,8 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 - **The terminal client** reading format 2 (colours mapped to what the terminal supports, the chrome it can draw); step 3.
 - **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
 - **The community catalog** and `agora hub themes update`; step 5.
-- More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (an open question
-  of ADR-0113, proposed: not in format 2).
+- More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
+  ADR-0113, whose answer is: not in format 2).
 - The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.
 - A themes folder watched on disk (the desktop app, the terminal client): the browser has no folder, so "live reload" here is
   the editor and other tabs.
