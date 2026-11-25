@@ -72,12 +72,12 @@ pub fn primary_language(tag: &str) -> String {
 }
 
 /// The user's locale from the environment: `AGORA_LANG` first, then the usual `LC_ALL`, `LC_MESSAGES`, `LANG`.
-/// Empty and `C`/`POSIX` count as unset.
+/// Empty and the `C`/`POSIX` locale families count as unset.
 pub fn locale_from_env() -> String {
     ["AGORA_LANG", "LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
-        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
+        .find(|v| !v.is_empty() && !matches!(primary_language(v).as_str(), "c" | "posix"))
         .unwrap_or_else(|| "en".to_string())
 }
 

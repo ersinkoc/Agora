@@ -159,6 +159,7 @@ fn without_comments(src: &str) -> (String, bool) {
             continue;
         }
         if bytes.get(i..i + 2) == Some(b"/*") {
+            out.push(' ');
             depth = 1;
             i += 2;
             continue;
@@ -388,7 +389,11 @@ pub fn load_locales(root: &Path) -> io::Result<BTreeMap<String, BTreeSet<String>
         for f in files {
             ids.extend(ftl_ids(&fs::read_to_string(f)?));
         }
-        map.insert(entry.file_name().to_string_lossy().into_owned(), ids);
+        let lang = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        map.insert(lang, ids);
     }
     Ok(map)
 }
