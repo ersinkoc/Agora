@@ -11,6 +11,7 @@
 //! - **Everything is auditable:** each state change queues a protocol event ([`Mesh::take_events`]).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use agora_core::{AgentId, LeaseError, LeaseTable, Task, TaskError, TaskId, TaskState};
 use agora_protocol::v1::event::Body;
@@ -294,6 +295,7 @@ pub struct Mesh {
     limits: Limits,
     agents: BTreeMap<AgentId, AgentInfo>,
     inboxes: BTreeMap<AgentId, VecDeque<Message>>,
+    handoff_inboxes: BTreeMap<AgentId, BTreeMap<u64, Arc<Message>>>,
     sent: BTreeMap<AgentId, VecDeque<u64>>,
     asks: BTreeMap<String, Ask>,
     tasks: BTreeMap<TaskId, TaskRec>,
@@ -317,6 +319,7 @@ impl Mesh {
             limits,
             agents: BTreeMap::new(),
             inboxes: BTreeMap::new(),
+            handoff_inboxes: BTreeMap::new(),
             sent: BTreeMap::new(),
             asks: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -650,6 +653,7 @@ impl Mesh {
             }
         }
         self.inboxes.remove(agent);
+        self.handoff_inboxes.remove(agent);
         self.sent.remove(agent);
         self.activity.remove(agent);
         self.presence_sent.remove(agent);
@@ -983,6 +987,46 @@ impl Mesh {
         }
     }
 
+    /// Reserves an inbox position from the same range as ordinary mesh messages.
+    pub fn next_handoff_number(&mut self, sender: &AgentId, now_ms: u64) -> Result<u64, MeshError> {
+        if !self.message_ids_open() {
+            return Err(MeshError::IdsUnreserved);
+        }
+        self.check_rate(sender, now_ms)?;
+        let number = self.next;
+        self.next += 1;
+        Ok(number)
+    }
+
+    /// Replaces the durable view when the node binds a run. Restoring records does not
+    /// emit a second audit event.
+    pub fn restore_handoff_inbox(
+        &mut self,
+        agent: &AgentId,
+        messages: impl Iterator<Item = (u64, Message)>,
+    ) {
+        let inbox: BTreeMap<_, _> = messages.map(|(n, m)| (n, Arc::new(m))).collect();
+        if inbox.is_empty() {
+            self.handoff_inboxes.remove(agent);
+        } else {
+            self.handoff_inboxes.insert(agent.clone(), inbox);
+        }
+    }
+
+    /// The node persisted a new handoff. It stays outside the ordinary inbox ring.
+    pub fn publish_handoff(&mut self, agent: &AgentId, number: u64, m: Message) {
+        self.events.push(Body::MessagePosted(MessagePosted {
+            message_id: m.id.clone(),
+            from_agent_id: m.provenance.from.as_str().to_string(),
+            to: m.to.clone(),
+            body: m.body.clone(),
+        }));
+        self.handoff_inboxes
+            .entry(agent.clone())
+            .or_default()
+            .insert(number, Arc::new(m));
+    }
+
     /// `inbox`: messages after `since` (by id), oldest first. Reading does not remove them; `since` moves the cursor.
     pub fn inbox(
         &self,
@@ -991,15 +1035,25 @@ impl Mesh {
         limit: usize,
     ) -> Result<Vec<Message>, MeshError> {
         self.caller(agent)?;
-        let Some(inbox) = self.inboxes.get(agent) else {
-            return Ok(Vec::new());
-        };
         let after = since.and_then(inbox_message_number).unwrap_or(0);
-        Ok(inbox
-            .iter()
-            .filter(|m| inbox_message_number(&m.id).is_some_and(|n| n > after))
+        let ordinary = self.inboxes.get(agent).into_iter().flatten();
+        let ordinary = ordinary
+            .filter_map(|m| Some((inbox_message_number(&m.id)?, m)))
+            .filter(|(n, _)| *n > after)
+            .take(limit);
+        let Some(durable) = self.handoff_inboxes.get(agent) else {
+            return Ok(ordinary.map(|(_, m)| m.clone()).collect());
+        };
+        let durable = durable
+            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
             .take(limit)
-            .cloned()
+            .map(|(n, m)| (*n, m.as_ref()));
+        let mut page: Vec<_> = ordinary.chain(durable).collect();
+        page.sort_unstable_by_key(|(n, _)| *n);
+        Ok(page
+            .into_iter()
+            .take(limit)
+            .map(|(_, m)| m.clone())
             .collect())
     }
 

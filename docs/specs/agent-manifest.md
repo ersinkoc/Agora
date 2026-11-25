@@ -370,9 +370,12 @@ asking.
 `[adapter] command = ["program", "args"...]` (and optional `env`) makes the kind an adapter agent: the node starts the
 process in the agent's own worktree, runs `initialize` and `session/start`, and drives the agent through the adapter protocol
 (`docs/specs/adapter-protocol.md`) instead of a terminal. The adapter's `state/update` is a reported state (it wins over
-anything else); chat items, usage, approval requests and the native session id are passed on as supervisor events; a crash ends the
+anything else); chat items, usage, approval requests and the native session id are passed on as supervisor events; a crash leaves the
 agent as `unknown` without touching others. Prompts and verified approval decisions are relayed by the node. Adapter agents have
-no terminal, so terminal commands do not apply to them; restart with backoff is not done yet.
+no terminal, so terminal commands do not apply to them. An adapter that crashes is restarted with the same backoff and budget as a
+terminal agent: the agent is `unknown` meanwhile, its session is resumed when the adapter reported one, and each restart is said in its
+conversation (notice `adapter.restarting`). Once the budget is spent the agent ends with an error and its conversation says so (notice
+`adapter.gave_up`); see `docs/specs/adapter-protocol.md`.
 
 ## Login credentials (`[accounts] credential_env`, ADR-0084)
 

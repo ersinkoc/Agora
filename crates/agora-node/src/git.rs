@@ -1412,14 +1412,36 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
     #[test]
     fn rejects_invalid_branch_names_and_option_like_bases() {
         let r = Repo::new(None);
-        for b in ["", "-x", "a..b", "a b"] {
-            assert!(
-                matches!(
-                    create_worktree(&r.dir, &r.wt("w1"), b, None),
-                    Err(GitError::InvalidBranch(_))
-                ),
-                "{b}"
+        // Each is a name git refuses: it must come back as InvalidBranch (protocol.invalid_message, field=branch),
+        // never as the Internal error a failed git command maps to.
+        for b in [
+            "",
+            "-x",
+            "a..b",
+            "a b",
+            "agent/.hidden",
+            "a.lock/b",
+            "a/b.lock",
+            "a/",
+            "a.",
+            "a@{1}",
+            "a:b",
+            "HEAD",
+        ] {
+            let got = create_worktree(&r.dir, &r.wt("w1"), b, None);
+            assert!(matches!(got, Err(GitError::InvalidBranch(_))), "{b:?}");
+            let err = got.err().map(|e| e.to_protocol());
+            assert_eq!(
+                err.as_ref().map(|e| &e.code),
+                Some(&ErrorCode::ProtocolInvalidMessage),
+                "{b:?}"
             );
+            assert_eq!(
+                err.as_ref().and_then(|e| e.params.get("field")),
+                Some(&agora_protocol::ParamValue::Str("branch".into())),
+                "{b:?}"
+            );
+            assert!(!r.wt("w1").exists(), "{b:?}");
         }
         assert!(matches!(
             create_worktree(&r.dir, &r.wt("w1"), "ok", Some("--force")),

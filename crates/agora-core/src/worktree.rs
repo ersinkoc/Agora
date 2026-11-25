@@ -5,7 +5,7 @@ use crate::project::ProjectId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeError {
-    /// Branch name is empty or violates basic git ref rules.
+    /// Branch name is one git would refuse (see `valid_branch`).
     InvalidBranch,
 }
 
@@ -52,20 +52,21 @@ impl Worktree {
     }
 }
 
-/// A conservative subset of `git check-ref-format`.
+/// Git's rules for a branch name (`git help check-ref-format`), so a name git would refuse is refused here,
+/// before it reaches git. Per slash-separated component: not empty (no leading, trailing or doubled `/`), no
+/// leading `.`, no trailing `.lock`. For the whole name: no `..`, no `@{`, no control character, space or any of
+/// `~^:?*[\`, no trailing `.`. As for `git branch`: no leading `-`, and not `HEAD`. Every control
+/// character is refused, including the ones git would allow above ASCII.
 fn valid_branch(b: &str) -> bool {
     !b.is_empty()
-        && b != "@"
         && b != "HEAD"
-        && !b.starts_with(['/', '-'])
-        && !b.ends_with(['/', '.'])
-        && !b
-            .split('/')
-            .any(|component| component.starts_with('.') || component.ends_with(".lock"))
+        && !b.starts_with('-')
+        && !b.ends_with('.')
         && !b.contains("..")
-        && !b.contains("//")
         && !b.contains("@{")
         && !b.chars().any(|c| c.is_control() || " ~^:?*[\\".contains(c))
+        && b.split('/')
+            .all(|c| !c.is_empty() && !c.starts_with('.') && !c.ends_with(".lock"))
 }
 
 #[cfg(test)]
@@ -90,12 +91,66 @@ mod tests {
     #[test]
     fn rejects_bad_branches() {
         for b in [
-            "", "-x", "a..b", "a b", "a/", "x.lock", "a//b", "a~1", "@{x",
+            "",
+            "-x",
+            "a..b",
+            "a b",
+            "a/",
+            "/a",
+            "x.lock",
+            "a//b",
+            "a~1",
+            "@{x",
+            // Per slash-separated component: no leading dot, no trailing ".lock".
+            ".a",
+            "a/.b",
+            "agent/.hidden",
+            "a.lock/b",
+            "x.lock/y",
+            "a/b.lock",
+            // The rest of git's rules.
+            "a.",
+            "a/b.",
+            "a/./b",
+            "a/../b",
+            "a@{1}",
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "a\tb",
+            "a\u{7f}b",
+            "HEAD",
         ] {
             assert_eq!(
                 Worktree::new(WorktreeId::new("w"), &checkout(), "/p", b),
                 Err(WorktreeError::InvalidBranch),
-                "{b}"
+                "{b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_branches_git_accepts() {
+        for b in [
+            "a",
+            "claude/42-x",
+            "a.b",
+            "a/b.c",
+            "a.b/c",
+            "a.lock.b",
+            "a/-x",
+            "a@b",
+            "a/@",
+            "@",
+            "a/HEAD",
+            "feature/ü",
+        ] {
+            assert!(
+                Worktree::new(WorktreeId::new("w"), &checkout(), "/p", b).is_ok(),
+                "{b:?}"
             );
         }
     }
