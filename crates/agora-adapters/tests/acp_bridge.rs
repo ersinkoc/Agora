@@ -386,6 +386,25 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
     assert!(n.done.take().unwrap().join().unwrap().is_ok());
 }
 
+/// ADR-0111 build step 3: the bridge declares `chat.cuts` (it reports every place it cuts a chat item's text) to a node that reads
+/// rich items, as every node since ADR-0090 does; one that does not is served as before (`a_node_without_rich_chat_gets_the_old_items_byte_for_byte`).
+#[test]
+fn the_bridge_declares_that_it_reports_its_cuts() {
+    let mut n = Node::start();
+    let init = n.call(
+        "initialize",
+        json!({"protocolGeneration": 1, "nodeCapabilities": ["chat", "chat.rich"]}),
+    );
+    let caps = init["result"]["capabilities"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        caps.contains(&json!(agora_adapters::host::CHAT_CUTS)),
+        "{caps:?}"
+    );
+}
+
 #[test]
 fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializing() {
     let n = Node::start_with("acp_child_init_delay");

@@ -190,7 +190,17 @@ Every `chat/append` line the bridge makes from the agent's content stays within 
 complete serialized line (envelope and JSON escaping included; the caps in the table count decoded text, and a rich plan carries
 its text twice). A line that would be longer has every string of its item longer than 256 bytes (head and tail kept) and every
 list cut to half, repeatedly, until it fits; the session id is never cut. The item arrives shortened instead of being dropped
-whole by the node. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
+whole by the node. ADR-0111: to a node that said `chat.rich` the bridge declares `chat.cuts` and reports every place it removed text
+from a string of a `chat/append` item ("Reported cuts"): each place of that halving (one halving moves the places an earlier one, or
+the bridge's own cut, left in that string; a place inside what it removes becomes its own), the head-and-tail cuts of a tool's
+arguments, output and location paths, a plan step (in its entry, `/plan/entries/N/text`) and a diff, and in a notice's stderr tail
+the place after its leading `…`, both sides of each line break where lines were left out, its start when lines before it were left
+out and its end when lines after it were. At most 64 places per item: should more be
+needed (only a tool call the bridge did not halve, whose arguments and output are cut and more than 62 of its location paths: a
+title is cut only by halving, which also halves the locations), those of locations 62 and 63 are left out, which is harmless: the node
+keeps only the head and tail of a path (1 KiB), never the place in its middle where the bridge cut a path of over 4 KiB. The `[redacted]` marks of its
+shape check are not reported: the node finds them itself. Not reported: the home folder written `~` in a stderr tail (threat model
+T61). A node without `chat.rich` gets neither the capability nor `cuts`, as before ADR-0090. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
 agent error (`adapter.agent_refused`, `stage` `session`; the notice's `rpc_code` is `0` and its `detail` `session_id_too_long`), and
 a `session/start` whose `resumeSessionId` is longer is answered with JSON-RPC `-32602` and `data` `protocol.invalid_message`
 (`field` `resumeSessionId`) without asking the agent; an id is never cut, as that would name another session. With that, a cut
