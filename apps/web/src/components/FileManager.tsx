@@ -8,6 +8,7 @@ import { useHighlightedFile } from '../highlight/useHighlight';
 import { Skeleton } from './EmptyState';
 import { CodeView, keepLetters } from './FilesView';
 import { Icon, type IconName } from './Icon';
+import { visible } from '../net/hidden';
 
 // The file manager (docs/ux/main-window.md, "File manager"): an agent's folder as a list you can sort and filter, with a folder tree, a
 // breadcrumb and a preview. Read-only: what changes files (rename, move, delete, upload) needs your approval on the machine and a policy
@@ -244,8 +245,8 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
             <span key={c.path} className="flex min-w-0 items-center gap-0.5">
               {i > 0 && <Icon name="chevron" className="size-3 flex-none text-muted" />}
               {i < all.length - 1
-                ? <button type="button" className="truncate rounded-xs px-1 text-muted hover:bg-surface-2 hover:text-ink" onClick={() => go(c.path)}>{c.name}</button>
-                : <span aria-current="page" className="truncate px-1 font-semibold text-ink">{c.name}</span>}
+                ? <button type="button" className="truncate rounded-xs px-1 text-muted hover:bg-surface-2 hover:text-ink" onClick={() => go(c.path)}>{visible(c.name)}</button>
+                : <span aria-current="page" className="truncate px-1 font-semibold text-ink">{visible(c.name)}</span>}
             </span>
           ))}
         </nav>
@@ -300,12 +301,12 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
                   const kind = kindOf(e);
                   return (
                     <div key={e.name} role="row" aria-rowindex={i + 2} aria-selected={path === preview?.path || undefined} data-path={path} tabIndex={path === focusPath ? 0 : -1} style={{ position: 'absolute', insetInline: 0, top: i * ROW, height: ROW }}
-                      aria-label={e.secret ? t('files-secret-row', { name: e.name }) : undefined}
+                      aria-label={e.secret ? t('files-secret-row', { name: visible(e.name) }) : undefined}
                       className={`fm-row flex cursor-pointer items-center gap-2 px-3 text-[0.8125rem] outline-none ${path === preview?.path ? 'font-semibold' : 'hover:bg-surface-2'}`}
                       onFocus={() => setCursor((c) => (c === path ? c : path))} onClick={() => open(e)}>
                       <div role="gridcell" className="flex min-w-0 flex-1 items-center gap-2">
                         <Icon name={KIND_ICON[kind]} className={`size-3.5 ${kind === 'folder' ? 'text-accent' : 'text-muted'}`} />
-                        <span className="min-w-0 truncate" dir="ltr" title={e.name}>{e.name}</span>
+                        <span className="min-w-0 truncate" dir="ltr" title={visible(e.name)}>{visible(e.name)}</span>
                       </div>
                       <div role="gridcell" className="hidden w-28 flex-none truncate text-xs text-muted @lg:block">{t(`fm-kind-${kind}`)}</div>
                       <div role="gridcell" className="w-20 flex-none text-end text-xs text-muted">{e.isDir ? '—' : formatSize(e.size)}</div>
@@ -321,7 +322,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
           <section ref={previewBox} tabIndex={-1} aria-label={t('fm-preview')} className="outline-none flex min-h-0 min-w-0 flex-1 flex-col border-line @4xl:border-s">
             <div className="ide-bar flex-none gap-1.5 border-b py-1">
               <button type="button" className="ide-iconbtn @4xl:hidden" onClick={() => closePreview()} aria-label={t('fm-back')} title={t('fm-back')}><Icon name="chevron" className="rotate-180 rtl:rotate-0" /></button>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold" dir="ltr" title={preview.path}>{baseName(preview.path)}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold" dir="ltr" title={visible(preview.path)}>{visible(baseName(preview.path))}</span>
               <span className="flex-none text-xs text-muted">{formatSize(preview.item.size)}</span>
               <button type="button" className="ide-iconbtn" onClick={() => closePreview()} aria-label={t('fm-close-preview')} title={t('fm-close-preview')}><Icon name="close" className="size-3.5" /></button>
             </div>
@@ -358,7 +359,7 @@ function TreeNode({ path, name, depth, listings, expanded, list, toggle, current
           <Icon name="chevron" className={`size-3 transition-transform duration-150 ${open ? 'rotate-90' : 'rtl:rotate-180'}`} />
         </button>
         <Icon name="folder" className="size-3.5 text-muted" />
-        <span className="min-w-0 truncate" dir="ltr">{name}</span>
+        <span className="min-w-0 truncate" dir="ltr">{visible(name)}</span>
       </div>
       {open && (l === 'loading' ? <p role="none" className="muted m-0 py-1 text-xs" style={{ paddingInlineStart: 36 + depth * 12 }}>…</p>
         : l === 'failed' ? <p role="none" className="m-0 py-1 text-xs text-danger" style={{ paddingInlineStart: 36 + depth * 12 }}>{t('files-failed')}</p>

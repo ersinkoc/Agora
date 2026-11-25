@@ -42,6 +42,19 @@ const row = (path: string) => host.querySelector<HTMLElement>(`[role=row][data-p
 const click = (el: Element) => act(() => { (el as HTMLElement).click(); });
 
 describe('the file manager list', () => {
+  it('makes listed file names visible', async () => {
+    await mount(files({ list: async () => [{ name: 'Grü\u3164ße\u2800.ts', isDir: false, size: 1 }] }));
+    const shown = host.textContent ?? '';
+    expect([...shown].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(shown).toContain('Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('verifies multilingual display while preserving the raw row path', async () => {
+    const raw = '漢\u202e字\u3164.rs';
+    await mount(files({ list: async () => [{ name: raw, isDir: false, size: 1 }] }));
+    expect(host.textContent).toContain('漢\\u{202e}字\\u{3164}.rs');
+    expect(host.querySelector('[role=row][data-path]')?.getAttribute('data-path')).toBe(raw);
+  });
+
   it('lists a folder with folders first, kind and size, and a count', async () => {
     await mount();
     expect(names()).toEqual(['docs', 'src', '.env', 'big.bin', 'Cargo.toml', 'README.md']);

@@ -8,6 +8,7 @@ import { useHighlightedFile } from '../highlight/useHighlight';
 import { StatusBadge } from './ChangesView';
 import { Icon } from './Icon';
 import { Resizer } from './Resizer';
+import { visible } from '../net/hidden';
 
 // An agent's workspace as an editor shows it (docs/ux/main-window.md, Files): a folder tree that opens lazily, with the files and
 // folders that hold changes marked; open files as tabs; the file with line numbers, where it changed in the gutter, and a search.
@@ -405,12 +406,12 @@ export function TreeLevel({ dir, depth, listings, open, list, toggle, pick, acti
         return (
           <div key={path}>
             <button type="button" role="treeitem" aria-level={depth + 1} data-path={path} aria-expanded={f.isDir ? isOpen : undefined} aria-selected={path === active} aria-current={path === active}
-              aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: f.name }) : undefined}
-              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={secret ? t('files-secret') : path}
+              aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: visible(f.name) }) : undefined}
+              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={secret ? t('files-secret') : visible(path)}
               onClick={() => (f.isDir ? toggle(path) : pick(path, f.size))}>
               <span className="w-3 flex-none text-muted">{f.isDir && <Icon name="chevron" className={`size-3 transition-transform duration-150 ${isOpen ? 'rotate-90' : 'rtl:rotate-180'}`} />}</span>
               <Icon name={f.isDir ? 'folder' : secret ? 'lock' : 'files'} className={`size-3.5 flex-none ${f.isDir ? 'text-muted' : 'text-muted/70'}`} />
-              <span className={`min-w-0 flex-1 truncate text-start ${st ? 'text-ink' : ''}`} dir="ltr">{f.name}</span>
+              <span className={`min-w-0 flex-1 truncate text-start ${st ? 'text-ink' : ''}`} dir="ltr">{visible(f.name)}</span>
               {f.isDir && folders.has(path) && <span className="size-1.5 flex-none rounded-full bg-working" title={t('files-folder-changed')} />}
               {st && <StatusBadge status={st} />}
             </button>

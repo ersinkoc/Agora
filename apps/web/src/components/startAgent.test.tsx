@@ -234,6 +234,34 @@ describe('the start window, machine, preview and errors', () => {
 });
 
 describe('StartAgent', () => {
+  it('makes folder-browser paths and entries visible', async () => {
+    await act(async () => {
+      root.render(<StartAgent projects={[]} machines={machines.slice(0, 1)} initialNode="n1" loadKinds={() => Promise.resolve([])}
+        inspect={() => Promise.reject(new Error('unused'))}
+        list={() => Promise.resolve({ path: '/Grü\u3164ße', parent: '/', entries: [{ name: 'ça\u2800lış', isGit: false }], truncated: false })}
+        onStart={() => Promise.resolve(undefined)} onClose={() => {}} />);
+    });
+    const browseBtn = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent?.includes(t('start-browse')));
+    await act(async () => { browseBtn!.click(); });
+    const shown = win().textContent ?? '';
+    expect([...shown].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(shown).toContain('/Grü\\u{3164}ße');
+    expect(shown).toContain('ça\\u{2800}lış');
+  });
+  it('verifies folder display while navigating with the raw path', async () => {
+    const list = vi.fn(async () => ({ path: '/Grü\u3164ße', parent: '/', entries: [{ name: '漢\u202e字', isGit: false }], truncated: false }));
+    await act(async () => {
+      root.render(<StartAgent projects={[]} machines={machines.slice(0, 1)} initialNode="n1" loadKinds={() => Promise.resolve([])} inspect={() => Promise.reject(new Error('unused'))}
+        list={list} onStart={() => Promise.resolve(undefined)} onClose={() => {}} />);
+    });
+    const browseBtn = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent?.includes(t('start-browse')));
+    await act(async () => { browseBtn!.click(); });
+    expect(win().textContent).toContain('Grü\\u{3164}ße');
+    const folder = Array.from(win().querySelectorAll('button')).find((b) => b.textContent?.includes('漢\\u{202e}字'));
+    await act(async () => { folder!.click(); });
+    expect(list).toHaveBeenLastCalledWith('n1', '/Grü\u3164ße/漢\u202e字');
+  });
+
   it('ignores stale directory listings from a previous machine after switching', async () => {
     const machines: MachineModel[] = [
       { id: 'n1', name: 'Node 1', online: true, os: 'linux', binary: '', agentsRunning: 0, terminalsOpen: 0, memoryBytes: 0, lastSeenMs: 0 },

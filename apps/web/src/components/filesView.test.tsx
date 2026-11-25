@@ -22,6 +22,21 @@ afterEach(() => {
 });
 
 describe('FilesView', () => {
+  it('makes listed file names visible', async () => {
+    const files = { list: () => Promise.resolve([{ name: 'Grü\u3164ße\u2800.ts', isDir: false, size: 1 }]), read: () => Promise.resolve(new Uint8Array()) };
+    await act(async () => { root.render(<FilesView files={files} />); });
+    const shown = host.textContent ?? '';
+    expect([...shown].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(shown).toContain('Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('verifies multilingual display while preserving the raw file path', async () => {
+    const raw = '漢\u202e字\u3164.rs';
+    const files = { list: () => Promise.resolve([{ name: raw, isDir: false, size: 1 }]), read: () => Promise.resolve(new Uint8Array()) };
+    await act(async () => { root.render(<FilesView files={files} />); });
+    expect(host.textContent).toContain('漢\\u{202e}字\\u{3164}.rs');
+    expect(host.querySelector('[role=treeitem]')?.getAttribute('data-path')).toBe(raw);
+  });
+
   it('cancels pending list retries when unmounted', async () => {
     vi.useFakeTimers();
     try {

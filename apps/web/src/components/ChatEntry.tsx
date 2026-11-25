@@ -11,6 +11,7 @@ import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar } from './kit';
 import { alwaysText } from '../net/always';
+import { visible } from '../net/hidden';
 
 // How one conversation entry looks. Everything here was written by an agent or a person: it is drawn as React text, never as HTML
 // (the one exception is the syntax highlighter's own output, which is escaped text inside <span class> tags).
@@ -216,7 +217,7 @@ function PlaceChips({ places, skip }: { places: readonly { path: string; line: n
   const list = places.filter((p) => p.path !== skip);
   if (list.length === 0) return null;
   return <>
-    {list.slice(0, 2).map((p, i) => <code key={`${p.path}:${p.line}`} dir="ltr" title={p.line > 0 ? `${p.path}:${p.line}` : p.path} data-place className={`min-w-0 max-w-40 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted ${i > 0 ? 'max-md:hidden' : ''}`}>{baseName(p.path)}{p.line > 0 ? `:${p.line}` : ''}</code>)}
+    {list.slice(0, 2).map((p, i) => <code key={`${p.path}:${p.line}`} dir="ltr" title={visible(p.line > 0 ? `${p.path}:${p.line}` : p.path)} data-place className={`min-w-0 max-w-40 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted ${i > 0 ? 'max-md:hidden' : ''}`}>{visible(baseName(p.path))}{p.line > 0 ? `:${p.line}` : ''}</code>)}
     {list.length > 2 && <span className="flex-none text-xs text-muted max-md:hidden">+{list.length - 2}</span>}
   </>;
 }

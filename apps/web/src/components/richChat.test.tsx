@@ -48,6 +48,16 @@ describe('a tool call with the node\'s data', () => {
     expect(html).toContain('+1'); // two chips and "+1"
     expect(html).not.toContain('<a '); // a path is never a link
   });
+  it('makes tool location paths visible', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"x","arguments":{}}', callKind: 'search', locations: [{ path: 'src/Grü\u3164ße\u2800.ts', line: 3 }] })]} />);
+    expect([...html].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(html).toContain('Grü\\u{3164}ße\\u{2800}.ts:3');
+  });
+  it('verifies multilingual tool paths in chip text and tooltip', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"x","arguments":{}}', callKind: 'search', locations: [{ path: 'src/漢\u202e字\u3164.rs', line: 7 }] })]} />);
+    expect(html).toContain('漢\\u{202e}字\\u{3164}.rs:7');
+    expect(html).toContain('title="src/漢\\u{202e}字\\u{3164}.rs:7"');
+  });
   it('folds what a run printed to its last lines, with the rest on request, and says when the node shortened it', () => {
     const out = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
     act(() => root.render(<ToolSteps lines={[call(1, { text: '{"tool":"execute","arguments":{"command":"cargo test"}}', callKind: 'run', status: 'completed', output: out, outputCut: true })]} open />));
