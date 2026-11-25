@@ -28,5 +28,5 @@ export function MachineName({ m, id, className = '' }: { m: Pick<MachineModel, '
 export function MachineFacts({ m, now }: { m: MachineModel; now: number }) {
   const when = t(m.online ? 'network-heard' : 'network-last-seen', { when: ago(m.lastSeenMs, now) });
   const parts: [string, boolean][] = [[peerText(systemName(m.os)) || '?', false], ...(m.build ? [[m.build, true] as [string, boolean]] : []), [when, false]];
-  return <>{parts.map(([p, mono], i) => <span key={i}>{i > 0 && ' · '}<bdi data-fact={i === 0 ? 'os' : undefined} className={mono ? 'font-mono' : undefined}>{p}</bdi></span>)}</>;
+  return <>{parts.map(([p, mono], i) => <span key={i}>{i > 0 && ' · '}<bdi data-fact={i === 0 ? 'os' : undefined} className={mono ? 'font-mono' : undefined}>{mono ? visible(p) : p}</bdi></span>)}</>;
 }
