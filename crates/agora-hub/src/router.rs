@@ -462,12 +462,12 @@ impl Router {
             payload,
         });
         if sent.is_ok() && terminal {
-            self.terminal_bytes.fetch_add(bytes, Ordering::Relaxed);
+            crate::metrics::saturating_add(&self.terminal_bytes, bytes);
         }
         let exited = kind == 3;
         if sent.is_err() || exited {
             if sent.is_err() && terminal {
-                self.relays_dropped.fetch_add(1, Ordering::Relaxed);
+                crate::metrics::saturating_add(&self.relays_dropped, 1);
             }
             if let Some(r) = relays.remove(&key) {
                 if sent.is_err() {
@@ -1263,6 +1263,90 @@ mod tests {
         assert_eq!(client.take_closed(), vec![6]);
         assert_eq!(r.relays_dropped(), 1);
         assert_eq!(r.terminal_bytes(), 8 + 2 * RELAY_QUEUE as u64);
+    }
+
+    #[test]
+    fn f373_terminal_bytes_do_not_wrap_after_the_counter_saturates() {
+        let r = Router::new();
+        r.terminal_bytes.store(u64::MAX, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        r.relay_frame("n", stream, 0, vec![1]);
+        assert_eq!(r.terminal_bytes(), u64::MAX);
+    }
+
+    #[test]
+    fn terminal_bytes_still_reach_the_counter_maximum() {
+        let r = Router::new();
+        r.terminal_bytes.store(u64::MAX - 1, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        r.relay_frame("n", stream, 0, vec![1]);
+        assert_eq!(r.terminal_bytes(), u64::MAX);
+    }
+
+    #[test]
+    fn f374_dropped_terminal_relays_do_not_wrap_after_the_counter_saturates() {
+        let r = Router::new();
+        r.relays_dropped.store(u64::MAX, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", stream, 0, vec![1]);
+        }
+        assert_eq!(r.relays_dropped(), u64::MAX);
+    }
+
+    #[test]
+    fn dropped_terminal_relays_still_reach_the_counter_maximum() {
+        let r = Router::new();
+        r.relays_dropped.store(u64::MAX - 1, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", stream, 0, vec![1]);
+        }
+        assert_eq!(r.relays_dropped(), u64::MAX);
+    }
+
+    #[test]
+    fn verifies_f373_terminal_byte_saturation_for_single_multi_and_empty_payloads() {
+        for (starting, payload, expected) in [
+            (u64::MAX, vec![1], u64::MAX),
+            (u64::MAX - 2, vec![1, 2, 3], u64::MAX),
+            (17, Vec::new(), 17),
+        ] {
+            let r = Router::new();
+            r.terminal_bytes.store(starting, Ordering::Relaxed);
+            let (_reg, _node_rx) = r.register("n");
+            let (client, _frames) = r.client();
+            let stream = r.open_relay("n", &client, 1, Some("terminal"));
+            r.relay_frame("n", stream, 0, payload);
+            assert_eq!(r.terminal_bytes(), expected);
+        }
+    }
+
+    #[test]
+    fn verifies_f374_drop_saturation_for_max_near_max_and_non_terminal_relays() {
+        for (starting, terminal, expected) in [
+            (u64::MAX, Some("terminal"), u64::MAX),
+            (u64::MAX - 1, Some("terminal"), u64::MAX),
+            (9, None, 9),
+        ] {
+            let r = Router::new();
+            r.relays_dropped.store(starting, Ordering::Relaxed);
+            let (_reg, _node_rx) = r.register("n");
+            let (client, _frames) = r.client();
+            let stream = r.open_relay("n", &client, 1, terminal);
+            for _ in 0..=RELAY_QUEUE {
+                r.relay_frame("n", stream, 0, vec![1]);
+            }
+            assert_eq!(r.relays_dropped(), expected);
+        }
     }
 
     #[test]

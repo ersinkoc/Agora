@@ -6,6 +6,13 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
+/// Monotonic counters stay at their public representation limit instead of wrapping to zero.
+pub(crate) fn saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.try_update(Relaxed, Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
+}
+
 /// Bucket bounds in microseconds for the hub's own work: 0.1 ms to 250 ms.
 pub const LATENCY_US: [u64; 9] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 50_000, 250_000];
 /// Bucket bounds in microseconds for a person's answer: 1 s to 1 hour.
@@ -51,7 +58,7 @@ impl Histogram {
             .iter()
             .position(|b| us <= *b)
             .unwrap_or(self.bounds.len());
-        let _ = self.buckets[i].try_update(Relaxed, Relaxed, |count| Some(count.saturating_add(1)));
+        saturating_add(&self.buckets[i], 1);
         // Saturating: a time from a machine's clock (an approval's answer far in the future) must not wrap the sum (#574 review).
         let _ = self
             .sum_us

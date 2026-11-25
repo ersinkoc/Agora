@@ -410,9 +410,7 @@ impl Hub {
     ) -> Result<Ingest, SessionError> {
         let (outcome, stored) = session.event_stored(payload)?;
         if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
-            self.metrics
-                .events_ingested
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::saturating_add(&self.metrics.events_ingested, 1);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(stored.as_deref().unwrap_or(payload)) {
                 let restarted = match &event.body {
@@ -1156,6 +1154,92 @@ mod tests {
             Ingest::Duplicate { acked: 2 }
         );
         assert!(sub.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn f372_the_ingested_event_counter_does_not_wrap_after_saturation() {
+        let (hub, sup) = (hub(), support());
+        hub.metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        assert_eq!(
+            hub.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn the_ingested_event_counter_still_reaches_its_maximum() {
+        let (hub, sup) = (hub(), support());
+        hub.metrics
+            .events_ingested
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        assert_eq!(
+            hub.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn verifies_f372_ingested_counter_saturation_for_applied_resynced_and_near_max_events() {
+        let sup = support();
+
+        let applied = hub();
+        applied
+            .metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut applied_session = open_session(&applied, &sup, "applied");
+        applied
+            .ingest(&mut applied_session, &online("applied", 1))
+            .unwrap();
+        assert_eq!(
+            applied
+                .metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+
+        let resynced = hub();
+        resynced
+            .metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut resynced_session = open_session(&resynced, &sup, "resynced");
+        resynced_session.snapshot_required(9).unwrap();
+        assert!(matches!(
+            resynced.ingest(&mut resynced_session, &online("resynced", 7)),
+            Ok(Ingest::Resynced { .. })
+        ));
+        assert_eq!(
+            resynced
+                .metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+
+        let near = hub();
+        near.metrics
+            .events_ingested
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        let mut near_session = open_session(&near, &sup, "near");
+        near.ingest(&mut near_session, &online("near", 1)).unwrap();
+        assert_eq!(
+            near.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
     }
 
     /// ADR-0054: the event a node's resync lands on goes into the view and to subscribers like any applied one.

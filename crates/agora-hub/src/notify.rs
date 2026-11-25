@@ -179,7 +179,7 @@ impl Router {
     pub fn route(&mut self, prefs: &Prefs, ctx: &Context, n: &Notice) -> Outcome {
         let key = (n.trigger, n.subject.clone());
         if let Some(&prev) = self.last.get(&key) {
-            if n.at_ms.saturating_sub(prev) < DEDUPE_MS {
+            if n.at_ms >= prev && n.at_ms - prev < DEDUPE_MS {
                 return Outcome::Dropped(Dropped::Repeat);
             }
         }
@@ -231,7 +231,7 @@ impl Router {
 impl Outcome {
     fn counted(self, r: &mut Router) -> Self {
         if self == Outcome::Digest {
-            r.digest += 1;
+            r.digest = r.digest.saturating_add(1);
         }
         self
     }
@@ -398,6 +398,91 @@ mod tests {
         r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "new", DEDUPE_MS));
         r.prune(DEDUPE_MS + 1);
         assert_eq!(r.last.len(), 1);
+    }
+
+    #[test]
+    fn f370_a_saturated_digest_count_does_not_overflow() {
+        let (mut r, p) = (Router::new(), Prefs::default());
+        r.digest = u32::MAX;
+        assert_eq!(
+            r.route(&p, &ctx(), &notice(Trigger::TaskCompleted, "new", 1)),
+            Outcome::Digest
+        );
+        assert_eq!(r.flush_digest(), Some(u32::MAX));
+    }
+
+    #[test]
+    fn a_digest_count_still_reaches_its_maximum() {
+        let (mut r, p) = (Router::new(), Prefs::default());
+        r.digest = u32::MAX - 1;
+        r.route(&p, &ctx(), &notice(Trigger::TaskCompleted, "new", 1));
+        assert_eq!(r.flush_digest(), Some(u32::MAX));
+    }
+
+    #[test]
+    fn f371_a_clock_rollback_does_not_suppress_a_subject_until_the_old_time_returns() {
+        let (mut r, p) = (Router::new(), Prefs::default());
+        assert!(matches!(
+            r.route(
+                &p,
+                &ctx(),
+                &notice(Trigger::AgentBlocked, "agent", 1_000_000)
+            ),
+            Outcome::Deliver(_)
+        ));
+        assert!(matches!(
+            r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "agent", 0)),
+            Outcome::Deliver(_)
+        ));
+    }
+
+    #[test]
+    fn a_forward_timestamp_inside_the_window_remains_a_repeat() {
+        let (mut r, p) = (Router::new(), Prefs::default());
+        r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "agent", 100));
+        assert_eq!(
+            r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "agent", 101)),
+            Outcome::Dropped(Dropped::Repeat)
+        );
+    }
+
+    #[test]
+    fn verifies_f370_digest_saturation_from_max_near_max_and_regular_counts() {
+        for (starting, subjects, expected) in [
+            (u32::MAX, 1usize, u32::MAX),
+            (u32::MAX - 1, 2, u32::MAX),
+            (0, 3, 3),
+        ] {
+            let (mut r, p) = (Router::new(), Prefs::default());
+            r.digest = starting;
+            for i in 0..subjects {
+                assert_eq!(
+                    r.route(
+                        &p,
+                        &ctx(),
+                        &notice(Trigger::TaskCompleted, &format!("task-{i}"), i as u64)
+                    ),
+                    Outcome::Digest
+                );
+            }
+            assert_eq!(r.flush_digest(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn verifies_f371_dedupe_across_large_small_equal_and_forward_timestamp_changes() {
+        for (first, second, repeated) in [
+            (1_000_000, 0, false),
+            (101, 100, false),
+            (100, 100, true),
+            (100, 101, true),
+            (100, 100 + DEDUPE_MS, false),
+        ] {
+            let (mut r, p) = (Router::new(), Prefs::default());
+            r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "agent", first));
+            let outcome = r.route(&p, &ctx(), &notice(Trigger::AgentBlocked, "agent", second));
+            assert_eq!(outcome == Outcome::Dropped(Dropped::Repeat), repeated);
+        }
     }
 
     #[test]
