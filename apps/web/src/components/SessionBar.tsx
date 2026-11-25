@@ -10,6 +10,7 @@ import { Mark } from './StateBadge';
 import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import type { SessionModel, SessionOptionModel, UiState } from '../model';
 import type { ConfigOptionModel } from '../model';
 import { actsFreely, skippingNow, choices, choiceState, configChoices, configGroups, contextFill, contextLabel, contextPercent, isChange, needsPlaceholder, shortCount, type OptionKind } from './sessionChoice';
@@ -17,7 +18,7 @@ import { actsFreely, skippingNow, choices, choiceState, configChoices, configGro
 // ADR-0090: the word a setting is called in the window. The three the window knows get its own words (the agent's name for them is its
 // own and untrusted); any other keeps the agent's name.
 const CATEGORY_WORD: Record<string, string> = { mode: 'session-mode', model: 'session-model', thought_level: 'session-effort' };
-const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] ? t(CATEGORY_WORD[o.category] as string) : o.name || o.id);
+const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] ? t(CATEGORY_WORD[o.category] as string) : visible(o.name || o.id));
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported. A mode or setting in which the agent acts without asking is sent like any other choice: the machine raises
@@ -108,10 +109,13 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   const picker = (kind: OptionKind, list: readonly SessionOptionModel[], current: string) => {
     if (list.length === 0) return null;
     const word = t(kind === 'mode' ? 'session-mode' : 'session-model');
-    const name = (o: SessionOptionModel) => (o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id));
+    const name = (o: SessionOptionModel) => {
+      const shown = visible(o.name || o.id);
+      return o.skipsPermissions ? t('session-mode-unasked', { name: shown }) : shown;
+    };
     const now = list.find((o) => o.id === current);
     const wait = waits.find((x) => x.control === kind);
-    const shown = wait && wait.state !== 'late' ? waitWord(wait) : now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : current;
+    const shown = wait && wait.state !== 'late' ? waitWord(wait) : now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : visible(current);
     // A choice this machine's settings refuse stays marked unavailable with the reason; any other is sent, a skipping one waits for the owner's card.
     const items: MenuItem[] = choices(list, current).map((o) => { const no = refused.has(refusedKey(kind, o.id)); return { label: name(o), checked: o.id === current, disabled: disabled || busy || !choose || no, hint: no ? t('session-forbidden-hint') : undefined, run: () => pick(kind, o.id) }; });
     return (
@@ -133,7 +137,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     settle(r, o.id, value);
   };
   const choiceName = (o: ConfigOptionModel, c: { id: string; name: string; skipsPermissions: boolean }): string => {
-    const base = o.type === 'boolean' ? t(c.id === 'true' ? 'session-on' : 'session-off') : c.name || c.id;
+    const base = o.type === 'boolean' ? t(c.id === 'true' ? 'session-on' : 'session-off') : visible(c.name || c.id);
     return c.skipsPermissions ? t('session-mode-unasked', { name: base }) : base;
   };
   const configItems = (o: ConfigOptionModel): MenuItem[] => configChoices(o).map((c) => {
@@ -145,7 +149,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     const w = waits.find((x) => x.control === o.id);
     if (w && w.state !== 'late') return waitWord(w);
     const now = configChoices(o).find((c) => c.id === o.current);
-    return now ? choiceName(o, now) : o.current || t('session-not-reported');
+    return now ? choiceName(o, now) : visible(o.current) || t('session-not-reported');
   };
   const configChip = (o: ConfigOptionModel) => (
     <Menu key={o.id} label={`${configWord(o)}: ${configShown(o)}`} items={configItems(o)} align="start" className="ide-chip h-7 max-w-56 min-w-0 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink">
@@ -159,10 +163,10 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   const started = useMemo(() => startedWith(agentKey).filter(([id]) => !(id === 'model' && (session.models.length > 0 || groups.replaces.model)) && !(id === 'mode' && (session.modes.length > 0 || groups.replaces.mode)) && !(id === 'effort' && hasEffort)), [agentKey, session.models.length, session.modes.length, groups, hasEffort]);
   // What makes it act without asking now, in the agent's own words ("Mode: YOLO"), for the sign's tooltip.
   const freeCause = skippingNow(session).map(({ option, value }) => {
-    if (option === 'mode') return `${t('session-mode')}: ${session.modes.find((o) => o.id === value)?.name || value}`;
+    if (option === 'mode') return `${t('session-mode')}: ${visible(session.modes.find((o) => o.id === value)?.name || value)}`;
     const o = (session.config ?? []).find((c) => c.id === option);
     if (!o) return value;
-    const shown = o.type === 'boolean' ? t(value === 'true' ? 'session-on' : 'session-off') : configChoices(o).find((c) => c.id === value)?.name || value;
+    const shown = o.type === 'boolean' ? t(value === 'true' ? 'session-on' : 'session-off') : visible(configChoices(o).find((c) => c.id === value)?.name || value);
     return `${configWord(o)}: ${shown}`;
   }).join(', ');
   // The acts-without-asking sign (ADR-0059, ADR-0090 Amendment A) stands beside Mode, the control that usually causes it, as a red-tinted tag:

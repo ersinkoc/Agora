@@ -602,6 +602,28 @@ describe('the "/" menu of the composer', () => {
     type('hello');
     expect(host.querySelector('[role=listbox]')).toBeNull();
   });
+  it('makes command menu text visible while retaining the raw command value', () => {
+    const unsafe: SessionModel = { ...base, commands: [{ name: 're\u3164view', description: 'De\u2800scription', inputHint: 'Hi\u034fnt' }] };
+    mount([L(1)], agent({ session: unsafe }));
+    type('/');
+    const row = host.querySelector('[data-slash-option]') as HTMLElement;
+    expect([...row.textContent ?? ''].some((c) => ['\u3164', '\u2800', '\u034f'].includes(c))).toBe(false);
+    expect(row.textContent).toContain('/re\\u{3164}view');
+    act(() => row.click());
+    expect(box().value).toBe('/re\u3164view ');
+  });
+  it('verifies command visibility across fields and multilingual text', () => {
+    const raw = 'ça\u202elış';
+    const unsafe: SessionModel = { ...base, commands: [{ name: raw, description: 'Grü\u3164ße 😀', inputHint: '漢\u2800字' }] };
+    mount([L(1)], agent({ session: unsafe }));
+    type('/');
+    const row = host.querySelector('[data-slash-option]') as HTMLElement;
+    expect(row.textContent).toContain('/ça\\u{202e}lış');
+    expect(row.textContent).toContain('Grü\\u{3164}ße 😀');
+    expect(row.textContent).toContain('漢\\u{2800}字');
+    act(() => row.click());
+    expect(box().value).toBe(`/${raw} `);
+  });
   it('is a combobox for the keyboard: arrows move, Enter inserts the command and does not send, Escape closes', () => {
     const send = vi.fn(async () => true);
     mount([L(1)], agent({ session }), {}, { send } as never);
