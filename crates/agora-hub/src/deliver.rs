@@ -13,6 +13,7 @@ use crate::notify::Priority;
 
 /// How long connecting, and then each read or write, may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RESPONSE_HEAD: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
@@ -59,6 +60,7 @@ impl Url {
         if authority.is_empty()
             || authority.contains('@')
             || path.chars().any(|c| c.is_control() || c == ' ')
+            || !valid_percent_encoding(&path)
         {
             return None;
         }
@@ -107,6 +109,25 @@ impl Url {
             format!("{host}:{}", self.port)
         }
     }
+}
+
+fn valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            if !bytes
+                .get(at + 1..at + 3)
+                .is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))
+            {
+                return false;
+            }
+            at += 3;
+        } else {
+            at += 1;
+        }
+    }
+    true
 }
 
 /// Reads the targets file. Blank lines and `#` comments are skipped; lines that do not parse are counted, not guessed at.
@@ -181,29 +202,57 @@ pub fn request(target: &Target, title: &str, text: &str, priority: Priority) -> 
 }
 
 fn status_of(response: &[u8]) -> Option<u16> {
-    let head = std::str::from_utf8(response.get(..12)?).ok()?;
-    if !matches!(head.get(..9), Some("HTTP/1.0 ") | Some("HTTP/1.1 ")) {
+    let line_end = response
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap_or(response.len());
+    let line = &response[..line_end];
+    let rest = line
+        .strip_prefix(b"HTTP/1.0 ")
+        .or_else(|| line.strip_prefix(b"HTTP/1.1 "))?;
+    if rest.get(3) != Some(&b' ') {
         return None;
     }
-    head.get(9..12)?
+    std::str::from_utf8(rest.get(..3)?)
+        .ok()?
         .parse()
         .ok()
         .filter(|code| (100..=599).contains(code))
 }
 
+fn final_response(response: &[u8]) -> Option<(u16, usize, usize)> {
+    let mut head_at = 0;
+    loop {
+        let body_at = head_at + find_body(response.get(head_at..)?)?;
+        let status = status_of(response.get(head_at..body_at)?)?;
+        if status >= 200 {
+            return Some((status, head_at, body_at));
+        }
+        head_at = body_at;
+    }
+}
+
 fn exchange<S: Read + Write>(mut s: S, bytes: &[u8]) -> io::Result<u16> {
     s.write_all(bytes)?;
     let mut head = Vec::new();
-    // Only the status line is needed; stop at 256 bytes or the end of the stream.
-    let mut buf = [0u8; 256];
-    while head.len() < 12 {
-        let n = s.read(&mut buf)?;
+    // Read only response headers. Informational responses precede, rather than replace, the final response.
+    let mut buf = [0u8; 1024];
+    while head.len() < MAX_RESPONSE_HEAD {
+        let remaining = MAX_RESPONSE_HEAD - head.len();
+        let take = remaining.min(buf.len());
+        let n = s.read(&mut buf[..take])?;
         if n == 0 {
             break;
         }
         head.extend_from_slice(&buf[..n]);
+        if let Some((status, _, _)) = final_response(&head) {
+            return Ok(status);
+        }
     }
-    status_of(&head).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no HTTP status"))
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "no final HTTP response",
+    ))
 }
 
 fn tls_config() -> io::Result<Arc<rustls::ClientConfig>> {
@@ -265,18 +314,38 @@ pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
             break;
         }
         all.extend_from_slice(&buf[..n]);
-        if all.len() > max + 16 * 1024 {
+        if all.len() > max.saturating_add(MAX_RESPONSE_HEAD) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "response too large",
             ));
         }
     }
-    let status = status_of(&all)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no HTTP status"))?;
-    let body_at = find_body(&all)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no HTTP body"))?;
+    let (status, head_at, body_at) = final_response(&all)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no final HTTP response"))?;
+    // A 304 carries metadata for a selected representation but no message body; its Content-Length can describe that representation.
+    let declared = (status != 304)
+        .then(|| content_length(&all[head_at..body_at]))
+        .transpose()?
+        .flatten();
     let body = all.split_off(body_at);
+    if let Some(declared) = declared {
+        match body.len().cmp(&declared) {
+            std::cmp::Ordering::Less => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "HTTP body shorter than Content-Length",
+                ));
+            }
+            std::cmp::Ordering::Greater => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HTTP body longer than Content-Length",
+                ));
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+    }
     if body.len() > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -290,10 +359,101 @@ fn find_body(r: &[u8]) -> Option<usize> {
     r.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
+fn content_length(head: &[u8]) -> io::Result<Option<usize>> {
+    let mut declared = None;
+    for raw in head.split(|b| *b == b'\n').skip(1) {
+        let line = raw.strip_suffix(b"\r").unwrap_or(raw);
+        let Some(colon) = line.iter().position(|b| *b == b':') else {
+            continue;
+        };
+        let (name, value) = (&line[..colon], &line[colon + 1..]);
+        if !name.eq_ignore_ascii_case(b"content-length") {
+            continue;
+        }
+        for item in value.split(|b| *b == b',') {
+            let item = item.trim_ascii();
+            if item.is_empty() || !item.iter().all(u8::is_ascii_digit) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Content-Length",
+                ));
+            }
+            let value = std::str::from_utf8(item)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length")
+                })?;
+            if declared.is_some_and(|earlier| earlier != value) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "conflicting Content-Length",
+                ));
+            }
+            declared = Some(value);
+        }
+    }
+    Ok(declared)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    struct ScriptedStream {
+        response: std::io::Cursor<Vec<u8>>,
+        request: Vec<u8>,
+        read_cap: usize,
+    }
+
+    impl ScriptedStream {
+        fn new(response: &[u8]) -> Self {
+            Self {
+                response: std::io::Cursor::new(response.to_vec()),
+                request: Vec::new(),
+                read_cap: usize::MAX,
+            }
+        }
+
+        fn with_cap(response: &[u8], read_cap: usize) -> Self {
+            Self {
+                read_cap,
+                ..Self::new(response)
+            }
+        }
+    }
+
+    impl Read for ScriptedStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let take = buf.len().min(self.read_cap);
+            self.response.read(&mut buf[..take])
+        }
+    }
+
+    impl Write for ScriptedStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.request.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn serve_once(response: &'static [u8]) -> Url {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            stream.write_all(response).unwrap();
+        });
+        Url::parse(&format!("http://127.0.0.1:{port}/catalog")).unwrap()
+    }
 
     #[test]
     fn urls_are_parsed_strictly() {
@@ -385,6 +545,175 @@ mod tests {
     fn valid_http_1_status_lines_keep_their_status() {
         assert_eq!(status_of(b"HTTP/1.0 200 OK\r\n"), Some(200));
         assert_eq!(status_of(b"HTTP/1.1 503 Busy\r\n"), Some(503));
+    }
+
+    #[test]
+    fn f350_a_status_code_must_end_at_a_status_line_delimiter() {
+        assert_eq!(status_of(b"HTTP/1.1 200X-not-a-delimiter\r\n"), None);
+    }
+
+    #[test]
+    fn a_status_code_followed_by_a_space_remains_valid() {
+        assert_eq!(status_of(b"HTTP/1.1 200 OK\r\n"), Some(200));
+        assert_eq!(status_of(b"HTTP/1.1 200 \xff\r\n"), Some(200));
+    }
+
+    #[test]
+    fn f351_exchange_returns_the_final_status_after_an_informational_response() {
+        let response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
+        assert_eq!(
+            exchange(ScriptedStream::new(response), b"GET / HTTP/1.0\r\n\r\n").unwrap(),
+            204
+        );
+    }
+
+    #[test]
+    fn exchange_keeps_returning_a_direct_final_status() {
+        let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+        assert_eq!(
+            exchange(ScriptedStream::new(response), b"GET / HTTP/1.0\r\n\r\n").unwrap(),
+            204
+        );
+    }
+
+    #[test]
+    fn f352_get_rejects_a_body_shorter_than_its_content_length() {
+        let url = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 10\r\n\r\n{}");
+        assert_eq!(
+            get(&url, 100).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn get_keeps_accepting_a_body_that_matches_its_content_length() {
+        let url = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&url, 100).unwrap(), (200, b"{}".to_vec()));
+    }
+
+    #[test]
+    fn get_keeps_accepting_a_bodyless_304_with_representation_length_metadata() {
+        let url = serve_once(b"HTTP/1.0 304 Not Modified\r\nContent-Length: 20\r\n\r\n");
+        assert_eq!(get(&url, 100).unwrap(), (304, Vec::new()));
+    }
+
+    #[test]
+    fn f353_an_unbounded_get_limit_does_not_overflow() {
+        let url = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&url, usize::MAX).unwrap(), (200, b"{}".to_vec()));
+    }
+
+    #[test]
+    fn a_small_get_limit_still_accepts_a_body_that_fits() {
+        let url = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(get(&url, 2).unwrap(), (200, b"{}".to_vec()));
+    }
+
+    #[test]
+    fn f354_malformed_percent_encoding_is_not_a_valid_url() {
+        for raw in [
+            "https://notify.example/%",
+            "https://notify.example/%0",
+            "https://notify.example/%GG",
+        ] {
+            assert_eq!(Url::parse(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn valid_percent_encoding_in_a_url_stays_accepted() {
+        for raw in [
+            "https://notify.example/a%20b",
+            "https://notify.example/%2Ftopic",
+            "https://notify.example/?x=%25",
+        ] {
+            assert!(Url::parse(raw).is_some(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn verifies_f350_status_code_delimiters_across_letters_tabs_and_missing_separators() {
+        for bad in [
+            b"HTTP/1.1 200X\r\n".as_slice(),
+            b"HTTP/1.0 404\tNope\r\n".as_slice(),
+            b"HTTP/1.1 503\r\n".as_slice(),
+        ] {
+            assert_eq!(status_of(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
+        assert_eq!(status_of(b"HTTP/1.1 200 OK\r\n"), Some(200));
+        assert_eq!(status_of(b"HTTP/1.0 204 \r\n"), Some(204));
+    }
+
+    #[test]
+    fn verifies_f351_final_statuses_after_single_multiple_and_fragmented_informationals() {
+        for (response, cap, want) in [
+            (
+                b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 Done\r\n\r\n".as_slice(),
+                1024,
+                204,
+            ),
+            (
+                b"HTTP/1.1 103 Early\r\nLink: </x>\r\n\r\nHTTP/1.1 200 OK\r\n\r\n".as_slice(),
+                7,
+                200,
+            ),
+            (
+                b"HTTP/1.0 100 One\r\n\r\nHTTP/1.0 102 Two\r\n\r\nHTTP/1.0 201 Made\r\n\r\n"
+                    .as_slice(),
+                1,
+                201,
+            ),
+        ] {
+            assert_eq!(
+                exchange(ScriptedStream::with_cap(response, cap), b"request").unwrap(),
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn verifies_f352_truncated_content_lengths_across_empty_small_and_large_shortfalls() {
+        for response in [
+            b"HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n".as_slice(),
+            b"HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\n{}".as_slice(),
+            b"HTTP/1.0 200 OK\r\nContent-Length: 999\r\n\r\n{}".as_slice(),
+        ] {
+            let url = serve_once(response);
+            assert_eq!(
+                get(&url, 1_000).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn verifies_f353_limits_at_each_side_of_the_header_allowance_overflow_boundary() {
+        for max in [
+            usize::MAX,
+            usize::MAX - 1,
+            usize::MAX - MAX_RESPONSE_HEAD + 1,
+        ] {
+            let url = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            assert_eq!(get(&url, max).unwrap(), (200, b"{}".to_vec()), "{max}");
+        }
+    }
+
+    #[test]
+    fn verifies_f354_percent_triplets_across_path_query_and_hex_classes() {
+        for bad in [
+            "https://notify.example/topic%",
+            "https://notify.example/topic%G0",
+            "https://notify.example/topic?next=%0g",
+        ] {
+            assert_eq!(Url::parse(bad), None, "{bad}");
+        }
+        for good in [
+            "https://notify.example/topic%20name",
+            "https://notify.example/topic%2fname",
+            "https://notify.example/topic?next=%2Fagent%2f1",
+        ] {
+            assert!(Url::parse(good).is_some(), "{good}");
+        }
     }
 
     #[test]
