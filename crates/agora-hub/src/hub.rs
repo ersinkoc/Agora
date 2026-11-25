@@ -830,23 +830,49 @@ impl Hub {
     /// reload over one another's newer in-memory work.
     fn restore_board(&self, view: &View, project: &str, now_ms: u64) -> String {
         let key = format!("board.{project}");
-        if !self.boards.has(project) {
-            match self.store.setting(&key) {
-                Ok(Some(bytes)) => self.boards.load(project, &bytes, now_ms),
-                // ADR-0115: a board an older hub stored under the project's spelling in another case. The first spelling (by
-                // producer) that has one is loaded and stored again under the folded id; the old record is left for a downgrade.
-                Ok(None) => {
-                    for spelling in view.spellings_of(project) {
-                        if let Ok(Some(bytes)) = self.store.setting(&format!("board.{spelling}")) {
-                            self.boards.load(project, &bytes, now_ms);
-                            if let Some(bytes) = self.boards.snapshot(project, now_ms) {
-                                let _ = self.store.set_setting(&key, &bytes);
-                            }
-                            break;
-                        }
+        if self.boards.has(project) {
+            return key;
+        }
+        let mut parts = Vec::new();
+        if let Ok(Some(bytes)) = self.store.setting(&key) {
+            parts.push(bytes);
+        }
+        // ADR-0115: boards an older hub stored under the project's spellings in another case (one per spelling it saw). Each is
+        // merged into the folded project's board once (`board-merged.<spelling>` remembers it, so a restart does not add it twice)
+        // and the result is stored under the folded id; the old records are left for a downgrade.
+        let spellings: std::collections::BTreeSet<&str> = view
+            .spellings_of(project)
+            .filter(|s| *s != project)
+            .collect();
+        let mut merged = Vec::new();
+        for spelling in spellings {
+            let marker = format!("board-merged.{spelling}");
+            if !matches!(self.store.setting(&marker), Ok(None)) {
+                continue;
+            }
+            if let Ok(Some(bytes)) = self.store.setting(&format!("board.{spelling}")) {
+                parts.push(bytes);
+                merged.push(marker);
+            }
+        }
+        match (parts.len(), merged.is_empty()) {
+            (0, _) => {}
+            (1, true) => self.boards.load(project, &parts[0], now_ms),
+            _ => {
+                self.boards.load(
+                    project,
+                    &crate::board::Boards::merge_snapshots(&parts),
+                    now_ms,
+                );
+                let stored = self
+                    .boards
+                    .snapshot(project, now_ms)
+                    .is_some_and(|bytes| self.store.set_setting(&key, &bytes).is_ok());
+                if stored {
+                    for marker in merged {
+                        let _ = self.store.set_setting(&marker, project.as_bytes());
                     }
                 }
-                Err(_) => {}
             }
         }
         key
@@ -2223,6 +2249,107 @@ mod tests {
             .setting(&format!("board.{old}"))
             .unwrap()
             .is_some());
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115: an older hub kept a board per spelling. Every one is merged into the folded project's board once (an id taken twice
+    /// gets a new one, its dependency follows), stored under the folded id, and a restarted hub does not add them again.
+    #[test]
+    fn every_board_stored_under_an_older_spelling_is_merged_once() {
+        let (hub, path) = hub_on_file("adr0115-many-boards");
+        let (old, folded) = two_spellings(&hub);
+        let upper = format!("github.com/ERSINKOC/AGORA#{ROOT_0115}");
+        let sup = support();
+        let mut s = open_session(&hub, &sup, "older");
+        hub.ingest(&mut s, &online("older", 1)).unwrap();
+        for ev in in_project("older", 2, &upper) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        let task = |id: &str, title: &str, deps: &[&str]| serde_json::json!({"id": id, "title": title, "detail": "", "depends_on": deps, "done": false, "owner": null, "summary": ""});
+        let board = |tasks: Vec<serde_json::Value>| {
+            serde_json::json!({"next": 3, "tasks": tasks, "leases": []}).to_string()
+        };
+        let put = |spelling: &str, text: String| {
+            hub.store()
+                .set_setting(&format!("board.{spelling}"), text.as_bytes())
+                .unwrap();
+        };
+        put(&folded, board(vec![task("t-1", "folded one", &[])]));
+        put(&old, board(vec![task("t-1", "cased one", &[])]));
+        put(
+            &upper,
+            board(vec![
+                task("t-1", "upper one", &[]),
+                task("t-2", "upper two", &["t-1"]),
+            ]),
+        );
+        for n in ["old", "new", "older"] {
+            hub.board_join_settled(n, &folded);
+        }
+        let list = |hub: &Hub| -> serde_json::Value {
+            match hub
+                .board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6)
+                .verdict
+            {
+                crate::board::Verdict::Done { result, .. } => {
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap_or("null"))
+                        .unwrap()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["title"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+        let first = list(&hub);
+        assert_eq!(
+            titles(&first),
+            ["cased one", "folded one", "upper one", "upper two"],
+            "{first}"
+        );
+        let ids: std::collections::BTreeSet<&str> = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["task_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 4, "{first}");
+        let two = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper two")
+            .unwrap();
+        let one = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper one")
+            .unwrap();
+        assert_eq!(two["depends_on"][0], one["task_id"], "{first}");
+        assert!(hub
+            .store()
+            .setting(&format!("board.{old}"))
+            .unwrap()
+            .is_some());
+        drop(hub);
+        // Restarted: the merged board is read back under the folded id, and the older ones are not added again.
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let mut links = Vec::new();
+        for n in ["old", "new", "older"] {
+            links.push(hub.node_link_opened(n, Vec::new(), 7).unwrap());
+            hub.board_join_settled(n, &folded);
+        }
+        let again = list(&hub);
+        assert_eq!(titles(&again), titles(&first), "{again}");
         drop(hub);
         remove_db(&path);
     }

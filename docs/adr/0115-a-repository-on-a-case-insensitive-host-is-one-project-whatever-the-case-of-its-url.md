@@ -39,6 +39,10 @@ Changing the clone's URL fixed it, but nothing told the owner why, and every clo
    it appears in the merged project at once.
 5. **Docs.** `architecture.md` (project identity), `protocol.md` (the id text), the comment on `normalize_remote`, and `CHANGELOG`.
 
+Editorial note: ADR-0052 requires that a "binding must not silently merge or split projects". This decision merges ids that differ
+only by the case of a GitHub, GitLab, Bitbucket or Codeberg path, which name one repository with one root commit, so it removes a
+silent split rather than adding a silent merge; any other change of identity still needs the owner's confirmation.
+
 ## Consequences
 
 - Clones of one GitHub/GitLab/Bitbucket/Codeberg repository are one project, whatever the case of their URLs.

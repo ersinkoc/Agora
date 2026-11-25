@@ -732,6 +732,68 @@ fn seed_projects(hub_dir: &Path) {
     put("n3", checkout("n3", "c1", "#ops3", "/opt/ops"));
 }
 
+/// ADR-0115: a grant an older hub stored in a GitHub repository's own case is taken back by the folded id the machines now report
+/// (and the other way round), leaving no row that keeps the access; a new grant is stored folded.
+#[test]
+fn a_grant_stored_in_another_case_of_a_github_project_is_revoked_by_the_folded_id() {
+    let root = tmp("grant-case");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let (ok, _, err) = run(&["hub", "user", "add", "Ayse"]);
+    assert!(ok, "{err}");
+    let commit = "db6f7d0123456789abcdef0123456789abcdef01";
+    let cased = format!("github.com/ersinkoc/Agora#{commit}");
+    let folded = format!("github.com/ersinkoc/agora#{commit}");
+    let rows = || -> Vec<String> {
+        let c = rusqlite::Connection::open(root.join("hub.db")).unwrap();
+        let mut st = c
+            .prepare("SELECT node || '/' || project FROM grants WHERE user_id = 'ayse' ORDER BY 1")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let store_cased = || {
+        rusqlite::Connection::open(root.join("hub.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO grants (user_id, node, project) VALUES ('ayse', 'mac', ?1)",
+                [&cased],
+            )
+            .unwrap();
+    };
+    // As an older hub stored it; the person is shown the project as the machines now report it.
+    store_cased();
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && out.contains(&format!("mac/{folded}")), "{out}");
+    // Revoked by the folded id: no row is left.
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "mac", &folded]);
+    assert!(ok, "{err}");
+    assert!(rows().is_empty(), "{:?}", rows());
+    // And the other way round: a folded row revoked by the cased id.
+    {
+        let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+        let users = agora_hub::users::Users::new(&store);
+        assert!(users.grant("ayse", "mac", &cased).unwrap());
+    }
+    assert_eq!(rows(), [format!("mac/{folded}")]);
+    store_cased();
+    let (ok, _, err) = run(&["hub", "user", "revoke", "ayse", "mac", &cased]);
+    assert!(ok, "{err}");
+    assert!(rows().is_empty(), "{:?}", rows());
+}
+
 #[test]
 fn a_project_is_granted_by_the_name_the_window_shows_and_an_unknown_or_ambiguous_one_is_refused() {
     let root = tmp("grant-names");

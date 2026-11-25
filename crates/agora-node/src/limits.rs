@@ -111,12 +111,14 @@ impl DeviceLimits {
 }
 
 /// A device's limit from the policy file and the one it inherited: both apply (their intersection); either alone applies as is.
+/// ADR-0115: a project is in both when the other names it in another case of a GitHub, GitLab, Bitbucket or Codeberg path (the same
+/// repository and root commit); it is kept as the first set spells it, so two sets that spell it alike combine exactly as before.
 pub fn combine(
     policy: Option<BTreeSet<String>>,
     inherited: Option<BTreeSet<String>>,
 ) -> Option<BTreeSet<String>> {
     match (policy, inherited) {
-        (Some(p), Some(i)) => Some(p.intersection(&i).cloned().collect()),
+        (Some(p), Some(i)) => Some(p.into_iter().filter(|x| in_projects(&i, x)).collect()),
         (p, i) => p.or(i),
     }
 }
@@ -137,6 +139,37 @@ mod tests {
             _ => None,
         }));
         l
+    }
+
+    /// ADR-0115: a policy line and an inherited limit that spell one GitHub project in two cases still share it; another repository
+    /// or host does not.
+    #[test]
+    fn a_policy_and_an_inherited_limit_in_two_cases_of_one_github_project_share_it() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let set = |ids: &[String]| Some(ids.iter().cloned().collect::<BTreeSet<String>>());
+        let cased = format!("github.com/O/R#{root}");
+        let folded = format!("github.com/o/r#{root}");
+        let self_hosted = format!("git.example.org/O/R#{root}");
+        let both = combine(
+            set(&[cased.clone(), self_hosted.clone()]),
+            set(&[folded.clone(), format!("git.example.org/o/r#{root}")]),
+        )
+        .unwrap();
+        assert_eq!(both, BTreeSet::from([cased.clone()]));
+        // Alike: exactly as before.
+        assert_eq!(
+            combine(set(&[folded.clone()]), set(&[folded.clone()])),
+            set(&[folded.clone()])
+        );
+        assert_eq!(
+            combine(
+                set(&[folded.clone()]),
+                set(&[format!("github.com/o/r2#{root}")])
+            ),
+            Some(BTreeSet::new())
+        );
+        let l = DeviceLimits::new(BTreeMap::from([("eda".to_string(), both)]));
+        assert!(l.allows_project("eda", &folded));
     }
 
     /// ADR-0115: a policy line written with a GitHub project's id in another case still names that project once the node folds it;

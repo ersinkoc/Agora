@@ -981,7 +981,13 @@ fn revoke_by_name(
             return ExitCode::from(1);
         }
     };
-    let has = |node: &str, project: &str| held.iter().any(|g| *g == format!("{node}/{project}"));
+    // ADR-0115: a project named in either case of a GitHub, GitLab, Bitbucket or Codeberg path is the one granted.
+    let has = |node: &str, project: &str| {
+        held.iter().any(|g| {
+            g.split_once('/')
+                .is_some_and(|(n, p)| n == node && agora_core::same_project(p, project))
+        })
+    };
     let target = if has(machine, project) {
         Some((machine.to_string(), project.to_string()))
     } else {

@@ -378,12 +378,14 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         return Err(unknown());
     };
     let id = AgentId::new(d.agent_id.clone());
-    let (terminal, skips, paste) = {
+    // ADR-0115: the command may name the project in another case of a GitHub, GitLab, Bitbucket or Codeberg path than the agent's own
+    // id (an agent that started before this node folded it, or a window that was shown the folded id): the same project. From here
+    // on the agent's own id is used, which is the one the node's broker and board calls know it by.
+    let (terminal, skips, paste, project) = {
         let sup = ctx.sup();
         let view = sup
             .list()
             .into_iter()
-            // ADR-0115: an agent that started before this node folded its project's id keeps the id it had.
             .find(|v| {
                 v.id == id && v.running && agora_core::same_project(&v.project, &d.project_id)
             })
@@ -391,7 +393,12 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         let paste = sup
             .terminal(&id)
             .map(crate::terminal::TerminalHandle::bracketed_paste);
-        (view.terminal, sup.skips_permissions_now(&id), paste)
+        (
+            view.terminal,
+            sup.skips_permissions_now(&id),
+            paste,
+            view.project.to_string(),
+        )
     };
     let dispatches = mesh.dispatches();
     // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
@@ -405,7 +412,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
     } else {
         None
     };
-    let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
+    let claim = match mesh.dispatch_claim(&project, &id, &d.task_id) {
         Ok(c) => c,
         Err(e) => {
             if let Some(t) = token {
@@ -474,7 +481,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
     let prompt_sha256 = crate::task_dispatch::prompt_sha256(&claim.prompt);
     if let Some(ev) = &ctx.events {
         ev.record_bodies(vec![v1::event::Body::TaskDispatched(v1::TaskDispatched {
-            project_id: d.project_id.clone(),
+            project_id: project.clone(),
             task_id: d.task_id.clone(),
             agent_id: d.agent_id.clone(),
             by_user: d.by_user.clone(),
