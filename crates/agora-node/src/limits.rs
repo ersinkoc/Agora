@@ -158,12 +158,15 @@ mod tests {
         assert_eq!(both, BTreeSet::from([cased.clone()]));
         // Alike: exactly as before.
         assert_eq!(
-            combine(set(&[folded.clone()]), set(&[folded.clone()])),
-            set(&[folded.clone()])
+            combine(
+                set(std::slice::from_ref(&folded)),
+                set(std::slice::from_ref(&folded))
+            ),
+            set(std::slice::from_ref(&folded))
         );
         assert_eq!(
             combine(
-                set(&[folded.clone()]),
+                set(std::slice::from_ref(&folded)),
                 set(&[format!("github.com/o/r2#{root}")])
             ),
             Some(BTreeSet::new())
