@@ -33,23 +33,43 @@ export function watchIdle(minutes: number, onIdle: () => void, target: Pick<Even
   if (minutes <= 0) return () => {};
   const ms = minutes * 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Set by stop: an event already being delivered (or a listener the target keeps) then changes nothing.
+  let stopped = false;
+  // Idle time is measured on both clocks and the larger one wins: `performance.now()` is steady but on some systems stops while
+  // the computer sleeps, `Date.now()` counts the sleep. A person coming back after a sleep longer than the limit finds the window
+  // locked at their first touch, instead of that touch starting the count again.
   let last = performance.now();
+  let lastWall = Date.now();
+  const idleFor = () => Math.max(performance.now() - last, Date.now() - lastWall);
+  const lock = () => {
+    if (stopped) return;
+    stop();
+    onIdle();
+  };
   // Record every event without restarting the timer on every pointer move.
-  const active = () => { last = performance.now(); };
+  const active = () => {
+    if (stopped) return;
+    if (idleFor() >= ms) {
+      lock();
+      return;
+    }
+    last = performance.now();
+    lastWall = Date.now();
+  };
   const fire = () => {
-    const remaining = ms - (performance.now() - last);
+    timer = undefined;
+    const remaining = ms - idleFor();
     if (remaining > 0) {
       timer = setTimeout(fire, Math.ceil(remaining));
       return;
     }
-    timer = undefined;
-    stop();
-    onIdle();
+    lock();
   };
   const stop = () => {
+    stopped = true;
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    for (const e of ACTIVITY) target.removeEventListener(e, active, true);
+    for (const e of ACTIVITY) target.removeEventListener(e, active, { capture: true });
   };
   for (const e of ACTIVITY) target.addEventListener(e, active, { capture: true, passive: true });
   timer = setTimeout(fire, ms);

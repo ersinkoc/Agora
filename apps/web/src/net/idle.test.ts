@@ -55,6 +55,36 @@ describe('idle lock', () => {
     }
   });
 
+  it('locks at the first activity after a sleep longer than the limit, even before the timer fires', () => {
+    const target = new EventTarget();
+    const onIdle = vi.fn();
+    const stop = watchIdle(5, onIdle, target);
+    try {
+      vi.advanceTimersByTime(60_000);
+      // The computer slept two hours: the wall clock moved, the timers did not.
+      vi.setSystemTime(Date.now() + 2 * 60 * 60_000);
+      target.dispatchEvent(new Event('pointermove'));
+      expect(onIdle).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(onIdle, 'locks once, and the stopped watcher stays stopped').toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it('stops after its timer re-armed', () => {
+    const target = new EventTarget();
+    const onIdle = vi.fn();
+    const stop = watchIdle(5, onIdle, target);
+    vi.advanceTimersByTime(60_000);
+    target.dispatchEvent(new Event('keydown'));
+    vi.advanceTimersByTime(4 * 60_000);
+    stop();
+    vi.advanceTimersByTime(60 * 60_000);
+    expect(onIdle).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('watches nothing when off and stops when asked', () => {
     const target = new EventTarget();
     const onIdle = vi.fn();
