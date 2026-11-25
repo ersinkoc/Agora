@@ -1952,7 +1952,24 @@ impl ChatBoard {
             ChatItem::Tool(tool) => self.upsert_tool(agent, tool, cuts, at_ms),
             ChatItem::PlanSteps(steps) => self.upsert_plan(agent, steps, cuts, at_ms),
             other => {
-                let (kind, text, path) = describe(other);
+                let (kind, mut text, path) = describe(other);
+                // Audit F1660: a diff's path is untrusted like a tool call's: cleaned and cut before the entry exists (each place the
+                // adapter reported lands where cleaning puts it), and a secret file is known by the cleaned path (ADR-0080).
+                let (path, path_at) = match other {
+                    ChatItem::Diff { .. } => {
+                        let (path, _, at) = tidy_cuts_at(
+                            &path,
+                            MAX_PATH_BYTES,
+                            Style::Label,
+                            &reported(cuts, &CutField::DiffPath),
+                        );
+                        if agora_core::secrets::is_secret_path(&path) {
+                            text.clear();
+                        }
+                        (path, at)
+                    }
+                    _ => (path, Vec::new()),
+                };
                 // The places in the entry's text (as `describe` made it) and its path; the node only cuts the text's end.
                 let at: Vec<usize> = match other {
                     ChatItem::Text(_) => reported(cuts, &CutField::Text),
@@ -1962,10 +1979,6 @@ impl ChatBoard {
                     }
                     _ => Vec::new(),
                 };
-                let path_at: Vec<usize> = reported(cuts, &CutField::DiffPath)
-                    .into_iter()
-                    .filter(|&a| a <= path.len())
-                    .collect();
                 let (text, end) = cut_at(text);
                 let text_at: Vec<usize> = at
                     .into_iter()
@@ -2857,6 +2870,32 @@ mod tests {
             .find(|e| e.call_id == "o")
             .unwrap();
         assert!(!o.output_truncated && o.output == "ok");
+    }
+
+    /// Audit F1660: a diff's path is untrusted like a tool call's: cleaned and cut to `MAX_PATH_BYTES` before the entry exists (one
+    /// long path does not empty the ring), and a secret file is known by the cleaned path, so its change keeps no text.
+    #[test]
+    fn a_diffs_path_is_cleaned_and_cut_before_the_entry_exists() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Text("kept".into()), 0);
+        let diff = |path: String, text: &str| ChatItem::Diff {
+            path,
+            unified_diff: text.into(),
+        };
+        b.push_item(&a, &diff("p".repeat(MAX_BYTES + 1), "+x"), 0);
+        b.push_item(
+            &a,
+            &diff("src/\u{1b}]0;t\u{7}b.rs\u{1b}[2J".into(), "+y"),
+            0,
+        );
+        b.push_item(&a, &diff("cfg/.env\u{7}".into(), "+KEY=v"), 0);
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 4, "one long path does not empty the ring");
+        assert_eq!(s[0].text, "kept");
+        assert!(s[1].path.len() <= MAX_PATH_BYTES && s[1].text == "+x");
+        assert_eq!(s[2].path, "src/b.rs");
+        assert_eq!((s[3].path.as_str(), s[3].text.as_str()), ("cfg/.env", ""));
     }
 
     #[test]
