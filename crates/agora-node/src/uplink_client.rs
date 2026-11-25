@@ -690,7 +690,7 @@ where
     .map_err(|_| LinkError::Transport("bad resume".into()))?;
     let replay = up.on_resume_ok(&ok)?;
     accepted.store(true, Ordering::Release);
-    send_replay(&mut conn, replay).await?;
+    send_replay(&mut conn, replay, live.deadline).await?;
 
     let limit = live.deadline;
     let mut last_ping = tokio::time::Instant::now();
@@ -727,14 +727,27 @@ where
         let received = tokio::select! {
             r = tokio::time::timeout(TICK, conn.recv()) => r,
             Some(answer) = answers.recv() => {
+                if waited.jumped(live.suspended_after) {
+                    return Err(LinkError::Suspended);
+                }
                 put(&mut conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), limit).await?;
+                // F1700: a slow send (a hub that reads slowly) is not a suspension; only the wait above is measured.
+                waited = Wake::now();
                 continue;
             }
             Some(f) = relay_rx.recv() => {
+                if waited.jumped(live.suspended_after) {
+                    return Err(LinkError::Suspended);
+                }
                 put(&mut conn, &f, limit).await?;
+                waited = Wake::now();
                 continue;
             }
             Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
+                // Checked before the job is taken apart, so a dropped job still tells its sender `node.offline`.
+                if waited.jumped(live.suspended_after) {
+                    return Err(LinkError::Suspended);
+                }
                 let (from_agent, to, body, refs, board, done) = job.take();
                 posts.next += 1;
                 let id = format!("m{}", posts.next);
@@ -763,6 +776,7 @@ where
                 };
                 posts.waiting.insert(id, (tokio::time::Instant::now(), done));
                 put(&mut conn, &frame(STREAM_COMMANDS, 0, req.encode_to_vec()), limit).await?;
+                waited = Wake::now();
                 continue;
             }
         };
@@ -951,7 +965,7 @@ where
                 (STREAM_CONTROL, kinds::RESUME_OK) => {
                     if let Ok(r) = ResumeOk::decode(f.payload.as_slice()) {
                         let replay = up.on_gap(r.from_seq)?;
-                        send_replay(&mut conn, replay).await?;
+                        send_replay(&mut conn, replay, limit).await?;
                     }
                 }
                 _ => {}
@@ -964,7 +978,11 @@ where
 
 /// After the hub said where to start: when the node no longer has those events it tells the hub before sending any more
 /// (ADR-0054). A node that can replay sends nothing here.
-async fn send_replay<S>(conn: &mut Conn<S>, replay: Replay) -> Result<(), LinkError>
+async fn send_replay<S>(
+    conn: &mut Conn<S>,
+    replay: Replay,
+    limit: Duration,
+) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -975,8 +993,13 @@ where
     {
         // Codes and numbers only: this goes to the node's log, not to the user's screen.
         eprintln!("hub link: resync, events {from_seq}..{oldest_retained} are gone");
-        conn.send(&frame(STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED, Vec::new()))
-            .await?;
+        // F1701: bounded like every other send, so a hub that stopped reading is noticed instead of waited for forever.
+        put(
+            conn,
+            &frame(STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED, Vec::new()),
+            limit,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2191,5 +2214,127 @@ mod tests {
             panic!("{resp:?}");
         };
         assert_eq!(e.code, "node.policy_denied");
+    }
+
+    /// The node's end of an in-memory link whose writes (and flushes) never complete once the hub's last frame has been read: what
+    /// a full send buffer to a hub that stopped reading looks like.
+    struct FullAfterLast {
+        inner: tokio::io::DuplexStream,
+        last_sent: Arc<AtomicBool>,
+        full: bool,
+    }
+
+    impl AsyncRead for FullAfterLast {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let r = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+            if buf.filled().len() > before && self.last_sent.load(Ordering::Acquire) {
+                self.full = true;
+            }
+            r
+        }
+    }
+
+    impl AsyncWrite for FullAfterLast {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            b: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.full {
+                return std::task::Poll::Pending;
+            }
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, b)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.full {
+                return std::task::Poll::Pending;
+            }
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// F1701: the hub reports a gap the node can no longer serve (ADR-0054), so the node sends `SnapshotRequired`; the hub has
+    /// stopped reading. That send is bounded like every other one: the link is given up as silent, not waited on for ever (before,
+    /// the conversation never ended: no silence deadline, no stop, no redial).
+    #[test]
+    fn a_resync_announcement_to_a_hub_that_stopped_reading_ends_the_link_as_silent() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-link-{}-resync-full", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A small buffer that already dropped its oldest events.
+        let sink = Arc::new(EventSink::open_with_cap(&dir, "n1", 600).unwrap());
+        for i in 0..40 {
+            sink.node_resources("n1", i, i, 0);
+        }
+        assert!(sink.oldest_retained() > 1);
+        let tail = sink.next_seq();
+        let live = Liveness {
+            ping_every: Duration::from_millis(100),
+            deadline: Duration::from_millis(500),
+            suspended_after: Duration::from_secs(60),
+            post_deadline: POST_DEADLINE,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = rt.block_on(async {
+            let (node_io, hub_io) = tokio::io::duplex(64 * 1024);
+            let last_sent = Arc::new(AtomicBool::new(false));
+            let hub_last = Arc::clone(&last_sent);
+            let hub = tokio::spawn(async move {
+                let mut c = ws::accept(hub_io).await.unwrap();
+                assert_eq!(c.recv().await.unwrap().unwrap().kind, kinds::HELLO);
+                let welcome = Welcome {
+                    chosen_generation: 1,
+                    ..Default::default()
+                };
+                let w = frame(STREAM_CONTROL, kinds::WELCOME, welcome.encode_to_vec());
+                c.send(&w).await.unwrap();
+                assert_eq!(c.recv().await.unwrap().unwrap().kind, kinds::RESUME);
+                let ok = |from_seq| {
+                    frame(
+                        STREAM_CONTROL,
+                        kinds::RESUME_OK,
+                        ResumeOk { from_seq }.encode_to_vec(),
+                    )
+                };
+                c.send(&ok(tail)).await.unwrap();
+                // The gap, then the hub reads nothing more.
+                hub_last.store(true, Ordering::Release);
+                c.send(&ok(1)).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            let io = FullAfterLast {
+                inner: node_io,
+                last_sent,
+                full: false,
+            };
+            let conn = ws::connect(io, "ws://hub/").await.unwrap();
+            let stop = AtomicBool::new(false);
+            let none = AtomicBool::new(false);
+            let talk = converse(
+                conn, &sink, &stop, None, None, None, None, live, None, &none, None,
+            );
+            let r = tokio::time::timeout(live.deadline * 10, talk).await;
+            hub.abort();
+            r
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(r, Ok(Err(LinkError::Silent))), "{r:?}");
     }
 }
