@@ -1378,7 +1378,10 @@ where
                 _ => None,
             };
             let node_stream = hub.router().open_relay(&node, relays, stream_id, terminal);
-            match hub.router().send_on(&node, req.clone(), node_stream) {
+            match hub
+                .router()
+                .send_on(&node, hub.spelled_for(&node, req.clone()), node_stream)
+            {
                 Ok(r) => (r, Some(node_stream)),
                 Err(e) => {
                     hub.router().drop_relay(&node, node_stream);
@@ -1386,7 +1389,12 @@ where
                 }
             }
         } else {
-            (hub.router().send(&node, req.clone())?, None)
+            // ADR-0115: a project in the spelling that node knows it by.
+            (
+                hub.router()
+                    .send(&node, hub.spelled_for(&node, req.clone()))?,
+                None,
+            )
         };
         Ok(Inflight {
             client_request_id: client_request_id.clone(),
@@ -1516,11 +1524,19 @@ async fn send_shown<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match (owner, crate::scope::without_full_binary(&d.event)) {
+    // ADR-0115: a window gets an older node's project id folded, as the snapshot has it.
+    let folded = crate::projection::fold_event(&d.event);
+    let event = folded.as_ref().unwrap_or(&d.event);
+    match (owner, crate::scope::without_full_binary(event)) {
         (false, Some(event)) => {
             send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
         }
-        _ => send_positioned(conn, d).await,
+        _ => match folded {
+            Some(event) => {
+                send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
+            }
+            None => send_positioned(conn, d).await,
+        },
     }
 }
 
@@ -1633,6 +1649,8 @@ fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
             project_id: project.clone(),
         })),
     };
+    // ADR-0115: an older node hands over the work it holds under its own spelling of the project.
+    let req = hub.spelled_for(&node, req);
     let reply = match hub.router().send(&node, req) {
         Ok(r) => r,
         Err(_) => {

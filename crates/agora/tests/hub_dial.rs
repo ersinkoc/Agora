@@ -4041,3 +4041,89 @@ fn a_registry_kind_that_fetches_starts_only_when_a_device_signed_its_start() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&pick);
 }
+
+/// ADR-0115 end to end: two machines with clones of one GitHub repository whose `origin` differs only in case (`Owner/Repo` and
+/// `owner/repo`, the same root commit) discover one project id. Over mTLS to a real hub, one sends that id and the other the id an
+/// older node makes of the same clone (`github.com/Owner/Repo#…`), and the hub holds them as one project shared by both.
+#[test]
+fn two_machines_with_clones_of_one_github_repository_in_two_cases_are_one_shared_project() {
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("case-fold");
+    let first = dir.join("Repo");
+    std::fs::create_dir_all(&first).unwrap();
+    git(&first, &["init", "-q", "-b", "main"]);
+    git(&first, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    let second = dir.join("repo-clone");
+    git(
+        &dir,
+        &[
+            "clone",
+            "-q",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+    );
+    git(
+        &first,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Owner/Repo.git",
+        ],
+    );
+    git(
+        &second,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:owner/repo.git",
+        ],
+    );
+    let ids: Vec<String> = [&first, &second]
+        .iter()
+        .map(|r| {
+            agora_node::git::discover_checkout(r)
+                .unwrap()
+                .project
+                .to_string()
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1]);
+    assert!(ids[0].starts_with("github.com/owner/repo#"), "{}", ids[0]);
+
+    let older = ids[0].replace("github.com/owner/repo#", "github.com/Owner/Repo#");
+    assert_ne!(older, ids[0]);
+    let (desk_cert, desk_key) = hub.enroll("desk");
+    let mut links = Vec::new();
+    for (node, repo, id, cert) in [
+        ("laptop", &first, &ids[0], None),
+        ("desk", &second, &older, Some((desk_cert, desk_key))),
+    ] {
+        let sink = Arc::new(EventSink::open(&dir.join(format!("{node}-data")), node).unwrap());
+        sink.node_online(node);
+        sink.checkout_discovered(node, id, repo);
+        let mut link = hub.link(addr);
+        if let Some((cert_pem, key_pem)) = cert {
+            link.cert_pem = cert_pem;
+            link.key_pem = key_pem;
+        }
+        links.push((sink.clone(), spawn(sink, link).unwrap()));
+    }
+    wait("both machines' checkouts", || {
+        hub.state.hub.view().0.checkouts.len() == 2
+    });
+    let (view, _) = hub.state.hub.view();
+    assert!(view.checkouts.values().all(|(_, p, _)| p == &ids[0]));
+    assert_eq!(
+        agora_hub::board::nodes_with(&view, &ids[0]),
+        ["desk", "laptop"]
+    );
+    // A command about the project reaches the older machine in its own spelling.
+    assert_eq!(view.spelled_for("desk", &ids[0]), older);
+    assert_eq!(view.spelled_for("laptop", &ids[0]), ids[0]);
+    drop(links);
+    let _ = std::fs::remove_dir_all(&dir);
+}

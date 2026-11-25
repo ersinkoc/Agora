@@ -422,6 +422,68 @@ impl Boards {
         )
     }
 
+    /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
+    /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
+    /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows), and
+    /// a lease on a path already held is dropped (the first holder keeps it). A damaged one is left out.
+    pub fn merge_snapshots(parts: &[Vec<u8>]) -> Vec<u8> {
+        let boards: Vec<Value> = parts
+            .iter()
+            .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
+            .filter(Value::is_object)
+            .collect();
+        let task_number = |id: &str| id.strip_prefix("t-").and_then(|n| n.parse::<u64>().ok());
+        let mut next = boards
+            .iter()
+            .map(|b| b["next"].as_u64().unwrap_or(1))
+            .chain(boards.iter().flat_map(|b| {
+                b["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t["id"].as_str().and_then(task_number))
+                    .map(|n| n + 1)
+            }))
+            .max()
+            .unwrap_or(1);
+        let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
+        let mut taken = BTreeSet::<String>::new();
+        let mut held = BTreeSet::<String>::new();
+        for board in boards {
+            let mine: Vec<Value> = board["tasks"].as_array().cloned().unwrap_or_default();
+            let mut renamed = std::collections::BTreeMap::<String, String>::new();
+            for t in &mine {
+                let id = t["id"].as_str().unwrap_or("").to_string();
+                if taken.contains(&id) {
+                    renamed.insert(id, format!("t-{next}"));
+                    next += 1;
+                }
+            }
+            for mut t in mine {
+                let rename = |id: &str| renamed.get(id).cloned().unwrap_or_else(|| id.to_string());
+                let id = rename(t["id"].as_str().unwrap_or(""));
+                t["id"] = Value::String(id.clone());
+                if let Some(deps) = t["depends_on"].as_array_mut() {
+                    for d in deps.iter_mut() {
+                        if let Some(x) = d.as_str() {
+                            *d = Value::String(rename(x));
+                        }
+                    }
+                }
+                taken.insert(id);
+                tasks.push(t);
+            }
+            for l in board["leases"].as_array().cloned().unwrap_or_default() {
+                if held.insert(l["path"].as_str().unwrap_or("").to_string()) {
+                    leases.push(l);
+                }
+            }
+        }
+        json!({"next": next, "tasks": tasks, "leases": leases})
+            .to_string()
+            .into_bytes()
+    }
+
     /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
     pub fn load(&self, project: &str, bytes: &[u8], now_ms: u64) {
         use agora_mesh::broker::{TaskEntry, TaskStatus};

@@ -732,7 +732,7 @@ impl Hub {
         now_ms: u64,
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
-        let key = self.restore_board(project, now_ms);
+        let key = self.restore_board(&g.view, project, now_ms);
         let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
         if !events.is_empty() {
             if let Some(bytes) = self.boards.snapshot(project, now_ms) {
@@ -788,8 +788,10 @@ impl Hub {
         if call.tool == "fleet_status" {
             return self.fleet_call(&g.view, &g.fleet_agreed, call);
         }
-        let key = self.restore_board(&call.project_id, now_ms);
-        let project = call.project_id.as_str();
+        // ADR-0115: an older node names a repository on a case-insensitive host in its own case; the board is the folded project's.
+        let project = agora_core::fold_project_id(&call.project_id);
+        let project = project.as_ref();
+        let key = self.restore_board(&g.view, project, now_ms);
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
         // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
         // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
@@ -878,14 +880,79 @@ impl Hub {
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
     /// reload over one another's newer in-memory work.
-    fn restore_board(&self, project: &str, now_ms: u64) -> String {
+    fn restore_board(&self, view: &View, project: &str, now_ms: u64) -> String {
         let key = format!("board.{project}");
-        if !self.boards.has(project) {
-            if let Ok(Some(bytes)) = self.store.setting(&key) {
-                self.boards.load(project, &bytes, now_ms);
+        if self.boards.has(project) {
+            return key;
+        }
+        let mut parts = Vec::new();
+        if let Ok(Some(bytes)) = self.store.setting(&key) {
+            parts.push(bytes);
+        }
+        // ADR-0115: boards an older hub stored under the project's spellings in another case (one per spelling it saw). Each is
+        // merged into the folded project's board once (`board-merged.<spelling>` remembers it, so a restart does not add it twice)
+        // and the result is stored under the folded id; the old records are left for a downgrade.
+        let spellings: std::collections::BTreeSet<&str> = view
+            .spellings_of(project)
+            .filter(|s| *s != project)
+            .collect();
+        let mut merged = Vec::new();
+        for spelling in spellings {
+            let marker = format!("board-merged.{spelling}");
+            if !matches!(self.store.setting(&marker), Ok(None)) {
+                continue;
+            }
+            if let Ok(Some(bytes)) = self.store.setting(&format!("board.{spelling}")) {
+                parts.push(bytes);
+                merged.push(marker);
+            }
+        }
+        match (parts.len(), merged.is_empty()) {
+            (0, _) => {}
+            (1, true) => self.boards.load(project, &parts[0], now_ms),
+            _ => {
+                self.boards.load(
+                    project,
+                    &crate::board::Boards::merge_snapshots(&parts),
+                    now_ms,
+                );
+                let stored = self
+                    .boards
+                    .snapshot(project, now_ms)
+                    .is_some_and(|bytes| self.store.set_setting(&key, &bytes).is_ok());
+                if stored {
+                    for marker in merged {
+                        let _ = self.store.set_setting(&marker, project.as_bytes());
+                    }
+                }
             }
         }
         key
+    }
+
+    /// ADR-0115: `req` as `node` should get it: a project it names in the spelling that node last reported for it (an older node
+    /// spells a repository on a case-insensitive host in its own case and knows it only so). Commands that name no project, and every
+    /// command to a node that spells it folded, are unchanged. A launch keeps its project as signed (the node answered it itself).
+    pub fn spelled_for(
+        &self,
+        node: &str,
+        mut req: agora_protocol::v1::CommandRequest,
+    ) -> agora_protocol::v1::CommandRequest {
+        use agora_protocol::v1::command_request::Command as C;
+        let project = match req.command.as_mut() {
+            Some(C::AgentStart(c)) => &mut c.project_id,
+            Some(C::TaskUpdate(c)) => &mut c.project_id,
+            Some(C::TaskDispatch(c)) => &mut c.project_id,
+            Some(C::BoardJoin(c)) => &mut c.project_id,
+            Some(C::DeliverTaskHandoff(c)) => &mut c.project_id,
+            _ => return req,
+        };
+        let g = self.lock();
+        let spelled = g.view.spelled_for(node, project);
+        if spelled != project.as_str() {
+            *project = spelled.to_string();
+        }
+        req
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
@@ -2002,6 +2069,341 @@ mod tests {
             .observed_at_ms;
         assert_eq!(live_ts, rebuilt_ts);
         assert!(live_ts < u64::MAX - 1);
+    }
+
+    const ROOT_0115: &str = "db6f7d0123456789abcdef0123456789abcdef01";
+
+    /// ADR-0115: an older node's checkout and agent in `project` (in whatever case it spells it).
+    fn in_project(node: &str, seq: u64, project: &str) -> Vec<Vec<u8>> {
+        let ev = |seq: u64, body: Body| {
+            Event {
+                producer_id: node.into(),
+                seq,
+                at_ms: seq,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        vec![
+            ev(
+                seq,
+                Body::CheckoutDiscovered(agora_protocol::v1::CheckoutDiscovered {
+                    checkout_id: "c".into(),
+                    node_id: node.into(),
+                    project_id: project.into(),
+                    path: "/src/agora".into(),
+                }),
+            ),
+            ev(
+                seq + 1,
+                Body::AgentStarted(AgentStarted {
+                    agent_id: "a".into(),
+                    project_id: project.into(),
+                    node_id: node.into(),
+                    worktree_id: "w".into(),
+                    kind: "shell".into(),
+                    level: 2,
+                    ..Default::default()
+                }),
+            ),
+        ]
+    }
+
+    fn board_call_0115(project: &str, tool: &str, args: &str) -> agora_protocol::v1::BoardCall {
+        agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: project.into(),
+            tool: tool.into(),
+            arguments_json: args.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0115: `old` (an older node, its clone's remote `…/ersinkoc/Agora`) and `new` (a newer node, which folds `…/ersinkoc/agora`).
+    fn two_spellings(hub: &Hub) -> (String, String) {
+        let sup = support();
+        let old = format!("github.com/ersinkoc/Agora#{ROOT_0115}");
+        let folded = format!("github.com/ersinkoc/agora#{ROOT_0115}");
+        for (node, project) in [("old", &old), ("new", &folded)] {
+            let mut s = open_session(hub, &sup, node);
+            hub.ingest(&mut s, &online(node, 1)).unwrap();
+            for ev in in_project(node, 2, project) {
+                hub.ingest(&mut s, &ev).unwrap();
+            }
+        }
+        (old, folded)
+    }
+
+    /// ADR-0115: a node that spells a GitHub repository in another case is in the same project as one that spells it folded, in the
+    /// hub's view, its rebuilt view, board membership and the board; a command about the project reaches each in its own spelling.
+    #[test]
+    fn an_older_nodes_cased_project_id_is_one_project_with_a_newer_nodes() {
+        let (hub, path) = hub_on_file("adr0115-one-project");
+        let (old, folded) = two_spellings(&hub);
+        let check = |view: &View| {
+            assert_eq!(view.checkouts["old/c"].1, folded);
+            assert_eq!(view.checkouts["new/c"].1, folded);
+            assert_eq!(view.agents["old/a"].project_id, folded);
+            assert_eq!(view.agents["new/a"].project_id, folded);
+            assert_eq!(crate::board::nodes_with(view, &folded), ["new", "old"]);
+            assert!(crate::board::nodes_with(view, &old).is_empty());
+            assert_eq!(view.spelled_for("old", &folded), old);
+            assert_eq!(view.spelled_for("new", &folded), folded);
+        };
+        check(&hub.view().0);
+        check(&View::rebuild(hub.store()).unwrap().0);
+        // One shared project: both nodes are asked to join it, by its folded id.
+        let mut asked = hub.board_membership(4);
+        asked.sort();
+        assert_eq!(
+            asked,
+            [
+                ("new".to_string(), folded.clone()),
+                ("old".to_string(), folded.clone())
+            ]
+        );
+        hub.board_join_settled("old", &folded);
+        hub.board_join_settled("new", &folded);
+        // The older node's board call names the project in its case; the newer node sees the task it made.
+        let made = hub.board_call(
+            "old",
+            &board_call_0115(&old, "task_create", r#"{"title":"ship it"}"#),
+            5,
+        );
+        assert!(
+            matches!(
+                made.verdict,
+                crate::board::Verdict::Done {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            made.verdict
+        );
+        let listed = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        match listed.verdict {
+            crate::board::Verdict::Done { result, .. } => {
+                assert!(result.to_string().contains("ship it"), "{result}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let view = hub.view().0;
+        assert!(view.tasks.values().all(|t| t.project_id == folded));
+        assert!(!view.tasks.is_empty());
+        // A command about the project, as a window sends it (folded), reaches each node in its own spelling.
+        let dispatch = |node: &str| {
+            let req = agora_protocol::v1::CommandRequest {
+                command: Some(agora_protocol::v1::command_request::Command::TaskDispatch(
+                    agora_protocol::v1::TaskDispatch {
+                        project_id: folded.clone(),
+                        task_id: "t".into(),
+                        agent_id: "a".into(),
+                        by_user: String::new(),
+                    },
+                )),
+                ..Default::default()
+            };
+            match hub.spelled_for(node, req).command {
+                Some(agora_protocol::v1::command_request::Command::TaskDispatch(d)) => d.project_id,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(dispatch("old"), old);
+        assert_eq!(dispatch("new"), folded);
+        let join = hub.spelled_for(
+            "old",
+            agora_protocol::v1::CommandRequest {
+                command: Some(agora_protocol::v1::command_request::Command::BoardJoin(
+                    agora_protocol::v1::BoardJoin {
+                        project_id: folded.clone(),
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            join.command,
+            Some(agora_protocol::v1::command_request::Command::BoardJoin(j)) if j.project_id == old
+        ));
+        // Stored events keep what the node sent.
+        let stored = hub.store().events_after(0, 100).unwrap();
+        assert!(stored.iter().any(|stored| {
+            Event::decode(stored.payload.as_slice()).is_ok_and(
+                |e| matches!(e.body, Some(Body::CheckoutDiscovered(c)) if c.project_id == old),
+            )
+        }));
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115: once the older node updates and reports the folded id, the hub forgets its old spelling; a node that never spelled
+    /// it otherwise is sent the id as given, and another host keeps its case (two projects).
+    #[test]
+    fn a_node_that_updates_is_sent_the_folded_id_and_other_hosts_keep_their_case() {
+        let hub = hub();
+        let (_, folded) = two_spellings(&hub);
+        let sup = support();
+        let mut s = open_session(&hub, &sup, "old");
+        for ev in in_project("old", 4, &folded) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        assert_eq!(hub.view().0.spelled_for("old", &folded), folded);
+        assert!(hub.view().0.spellings.is_empty());
+        let mut s = open_session(&hub, &sup, "self-hosted");
+        hub.ingest(&mut s, &online("self-hosted", 1)).unwrap();
+        for ev in in_project(
+            "self-hosted",
+            2,
+            &format!("git.example.org/O/R#{ROOT_0115}"),
+        ) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        let view = hub.view().0;
+        assert_eq!(
+            view.checkouts["self-hosted/c"].1,
+            format!("git.example.org/O/R#{ROOT_0115}")
+        );
+        assert!(
+            crate::board::nodes_with(&view, &format!("git.example.org/o/r#{ROOT_0115}")).is_empty()
+        );
+    }
+
+    /// ADR-0115: a board an older hub stored under the project's spelling in another case is the folded project's board after the
+    /// update, and is stored again under the folded id (the old record stays for a downgrade).
+    #[test]
+    fn a_board_stored_under_an_older_spelling_is_found() {
+        let (hub, path) = hub_on_file("adr0115-old-board");
+        let (old, folded) = two_spellings(&hub);
+        hub.store()
+            .set_setting(
+                &format!("board.{old}"),
+                br#"{"next": 2, "tasks": [{"id": "t1", "title": "kept from before", "detail": "", "depends_on": [], "done": false, "owner": null, "summary": ""}], "leases": []}"#,
+            )
+            .unwrap();
+        hub.board_join_settled("old", &folded);
+        hub.board_join_settled("new", &folded);
+        let listed = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        match listed.verdict {
+            crate::board::Verdict::Done { result, .. } => {
+                assert!(result.to_string().contains("kept from before"), "{result}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let again = hub
+            .store()
+            .setting(&format!("board.{folded}"))
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&again).contains("kept from before"));
+        assert!(hub
+            .store()
+            .setting(&format!("board.{old}"))
+            .unwrap()
+            .is_some());
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115: an older hub kept a board per spelling. Every one is merged into the folded project's board once (an id taken twice
+    /// gets a new one, its dependency follows), stored under the folded id, and a restarted hub does not add them again.
+    #[test]
+    fn every_board_stored_under_an_older_spelling_is_merged_once() {
+        let (hub, path) = hub_on_file("adr0115-many-boards");
+        let (old, folded) = two_spellings(&hub);
+        let upper = format!("github.com/ERSINKOC/AGORA#{ROOT_0115}");
+        let sup = support();
+        let mut s = open_session(&hub, &sup, "older");
+        hub.ingest(&mut s, &online("older", 1)).unwrap();
+        for ev in in_project("older", 2, &upper) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        let task = |id: &str, title: &str, deps: &[&str]| serde_json::json!({"id": id, "title": title, "detail": "", "depends_on": deps, "done": false, "owner": null, "summary": ""});
+        let board = |tasks: Vec<serde_json::Value>| {
+            serde_json::json!({"next": 3, "tasks": tasks, "leases": []}).to_string()
+        };
+        let put = |spelling: &str, text: String| {
+            hub.store()
+                .set_setting(&format!("board.{spelling}"), text.as_bytes())
+                .unwrap();
+        };
+        put(&folded, board(vec![task("t-1", "folded one", &[])]));
+        put(&old, board(vec![task("t-1", "cased one", &[])]));
+        put(
+            &upper,
+            board(vec![
+                task("t-1", "upper one", &[]),
+                task("t-2", "upper two", &["t-1"]),
+            ]),
+        );
+        for n in ["old", "new", "older"] {
+            hub.board_join_settled(n, &folded);
+        }
+        let list = |hub: &Hub| -> serde_json::Value {
+            match hub
+                .board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6)
+                .verdict
+            {
+                crate::board::Verdict::Done { result, .. } => {
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap_or("null"))
+                        .unwrap()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["title"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+        let first = list(&hub);
+        assert_eq!(
+            titles(&first),
+            ["cased one", "folded one", "upper one", "upper two"],
+            "{first}"
+        );
+        let ids: std::collections::BTreeSet<&str> = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["task_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 4, "{first}");
+        let two = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper two")
+            .unwrap();
+        let one = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper one")
+            .unwrap();
+        assert_eq!(two["depends_on"][0], one["task_id"], "{first}");
+        assert!(hub
+            .store()
+            .setting(&format!("board.{old}"))
+            .unwrap()
+            .is_some());
+        drop(hub);
+        // Restarted: the merged board is read back under the folded id, and the older ones are not added again.
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let mut links = Vec::new();
+        for n in ["old", "new", "older"] {
+            links.push(hub.node_link_opened(n, Vec::new(), 7).unwrap());
+            hub.board_join_settled(n, &folded);
+        }
+        let again = list(&hub);
+        assert_eq!(titles(&again), titles(&first), "{again}");
+        drop(hub);
+        remove_db(&path);
     }
 
     /// A hub on a file, another connection to the same file (what another process is: `agora hub login`, the front door, `agora hub

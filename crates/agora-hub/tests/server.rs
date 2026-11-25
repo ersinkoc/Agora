@@ -4234,3 +4234,141 @@ async fn a_window_that_connects_later_is_sent_the_last_config_and_commands_of_a_
     );
     assert!(matches!(&seen[1], Body::AgentCommands(c) if c.commands[0].name == "review"));
 }
+
+/// The next command the hub sends this node for which `pick` says something, skipping acks and other commands.
+async fn next_command<T>(
+    c: &mut Conn<TcpStream>,
+    pick: impl Fn(command_request::Command) -> Option<T>,
+) -> T {
+    loop {
+        let fr = recv(c).await;
+        if (fr.stream_id, fr.kind) != (STREAM_COMMANDS, 0) {
+            continue;
+        }
+        let req = v1::CommandRequest::decode(fr.payload.as_slice()).unwrap();
+        if let Some(t) = req.command.and_then(&pick) {
+            return t;
+        }
+    }
+}
+
+/// ADR-0115 over real sockets: an older node whose clone's remote is `…/ersinkoc/Agora` and a newer one that folds it to
+/// `…/ersinkoc/agora` are one project. The window gets the older node's events with the folded id (as its snapshot has them), the
+/// board asks both to join, and the join and a window's start reach the older node in its own spelling.
+#[tokio::test]
+async fn an_older_and_a_newer_node_with_two_cases_of_one_github_repository_are_one_project() {
+    let root = "db6f7d0123456789abcdef0123456789abcdef01";
+    let old_id = format!("github.com/ersinkoc/Agora#{root}");
+    let folded = format!("github.com/ersinkoc/agora#{root}");
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec!["board.join".into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let mut client = dial(addr, Some("good-token")).await;
+    subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+
+    let mut nodes = Vec::new();
+    for (node, project) in [("old", &old_id), ("new", &folded)] {
+        let (mut conn, task) = node_conn(&st, node).await;
+        handshake_offering(&mut conn, &["board.join"]).await;
+        for (seq, body) in [
+            (1, online(node)),
+            (
+                2,
+                Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                    checkout_id: "c".into(),
+                    node_id: node.into(),
+                    project_id: project.clone(),
+                    path: "/src/agora".into(),
+                }),
+            ),
+            (
+                3,
+                Body::AgentStarted(v1::AgentStarted {
+                    project_id: project.clone(),
+                    ..match agent(node, "a") {
+                        Body::AgentStarted(a) => a,
+                        _ => unreachable!(),
+                    }
+                }),
+            ),
+        ] {
+            conn.send(&f(STREAM_EVENTS, kinds::EVENT, event(node, seq, body)))
+                .await
+                .unwrap();
+        }
+        nodes.push((conn, task));
+    }
+
+    // The window: every project id it is sent is the folded one.
+    let mut seen = 0;
+    while seen < 4 {
+        let fr = recv(&mut client).await;
+        if fr.kind != kinds::POSITIONED_EVENT {
+            continue;
+        }
+        let ev = v1::PositionedEvent::decode(fr.payload.as_slice())
+            .unwrap()
+            .event
+            .unwrap();
+        let id = match ev.body {
+            Some(Body::CheckoutDiscovered(c)) => c.project_id,
+            Some(Body::AgentStarted(a)) => a.project_id,
+            _ => continue,
+        };
+        assert_eq!(id, folded, "from {}", ev.producer_id);
+        seen += 1;
+    }
+    // A window that connects now: the snapshot has one project on both machines.
+    let mut later = dial(addr, Some("good-token")).await;
+    subscribe(&mut later, v1::Subscribe::default().encode_to_vec()).await;
+    let snap = v1::Snapshot::decode(recv(&mut later).await.payload.as_slice()).unwrap();
+    assert_eq!(snap.checkouts.len(), 2);
+    assert!(snap.checkouts.iter().all(|c| c.project_id == folded));
+    assert!(snap.agents.iter().all(|a| a.project_id == folded));
+
+    // The project is shared: both are asked to join its board, each in its own spelling.
+    let (mut old, _old_task) = nodes.remove(0);
+    let (mut new, _new_task) = nodes.remove(0);
+    let join = |c: command_request::Command| match c {
+        command_request::Command::BoardJoin(j) => Some(j.project_id),
+        _ => None,
+    };
+    assert_eq!(next_command(&mut old, join).await, old_id);
+    assert_eq!(next_command(&mut new, join).await, folded);
+
+    // A window starts an agent in the project it was shown: the older node is asked in its own spelling.
+    for (target, conn, want) in [("old", &mut old, &old_id), ("new", &mut new, &folded)] {
+        let req = v1::CommandRequest {
+            request_id: format!("start-{target}"),
+            idempotency_key: String::new(),
+            target_node: target.into(),
+            command: Some(command_request::Command::AgentStart(v1::AgentStart {
+                project_id: folded.clone(),
+                kind: "shell".into(),
+                ..Default::default()
+            })),
+        };
+        client
+            .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let got = next_command(conn, |c| match c {
+            command_request::Command::AgentStart(s) => Some(s.project_id),
+            _ => None,
+        })
+        .await;
+        assert_eq!(&got, want, "{target}");
+    }
+}

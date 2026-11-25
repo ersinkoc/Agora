@@ -1122,6 +1122,65 @@ fn created(said: &str) -> String {
     v["task_id"].as_str().expect(said).to_string()
 }
 
+/// ADR-0115: a task given with the project named in another case of its GitHub remote's path (what a window shown an older node's
+/// id, or an older hub, may send) is given: the node claims it in the agent's own project, through its broker. Another project is
+/// still refused.
+#[test]
+fn a_task_given_with_the_project_in_another_case_of_its_github_path_is_given() {
+    let Some((home, _node)) = node_with_acp_before("dispatch-case", None, |home| {
+        git(
+            &home.join("demo"),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Owner/Demo.git",
+            ],
+        );
+    }) else {
+        return;
+    };
+    let author = started_agent(&home);
+    let worker = started_agent(&home);
+    let task = created(&answer(
+        &home,
+        &author,
+        r#"mcp task_create {"title":"Fix the login"}"#,
+        |t| t.contains("task_id"),
+    ));
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    let project = match c
+        .call(Cmd::ProjectList(v1::ProjectList {}))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::ProjectList(p)) => p.projects[0].project_id.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(project.starts_with("github.com/owner/demo#"), "{project}");
+    let cased = project.replace("github.com/owner/demo#", "github.com/Owner/Demo#");
+    let dispatch = |c: &mut Client, project: &str| {
+        c.call(Cmd::TaskDispatch(v1::TaskDispatch {
+            project_id: project.into(),
+            task_id: task.clone(),
+            agent_id: worker.clone(),
+            by_user: "u-test".into(),
+        }))
+        .unwrap()
+    };
+    let other = project.replace("github.com/owner/demo#", "github.com/owner/other#");
+    assert_eq!(
+        dispatch(&mut c, &other).unwrap_err().code,
+        "mesh.recipient_unknown"
+    );
+    let ok = dispatch(&mut c, &cased).expect("dispatched");
+    assert!(matches!(
+        ok.result,
+        Some(v1::command_ok::Result::TaskDispatch(_))
+    ));
+}
+
 /// ADR-0095 decisions 3 to 5: the node claims an open task for the chosen agent, sends it one prompt in which the task's text sits in
 /// the fenced untrusted block (an instruction in the detail stays data), and records `TaskDispatched`; a refused dispatch (an agent not
 /// of the project, a task already given, a blocked task) moves nothing.
