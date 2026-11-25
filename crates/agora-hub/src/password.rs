@@ -463,6 +463,8 @@ impl Tally {
 struct GuardState {
     by_address: HashMap<IpAddr, Tally>,
     global: Tally,
+    /// Lock decisions never move backward with the wall clock, so a deadline already observed to end cannot return.
+    observed_ms: u64,
 }
 
 /// Rate limits for everything that proves who is signing in (codes, the password, passkeys): per address and for the whole hub.
@@ -509,6 +511,8 @@ impl Guard {
         now_ms: u64,
     ) -> Result<Undo, u64> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now_ms = now_ms.max(s.observed_ms);
+        s.observed_ms = now_ms;
         let local = client.is_local();
         let key = client.bucket();
         let mine = s.by_address.get(&key).and_then(|t| t.locked(now_ms));
@@ -749,6 +753,69 @@ mod tests {
         for _ in 0..ADDRESS_FREE_FAILURES {
             assert_eq!(g.attempt(&c, Scope::All, now), Ok(()));
         }
+    }
+
+    #[test]
+    fn f383_an_ended_password_lockout_does_not_return_after_clock_rollback() {
+        let guard = Guard::new();
+        let client = remote(1);
+        for _ in 0..ADDRESS_FREE_FAILURES {
+            assert_eq!(guard.attempt(&client, Scope::AddressOnly, 0), Ok(()));
+        }
+        assert_eq!(
+            guard.attempt(&client, Scope::AddressOnly, 1),
+            Err(FIRST_LOCKOUT_MS - 1)
+        );
+        assert_eq!(guard.attempt(&remote(2), Scope::AddressOnly, 1), Ok(()));
+        println!("CONTROL OK");
+
+        let after = FIRST_LOCKOUT_MS + 1;
+        let valid = guard
+            .attempt_undoable(&client, Scope::AddressOnly, after)
+            .unwrap();
+        guard.undo(valid);
+        let actual = guard.attempt(&client, Scope::AddressOnly, 1);
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn verifies_f383_password_lockout_deadline_boundaries() {
+        let locked = |last| {
+            let guard = Guard::new();
+            let client = remote(last);
+            for _ in 0..ADDRESS_FREE_FAILURES {
+                guard.attempt(&client, Scope::AddressOnly, 10).unwrap();
+            }
+            (guard, client)
+        };
+        let observe_valid = |guard: &Guard, client: &Client, now| {
+            let undo = guard
+                .attempt_undoable(client, Scope::AddressOnly, now)
+                .unwrap();
+            guard.undo(undo);
+        };
+
+        let (active, client) = locked(1);
+        assert_eq!(
+            active.attempt(&client, Scope::AddressOnly, 10 + FIRST_LOCKOUT_MS - 1),
+            Err(1)
+        );
+
+        let (exact, client) = locked(2);
+        observe_valid(&exact, &client, 10 + FIRST_LOCKOUT_MS);
+        assert!(exact.attempt(&client, Scope::AddressOnly, 10).is_ok());
+
+        let (later, client) = locked(3);
+        observe_valid(&later, &client, 10 + FIRST_LOCKOUT_MS + 500);
+        assert!(later.attempt(&client, Scope::AddressOnly, 11).is_ok());
+        println!("FIX VERIFIED");
     }
 
     #[test]

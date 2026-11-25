@@ -231,8 +231,12 @@ impl PairLimits {
             return;
         }
         self.last_prune = now;
-        self.keys
-            .retain(|_, k| k.locked_until > now || now.saturating_sub(k.last_seen) < RETAIN_MS);
+        self.keys.retain(|_, k| {
+            if k.locked_until != 0 && now >= k.locked_until {
+                k.locked_until = 0;
+            }
+            k.locked_until > now || now.saturating_sub(k.last_seen) < RETAIN_MS
+        });
         for h in &mut self.hub {
             while h
                 .front()
@@ -1270,6 +1274,63 @@ mod tests {
     fn the_number_matches_a_vector_computed_independently() {
         let n = sas(&[1; 32], &[2; 32], &[3; 32], &[4; 16], &[5; 16]);
         assert_eq!(digits(n), SAS_VECTOR);
+    }
+
+    #[test]
+    fn f384_an_ended_pairing_lockout_does_not_return_after_clock_rollback() {
+        let mut limits = PairLimits::new();
+        let key = ip(1);
+        for _ in 0..KEY_FAILURES {
+            limits.failure(Kind::Machine, key, 0);
+        }
+        assert_eq!(
+            limits.admit(Kind::Machine, key, 1),
+            Err(seconds_until(LOCKOUT_MS - 1))
+        );
+        assert_eq!(limits.admit(Kind::Machine, ip(2), 1), Ok(()));
+        println!("CONTROL OK");
+
+        assert_eq!(limits.admit(Kind::Machine, key, LOCKOUT_MS + 1), Ok(()));
+        let actual = limits.admit(Kind::Machine, key, 1);
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn verifies_f384_pairing_lockout_deadline_boundaries() {
+        let locked = |last| {
+            let mut limits = PairLimits::new();
+            let key = ip(last);
+            for _ in 0..KEY_FAILURES {
+                limits.failure(Kind::Machine, key, 10);
+            }
+            (limits, key)
+        };
+
+        let (mut active, key) = locked(1);
+        assert_eq!(
+            active.admit(Kind::Machine, key, 10 + LOCKOUT_MS - 1),
+            Err(1)
+        );
+
+        let (mut exact, key) = locked(2);
+        assert_eq!(exact.admit(Kind::Machine, key, 10 + LOCKOUT_MS), Ok(()));
+        assert_eq!(exact.admit(Kind::Machine, key, 10), Ok(()));
+
+        let (mut later, key) = locked(3);
+        assert_eq!(
+            later.admit(Kind::Machine, key, 10 + LOCKOUT_MS + 500),
+            Ok(())
+        );
+        assert_eq!(later.admit(Kind::Machine, key, 11), Ok(()));
+        assert_eq!(later.admit(Kind::Browser, ip(4), 11), Ok(()));
+        println!("FIX VERIFIED");
     }
 
     const SAS_VECTOR: &str = "497259";

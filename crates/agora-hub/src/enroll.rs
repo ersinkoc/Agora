@@ -187,7 +187,10 @@ impl Lockout {
     }
 
     pub(crate) fn check(&self, now_ms: u64) -> Option<u64> {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.1 != 0 && now_ms >= s.1 {
+            s.1 = 0;
+        }
         (now_ms < s.1).then(|| s.1 - now_ms)
     }
 
@@ -745,6 +748,49 @@ mod tests {
         }
         // After the lockout the real code still works.
         assert!(e.redeem(&ca, &code, "n", &csr, LOCKOUT_MS + 100).is_ok());
+    }
+
+    #[test]
+    fn f382_an_ended_enrollment_lockout_does_not_return_after_clock_rollback() {
+        let lockout = Lockout::new();
+        for _ in 0..MAX_FAILURES {
+            lockout.failed(0);
+        }
+        assert_eq!(lockout.check(1), Some(LOCKOUT_MS - 1));
+        println!("CONTROL OK");
+
+        assert_eq!(lockout.check(LOCKOUT_MS + 1), None);
+        let actual = lockout.check(1);
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, None);
+    }
+
+    #[test]
+    fn verifies_f382_enrollment_lockout_deadline_boundaries() {
+        let locked = || {
+            let lockout = Lockout::new();
+            for _ in 0..MAX_FAILURES {
+                lockout.failed(10);
+            }
+            lockout
+        };
+
+        let exact = locked();
+        assert_eq!(exact.check(10 + LOCKOUT_MS - 1), Some(1));
+        assert_eq!(exact.check(10 + LOCKOUT_MS), None);
+        assert_eq!(exact.check(10), None);
+
+        let later = locked();
+        assert_eq!(later.check(10 + LOCKOUT_MS + 500), None);
+        assert_eq!(later.check(11), None);
+
+        println!("FIX VERIFIED");
     }
 
     #[test]

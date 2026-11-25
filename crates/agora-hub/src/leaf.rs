@@ -170,8 +170,7 @@ impl Leaf {
         cur.not_after_secs = not_after_secs;
         if let Some(save) = &self.persist {
             if let Err(e) = save(&cert) {
-                self.persist_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::metrics::saturating_add(&self.persist_failures, 1);
                 eprintln!(
                     "warn: the hub's new certificate is in use but server-cert.pem could not be written: {e}"
                 );
@@ -568,6 +567,76 @@ mod tests {
         assert!(leaf.renew_if_ending(end2, 30).unwrap());
         assert_eq!(*calls.lock().unwrap(), 3);
         assert_eq!(leaf.persist_failures(), 1);
+    }
+
+    #[test]
+    fn f380_certificate_persist_failure_count_does_not_wrap() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let seen = Arc::clone(&calls);
+        let ca = Ca::generate("ca")
+            .unwrap()
+            .with_lifetime_for_tests(std::time::Duration::from_secs(100));
+        let leaf = quiet_leaf(
+            ca,
+            Some(Box::new(move |_| {
+                let mut calls = seen.lock().unwrap();
+                *calls += 1;
+                if *calls == 1 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("read-only file system"))
+                }
+            })),
+        );
+
+        leaf.persist_failures
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        assert!(leaf.renew_if_ending(leaf.not_after_secs(), 30).unwrap());
+        assert_eq!(leaf.persist_failures(), u64::MAX);
+        println!("CONTROL OK");
+
+        assert!(leaf.renew_if_ending(leaf.not_after_secs(), 30).unwrap());
+        let actual = leaf.persist_failures();
+        println!("EXPECTED: {}", u64::MAX);
+        println!("ACTUAL: {actual}");
+        if actual == u64::MAX {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, u64::MAX);
+    }
+
+    #[test]
+    fn verifies_f380_certificate_persist_failure_count_boundaries() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let seen = Arc::clone(&calls);
+        let ca = Ca::generate("ca")
+            .unwrap()
+            .with_lifetime_for_tests(std::time::Duration::from_secs(100));
+        let leaf = quiet_leaf(
+            ca,
+            Some(Box::new(move |_| {
+                let mut calls = seen.lock().unwrap();
+                *calls += 1;
+                if *calls == 1 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("disk full"))
+                }
+            })),
+        );
+        let fail_once = |starting| {
+            leaf.persist_failures
+                .store(starting, std::sync::atomic::Ordering::Relaxed);
+            leaf.renew_if_ending(leaf.not_after_secs(), 30).unwrap();
+            leaf.persist_failures()
+        };
+
+        assert_eq!(fail_once(0), 1);
+        assert_eq!(fail_once(u64::MAX - 1), u64::MAX);
+        assert_eq!(fail_once(u64::MAX), u64::MAX);
+        println!("FIX VERIFIED");
     }
 
     /// The same, against a real directory that cannot be written.
