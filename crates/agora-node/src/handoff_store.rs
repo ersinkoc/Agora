@@ -60,7 +60,10 @@ impl Record {
 
     fn id(&self) -> io::Result<Id> {
         let invalid = io::ErrorKind::InvalidData;
-        if self.number == 0 || self.number == u64::MAX || self.delivery.receiver_run_id.len() != 16
+        // A number at or past the node's id clamp would push the broker's counter past it on restore (#1194 review).
+        if self.number == 0
+            || self.number >= crate::mesh_server::MAX_FIRST_ID
+            || self.delivery.receiver_run_id.len() != 16
         {
             return Err(invalid.into());
         }
@@ -107,16 +110,33 @@ fn stale_temporary(name: &str) -> bool {
         && pid.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The inbox number in a record's header, or `None` when the file does not start like one.
-fn header_number(path: &Path) -> Option<u64> {
+/// The inbox number in a record's header: `Ok(None)` when the file does not start like one (too
+/// short or another format), `Err` when it could not be read.
+fn header_number(path: &Path) -> io::Result<Option<u64>> {
     let mut header = [0; HEADER_LEN];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut header))
-        .ok()?;
-    if !header.starts_with(FORMAT) {
-        return None;
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut header)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
     }
-    Some(u64::from_le_bytes(header[4..12].try_into().ok()?))
+    if !header.starts_with(FORMAT) {
+        return Ok(None);
+    }
+    Ok(header[4..12].try_into().ok().map(u64::from_le_bytes))
+}
+
+/// A record file that could not be read (too many open files, no permission, a disk error): it is
+/// left where it is and not loaded, since the next start may read it. Its size, when known, still
+/// counts toward the byte limit while this store is open.
+fn skipped(store: &mut Store, path: &Path, error: &io::Error) {
+    eprintln!(
+        "mesh: durable handoff record {} not loaded, left in place: {error}",
+        path.display()
+    );
+    if let Ok(meta) = std::fs::metadata(path) {
+        let len = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+        store.bytes = store.bytes.saturating_add(len).min(MAX_BYTES);
+    }
 }
 
 /// Moves a record that is not loaded out of the store's way, keeping it for a person to look at.
@@ -137,10 +157,11 @@ fn set_aside(path: &Path, reason: &str) {
 }
 
 impl Store {
-    /// Loads what is on disk within the limits. A record that cannot be read, is not one this
-    /// node wrote, or does not fit the limits is set aside (renamed, see [`set_aside`]) and the
-    /// rest stay available: one bad file never turns the durable inbox off. When more is on
-    /// disk than the limits allow, the earliest accepted records (lowest inbox numbers) are kept.
+    /// Loads what is on disk within the limits. A record that is not one this node wrote (its
+    /// format, name or number) or does not fit the limits is set aside (renamed, see
+    /// [`set_aside`]); one that cannot be read now is left in place ([`skipped`]); the rest stay
+    /// available: one bad file never turns the durable inbox off. When more is on disk than the
+    /// limits allow, the earliest accepted records (lowest inbox numbers) are kept.
     pub fn open(root: &Path) -> io::Result<Self> {
         agora_platform::ensure_private_dir(root)?;
         let mut store = Self {
@@ -162,14 +183,21 @@ impl Store {
             if path.extension().and_then(|value| value.to_str()) != Some("handoff") {
                 continue;
             }
-            let number = entry
-                .file_type()
-                .ok()
-                .filter(std::fs::FileType::is_file)
-                .and_then(|_| header_number(&path));
-            match number {
-                Some(number) => found.push((number, path)),
-                None => set_aside(&path, "unreadable"),
+            let is_file = match entry.file_type() {
+                Ok(t) => t.is_file(),
+                Err(e) => {
+                    skipped(&mut store, &path, &e);
+                    continue;
+                }
+            };
+            if !is_file {
+                set_aside(&path, "not a file");
+                continue;
+            }
+            match header_number(&path) {
+                Ok(Some(number)) => found.push((number, path)),
+                Ok(None) => set_aside(&path, "format"),
+                Err(e) => skipped(&mut store, &path, &e),
             }
         }
         found.sort_unstable();
@@ -182,8 +210,8 @@ impl Store {
             let mut bytes = Vec::new();
             let read = std::fs::File::open(&path)
                 .and_then(|f| f.take(remaining as u64 + 1).read_to_end(&mut bytes));
-            if read.is_err() {
-                set_aside(&path, "unreadable");
+            if let Err(e) = read {
+                skipped(&mut store, &path, &e);
                 continue;
             }
             if bytes.len() > remaining {
@@ -192,13 +220,13 @@ impl Store {
             }
             let loaded = Record::decode(&bytes).and_then(|record| Ok((record.id()?, record)));
             let Ok((id, record)) = loaded else {
-                set_aside(&path, "unreadable");
+                set_aside(&path, "format");
                 continue;
             };
             if path.file_name().and_then(|n| n.to_str()) != Some(filename(id).as_str())
                 || store.records.contains_key(&id)
             {
-                set_aside(&path, "unreadable");
+                set_aside(&path, "name");
                 continue;
             }
             store.bytes += bytes.len();
@@ -215,24 +243,31 @@ impl Store {
         self.records.values().map(|(record, _)| record)
     }
 
-    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
-        let id = record.id().map_err(InsertError::Storage)?;
-        if self.records.contains_key(&id) {
-            return Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into()));
-        }
-        let bytes = record.bytes().map_err(InsertError::Storage)?;
-        if self.records.len() == MAX_RECORDS {
+    /// Whether one more record holding `delivery` fits the limits. A record's size does not
+    /// depend on its number, so this is answered before a number is taken.
+    pub fn room_for(&self, delivery: &DeliverTaskHandoff) -> Result<(), InsertError> {
+        if self.records.len() >= MAX_RECORDS {
             return Err(InsertError::Full {
                 resource: "handoff_records",
                 limit: MAX_RECORDS,
             });
         }
-        if bytes.len() > MAX_BYTES - self.bytes {
+        if HEADER_LEN + delivery.encoded_len() > MAX_BYTES - self.bytes {
             return Err(InsertError::Full {
                 resource: "handoff_bytes",
                 limit: MAX_BYTES,
             });
         }
+        Ok(())
+    }
+
+    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
+        let id = record.id().map_err(InsertError::Storage)?;
+        if self.records.contains_key(&id) {
+            return Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into()));
+        }
+        self.room_for(&record.delivery)?;
+        let bytes = record.bytes().map_err(InsertError::Storage)?;
         agora_platform::write_private(&self.root.join(filename(id)), &bytes)
             .map_err(InsertError::Storage)?;
         self.records.insert(id, (record, bytes.len()));
@@ -276,7 +311,7 @@ impl Store {
 pub(crate) fn plant(root: &Path, record: &Record) -> usize {
     std::fs::create_dir_all(root).unwrap();
     let bytes = record.bytes().unwrap();
-    let id = record.id().unwrap();
+    let id: Id = record.delivery.delivery_id.as_slice().try_into().unwrap();
     std::fs::write(root.join(filename(id)), &bytes).unwrap();
     bytes.len()
 }
@@ -402,6 +437,52 @@ mod tests {
             names(&root, ".rejected"),
             [format!("{}.rejected", filename(id_of(2)))]
         );
+    }
+
+    /// Review of #1194: a record numbered at or past the node's id clamp would push the broker's counter past it when restored (an
+    /// overflow, or no id left for any mesh call), so it is set aside like any record this node could not have written.
+    #[test]
+    fn a_record_numbered_past_the_id_clamp_is_set_aside() {
+        let dir = TempDir::new("clamp");
+        let root = dir.0.join("handoffs");
+        let max = crate::mesh_server::MAX_FIRST_ID;
+        plant(&root, &record(1, String::new()));
+        for n in [max - 1, max, u64::MAX - 1] {
+            let mut r = record(n, String::new());
+            r.delivery.delivery_id = id_of(n % 1000 + 2).to_vec();
+            plant(&root, &r);
+        }
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.records().map(|r| r.number).max(), Some(max - 1));
+        assert_eq!(names(&root, ".rejected").len(), 2);
+    }
+
+    /// Review of #1194: a record that cannot be read now (here, no permission) is neither loaded nor set aside: it stays where it is
+    /// for the next start, and its size still counts toward the byte limit.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_cannot_be_read_now_stays_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("eacces");
+        let root = dir.0.join("handoffs");
+        plant(&root, &record(1, "readable".into()));
+        let size = plant(&root, &record(2, "locked".into()));
+        let locked = root.join(filename(id_of(2)));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&locked).is_ok() {
+            return; // running with privileges that read it anyway
+        }
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.len(), 1);
+        assert!(store.get(&id_of(2)).is_none());
+        assert_eq!(store.bytes(), size_on_disk(&root));
+        assert!(store.bytes() >= size);
+        assert!(names(&root, ".rejected").is_empty());
+        drop(store);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.get(&id_of(2)).unwrap().delivery.summary, "locked");
     }
 
     /// Review of #1175 (N5): one file that is not a record this node wrote does not stop the store from opening (which would turn

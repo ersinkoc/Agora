@@ -1392,8 +1392,9 @@ current best-effort handoff path. Without negotiation the node answers `DeliverT
 `protocol.capability_missing` (`capability = mesh.task_handoff.v1`). Its local socket always answers with that error. After
 negotiation the delivery passes the node's grant check like any routed command (ADR-0041): when `signed_commands` lists
 `mesh.task_handoff.v1` (or `mesh.*`), it needs a live grant for that command, and it names no agent, so only a `node`-scope grant
-covers it. Without one the node answers `approval.grant_required` before it stores anything, and so also to an identical retry
-once the grant has ended.
+covers it. An identical retry of a delivery the node already stored (the same delivery id and the same fields) gets the stored
+receipt before that check, also once the grant has ended (ADR-0109 decisions 3 and 4); it changes nothing on the node. Any other
+delivery without a live grant gets `approval.grant_required` before the node stores anything.
 
 - **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
   A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
@@ -1409,8 +1410,11 @@ once the grant has ended.
   one durable inbox entry. The node stores each accepted delivery and its inbox number in one private atomic file under
   `<data>/handoffs/`. An identical retry gets the stored receipt, even after reading the entry or replacing the receiver run. The
   replacement run cannot see that entry. Reopening the store restores the original number for a held receiver run, before its
-  endpoint accepts MCP calls. A file there that the node cannot load, or that does not fit the limits below, is renamed with a
-  `.rejected` suffix and the rest load; the earliest accepted records are kept when more are on disk than the limits allow.
+  endpoint accepts MCP calls. A file there that is not a record the node could have written (its format, its name, or an inbox
+  number at or past the node's id clamp, 2^63 - 1), or that does not fit the limits below, is renamed with a `.rejected` suffix
+  and the rest load; the earliest accepted records are kept when more are on disk than the limits allow. `.rejected` files are
+  kept for a person to look at and do not count toward the limits. A file the node cannot read at that moment (an I/O error) is
+  left in place and not loaded; its size still counts toward the byte limit until the next start.
 - **Refusals.** A refusal stores nothing and returns no receipt.
   - `mesh.unavailable` is temporary: the store could not be written, the node has not reserved message ids yet, or the node is
     writing another delivery from the same link (it writes one at a time). The hub may retry before the deadline. The node gives
@@ -1418,7 +1422,8 @@ once the grant has ended.
     outcome stays unresolved.
   - `mesh.rate_limited` is temporary: the sending agent passed the mesh's message rate.
   - `node.resource_limit` (`resource = handoff_records`, `limit = 1024`, or `resource = handoff_bytes`, `limit = 33554432`) means
-    the durable inbox is full. It is definitive (ADR-0109 decision 6).
+    the durable inbox is full. It is definitive (ADR-0109 decision 6). The node answers it before it takes an inbox number or
+    counts the delivery against the sender's mesh rate.
   - Every other refusal is definitive, and the hub does not retry that delivery: `approval.grant_required`, `node.policy_denied`
     (`rule = mesh.remote`), `mesh.recipient_unknown` (the run is not that agent's current run in the project),
     `mesh.body_too_large`, `mesh.too_many_refs`, `protocol.invalid_message` (including `field = delivery_id` for a different

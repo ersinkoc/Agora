@@ -1824,11 +1824,12 @@ impl Node {
             agora_mesh::broker::Limits::default(),
         )?);
         mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
-        // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
-        // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
+        // ADR-0109: the durable inbox opens first, so the reservation below starts above every restored record's number.
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             eprintln!("mesh: durable handoffs unavailable: {e}");
         }
+        // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
+        // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
         mesh.reserve_ids(&cfg.data_dir);
 
         let mut sup = Supervisor::new(SupervisorConfig {

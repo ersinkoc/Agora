@@ -659,7 +659,8 @@ fn a_negotiated_handoff_under_signed_commands_needs_a_grant() {
 }
 
 /// With a live grant for it, the same policy lets the delivery through: one receipt for the addressed run, the same one for an
-/// identical retry, and a delivery naming another run is refused.
+/// identical retry, and a delivery naming another run is refused. Once the grant is gone (#1194 review, ADR-0109 decisions 3 and 4),
+/// an identical retry still gets its receipt, while a new delivery, or one that reuses the id with other content, is refused.
 #[test]
 fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
@@ -674,6 +675,10 @@ fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
     let mut wrong = delivery.clone();
     wrong.delivery_id = vec![5; 16];
     wrong.receiver_run_id[0] ^= 1;
+    let mut other = delivery.clone();
+    other.delivery_id = vec![6; 16];
+    let mut changed = delivery.clone();
+    changed.summary = "other text".into();
     let seen = hub_test(
         &n,
         &socket,
@@ -686,10 +691,26 @@ fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
             deliver("wrong", wrong),
             deliver("first", delivery.clone()),
             deliver("retry", delivery.clone()),
+            Step::Ask(
+                STREAM_COMMANDS,
+                req(
+                    "revoke",
+                    Cmd::GrantRevoke(v1::GrantRevoke {
+                        grant_id: "g-handoff".into(),
+                    }),
+                ),
+            ),
+            deliver("retry-after", delivery.clone()),
+            deliver("other-after", other),
+            deliver("changed-after", changed),
         ],
         true,
         |_| true,
     );
+    assert_eq!(seen.answers["revoke"], "ok");
+    assert_eq!(seen.handoffs["retry-after"], seen.handoffs["first"]);
+    assert_eq!(seen.answers["other-after"], "approval.grant_required");
+    assert_eq!(seen.answers["changed-after"], "approval.grant_required");
     assert_eq!(seen.answers["ungranted"], "approval.grant_required");
     assert_eq!(seen.answers["g-handoff"], "ok");
     assert_eq!(seen.answers["wrong"], "mesh.recipient_unknown");
@@ -744,6 +765,66 @@ fn a_restarted_agent_gets_a_new_run_that_cannot_see_the_old_handoff() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(new_run.len(), 16);
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 0);
+
+    let mut stale = old.clone();
+    stale.delivery_id = vec![7; 16];
+    let fresh = handoff_for(&n, &shell.agent_id, 8);
+    assert_eq!(fresh.receiver_run_id, new_run);
+    let seen = hub_test(
+        &n,
+        &socket,
+        vec![
+            deliver("stale", stale),
+            deliver("retry", old),
+            deliver("fresh", fresh),
+        ],
+        true,
+        |_| true,
+    );
+    assert_eq!(seen.answers["stale"], "mesh.recipient_unknown");
+    assert_eq!(seen.handoffs["retry"], receipt);
+    assert_eq!(seen.answers["fresh"], "ok");
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 1);
+    stop(&socket, &shell.agent_id);
+}
+
+/// ADR-0109: a resume after the node restarts starts a new process, so it gets a new run identity. The resumed agent cannot see the
+/// earlier run's entry, which the reopened store keeps for its receipt, or take a delivery for that run.
+#[test]
+fn a_resumed_agent_gets_a_new_run_that_cannot_see_the_old_handoff() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("durable-resume", "agent.launch");
+    let socket = e.dir.join("c.sock");
+    let n = node(&e);
+    let shell = start_shell(&socket);
+    let old = handoff_for(&n, &shell.agent_id, 6);
+    let seen = hub_test(&n, &socket, vec![deliver("old", old.clone())], true, |_| {
+        true
+    });
+    let receipt = seen.handoffs["old"].clone();
+    // The machine stops: the node goes and its agent ends with it. A new node starts on the same data folder.
+    drop(n);
+    let n = node(&e);
+    let mut c = Client::connect(&socket).unwrap();
+    match c
+        .call(Cmd::AgentResume(v1::AgentResume {
+            agent_id: shell.agent_id.clone(),
+            new_session: true,
+            authorization: None,
+        }))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(Ok_::AgentLaunch(r)) => assert_eq!(r.agent_id, shell.agent_id),
+        other => panic!("not a resume: {other:?}"),
+    }
+    let new_run = announced_runs(&n, &shell.agent_id).pop().unwrap().run_id;
+    assert_eq!(new_run.len(), 16);
+    assert_ne!(new_run, old.receiver_run_id, "a resume is a new run");
     assert_eq!(handoffs_in(&n, &shell.agent_id), 0);
 
     let mut stale = old.clone();

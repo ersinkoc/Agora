@@ -825,17 +825,23 @@ where
                             delivery.clone(),
                         );
                         tokio::task::spawn_blocking(move || {
-                            // ADR-0041/ADR-0020: a `signed_commands` line that lists `mesh.task_handoff.v1` (or `mesh.*`) gates the
-                            // hub's delivery as it gates a routed `mesh.post`: the hub cannot widen this node's policy. Checked here,
-                            // after negotiation (an unnegotiated delivery is answered above) and before anything is stored. The grant
-                            // check may read the trusted-devices file, so it runs off the link's task.
-                            let gated = match (grants.as_deref(), req.command.as_ref()) {
-                                (Some(g), Some(c)) => g.gate(c, crate::grants::now_ms()),
-                                _ => Ok(()),
+                            // ADR-0109 decisions 3 and 4: an identical retry of a delivery already stored gets its receipt, even
+                            // once the grant it came under has ended; that changes nothing on this node.
+                            // ADR-0041/ADR-0020: anything else passes the grant check first: a `signed_commands` line that lists
+                            // `mesh.task_handoff.v1` (or `mesh.*`) gates the hub's delivery as it gates a routed `mesh.post`, so the
+                            // hub cannot widen this node's policy. Checked after negotiation (an unnegotiated delivery is answered
+                            // above) and before anything is stored. The grant check may read the trusted-devices file, so it runs
+                            // off the link's task.
+                            let answer = match mesh.stored_handoff_receipt(&delivery) {
+                                Some(receipt) => Ok(receipt),
+                                None => match (grants.as_deref(), req.command.as_ref()) {
+                                    (Some(g), Some(c)) => g.gate(c, crate::grants::now_ms()),
+                                    _ => Ok(()),
+                                }
+                                .and_then(|()| {
+                                    mesh.deliver_handoff(delivery, crate::daemon::now_ms())
+                                }),
                             };
-                            let answer = gated.and_then(|()| {
-                                mesh.deliver_handoff(delivery, crate::daemon::now_ms())
-                            });
                             drop(permit);
                             let _ = tx.send(handoff_answer(req.request_id, answer));
                         });
