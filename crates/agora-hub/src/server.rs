@@ -1889,7 +1889,7 @@ fn board_for_node(
 }
 
 /// The largest board tool result the hub sends a node (well inside one frame, `DEFAULT_MAX_PAYLOAD`, with room for the envelope).
-const MAX_BOARD_RESULT: usize = agora_protocol::frame::DEFAULT_MAX_PAYLOAD - 64 * 1024;
+pub(crate) const MAX_BOARD_RESULT: usize = agora_protocol::frame::DEFAULT_MAX_PAYLOAD - 64 * 1024;
 
 /// A board tool result as it may be sent: one too big for a frame (a large board's whole `task_list`) becomes the tool error
 /// `mesh.body_too_large` (`limit`), so the answer never ends the node's connection.

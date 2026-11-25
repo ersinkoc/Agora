@@ -1379,6 +1379,9 @@ pub const POLICY_FILE: &str = "policy";
 pub struct Policy {
     /// Messages may cross to and from agents on other nodes (`mesh.remote`, default true; ADR-0031).
     pub mesh_remote: bool,
+    /// Agents may see every machine and agent of the hub (`mesh.fleet`, default true; ADR-0112): the node offers `machines_list` and
+    /// `agents_list {scope: "hub"}` and asks the hub for its view only when this allows it.
+    pub mesh_fleet: bool,
     /// Routed commands that need a user-signed grant (`signed_commands = a, b*`; ADR-0041). Empty: none do.
     pub signed_commands: crate::grants::SignedCommands,
     /// How agents are confined (`sandbox`, `sandbox.read`, `sandbox.write`; ADR-0047). Default: not at all.
@@ -1458,6 +1461,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             mesh_remote: true,
+            mesh_fleet: true,
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
@@ -1561,6 +1565,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
+                "mesh.fleet" => p.mesh_fleet = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
                 // ADR-0089: a value that is not a number keeps the default and is a line the node did not understand.
                 "chat.history_max_bytes" => match crate::transcript::Limits::parse_max_bytes(v) {
@@ -1827,7 +1832,8 @@ impl Node {
             &mesh_dir,
             agora_mesh::broker::Limits::default(),
         )?);
-        mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
+        mesh.set_remote_allowed(policy.mesh_remote);
+        mesh.set_fleet_allowed(policy.mesh_fleet);
         // ADR-0109: the durable inbox opens first, so the reservation below starts above every restored record's number.
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             eprintln!("mesh: durable handoffs unavailable: {e}");
@@ -4024,6 +4030,12 @@ mod announce_tests {
             read_policy(&f)
         };
         assert!(!read_policy(&dir.join("absent")).registry.off);
+        // ADR-0112: `mesh.fleet` is on unless the line says exactly `true`; a typo turns it off, like `mesh.remote`.
+        assert!(read_policy(&dir.join("absent")).mesh_fleet);
+        assert!(reg("mesh.fleet = true\n").mesh_fleet);
+        assert!(!reg("mesh.fleet = false\n").mesh_fleet);
+        let fleet_typo = reg("mesh.fleet = flase\n");
+        assert!(!fleet_typo.mesh_fleet && fleet_typo.problems.is_empty());
         assert!(reg("agents.registry = off\n").registry.off);
         assert!(!reg("agents.registry = on\n").registry.off);
         let typo = reg("agents.registry = of\n");

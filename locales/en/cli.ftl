@@ -23,6 +23,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
+      agora hub fleet on|off|status [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
@@ -260,6 +261,11 @@ cli-hub-not-here = This machine does not run the hub (there is no { $dir }), so 
 cli-hub-fingerprint = The hub CA fingerprint (SHA-256): { $fingerprint }
 cli-hub-user-added = Added { $id } as { $role }. Their sign-in code: { $code } (valid for 10 minutes). Have them open the hub's address and enter it; `agora hub user login { $id }` makes another.
 cli-hub-user-none = No team members yet. Add one with `agora hub user add NAME --role member`.
+cli-hub-fleet-solo = Agents see every machine and agent of this hub: nobody but you uses it. Once you add people, they see them only if you run `agora hub fleet on`.
+cli-hub-fleet-solo-on = Agents see every machine and agent of this hub: nobody but you uses it. The switch is on, so once you add people their agents will see everything too, also in projects they have no access to. `agora hub fleet off` turns it off.
+cli-hub-fleet-user-warning = `agora hub fleet` is on for this hub, so this person's agents see every machine and agent, also in projects they have no access to. `agora hub fleet off` turns it off.
+cli-hub-fleet-on = Agents see every machine and agent of this hub, also in projects their person has no access to. `agora hub fleet off` turns it off.
+cli-hub-fleet-off = Agents see only the machines and agents of their own projects, because other people use this hub. `agora hub fleet on` lets them see every machine and agent.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = There is no team member called { $id }.
 cli-hub-user-project =   works in { $project }
