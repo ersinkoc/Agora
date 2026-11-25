@@ -263,8 +263,13 @@ impl ProxyTrust {
             .split("\r\n")
             .skip(1)
             .filter_map(|l| l.split_once(':'))
-            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim()))
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.trim()))
             .collect();
+        let malformed = |name: &str| {
+            headers
+                .iter()
+                .any(|(k, _)| k != k.trim() && k.trim() == name)
+        };
         let values = |name: &str| -> Vec<&str> {
             headers
                 .iter()
@@ -273,8 +278,8 @@ impl ProxyTrust {
                 .collect()
         };
         // Host: exactly one, one of ours. A missing, repeated or foreign one is refused.
-        let host = match values("host").as_slice() {
-            [one] => authority_host(one),
+        let host = match (malformed("host"), values("host").as_slice()) {
+            (false, [one]) => authority_host(one),
             _ => None,
         };
         let Some(host) = host.filter(|h| self.host_allowed(h)) else {
@@ -286,6 +291,12 @@ impl ProxyTrust {
         // Origin (a browser sends it on cross-site requests and on every WebSocket): its host must be one of ours as well. `null`,
         // a repeated one and anything malformed are refused. A client that sends none is not a browser.
         let mut origin_host: Option<String> = None;
+        if malformed("origin") {
+            return Verdict::Refuse {
+                status: 403,
+                code: "proxy.origin_not_allowed",
+            };
+        }
         match values("origin").as_slice() {
             [] => {}
             [one] => {
@@ -708,6 +719,68 @@ mod tests {
         let origin = head(&[
             "Host: agora.example.com",
             "Origin: https://[agora.example.com]",
+        ]);
+        assert_eq!(
+            t.judge(&origin),
+            Verdict::Refuse {
+                status: 403,
+                code: "proxy.origin_not_allowed"
+            }
+        );
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f429_whitespace_cannot_turn_a_malformed_field_into_host() {
+        let t = trust();
+        let control = t.judge(&head(&[
+            "Host: agora.example.com",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]));
+        assert_eq!(
+            control,
+            Verdict::Proxied(Some("203.0.113.9".parse().unwrap()))
+        );
+        println!("CONTROL OK");
+
+        let actual = t.judge(&head(&[
+            "Host : agora.example.com",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]));
+        let expected = Verdict::Refuse {
+            status: 421,
+            code: "proxy.host_not_allowed",
+        };
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f429_proxy_header_field_name_boundaries() {
+        let t = trust();
+        for host in [
+            " Host: agora.example.com",
+            "Host : agora.example.com",
+            "\tHost: agora.example.com",
+        ] {
+            assert_eq!(
+                t.judge(&head(&[host, "CF-Connecting-IP: 203.0.113.9"])),
+                Verdict::Refuse {
+                    status: 421,
+                    code: "proxy.host_not_allowed"
+                },
+                "{host:?}"
+            );
+        }
+        let origin = head(&[
+            "Host: agora.example.com",
+            "Origin : https://agora.example.com",
         ]);
         assert_eq!(
             t.judge(&origin),

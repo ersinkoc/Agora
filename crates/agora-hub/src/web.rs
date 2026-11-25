@@ -338,6 +338,30 @@ fn forwarded(head: &str) -> bool {
         })
 }
 
+/// One valid, consistent decimal Content-Length. Repeated and comma-joined copies are allowed only when every value agrees.
+fn request_content_length(head: &str) -> Result<Option<usize>, ()> {
+    let mut declared = None;
+    for line in head.split("\r\n").skip(1).take_while(|l| !l.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        for item in value.split(',').map(str::trim) {
+            if item.is_empty() || !item.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            let value = item.parse::<usize>().map_err(|_| ())?;
+            if declared.is_some_and(|earlier| earlier != value) {
+                return Err(());
+            }
+            declared = Some(value);
+        }
+    }
+    Ok(declared)
+}
+
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
     stream: S,
@@ -369,7 +393,12 @@ where
     let mut chunk = [0u8; 1024];
     let end = loop {
         if let Some(i) = find(&head, b"\r\n\r\n") {
-            break i + 4;
+            let end = i + 4;
+            if end > MAX_HEAD {
+                respond(&mut stream, 431, "text/plain", b"", false).await?;
+                return Ok(First::Answered);
+            }
+            break end;
         }
         if head.len() > MAX_HEAD {
             respond(&mut stream, 431, "text/plain", b"", false).await?;
@@ -472,9 +501,14 @@ where
     };
     if method == "POST" && (path == "/api/session" || passkey_op.is_some() || account_op.is_some())
     {
-        let length = header("content-length")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+        let length = match request_content_length(&text) {
+            Ok(Some(length)) => length,
+            Ok(None) => usize::MAX,
+            Err(()) => {
+                respond(&mut stream, 400, "text/plain", b"", false).await?;
+                return Ok(First::Answered);
+            }
+        };
         if length > MAX_BODY {
             respond(&mut stream, 413, "text/plain", b"", false).await?;
             return Ok(First::Answered);
@@ -644,6 +678,14 @@ async fn respond<S: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
 
+    struct EmptySessions;
+
+    impl SessionApi for EmptySessions {
+        fn sign_in<'a>(&'a self, _req: &'a SignInRequest<'a>) -> SessionReply<'a, SignInReply> {
+            Box::pin(async { SignInReply::Failed })
+        }
+    }
+
     #[test]
     fn paths_cannot_leave_the_root() {
         assert_eq!(safe_relative("/a/b.js"), Some(PathBuf::from("a/b.js")));
@@ -792,6 +834,128 @@ mod tests {
             "POST {path} HTTP/1.1\r\nHost: h\r\nUser-Agent: curl/8.5\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    #[tokio::test]
+    async fn f427_conflicting_content_lengths_are_refused_before_sign_in() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(Arc::clone(&hub));
+        let code = crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+            .create_code(crate::server::now_ms())
+            .unwrap();
+        let body = serde_json::json!({ "code": code }).to_string();
+        let control = format!(
+            "POST /api/session HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (control, _) = ask(&api, "127.0.0.1", control).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let code = crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+            .create_code(crate::server::now_ms())
+            .unwrap();
+        let body = serde_json::json!({ "code": code }).to_string();
+        let request = format!(
+            "POST /api/session HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+            body.len() + 1
+        );
+        let (actual, _) = ask(&api, "127.0.0.1", request).await;
+        println!("EXPECTED: HTTP/1.1 400");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn verifies_f427_content_length_boundaries() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(hub);
+        let body = r#"{"code":"bad"}"#;
+        for fields in [
+            format!("Content-Length: {}", body.len()),
+            format!("Content-Length: {0}\r\nContent-Length: {0}", body.len()),
+            format!("Content-Length: {0}, {0}", body.len()),
+        ] {
+            let request =
+                format!("POST /api/session HTTP/1.1\r\nHost: h\r\n{fields}\r\n\r\n{body}");
+            let (out, _) = ask(&api, "127.0.0.1", request).await;
+            assert!(!out.starts_with("HTTP/1.1 400"), "{fields}: {out}");
+        }
+        for fields in [
+            format!("Content-Length: +{}", body.len()),
+            format!(
+                "Content-Length: {}\r\nContent-Length: {}",
+                body.len() + 1,
+                body.len()
+            ),
+            "Content-Length: 1x".to_string(),
+        ] {
+            let request =
+                format!("POST /api/session HTTP/1.1\r\nHost: h\r\n{fields}\r\n\r\n{body}");
+            let (out, _) = ask(&api, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{fields}: {out}");
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[tokio::test]
+    async fn f428_a_request_head_over_the_limit_is_refused() {
+        let at_limit_prefix = "GET / HTTP/1.1\r\nX-Pad: ";
+        let suffix = "\r\n\r\n";
+        let at_limit = format!(
+            "{at_limit_prefix}{}{suffix}",
+            "a".repeat(MAX_HEAD - at_limit_prefix.len() - suffix.len())
+        );
+        let (control, _) = ask(&EmptySessions, "127.0.0.1", at_limit).await;
+        assert!(!control.starts_with("HTTP/1.1 431"), "{control}");
+        println!("CONTROL OK");
+
+        let over = format!(
+            "{at_limit_prefix}{}{suffix}",
+            "a".repeat(MAX_HEAD + 1 - at_limit_prefix.len() - suffix.len())
+        );
+        let (actual, _) = ask(&EmptySessions, "127.0.0.1", over).await;
+        println!("EXPECTED: HTTP/1.1 431");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 431") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 431"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn verifies_f428_request_head_size_boundaries() {
+        let prefix = "GET / HTTP/1.1\r\nX-Pad: ";
+        let suffix = "\r\n\r\n";
+        for size in [MAX_HEAD - 1, MAX_HEAD] {
+            let request = format!(
+                "{prefix}{}{suffix}",
+                "a".repeat(size - prefix.len() - suffix.len())
+            );
+            let (out, _) = ask(&EmptySessions, "127.0.0.1", request).await;
+            assert!(!out.starts_with("HTTP/1.1 431"), "{size}");
+        }
+        for size in [MAX_HEAD + 1, MAX_HEAD + 512, MAX_HEAD + 1024] {
+            let request = format!(
+                "{prefix}{}{suffix}",
+                "a".repeat(size - prefix.len() - suffix.len())
+            );
+            let (out, _) = ask(&EmptySessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 431"), "{size}: {out}");
+        }
+        println!("FIX VERIFIED");
     }
 
     #[tokio::test]
