@@ -53,14 +53,24 @@ const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''),
 
 // ---- Reading --------------------------------------------------------------------------------------------------------------------
 
+// The largest theme file read (the per-person settings cap of ADR-0113 decision 6), and the most problems listed: a file with more says
+// how many more, so a hostile or broken file cannot flood the editor.
+export const MAX_FILE_BYTES = 256 * 1024;
+export const MAX_ISSUES = 50;
+function capped(r: ReadTheme): ReadTheme {
+  if (r.ok || r.issues.length <= MAX_ISSUES) return r;
+  return { ok: false, issues: [...r.issues.slice(0, MAX_ISSUES), { code: 'more', count: r.issues.length - MAX_ISSUES }] };
+}
+
 export function readTheme(value: unknown): ReadTheme {
   if (!isObject(value)) return { ok: false, issues: [{ code: 'invalid' }] };
   const format = value['agora-theme'];
   if (typeof format !== 'number' || !Number.isInteger(format) || format < 1) return { ok: false, issues: [{ code: 'invalid' }] };
   if (format > THEME_FORMAT_2) return { ok: false, issues: [{ code: 'newer' }] };
-  return format === 1 ? readFormat1(value) : readFormat2(value);
+  return capped(format === 1 ? readFormat1(value) : readFormat2(value));
 }
 export function deserialise(text: string): ReadTheme {
+  if (new Blob([text]).size > MAX_FILE_BYTES) return { ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] };
   let value: unknown;
   try { value = JSON.parse(text); } catch { return { ok: false, issues: [{ code: 'json' }] }; }
   return readTheme(value);
@@ -298,6 +308,14 @@ export const terminalColour = (look: Look, scheme: Scheme, k: (typeof TERMINAL_K
   return ANSI[scheme][ANSI_NAMES.indexOf(k as AnsiName)] as string;
 };
 
+// `fg` at `alpha` over `bg`, as the browser blends a translucent colour (sRGB), as #rrggbb.
+const SELECTION_ALPHA = 0x66 / 0xff;
+const MIN_SELECTION = 1.3;
+function over(fg: string, alpha: number, bg: string): string {
+  const ch = (h: string, i: number) => Number.parseInt(h.slice(i, i + 2), 16);
+  return `#${[1, 3, 5].map((i) => Math.round(ch(fg, i) * alpha + ch(bg, i) * (1 - alpha)).toString(16).padStart(2, '0')).join('')}`;
+}
+
 // The problems of one scheme's colours: `refusals` keep the theme from being used, `warnings` are listed with it.
 export function lookIssues(look: Look, scheme: Scheme): { refusals: ThemeIssue[]; warnings: ThemeIssue[] } {
   const refusals: ThemeIssue[] = contrastIssues(look.tokens).map((c) => ({ code: 'contrast', ...c }));
@@ -330,6 +348,11 @@ export function lookIssues(look: Look, scheme: Scheme): { refusals: ThemeIssue[]
   if (look.terminal.cursor || look.terminal.background) {
     const ratio = contrast(terminalColour(look, scheme, 'cursor'), bg);
     if (ratio < 3) warnings.push({ code: 'cursor-contrast', ratio, min: 3 });
+  }
+  // The selection is drawn at 40 % over the background (terminal/palette.ts): one that is (nearly) the background cannot be seen.
+  if (look.terminal.selection || look.terminal.background) {
+    const ratio = contrast(over(terminalColour(look, scheme, 'selection'), SELECTION_ALPHA, bg), bg);
+    if (ratio < MIN_SELECTION) warnings.push({ code: 'selection-contrast', ratio, min: MIN_SELECTION });
   }
   const code = regionColour(look, scheme, 'code-blocks', 'surface');
   for (const k of SYNTAX_KEYS) {

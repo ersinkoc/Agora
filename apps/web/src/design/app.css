@@ -91,6 +91,9 @@
   :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) * { --tw-leading: initial; font-variant-ligatures: normal; }
   :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { line-height: var(--text-sm--line-height); }
   :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-weight: 400; }
+  /* …and the window's own font (the floor rule at the end of this file sets the font variables there). In the base layer, so a utility on
+     the same element (a mono code line) still wins. */
+  :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
@@ -876,8 +879,8 @@
 
 /* Panes (layout/Workspace.tsx spaces them by `--pane-split` and draws the layout's background between them). Auto: a line between panes
    that touch; with a gap, the gap alone. Always: a line around every pane. Off: no lines. */
-[data-layout-root] { --pane-split: calc(var(--pane-gap, 0px) + var(--line-width, 1px)); background: var(--border); }
-:root:is([data-pane-gaps], [data-pane-borders='off'], [data-pane-borders='always']) [data-layout-root] { --pane-split: var(--pane-gap, 0px); background: var(--surface-0); }
+[data-layout-root][data-tiled] { --pane-split: calc(var(--pane-gap, 0px) + var(--line-width, 1px)); background: var(--border); }
+:root:is([data-pane-gaps], [data-pane-borders='off'], [data-pane-borders='always']) [data-layout-root][data-tiled] { --pane-split: var(--pane-gap, 0px); background: var(--surface-0); }
 :root[data-pane-borders='always'] [data-layout-root] [data-pane] { border: var(--line-width, 1px) solid var(--border); border-block-start-width: 0; }
 :root[data-pane-borders='always'] [data-layout-root] .pane-bar { border: var(--line-width, 1px) solid var(--pane-bar-line, var(--border)); }
 :root[data-pane-borders='always'][data-tab-bar='bottom'] [data-layout-root] [data-pane] { border-block-start-width: var(--line-width, 1px); border-block-end-width: 0; }
@@ -893,18 +896,25 @@
 /* Tab style. Underline: the tab in front has an accent line (today's). Filled: it is filled with the accent. Pill: rounded tabs with no
    lines between them, the one in front raised. */
 :root[data-tab-style='filled'] .ide-tab[aria-selected='true'] { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+/* On the accent a state's colour may not show (the floor: "needs you" must): its mark sits on a chip of the background, where every state
+   is held to 3:1. The tab's buttons take the label's colour. */
+:root[data-tab-style='filled'] .ide-tab[aria-selected='true'] :is(.state, .kit-mark) { background: var(--surface-0); border-radius: var(--radius-full); padding: 0.125rem; }
+:root[data-tab-style='filled'] .ide-tab[aria-selected='true'] .ide-iconbtn { color: inherit; }
 :root[data-tab-style='pill'] .ide-tab { border-inline-end-width: 0; border-radius: var(--radius-full); height: calc(var(--pane-bar-height, 2.25rem) - 0.5rem); margin: 0.25rem 0.125rem; }
 :root[data-tab-style='pill'] .ide-tab[aria-selected='true'] { box-shadow: inset 0 0 0 1px var(--tab-bar-line, var(--border)); }
 
-/* Density: the height of a pane's bar and its tabs, rows and cards. The sidebar's rows keep their size (the list is measured by it). */
-:root[data-density='compact'] { --pane-bar-height: 2rem; }
-:root[data-density='roomy'] { --pane-bar-height: 2.5rem; }
-:root[data-density='compact'] .ide-tab { padding-inline: 0.5rem; }
-:root[data-density='roomy'] .ide-tab { padding-inline: 1rem; }
-:root[data-density='compact'] .kit-row { min-height: 1.625rem; }
-:root[data-density='roomy'] .kit-row { min-height: 2.25rem; }
-:root[data-density='compact'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush) { padding: 0.75rem; }
-:root[data-density='roomy'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush) { padding: 1.25rem; }
+/* Density: the height of a pane's bar and its tabs, rows and cards. The sidebar's rows keep their size (the list is measured by it). Only
+   with a fine pointer: under a finger every target keeps the platform's size (`--tap`, the floor), and a "needs you" tile keeps its own. */
+@media (pointer: fine) {
+  :root[data-density='compact'] { --pane-bar-height: 2rem; }
+  :root[data-density='roomy'] { --pane-bar-height: 2.5rem; }
+  :root[data-density='compact'] .ide-tab { padding-inline: 0.5rem; }
+  :root[data-density='roomy'] .ide-tab { padding-inline: 1rem; }
+  :root[data-density='compact'] .kit-row { min-height: 1.625rem; }
+  :root[data-density='roomy'] .kit-row { min-height: 2.25rem; }
+  :root[data-density='compact'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush, .tile--needs-you) { padding: 0.75rem; }
+  :root[data-density='roomy'] :is(.kit-card, .tile):not(.kit-card--dense, .kit-card--flush, .tile--needs-you) { padding: 1.25rem; }
+}
 
 /* How a state is shown in rows and tabs: its symbol (today's), a dot, or its word. The word is always in the tooltip and read out; "needs
    you" always keeps its own symbol (the floor). */
@@ -930,6 +940,10 @@
    and the fixed red whatever a theme's regions say, so no theme can restyle, hide or fake it. Its buttons, cards, code and fields take
    the base colours here, and the focus ring is the base rule's. */
 :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {
+  /* The window's own fonts: a theme's font list (format 1 or 2) never reaches what needs the person, so no font can turn the action it
+     asks about into pictures. Held equal to tokens.css by themes/format2.test.ts. */
+  --font-ui: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
   --cards-surface: var(--surface-1); --cards-text: var(--text); --cards-line: var(--border);
   --inputs-surface: var(--surface-1); --inputs-text: var(--text); --inputs-line: var(--border);
   --buttons-surface: var(--surface-2); --buttons-text: var(--text); --buttons-line: var(--border);

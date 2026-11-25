@@ -59,6 +59,9 @@ function issueSentence(i: ThemeIssue): string {
       fg: i.fg === 'region-text' ? regionPartLabel(i.region, 'text') : tokenLabel(i.fg), bg: regionPartLabel(i.region, 'surface'), ratio: shownRatio(i.ratio), min: i.min,
     });
     case 'terminal-contrast': return t('theme-error-contrast', { fg: terminalLabel('foreground'), bg: terminalLabel('background'), ratio: shownRatio(i.ratio), min: i.min });
+    case 'selection-contrast': return t('theme-error-seen', { fg: terminalLabel('selection'), bg: terminalLabel('background'), ratio: shownRatio(i.ratio), min: i.min });
+    case 'too-large': return t('theme-error-too-large', { max: i.max });
+    case 'more': return t('theme-error-more', { count: i.count });
     case 'cursor-contrast': return t('theme-error-seen', { fg: terminalLabel('cursor'), bg: terminalLabel('background'), ratio: shownRatio(i.ratio), min: i.min });
     case 'ansi-contrast': return t('theme-error-seen', { fg: terminalLabel(i.colour as AnsiName), bg: terminalLabel('background'), ratio: shownRatio(i.ratio), min: i.min });
     case 'syntax-contrast': return t('theme-error-contrast', { fg: syntaxLabel(i.key), bg: regionPartLabel('code-blocks', 'surface'), ratio: shownRatio(i.ratio), min: i.min });

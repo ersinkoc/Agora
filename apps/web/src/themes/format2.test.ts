@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { terminalTheme } from '../terminal/palette';
-import { cloneLooks, deserialise, judge, readTheme, serialise, writeTheme } from './file';
+import { MAX_FILE_BYTES, MAX_ISSUES, cloneLooks, deserialise, judge, readTheme, serialise, writeTheme } from './file';
 import { ANSI, ANSI_NAMES, CHROME, CHROME_NAMES, DEFAULT_CHROME, FLOOR, FLOOR_ITEMS, REGIONS, REGION_PARTS, SYNTAX_KEYS, regionVar, terminalVar } from './look';
 import { chromeLabel, chromeValueLabel, floorLabel, floorReason, issueText } from './messages';
 import { USER_KEY, createThemeStore, loadState } from './store';
@@ -397,5 +397,63 @@ describe('format 2 in words and in the stylesheet', () => {
     for (const r of REGIONS) for (const p of REGION_PARTS) expect(css, regionVar(r, p)).toMatch(new RegExp(`var\\(${regionVar(r, p)}, (var\\(--[a-z0-9-]+\\)|transparent|inherit)\\)`));
     // "Needs you" keeps its own symbol whatever a theme's state display says.
     expect(css).toContain(':is(.state, .kit-mark):not(.state--needs-you, .kit-tone-needs)');
+  });
+});
+
+describe('the floor in the stylesheet (review of #1206)', () => {
+  const css = readFileSync('src/design/app.css', 'utf8').replace(/\r\n/g, '\n');
+  const tokensCss = readFileSync('src/design/tokens.css', 'utf8').replace(/\r\n/g, '\n');
+  const block = (src: string, start: string) => { const i = src.indexOf(start); expect(i, start).toBeGreaterThanOrEqual(0); return src.slice(i, src.indexOf('\n}', i)); };
+
+  it('draws a state mark in a filled tab on a chip of the background, where every state is held to 3:1', () => {
+    expect(css).toContain(":root[data-tab-style='filled'] .ide-tab[aria-selected='true'] :is(.state, .kit-mark) { background: var(--surface-0);");
+    // The chip's background is the surface every state colour is refused below 3:1 on.
+    const r = readTheme(v2({ inherits: 'slate', dark: { tokens: { 'state-needs-you': '#2a2f36' } }, chrome: { 'tab-style': 'filled' } }));
+    expect(issues(r)).toContainEqual(expect.objectContaining({ code: 'contrast', fg: 'state-needs-you', bg: 'surface-0', min: 3 }));
+  });
+
+  it('applies density only with a fine pointer, and never to a "needs you" tile', () => {
+    const fine = block(css, '@media (pointer: fine) {\n  :root[data-density');
+    const all = css.match(/\[data-density=/g)?.length ?? 0;
+    expect(fine.match(/\[data-density=/g)?.length).toBe(all);
+    for (const line of fine.split('\n').filter((l) => l.includes('.tile'))) expect(line).toContain('.tile--needs-you');
+  });
+
+  it('gives only the tiled layout its line-coloured background, never the welcome on its own', () => {
+    expect(css).toContain('[data-layout-root][data-tiled] {');
+    expect(css).not.toMatch(/(^|\n)\[data-layout-root\] \{/);
+    const ws = readFileSync('src/layout/Workspace.tsx', 'utf8');
+    expect(ws).toMatch(/data-layout-root data-tiled>/);
+    expect(ws).toMatch(/if \(lone\) return <div className="flex min-h-0 flex-1 flex-col" data-layout-root>/);
+  });
+
+  it('keeps the window\'s own fonts in what needs the person, equal to tokens.css', () => {
+    const root = block(tokensCss, ':root {');
+    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs) {');
+    const value = (src: string, n: string) => new RegExp(`--${n}:\\s*([^;]+);`).exec(src)?.[1]?.trim();
+    for (const n of ['font-ui', 'font-mono']) expect(value(floor, n), n).toBe(value(root, n));
+    expect(css).toContain(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-family: var(--font-ui); }');
+  });
+
+  it('puts one state mark in a tab menu row, not one inside another', () => {
+    expect(readFileSync('src/layout/TabStrip.tsx', 'utf8')).toContain('lead: x.state ? <StateMark state={x.state} failed={x.failed} /> : undefined,');
+  });
+});
+
+describe('limits and the selection', () => {
+  it('refuses a file over 256 KiB, and lists at most 50 problems and how many more', () => {
+    expect(codes(deserialise(JSON.stringify(v2({ inherits: 'dark', pad: 'x'.repeat(MAX_FILE_BYTES) }))))).toEqual(['too-large']);
+    const many = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`k${i}`, 1]));
+    const r = readTheme(v2({ inherits: 'dark', chrome: many }));
+    expect(issues(r)).toHaveLength(MAX_ISSUES + 1);
+    expect(issues(r).at(-1)).toEqual({ code: 'more', count: 30 });
+    expect(issueText({ code: 'more', count: 30 })).toBe('…and 30 more problems.');
+  });
+
+  it('warns about a selection that is (nearly) the terminal background, never about the window\'s own', () => {
+    const r = readTheme(v2({ dark: { terminal: { background: '#101010', selection: '#101010' } } }));
+    expect(r.ok && r.warnings?.map((w) => w.code)).toContain('selection-contrast');
+    for (const b of BUILT_IN) expect(judge(b).warnings.filter((w) => w.code === 'selection-contrast'), b.id).toEqual([]);
+    expect(readTheme(v2({ dark: { terminal: { selection: '#5cc8c2' } } })).ok && readTheme(v2({ dark: { terminal: { selection: '#5cc8c2' } } }))).toMatchObject({ ok: true });
   });
 });

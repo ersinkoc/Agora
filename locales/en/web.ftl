@@ -1037,6 +1037,11 @@ theme-error-floor = "{ $field }" can't be set. { $reason }
 theme-error-text-floor = "{ $field }": no text is smaller than 12 px, so the text size is at least { $min } px.
 theme-warning-text-lifted = The text size { $from } would make some text smaller than 12 px: it is shown at { $to }.
 theme-error-inherits = "{ $id }" is not a built-in theme to start from.
+theme-error-too-large = This file is larger than { $max } KiB; a theme is far smaller.
+theme-error-more = { $count ->
+    [one] …and one more problem.
+   *[other] …and { $count } more problems.
+}
 # A problem in one scheme of a theme that has both; $scheme is theme-dark or theme-light.
 theme-issue-in-scheme = { $scheme }: { $text }
 # What no theme can change (the floor): the row's name, and why.

@@ -268,7 +268,9 @@ export type ThemeIssue = (
   | { code: 'inherits'; id: string }
   | ({ code: 'contrast' } & ContrastIssue)
   | ({ code: 'region-contrast' } & RegionIssue)
-  | { code: 'terminal-contrast' | 'cursor-contrast'; ratio: number; min: number }
+  | { code: 'terminal-contrast' | 'cursor-contrast' | 'selection-contrast'; ratio: number; min: number }
+  | { code: 'too-large'; max: number }
+  | { code: 'more'; count: number }
   | { code: 'ansi-contrast'; colour: AnsiName; ratio: number; min: number }
   | { code: 'syntax-contrast'; key: SyntaxKey; ratio: number; min: number }
   | ({ code: 'tint-contrast' } & TintIssue)

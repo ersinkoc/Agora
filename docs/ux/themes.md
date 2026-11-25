@@ -159,8 +159,8 @@ builds CSS.
 | `pane-gap` | 0–16 px (0) | Space between panes; the background shows through. |
 | `line-width` | 0–2 px (1) | The window's lines: between and around panes, under pane bars, the header, the status line, the Agents list's edge. |
 | `tab-bar` | `top`, `bottom` | Where a pane's bar (its tabs or title) sits. |
-| `tab-style` | `underline`, `filled`, `pill` | The tab in front: an accent line, filled with the accent, or rounded tabs with no lines between them. |
-| `density` | `normal`, `compact`, `roomy` | The height of pane bars and tabs, rows and cards. The Agents list's rows keep their size (the list is measured by it). |
+| `tab-style` | `underline`, `filled`, `pill` | The tab in front: an accent line, filled with the accent (its state mark on a chip of the background), or rounded tabs with no lines between them. |
+| `density` | `normal`, `compact`, `roomy` | The height of pane bars and tabs, rows and cards, with a mouse or trackpad only (under a finger every target keeps the platform's size). The Agents list's rows and a "needs you" tile keep their size. |
 | `state-display` | `symbol`, `dot`, `word` | How an agent's state shows in lists and tabs. The word is always in the tooltip and read aloud; "Needs you" always keeps its own symbol. |
 | `icons` | `lines` | The icon set. There is one so far; the key is there so a theme can name it. |
 | `shadow` | `soft`, `none`, `strong` | The one elevation (menus, overlays); cards and panels stay flat. |
@@ -184,12 +184,19 @@ The names are matched whole: `state-needs-you` (the colour of the state) and `ac
 format-1 tokens and stay themeable, checked for readability as before. Beyond the names:
 
 - **No text under 12 px**: `text-16` is at least 16 px in format 2 (`theme-error-text-floor`); format 1 is lifted (above).
-- **The window keeps it out of every region and chrome value.** A request card, the "Needs you" card and tile, and anything drawn
-  in the "needs you" tone draw their buttons, cards, fields and code in the base tokens whatever the theme's regions say, and keep
-  today's text weight, line height and ligatures; a state display never replaces the "needs you" symbol (`app.css`, the floor
-  rules). A theme that
+- **The window keeps it out of the regions, the text values and the fonts.** A request card, the "Needs you" card and tile, and
+  anything drawn in the "needs you" tone draw their buttons, cards, fields and code in the base tokens whatever the theme's regions
+  say, and keep the window's own fonts (never a theme's font list), text weight, line height and ligatures (`app.css`, the floor
+  rules). A state display never replaces the "needs you" symbol; with the filled tab style a state's mark sits on a chip of the
+  background, where every state is held to 3:1. Density never changes a "needs you" tile, and never applies under a finger (coarse
+  pointer), so every hit target keeps the platform's minimum. What the floor does not hold: the base text size (it only grows,
+  16–24 px, so text can only get larger), the base colours (`state-needs-you`, `accent`, surfaces, checked for readability as in
+  format 1), the window's layout around a card (gaps, lines, the bar's place), and motion: `reduced` and `off` still the "needs you"
+  mark's pulse as the system's reduced-motion setting does; its shape, word and place stay. A theme that
   sets every region, chrome and text value and inherits the base colours leaves a request card pixel-identical (checked with
   pixelmatch on the right panel's card in both schemes for this change).
+- **A file is at most 256 KiB** (`theme-error-too-large`, the per-person settings cap of ADR-0113), and at most 50 problems are
+  listed, then "…and N more" (`theme-error-more`).
 - **Never CSS**: a value anywhere (the name too) containing `url(`, `@import`, `;`, `}`, `expression(` or `<` is refused
   (`theme-error-unsafe`), and no style property is set.
 
@@ -243,7 +250,8 @@ never throws and reports **every** problem at once, each with a message from `lo
    - the terminal's text on its background at **4.5:1**, when the theme sets either;
    - warnings only: each of the 16 colours the theme sets, or all of them on a background it sets, at **3:1** on the terminal's
      background (not the one the background stands in for: black on a dark background, white on a light one; programs choose these
-     colours); the cursor at 3:1; a syntax colour it sets at 4.5:1 on the code blocks; and 5 and 6.
+     colours); the cursor at 3:1; the selection (drawn at 40 % over the background) at 1.3:1 against it, so one that is the
+  background is noticed; a syntax colour it sets at 4.5:1 on the code blocks; and 5 and 6.
 
 A theme with any problem in 1–4 or the refusals of 7 is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in),
 an edit is not applied. A problem in 5 or 6 is a **warning**: the theme is accepted, saved and shown, and the warning is listed.

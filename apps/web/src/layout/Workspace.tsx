@@ -307,7 +307,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   if (lone) return <div className="flex min-h-0 flex-1 flex-col" data-layout-root>{welcome}</div>;
 
   return (
-    <div ref={host} className="relative min-h-0 flex-1 overflow-hidden" data-layout-root>
+    <div ref={host} className="relative min-h-0 flex-1 overflow-hidden" data-layout-root data-tiled>
       {frames.map(bar)}
       {bodies}
       {dividers.map((d) => <DividerLine key={`div:${d.path.join('.')}:${d.index}`} d={d} host={host} dispatch={dispatch} />)}
