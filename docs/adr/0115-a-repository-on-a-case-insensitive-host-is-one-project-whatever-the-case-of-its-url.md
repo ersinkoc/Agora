@@ -40,7 +40,7 @@ Changing the clone's URL fixed it, but nothing told the owner why, and every clo
 ## Consequences
 
 - Clones of one GitHub/GitLab/Bitbucket/Codeberg repository are one project, whatever the case of their URLs.
-- Ids of projects on those hosts now print in lowercase (`github.com/ersinkoc/agora#…`). Where a client takes the display name from the id,  so a name shows in lowercase. A later change could carry the remote's own spelling for display, if wanted.
+- Ids of projects on those hosts now print in lowercase (`github.com/ersinkoc/agora#…`). Where a client takes the display name from the id, the name shows in lowercase. A later change could carry the remote's own spelling for display, if wanted.
 - The fold is a change to a published value's text. Old and new nodes still agree because the hub folds (decision 2); a client
   that keys local state (layout, filters) by project id may lose that state once for those projects.
 - A repository renamed to a different name (not only case) is still two projects; `agora project init` (an explicit id) remains
