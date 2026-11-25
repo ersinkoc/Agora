@@ -112,6 +112,103 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
     assert!(kinds >= 1);
 }
 
+/// Title rules (`region = "title"`) sit below the screen rules, so they decide only when those have no opinion. They must never say
+/// what a captured screen contradicts: on every captured screen whose title they match, they give the expected state. A screen that
+/// shows nothing but a title is decided by them.
+#[test]
+fn title_rules_agree_with_every_captured_screen() {
+    // A screen with only a title on it (constructed, not captured): the title rules decide it.
+    let title_only: &[(&str, &str, &str)] = &[
+        (
+            "claude-code",
+            "\u{1b}]0;\u{25d0} Claude Code\u{7}",
+            "Working title_spinner",
+        ),
+        ("claude-code", "\u{1b}]0;\u{2733} Claude Code\u{7}", "none"),
+        (
+            "codex",
+            "\u{1b}]0;\u{280b} work3\u{7}",
+            "Working title_spinner",
+        ),
+        (
+            "codex",
+            "\u{1b}]0;[ ! ] Action Required | work3\u{7}",
+            "Blocked title_action_required",
+        ),
+        (
+            "codex",
+            "\u{1b}]0;[ . ] Action Required | work3\u{7}",
+            "Blocked title_action_required",
+        ),
+        ("codex", "\u{1b}]0;work3\u{7}", "none"),
+    ];
+    let detect = |d: &Detector, term: &AlacrittyTerminal| {
+        d.detect(term).map_or_else(
+            || "none".to_string(),
+            |d| format!("{:?} {}", d.state, d.rule_id),
+        )
+    };
+    for (kind, bytes, want) in title_only {
+        let path = root().join(format!("{kind}.toml"));
+        let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut term = AlacrittyTerminal::new(Size {
+            cols: 120,
+            rows: 40,
+        });
+        term.feed(bytes.as_bytes());
+        assert_eq!(
+            detect(&Detector::new(&manifest), &term),
+            *want,
+            "{kind}: {bytes:?}"
+        );
+    }
+    let mut checked = 0;
+    for entry in std::fs::read_dir(root()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let mut manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        manifest.rules.retain(|r| r.region.trim() == "title");
+        if manifest.rules.is_empty() || manifest.driver(std::path::Path::new("agora")).is_some() {
+            continue;
+        }
+        let titles = Detector::new(&manifest);
+        let kind = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let mut matched = 0;
+        for f in std::fs::read_dir(root().join("fixtures").join(&kind)).unwrap() {
+            let f = f.unwrap().path();
+            if f.extension().is_none_or(|e| e != "screen") {
+                continue;
+            }
+            let mut term = AlacrittyTerminal::new(screen_size(&f));
+            term.feed(&std::fs::read(&f).unwrap());
+            let Some(d) = titles.detect(&term) else {
+                continue;
+            };
+            let want = std::fs::read_to_string(f.with_extension("expect")).unwrap();
+            let want = want.split_whitespace().next().unwrap_or("none");
+            assert_eq!(
+                format!("{:?}", d.state),
+                want,
+                "{}: title {:?} gives {} by {}",
+                f.display(),
+                term.title(),
+                format!("{:?}", d.state),
+                d.rule_id
+            );
+            matched += 1;
+        }
+        // Each title rule set is seen at work on real captures, not only on the constructed screens above.
+        assert!(
+            matched >= 1,
+            "{kind}: title rules matched no captured screen"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2);
+}
+
 /// The usage files the manifests describe (ADR-0042): lines of the real shape (scrubbed) read through the manifest's own paths.
 #[test]
 fn the_usage_fixtures_add_up_to_what_the_files_say() {

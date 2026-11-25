@@ -155,6 +155,24 @@ priority = 800
 region = "bottom_non_empty_lines(12)"
 contains = "esc to interrupt"
 
+# The terminal title (OSC 0/2), from the screens captured on codex-cli 0.167.0: `[ ! ] Action Required | …` (blinking with
+# `[ . ]`) while it waits for an approval, a Braille spinner in front while a turn runs, the folder name otherwise. Below the screen
+# rules: it decides only when they have no opinion, e.g. a dialog a new version added. Every captured screen agrees with it
+# (`title_rules_agree_with_every_captured_screen`).
+[[rules]]
+id = "title_action_required"
+state = "blocked"
+priority = 890
+region = "title"
+regex = '^\[ [!.] \] Action Required'
+
+[[rules]]
+id = "title_spinner"
+state = "working"
+priority = 790
+region = "title"
+regex = '^[\x{2800}-\x{28FF}] '
+
 [[rules]]
 id = "prompt_box"
 state = "idle"

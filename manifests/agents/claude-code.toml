@@ -101,6 +101,17 @@ priority = 800
 region = "bottom_non_empty_lines(12)"
 contains = "esc to interrupt"
 
+# The terminal title (OSC 0/2): while a turn runs Claude Code puts a spinner in front of it (half circles `◐◑◒◓` in the captured
+# 2.1.319 screens; Braille dots in older versions), and `✳` when it is not working (also while it asks for permission, so `✳` is not
+# a rule: it would hide a dialog). Below the screen rules: it decides only when they have no opinion, e.g. a footer reworded by a
+# new version. Every captured screen agrees with it (`title_rules_agree_with_every_captured_screen`).
+[[rules]]
+id = "title_spinner"
+state = "working"
+priority = 790
+region = "title"
+regex = '^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}] '
+
 [[rules]]
 id = "prompt_box"
 state = "idle"

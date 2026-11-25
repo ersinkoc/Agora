@@ -7,6 +7,9 @@ to `BUILT_IN` there, a test fails until you do). A file in the node's manifests 
 (`docs/specs/agent-manifest.md`, "Where agent kinds come from").
 
 Shipped: `antigravity-acp` (`agy acp`, unverified against the real program yet), `opencode-acp` (opencode as an ACP server; unverified against the real program yet), `claude-code` (screens captured from Claude Code 2.1.319), `codex` (codex-cli 0.167.0) `wrongstack-acp` (the same agent as an ACP server, L2: no terminal, so no screens) and `wrongstack` (WrongStack 1.5.3; fixtures are the rows of the 120x40 screen as plain text, replayed from a raw capture, because its animated side panels made the raw streams megabytes long). Fixtures are raw terminal output (`<name>.screen`, captured on a 120x40 terminal) with the expected result in `<name>.expect` (`<state> <rule id>` or `none`); `crates/agora-adapters/tests/shipped_manifests.rs` checks every manifest against its screens.
+`claude-code` and `codex` also have title rules (`region = "title"`, the OSC 0/2 window title the captures carry): below every
+screen rule, so they decide only when the screen rules have no opinion; the same test checks that they agree with every captured
+screen whose title they match. A title that is also shown during a dialog (Claude Code's `✳`) is never a rule.
 
 ## The ACP registry (`registry/`, ADR-0092)
 `registry/` holds the agents of the official ACP registry (`github.com/agentclientprotocol/registry`), converted by
