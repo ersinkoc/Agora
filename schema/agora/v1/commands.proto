@@ -396,6 +396,10 @@ message MeshPost {
 }
 
 // ADR-0039. `tool` is one of task_list, task_create, task_claim, task_complete, lease_acquire, lease_release, handoff.
+// ADR-0112: `tool` may also be `fleet_status`, with `project_id` empty and `arguments_json` `{}`, answered by a hub with the capability
+// `mesh.fleet_status.v1`: `BoardResult.shared` true and `result_json` the machines whose link agreed on that capability and their
+// running agents (docs/specs/mesh-tools.md), or the tool error `board.not_allowed` on a hub with people besides the owner whose owner
+// has not turned it on.
 message BoardCall {
   string project_id = 1;
   string tool = 2;

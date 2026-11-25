@@ -1,4 +1,4 @@
-// Visual regression: the component gallery, Home (the demo window's fleet console), the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, Home (the demo window's fleet console), the window with one empty pane, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -36,6 +36,11 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const pages = [
   { name: 'gallery', hash: '#/gallery', ready: '.gallery' },
   { name: 'home', hash: '#/demo', ready: '.fleet-summary', quiet: true },
+  // The window with one empty pane: the welcome alone, with no pane bar (layout.md). Its background is the window's, never the line colour
+  // between tiled panes (the review of #1206).
+  // A phone has no panes (phone.md), so it is captured on a desktop only.
+  { name: 'welcome', hash: '#/demo', ready: '[data-layout-root]:not([data-tiled])', quiet: true, only: 'desktop',
+    storage: { 'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'pane', id: 'p1', panel: 'empty' } }, focus: 'p1', touched: true }) } },
   { name: 'signin', hash: '', ready: 'form' },
   // Its dates are written in the browser's zone and language, so both are fixed; notifications are allowed so the switch is enabled.
   { name: 'settings', hash: '#/gallery/settings', ready: '[data-settings] .set-kind', context: { locale: 'en-US', timezoneId: 'UTC', permissions: ['notifications'] } },
@@ -111,10 +116,12 @@ const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbo
 let failed = 0;
 for (const p of pages) {
   for (const [vname, viewport] of viewports) {
+    if (p.only && p.only !== vname) continue;
     for (const scheme of ['dark', 'light']) {
       const name = `${p.name}-${vname}-${scheme}`;
       const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce', locale: 'en-US', ...p.context });
       if (p.quiet) await ctx.addInitScript(() => { try { localStorage.setItem('agora.attention.mode', 'off'); } catch { /* captured as it is */ } });
+      if (p.storage) await ctx.addInitScript((kv) => { try { for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); } catch { /* captured as it is */ } }, p.storage);
       const page = await ctx.newPage();
       const cdp = await ctx.newCDPSession(page);
       await page.clock.setFixedTime(CLOCK);

@@ -134,6 +134,16 @@ impl<'a> Users<'a> {
         })
     }
 
+    /// Whether the hub has any person at all, whatever the role: a row whose role this build cannot read counts too (it is left out
+    /// of [`list`](Self::list)), so the hub is never taken for a solo one by mistake.
+    pub fn any(&self) -> Result<bool, StoreError> {
+        let conn = self.store.lock()?;
+        conn.query_row("SELECT 1 FROM users LIMIT 1", [], |_| Ok(()))
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(db)
+    }
+
     pub fn list(&self) -> Result<Vec<User>, StoreError> {
         let conn = self.store.lock()?;
         let mut st = conn
@@ -240,11 +250,7 @@ impl<'a> Users<'a> {
                         .ok()?;
                     let rows = st
                         .query_map([&id], |r| {
-                            Ok(format!(
-                                "{}/{}",
-                                r.get::<_, String>(0)?,
-                                r.get::<_, String>(1)?
-                            ))
+                            Ok(grant_key(&r.get::<_, String>(0)?, &r.get::<_, String>(1)?))
                         })
                         .ok()?;
                     Some(rows.filter_map(Result::ok).collect())
@@ -259,8 +265,11 @@ impl<'a> Users<'a> {
         }
     }
 
-    /// Lets a person see and work in a project of a machine.
+    /// Lets a person see and work in a project of a machine. ADR-0115: the project is stored folded, so a later revoke in either case
+    /// of a GitHub, GitLab, Bitbucket or Codeberg path finds it.
     pub fn grant(&self, id: &str, node: &str, project: &str) -> Result<bool, StoreError> {
+        let project = agora_core::fold_project_id(project);
+        let project = project.as_ref();
         let conn = self.store.lock()?;
         let known = conn
             .query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(()))
@@ -286,14 +295,31 @@ impl<'a> Users<'a> {
         Ok(true)
     }
 
+    /// Takes a project of a machine back from a person. ADR-0115: every row that names it, in whatever case an older build stored a
+    /// GitHub, GitLab, Bitbucket or Codeberg path, so no row spelled otherwise keeps the access.
     pub fn revoke(&self, id: &str, node: &str, project: &str) -> Result<bool, StoreError> {
         let conn = self.store.lock()?;
-        let n = conn
-            .execute(
-                "DELETE FROM grants WHERE user_id = ?1 AND node = ?2 AND project = ?3",
-                params![id, node, project],
-            )
-            .map_err(db)?;
+        let stored: Vec<String> = {
+            let mut st = conn
+                .prepare("SELECT project FROM grants WHERE user_id = ?1 AND node = ?2")
+                .map_err(db)?;
+            let rows = st
+                .query_map(params![id, node], |r| r.get::<_, String>(0))
+                .map_err(db)?;
+            rows.collect::<Result<_, _>>().map_err(db)?
+        };
+        let mut n = 0;
+        for p in stored
+            .iter()
+            .filter(|p| agora_core::same_project(p, project))
+        {
+            n += conn
+                .execute(
+                    "DELETE FROM grants WHERE user_id = ?1 AND node = ?2 AND project = ?3",
+                    params![id, node, p],
+                )
+                .map_err(db)?;
+        }
         drop(conn);
         if n > 0 {
             let _ = crate::audit::Audit::new(self.store).record(
@@ -314,14 +340,55 @@ impl<'a> Users<'a> {
             .map_err(db)?;
         let rows = st
             .query_map([id], |r| {
-                Ok(format!(
-                    "{}/{}",
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?
-                ))
+                Ok(grant_key(&r.get::<_, String>(0)?, &r.get::<_, String>(1)?))
             })
             .map_err(db)?;
-        rows.collect::<Result<_, _>>().map_err(db)
+        // ADR-0115: two rows an older build stored in two cases of one project are one grant.
+        let keys: std::collections::BTreeSet<String> =
+            rows.collect::<Result<_, _>>().map_err(db)?;
+        Ok(keys.into_iter().collect())
+    }
+}
+
+/// A grant as `node/project`, the project folded (ADR-0115): a row an older build stored in another case of a GitHub, GitLab,
+/// Bitbucket or Codeberg path names the project the machines now report.
+fn grant_key(node: &str, project: &str) -> String {
+    format!("{node}/{}", agora_core::fold_project_id(project))
+}
+
+/// ADR-0112: the hub setting with which the owner lets agents see every machine and agent of a hub that has people besides the
+/// owner (`agora hub fleet on|off`). Off when missing. A solo hub (no person in `users`) answers without it.
+pub const FLEET_SETTING: &str = "fleet_status";
+const FLEET_ON: &[u8] = b"on";
+
+/// Whether the owner turned the fleet view on ([`FLEET_SETTING`]).
+pub fn fleet_switch(store: &SqliteStore) -> Result<bool, StoreError> {
+    use crate::store::EventStore;
+    Ok(store.setting(FLEET_SETTING)?.as_deref() == Some(FLEET_ON))
+}
+
+/// Turns the fleet view on or off for a hub with people besides the owner, and records it in the audit trail as the owner's.
+pub fn set_fleet_switch(store: &SqliteStore, on: bool, now_ms: u64) -> Result<(), StoreError> {
+    use crate::store::EventStore;
+    store.set_setting(FLEET_SETTING, if on { FLEET_ON } else { b"off" })?;
+    let _ = crate::audit::Audit::new(store).record(
+        now_ms,
+        "owner",
+        if on { "fleet_on" } else { "fleet_off" },
+        "cli",
+        "ok",
+    );
+    Ok(())
+}
+
+/// ADR-0112: whether agents may see every machine and agent of this hub (`BoardCall{tool: "fleet_status"}`): in solo mode (no
+/// person in `users` at all, ADR-0049: the hub is the owner's alone), or when the owner turned [`FLEET_SETTING`] on. Any person
+/// added, whatever the role (one this build cannot read included), makes it a team hub. A store that cannot be read refuses.
+pub fn fleet_allowed(store: &SqliteStore) -> bool {
+    match Users::new(store).any() {
+        Ok(false) => true,
+        Ok(true) => fleet_switch(store).unwrap_or(false),
+        Err(_) => false,
     }
 }
 
@@ -354,6 +421,26 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
 mod tests {
     use super::*;
 
+    /// ADR-0112, F3 of the #1205 review: a person whose role this build cannot read still makes the hub a team hub.
+    #[test]
+    fn a_person_with_an_unknown_role_ends_solo_mode() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(fleet_allowed(&store));
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO users (id, name, role, created_ms) VALUES ('x', 'X', 'admin', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(Users::new(&store).list().unwrap().is_empty());
+        assert!(Users::new(&store).any().unwrap());
+        assert!(!fleet_allowed(&store));
+        set_fleet_switch(&store, true, 2).unwrap();
+        assert!(fleet_allowed(&store));
+    }
+
     #[test]
     fn people_are_added_listed_demoted_and_removed_with_their_sessions() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -371,6 +458,41 @@ mod tests {
         assert!(!users.set_role("nobody", Role::Member).unwrap());
         assert!(users.remove(&a.id).unwrap() && !users.remove(&a.id).unwrap());
         assert_eq!(users.list().unwrap().len(), 3);
+    }
+
+    /// ADR-0115: a grant an older hub stored in a GitHub repository's own case is read folded, a new grant is stored folded, and a
+    /// revoke in either case takes every row of that project, so no row keeps the access. Another project stays.
+    #[test]
+    fn a_grant_in_two_cases_of_one_github_project_is_one_grant_and_one_revoke() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let users = Users::new(&store);
+        let a = users.add("Ayse", Role::Member, 1).unwrap();
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let (cased, folded) = (
+            format!("github.com/O/R#{root}"),
+            format!("github.com/o/r#{root}"),
+        );
+        let other = format!("git.example.org/O/R#{root}");
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO grants (user_id, node, project) VALUES (?1, 'mac', ?2), (?1, 'mac', ?3)",
+                params![a.id, cased, other],
+            )
+            .unwrap();
+        assert!(users.grant(&a.id, "mac", &cased).unwrap());
+        assert_eq!(
+            users.grants_of(&a.id).unwrap(),
+            [format!("mac/{other}"), format!("mac/{folded}")]
+        );
+        assert!(users.revoke(&a.id, "mac", &folded).unwrap());
+        assert_eq!(users.grants_of(&a.id).unwrap(), [format!("mac/{other}")]);
+        assert!(!users
+            .revoke(&a.id, "mac", &format!("git.example.org/o/r#{root}"))
+            .unwrap());
+        assert!(users.revoke(&a.id, "mac", &other).unwrap());
+        assert!(users.grants_of(&a.id).unwrap().is_empty());
     }
 
     /// Audit F910: the devices a removed person registered stay under their id, so someone added later under the same name gets an

@@ -376,6 +376,22 @@ refused (`directory.path`): the path travels as text, and a lossy spelling would
 normal file, at most 4096 bytes, with a valid UUID, checked again on the open file before it is read (a link swapped in after
 the check is refused). An owner confirms its association; metadata is not an access grant.
 
+A Git project's id is `<host>/<path>#<root commit>` (`#<root commit>` without a remote): the `origin` URL without scheme, user,
+port, trailing `.git` and slashes, the host lowercased, the root commit in lowercase hex. ADR-0115: on the hosts `github.com`,
+`gitlab.com`, `bitbucket.org` and `codeberg.org` (exactly; not their subdomains) the path is lowercased as well, so
+`https://github.com/Owner/Repo` and `git@github.com:owner/repo.git` give one id; on every other host the path keeps its case.
+An older node still sends such an id in its remote's case. The hub reads it folded wherever it reads a `project_id` from an
+event (`CheckoutDiscovered`, `WorkspaceRegistered`, `AgentStarted`, `AgentInterrupted`, `TaskChanged`, `TaskDispatched`: its view,
+snapshots, board membership, the events it sends a window) or a `BoardCall`; stored events are not rewritten. It remembers the
+spelling each node last reported for a project (its `CheckoutDiscovered`/`WorkspaceRegistered`) and puts a project id it sends that
+node (`AgentStart`, `TaskUpdate`, `TaskDispatch`, `BoardJoin`, and `DeliverTaskHandoff` when the hub sends one) in that spelling; a signed `AgentLaunch` is
+never changed. Every board an older hub stored under another spelling is merged into the folded project's board once (a task id
+taken twice gets a new one) and stored under the folded id. A member's grant is stored folded, read folded, and revoked in every
+spelling. A node compares a confirmed
+folder binding, a resumed agent's recorded project, a signed launch's project and a device's `device.<id>.projects` with the
+folder's id after folding both, so an id that differs only by this fold is the same project (no `directory.identity_changed`,
+no `agent.folder_changed`); any other change still needs `accept_identity_change`.
+
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
@@ -531,7 +547,11 @@ written later. `agora history purge` removes every transcript. Reading older ent
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
-project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
+project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`. ADR-0112 adds one tool value, no new
+message or field: `fleet_status` with an empty `project_id`, the hub's read-only view for agents of every machine whose link agreed on the capability and its running agents (Amendment A)
+(`docs/specs/mesh-tools.md#the-hub-wide-view-adr-0112`). A hub that answers it offers the generation 1 capability
+`mesh.fleet_status.v1`, and a node offers it when its policy allows (`mesh.fleet`); the hub answers on a solo hub, or when its owner
+turned it on (`agora hub fleet on`), and otherwise with the tool error `board.not_allowed` (no parameters).
 
 `BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. A node that goes offline and comes back to a shared project is asked again, also when the hub records its end late, together with its next connection (#1036). Sent only to nodes that offer the capability `board.join`.
 

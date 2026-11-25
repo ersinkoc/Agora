@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { type Workspace, reduce, workspaceOf } from './engine';
 import { forgetLoaded, loadWorkspace, saveWorkspace } from './store';
-import { MAX_PANES, bindOf, defaultLayout, isKnownPanel, isValid, panesOf, parseLayout, serialiseLayout } from './tree';
+import { MAX_PANES, bindOf, defaultLayout, isValid, panesOf, parseLayout, serialiseLayout } from './tree';
+import { PANEL_INFO } from './panels';
 import { subscribeToolRequests, requestTool, takeToolRequests } from './requests';
 
 // Tool panes (Terminal, Changes, Files, File manager): panes bound to one agent, placed by the same layout machinery as any other.
@@ -81,7 +82,7 @@ describe('remembering the panes on this device', () => {
     expect(kinds(back.ws)).toContain('manager:n/a');
   });
   it('is written in the layout file, which a client that does not know a panel shows as unknown rather than refusing', () => {
-    expect(['terminal', 'changes', 'files', 'manager'].every(isKnownPanel)).toBe(true);
+    expect(['terminal', 'changes', 'files', 'manager'].every((id) => PANEL_INFO.get(id)?.kind === 'tool')).toBe(true);
     const ws = open(ws0(), 'manager', 'n/a');
     const parsed = parseLayout(JSON.parse(serialiseLayout(ws.layout)));
     expect(parsed.ok && kinds(workspaceOf(parsed.layout))).toEqual(['manager:n/a']);

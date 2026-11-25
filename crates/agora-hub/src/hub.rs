@@ -67,6 +67,10 @@ struct Inner {
     /// compares the online nodes with its last look, so a node that left and came back between two looks (its late end and its
     /// redial's `up` written together, #996) would otherwise look as if it never left.
     left: std::collections::BTreeSet<String>,
+    /// ADR-0112 Amendment A: the machines whose latest link agreed on `mesh.fleet_status.v1`; only they and their agents are in the
+    /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
+    /// machine is left out until it connects again.
+    fleet_agreed: std::collections::BTreeSet<String>,
 }
 
 pub struct Hub {
@@ -191,6 +195,7 @@ impl Hub {
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
+                fleet_agreed: std::collections::BTreeSet::new(),
             }),
         };
         {
@@ -568,7 +573,13 @@ impl Hub {
             .get(node)
             .map_or(0, |n| n.link_generation)
             .saturating_add(1);
-        self.emit(
+        // ADR-0112 Amendment A: a machine is in the hub-wide view only while its latest link agreed on it. A link whose opening the
+        // store refuses is not registered, and the agreement of the link before it does not stay: the machine is left out until a
+        // link is recorded (review of #1205).
+        let agreed = capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1);
+        let opened = self.emit(
             &mut g,
             Body::NodeLink(NodeLink {
                 node_id: node.to_string(),
@@ -578,7 +589,13 @@ impl Hub {
                 last_heard_ms: now_ms,
             }),
             now_ms,
-        )?;
+        );
+        if agreed && opened.is_ok() {
+            g.fleet_agreed.insert(node.to_string());
+        } else {
+            g.fleet_agreed.remove(node);
+        }
+        opened?;
         let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
         Ok((registration, commands, generation))
     }
@@ -715,7 +732,7 @@ impl Hub {
         now_ms: u64,
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
-        let key = self.restore_board(project, now_ms);
+        let key = self.restore_board(&g.view, project, now_ms);
         let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
         if !events.is_empty() {
             if let Some(bytes) = self.boards.snapshot(project, now_ms) {
@@ -767,8 +784,14 @@ impl Hub {
         if self.write_unrecorded(&mut g).is_err() {
             return refused();
         }
-        let key = self.restore_board(&call.project_id, now_ms);
-        let project = call.project_id.as_str();
+        // ADR-0112: the hub-wide view for agents is read only and belongs to no project's board.
+        if call.tool == "fleet_status" {
+            return self.fleet_call(&g.view, &g.fleet_agreed, call);
+        }
+        // ADR-0115: an older node names a repository on a case-insensitive host in its own case; the board is the folded project's.
+        let project = agora_core::fold_project_id(&call.project_id);
+        let project = project.as_ref();
+        let key = self.restore_board(&g.view, project, now_ms);
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
         // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
         // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
@@ -824,16 +847,112 @@ impl Hub {
         }
     }
 
+    /// ADR-0112: `fleet_status`, answered for a solo hub, or a team hub whose owner turned it on; refused `board.not_allowed`
+    /// otherwise. It names no project and takes no arguments.
+    fn fleet_call(
+        &self,
+        view: &crate::projection::View,
+        agreed: &std::collections::BTreeSet<String>,
+        call: &agora_protocol::v1::BoardCall,
+    ) -> crate::board::Answer {
+        let invalid = |field: &str| crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                    .with("field", field),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
+        if !call.project_id.is_empty() {
+            return invalid("project_id");
+        }
+        if !serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+            .is_ok_and(|v| v.is_object())
+        {
+            return invalid("arguments_json");
+        }
+        if !crate::users::fleet_allowed(&self.store) {
+            return crate::board::fleet_refused();
+        }
+        crate::board::fleet_answer(view, agreed)
+    }
+
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
     /// reload over one another's newer in-memory work.
-    fn restore_board(&self, project: &str, now_ms: u64) -> String {
+    fn restore_board(&self, view: &View, project: &str, now_ms: u64) -> String {
         let key = format!("board.{project}");
-        if !self.boards.has(project) {
-            if let Ok(Some(bytes)) = self.store.setting(&key) {
-                self.boards.load(project, &bytes, now_ms);
+        if self.boards.has(project) {
+            return key;
+        }
+        let mut parts = Vec::new();
+        if let Ok(Some(bytes)) = self.store.setting(&key) {
+            parts.push(bytes);
+        }
+        // ADR-0115: boards an older hub stored under the project's spellings in another case (one per spelling it saw). Each is
+        // merged into the folded project's board once (`board-merged.<spelling>` remembers it, so a restart does not add it twice)
+        // and the result is stored under the folded id; the old records are left for a downgrade.
+        let spellings: std::collections::BTreeSet<&str> = view
+            .spellings_of(project)
+            .filter(|s| *s != project)
+            .collect();
+        let mut merged = Vec::new();
+        for spelling in spellings {
+            let marker = format!("board-merged.{spelling}");
+            if !matches!(self.store.setting(&marker), Ok(None)) {
+                continue;
+            }
+            if let Ok(Some(bytes)) = self.store.setting(&format!("board.{spelling}")) {
+                parts.push(bytes);
+                merged.push(marker);
+            }
+        }
+        match (parts.len(), merged.is_empty()) {
+            (0, _) => {}
+            (1, true) => self.boards.load(project, &parts[0], now_ms),
+            _ => {
+                self.boards.load(
+                    project,
+                    &crate::board::Boards::merge_snapshots(&parts),
+                    now_ms,
+                );
+                let stored = self
+                    .boards
+                    .snapshot(project, now_ms)
+                    .is_some_and(|bytes| self.store.set_setting(&key, &bytes).is_ok());
+                if stored {
+                    for marker in merged {
+                        let _ = self.store.set_setting(&marker, project.as_bytes());
+                    }
+                }
             }
         }
         key
+    }
+
+    /// ADR-0115: `req` as `node` should get it: a project it names in the spelling that node last reported for it (an older node
+    /// spells a repository on a case-insensitive host in its own case and knows it only so). Commands that name no project, and every
+    /// command to a node that spells it folded, are unchanged. A launch keeps its project as signed (the node answered it itself).
+    pub fn spelled_for(
+        &self,
+        node: &str,
+        mut req: agora_protocol::v1::CommandRequest,
+    ) -> agora_protocol::v1::CommandRequest {
+        use agora_protocol::v1::command_request::Command as C;
+        let project = match req.command.as_mut() {
+            Some(C::AgentStart(c)) => &mut c.project_id,
+            Some(C::TaskUpdate(c)) => &mut c.project_id,
+            Some(C::TaskDispatch(c)) => &mut c.project_id,
+            Some(C::BoardJoin(c)) => &mut c.project_id,
+            Some(C::DeliverTaskHandoff(c)) => &mut c.project_id,
+            _ => return req,
+        };
+        let g = self.lock();
+        let spelled = g.view.spelled_for(node, project);
+        if spelled != project.as_str() {
+            *project = spelled.to_string();
+        }
+        req
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
@@ -1952,6 +2071,341 @@ mod tests {
         assert!(live_ts < u64::MAX - 1);
     }
 
+    const ROOT_0115: &str = "db6f7d0123456789abcdef0123456789abcdef01";
+
+    /// ADR-0115: an older node's checkout and agent in `project` (in whatever case it spells it).
+    fn in_project(node: &str, seq: u64, project: &str) -> Vec<Vec<u8>> {
+        let ev = |seq: u64, body: Body| {
+            Event {
+                producer_id: node.into(),
+                seq,
+                at_ms: seq,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        vec![
+            ev(
+                seq,
+                Body::CheckoutDiscovered(agora_protocol::v1::CheckoutDiscovered {
+                    checkout_id: "c".into(),
+                    node_id: node.into(),
+                    project_id: project.into(),
+                    path: "/src/agora".into(),
+                }),
+            ),
+            ev(
+                seq + 1,
+                Body::AgentStarted(AgentStarted {
+                    agent_id: "a".into(),
+                    project_id: project.into(),
+                    node_id: node.into(),
+                    worktree_id: "w".into(),
+                    kind: "shell".into(),
+                    level: 2,
+                    ..Default::default()
+                }),
+            ),
+        ]
+    }
+
+    fn board_call_0115(project: &str, tool: &str, args: &str) -> agora_protocol::v1::BoardCall {
+        agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: project.into(),
+            tool: tool.into(),
+            arguments_json: args.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0115: `old` (an older node, its clone's remote `…/ersinkoc/Agora`) and `new` (a newer node, which folds `…/ersinkoc/agora`).
+    fn two_spellings(hub: &Hub) -> (String, String) {
+        let sup = support();
+        let old = format!("github.com/ersinkoc/Agora#{ROOT_0115}");
+        let folded = format!("github.com/ersinkoc/agora#{ROOT_0115}");
+        for (node, project) in [("old", &old), ("new", &folded)] {
+            let mut s = open_session(hub, &sup, node);
+            hub.ingest(&mut s, &online(node, 1)).unwrap();
+            for ev in in_project(node, 2, project) {
+                hub.ingest(&mut s, &ev).unwrap();
+            }
+        }
+        (old, folded)
+    }
+
+    /// ADR-0115: a node that spells a GitHub repository in another case is in the same project as one that spells it folded, in the
+    /// hub's view, its rebuilt view, board membership and the board; a command about the project reaches each in its own spelling.
+    #[test]
+    fn an_older_nodes_cased_project_id_is_one_project_with_a_newer_nodes() {
+        let (hub, path) = hub_on_file("adr0115-one-project");
+        let (old, folded) = two_spellings(&hub);
+        let check = |view: &View| {
+            assert_eq!(view.checkouts["old/c"].1, folded);
+            assert_eq!(view.checkouts["new/c"].1, folded);
+            assert_eq!(view.agents["old/a"].project_id, folded);
+            assert_eq!(view.agents["new/a"].project_id, folded);
+            assert_eq!(crate::board::nodes_with(view, &folded), ["new", "old"]);
+            assert!(crate::board::nodes_with(view, &old).is_empty());
+            assert_eq!(view.spelled_for("old", &folded), old);
+            assert_eq!(view.spelled_for("new", &folded), folded);
+        };
+        check(&hub.view().0);
+        check(&View::rebuild(hub.store()).unwrap().0);
+        // One shared project: both nodes are asked to join it, by its folded id.
+        let mut asked = hub.board_membership(4);
+        asked.sort();
+        assert_eq!(
+            asked,
+            [
+                ("new".to_string(), folded.clone()),
+                ("old".to_string(), folded.clone())
+            ]
+        );
+        hub.board_join_settled("old", &folded);
+        hub.board_join_settled("new", &folded);
+        // The older node's board call names the project in its case; the newer node sees the task it made.
+        let made = hub.board_call(
+            "old",
+            &board_call_0115(&old, "task_create", r#"{"title":"ship it"}"#),
+            5,
+        );
+        assert!(
+            matches!(
+                made.verdict,
+                crate::board::Verdict::Done {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            made.verdict
+        );
+        let listed = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        match listed.verdict {
+            crate::board::Verdict::Done { result, .. } => {
+                assert!(result.to_string().contains("ship it"), "{result}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let view = hub.view().0;
+        assert!(view.tasks.values().all(|t| t.project_id == folded));
+        assert!(!view.tasks.is_empty());
+        // A command about the project, as a window sends it (folded), reaches each node in its own spelling.
+        let dispatch = |node: &str| {
+            let req = agora_protocol::v1::CommandRequest {
+                command: Some(agora_protocol::v1::command_request::Command::TaskDispatch(
+                    agora_protocol::v1::TaskDispatch {
+                        project_id: folded.clone(),
+                        task_id: "t".into(),
+                        agent_id: "a".into(),
+                        by_user: String::new(),
+                    },
+                )),
+                ..Default::default()
+            };
+            match hub.spelled_for(node, req).command {
+                Some(agora_protocol::v1::command_request::Command::TaskDispatch(d)) => d.project_id,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(dispatch("old"), old);
+        assert_eq!(dispatch("new"), folded);
+        let join = hub.spelled_for(
+            "old",
+            agora_protocol::v1::CommandRequest {
+                command: Some(agora_protocol::v1::command_request::Command::BoardJoin(
+                    agora_protocol::v1::BoardJoin {
+                        project_id: folded.clone(),
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            join.command,
+            Some(agora_protocol::v1::command_request::Command::BoardJoin(j)) if j.project_id == old
+        ));
+        // Stored events keep what the node sent.
+        let stored = hub.store().events_after(0, 100).unwrap();
+        assert!(stored.iter().any(|stored| {
+            Event::decode(stored.payload.as_slice()).is_ok_and(
+                |e| matches!(e.body, Some(Body::CheckoutDiscovered(c)) if c.project_id == old),
+            )
+        }));
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115: once the older node updates and reports the folded id, the hub forgets its old spelling; a node that never spelled
+    /// it otherwise is sent the id as given, and another host keeps its case (two projects).
+    #[test]
+    fn a_node_that_updates_is_sent_the_folded_id_and_other_hosts_keep_their_case() {
+        let hub = hub();
+        let (_, folded) = two_spellings(&hub);
+        let sup = support();
+        let mut s = open_session(&hub, &sup, "old");
+        for ev in in_project("old", 4, &folded) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        assert_eq!(hub.view().0.spelled_for("old", &folded), folded);
+        assert!(hub.view().0.spellings.is_empty());
+        let mut s = open_session(&hub, &sup, "self-hosted");
+        hub.ingest(&mut s, &online("self-hosted", 1)).unwrap();
+        for ev in in_project(
+            "self-hosted",
+            2,
+            &format!("git.example.org/O/R#{ROOT_0115}"),
+        ) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        let view = hub.view().0;
+        assert_eq!(
+            view.checkouts["self-hosted/c"].1,
+            format!("git.example.org/O/R#{ROOT_0115}")
+        );
+        assert!(
+            crate::board::nodes_with(&view, &format!("git.example.org/o/r#{ROOT_0115}")).is_empty()
+        );
+    }
+
+    /// ADR-0115: a board an older hub stored under the project's spelling in another case is the folded project's board after the
+    /// update, and is stored again under the folded id (the old record stays for a downgrade).
+    #[test]
+    fn a_board_stored_under_an_older_spelling_is_found() {
+        let (hub, path) = hub_on_file("adr0115-old-board");
+        let (old, folded) = two_spellings(&hub);
+        hub.store()
+            .set_setting(
+                &format!("board.{old}"),
+                br#"{"next": 2, "tasks": [{"id": "t1", "title": "kept from before", "detail": "", "depends_on": [], "done": false, "owner": null, "summary": ""}], "leases": []}"#,
+            )
+            .unwrap();
+        hub.board_join_settled("old", &folded);
+        hub.board_join_settled("new", &folded);
+        let listed = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        match listed.verdict {
+            crate::board::Verdict::Done { result, .. } => {
+                assert!(result.to_string().contains("kept from before"), "{result}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let again = hub
+            .store()
+            .setting(&format!("board.{folded}"))
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&again).contains("kept from before"));
+        assert!(hub
+            .store()
+            .setting(&format!("board.{old}"))
+            .unwrap()
+            .is_some());
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115: an older hub kept a board per spelling. Every one is merged into the folded project's board once (an id taken twice
+    /// gets a new one, its dependency follows), stored under the folded id, and a restarted hub does not add them again.
+    #[test]
+    fn every_board_stored_under_an_older_spelling_is_merged_once() {
+        let (hub, path) = hub_on_file("adr0115-many-boards");
+        let (old, folded) = two_spellings(&hub);
+        let upper = format!("github.com/ERSINKOC/AGORA#{ROOT_0115}");
+        let sup = support();
+        let mut s = open_session(&hub, &sup, "older");
+        hub.ingest(&mut s, &online("older", 1)).unwrap();
+        for ev in in_project("older", 2, &upper) {
+            hub.ingest(&mut s, &ev).unwrap();
+        }
+        let task = |id: &str, title: &str, deps: &[&str]| serde_json::json!({"id": id, "title": title, "detail": "", "depends_on": deps, "done": false, "owner": null, "summary": ""});
+        let board = |tasks: Vec<serde_json::Value>| {
+            serde_json::json!({"next": 3, "tasks": tasks, "leases": []}).to_string()
+        };
+        let put = |spelling: &str, text: String| {
+            hub.store()
+                .set_setting(&format!("board.{spelling}"), text.as_bytes())
+                .unwrap();
+        };
+        put(&folded, board(vec![task("t-1", "folded one", &[])]));
+        put(&old, board(vec![task("t-1", "cased one", &[])]));
+        put(
+            &upper,
+            board(vec![
+                task("t-1", "upper one", &[]),
+                task("t-2", "upper two", &["t-1"]),
+            ]),
+        );
+        for n in ["old", "new", "older"] {
+            hub.board_join_settled(n, &folded);
+        }
+        let list = |hub: &Hub| -> serde_json::Value {
+            match hub
+                .board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6)
+                .verdict
+            {
+                crate::board::Verdict::Done { result, .. } => {
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap_or("null"))
+                        .unwrap()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["title"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+        let first = list(&hub);
+        assert_eq!(
+            titles(&first),
+            ["cased one", "folded one", "upper one", "upper two"],
+            "{first}"
+        );
+        let ids: std::collections::BTreeSet<&str> = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["task_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 4, "{first}");
+        let two = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper two")
+            .unwrap();
+        let one = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "upper one")
+            .unwrap();
+        assert_eq!(two["depends_on"][0], one["task_id"], "{first}");
+        assert!(hub
+            .store()
+            .setting(&format!("board.{old}"))
+            .unwrap()
+            .is_some());
+        drop(hub);
+        // Restarted: the merged board is read back under the folded id, and the older ones are not added again.
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let mut links = Vec::new();
+        for n in ["old", "new", "older"] {
+            links.push(hub.node_link_opened(n, Vec::new(), 7).unwrap());
+            hub.board_join_settled(n, &folded);
+        }
+        let again = list(&hub);
+        assert_eq!(titles(&again), titles(&first), "{again}");
+        drop(hub);
+        remove_db(&path);
+    }
+
     /// A hub on a file, another connection to the same file (what another process is: `agora hub login`, the front door, `agora hub
     /// code`), and a cleanup.
     fn hub_on_file(name: &str) -> (Hub, std::path::PathBuf) {
@@ -2094,6 +2548,25 @@ mod tests {
                 (false, NodeLinkReason::Closed as i32, 1),
             ]
         );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0112 Amendment A (review of #1205): a link whose opening the store refuses does not keep the earlier link's agreement on
+    /// the hub-wide view; the machine is left out until a link is recorded.
+    #[test]
+    fn a_refused_link_does_not_keep_the_earlier_agreement_on_the_fleet_view() {
+        let (hub, path) = hub_on_file("fleet-refused-link");
+        let fleet = vec![agora_protocol::handshake::FLEET_STATUS_V1.to_string()];
+        let _first = hub.node_link_opened("n1", fleet.clone(), 1).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_opened("n1", fleet.clone(), 2).is_err());
+        assert!(!hub.lock().fleet_agreed.contains("n1"));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _again = hub.node_link_opened("n1", fleet, 3).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
         drop(hub);
         remove_db(&path);
     }
@@ -2279,6 +2752,92 @@ mod tests {
                     (expected.clone(), Vec::new()),
                     "{nodes:?} {end:?}"
                 );
+            }
+        }
+    }
+
+    /// ADR-0112: `fleet_status` is answered on a solo hub, refused `board.not_allowed` (no parameters) once the hub has people
+    /// besides the owner, and answered again when the owner turns it on; it names no project.
+    #[test]
+    fn fleet_status_is_answered_alone_and_on_a_team_only_with_the_owners_switch() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        // Amendment A: n1's link agreed on the view; n2's did not (its policy, or an older node), so it is left out.
+        let _n1 = hub
+            .node_link_opened(
+                "n1",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                2,
+            )
+            .unwrap();
+        let mut s2 = open_session(&hub, &sup, "n2");
+        hub.ingest(&mut s2, &online("n2", 1)).unwrap();
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 3).unwrap();
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            tool: "fleet_status".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        let answered = |hub: &Hub| match hub.board_call("n1", &call, 5).verdict {
+            crate::board::Verdict::Done { result, is_error } => {
+                let text: serde_json::Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                (text, is_error)
+            }
+            other => panic!("{other:?}"),
+        };
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1", "{text}");
+        assert_eq!(text["machines"].as_array().unwrap().len(), 1, "{text}");
+        assert_eq!(text["partial"], false);
+        // Once n2 connects again and agrees, it is listed; a later link that does not agree takes it out again.
+        let _n2 = hub
+            .node_link_opened(
+                "n2",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                4,
+            )
+            .unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 2);
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 5).unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 1);
+
+        crate::users::Users::new(hub.store())
+            .add("Eda", crate::users::Role::Member, 2)
+            .unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(is_error);
+        assert_eq!(
+            text,
+            serde_json::json!({"error": {"code": "board.not_allowed", "params": {}}})
+        );
+
+        crate::users::set_fleet_switch(hub.store(), true, 3).unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1");
+        crate::users::set_fleet_switch(hub.store(), false, 4).unwrap();
+        assert!(answered(&hub).1);
+
+        // It names no project and takes an object.
+        for (project, args, field) in [("p", "{}", "project_id"), ("", "[]", "arguments_json")] {
+            let bad = agora_protocol::v1::BoardCall {
+                project_id: project.into(),
+                arguments_json: args.into(),
+                ..call.clone()
+            };
+            match hub.board_call("n1", &bad, 6).verdict {
+                crate::board::Verdict::Invalid(e) => {
+                    assert_eq!(e.code, agora_protocol::ErrorCode::ProtocolInvalidMessage);
+                    assert_eq!(
+                        e.params.get("field"),
+                        Some(&agora_protocol::ParamValue::Str(field.into()))
+                    );
+                }
+                other => panic!("{other:?}"),
             }
         }
     }

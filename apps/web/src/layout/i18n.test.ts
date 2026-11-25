@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { PRESETS } from './engine';
-import { PANELS } from './tree';
+import { PANEL_INFO } from './panels';
 import { panelLabel } from './Workspace';
 
 // The layout's keys built at run time (the key test in src/i18n.test.ts sees only literal ones), in both languages.
@@ -16,7 +16,7 @@ describe('layout messages', () => {
         ...['attention', 'selection'].flatMap((f) => [`layout-follow-${f}`, `layout-follows-${f}`]),
       ];
       for (const k of keys) expect(t(k, { max: 1 }), k).not.toBe(k);
-      for (const p of PANELS) expect(panelLabel(p), p).not.toMatch(/^[a-z-]+$/);
+      for (const p of PANEL_INFO.ids) expect(panelLabel(p), p).not.toMatch(/^[a-z-]+$/);
       expect(panelLabel('machines-map')).toContain('machines-map');
     });
   }

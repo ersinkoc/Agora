@@ -14,6 +14,9 @@ import type { MachineModel } from '../net/view';
 import { Workspace } from '../layout/Workspace';
 import { reduce, workspaceOf, type Action, type Workspace as WorkspaceState } from '../layout/engine';
 import { LAYOUT_VERSION } from '../layout/tree';
+import { panelRegistry, type PanelDef, type PanelState } from '../layout/panels';
+import type { HostActions } from '../layout/builtinPanels';
+import type { AnswerGuard } from './useAnswerGuard';
 import { Explorer } from './Explorer';
 import { FileManager } from './FileManager';
 
@@ -88,11 +91,16 @@ describe('an Agents-list row', () => {
 
 describe('pane tabs and bars', () => {
   const tabs = (ids: string[]) => ({ type: 'tabs' as const, active: 0, children: ids.map((id) => ({ type: 'pane' as const, id: `p-${id}`, panel: 'agent', bind: { agent: `laptop/${id}` } })) });
+  // One panel, the agent's own view, drawn as its name: the pane bars are what this pins.
+  const panels = panelRegistry<PanelDef>([{ id: 'agent', label: 'layout-panel-agent', kind: 'agent', binds: 'agent', streams: true, render: ({ agent }) => <p>{agent?.name}</p> }]);
+  const panelState: PanelState = { fleet, machines: [], approvals: [], attention: [], changed: [], messages: [], boards: [], projects: [], now: 0, link: 'live' };
+  const none = () => {};
+  const actions: HostActions = { openAgent: none, openFromHome: none, openTool: none, review: none, history: none, browse: none, showNeeds: none, showChanges: none, dismiss: none, answers: {} as AnswerGuard, chat: {} };
   function Harness({ ws }: { ws: WorkspaceState }) {
     const [state, setState] = useStateRef(ws);
     return <div style={{ position: 'relative', width: 600, height: 400 }}>
       <Workspace ws={state} dispatch={(a: Action) => setState(a)} fleet={fleet} bindings={{ attention: new Map() }} narrow={false}
-        renderAgent={(a) => <p>{a.name}</p>} renderPanel={() => undefined} welcome={null} />
+        panels={panels} state={panelState} sources={{}} actions={actions} terminalFor={() => ({ connect: () => ({ sendInput() {}, resize() {}, close() {} }) })} welcome={null} />
     </div>;
   }
   const split = workspaceOf({ version: LAYOUT_VERSION, root: { type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [tabs(['a1', 'a2']), { type: 'pane', id: 'p-solo', panel: 'agent', bind: { agent: 'laptop/a2' } }] } });

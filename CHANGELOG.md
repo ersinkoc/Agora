@@ -6,6 +6,29 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.39
+
+- New `agora agent explain KIND --file SCREEN`: shows which screen rule decides a captured agent screen, and for every other rule
+  the condition that did not match. For writing and fixing agent descriptions; it needs no running node.
+- Themes go deeper: a theme file (format 2) can hold both its light and dark colours, start from a built-in theme, colour the
+  terminal (all 16 colours, background, text, cursor and selection) and each part of the window (the Agents list, tabs, pane
+  bars, the status line, cards, fields, buttons, conversation entries and code blocks), and set the window's frame from fixed
+  choices: pane borders and gaps, line width, the tab bar at the top or bottom, tab style, density, how an agent's state shows,
+  shadows, motion, text weight, line height and ligatures. The theme editor has a row for each, a live preview with a terminal
+  sample, and lists what no theme can change (the red, removed lines, requests from agents, the focus ring, "Needs you") as
+  locked rows with the reason. Format 1 files still open, and export writes format 2. (ADR-0113)
+- Agents can now see every machine of the hub and every agent running on it, in any project: a new mesh tool `machines_list`, and
+  `agents_list` with `scope: "hub"`. A hub used by other people shows this only after its owner runs `agora hub fleet on`. With
+  `mesh.fleet = false` in a machine's policy file, that machine's agents neither ask for nor see the hub-wide view, and the machine and
+  its agents are left out of it, except in projects it shares with the asking agent's machine, where they show as before; machines that
+  run an older Agora are left out too until they are updated (ADR-0112).
+- The CLI's device and metrics token lists keep the space before "· removed" / "· revoked" (in Turkish "· kaldırıldı" /
+  "· iptal edildi"), and translated text keeps the spaces a translation puts in quotes (`{" "}`) (#1200).
+- The window now says "The agent reported this itself." when an agent gave its own state (through its ACP bridge or adapter),
+  instead of always "Read from what is on the agent's screen." (#1198).
+- The window's idle lock (Settings, This device) now waits the full time after your last key press, click, touch or scroll; before, a click within a second of a key press was not counted, so the window could lock up to a second early. It also counts the time the computer was asleep: coming back after a sleep longer than the chosen time, the window locks at your first touch instead of starting the count again.
+- A worktree branch name that git would refuse (for example one with a part starting with `.` or ending in `.lock`) is now refused at once with a clear reason, instead of failing with an internal error.
+
 ## 0.3.38
 
 - Agents that run through the ACP bridge now tell the node every place the bridge shortened their text (a very long message, tool output, arguments, plan step or file path, and the error lines kept when an agent stops), so the node also hides the parts of your saved secrets left on either side of each cut, live and in the saved conversation. (ADR-0111)

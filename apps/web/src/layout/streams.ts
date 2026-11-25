@@ -2,6 +2,7 @@
 // ADR-0022): a background tab, a pane hidden behind a maximized one, or every pane but the front one on a phone holds none.
 import type { TerminalSession, TerminalSource } from '../terminal/source';
 import { type Workspace, visiblePanes } from './engine';
+import { PANEL_INFO, type PanelRegistry } from './panels';
 import { type Pane, bindOf, followOf } from './tree';
 
 export interface Bindings {
@@ -37,11 +38,11 @@ export function assignAttention(panes: readonly string[], prev: ReadonlyMap<stri
 export const sameAssignment = (a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>) =>
   a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
 
-// Pane id → agent id, for every pane on screen that draws a terminal.
-export function streamPlan(ws: Workspace, narrow: boolean, b: Bindings, hasTerminal: (agent: string) => boolean): Map<string, string> {
+// Pane id → agent id, for every pane on screen whose panel draws a terminal (the registry's `streams`).
+export function streamPlan(ws: Workspace, narrow: boolean, b: Bindings, hasTerminal: (agent: string) => boolean, panels: Pick<PanelRegistry, 'streams'> = PANEL_INFO): Map<string, string> {
   const plan = new Map<string, string>();
   for (const p of visiblePanes(ws, narrow)) {
-    if (p.panel !== 'terminal' && p.panel !== 'agent') continue;
+    if (!panels.streams(p.panel)) continue;
     const a = agentOf(p, b);
     if (a && hasTerminal(a)) plan.set(p.id, a);
   }

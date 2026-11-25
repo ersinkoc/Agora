@@ -147,10 +147,22 @@ pub struct Bindings {
 impl Bindings {
     pub fn load(path: PathBuf) -> Self {
         let (ids, valid) = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(ids) => (ids, true),
-                Err(_) => (Default::default(), false),
-            },
+            // ADR-0115: an id confirmed before is read folded, so a repository on a case-insensitive host whose remote this node
+            // now folds is the same project (no "identity changed"); the next confirmation writes the file back folded.
+            Ok(bytes) => {
+                match serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes) {
+                    Ok(ids) => (
+                        ids.into_iter()
+                            .map(|(path, id)| {
+                                let id = agora_core::fold_project_id(&id).into_owned();
+                                (path, id)
+                            })
+                            .collect(),
+                        true,
+                    ),
+                    Err(_) => (Default::default(), false),
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Default::default(), true),
             Err(_) => (Default::default(), false),
         };
@@ -159,7 +171,7 @@ impl Bindings {
     pub fn previous(&self, info: &v1::DirectoryInfo) -> String {
         self.ids
             .get(&info.path)
-            .filter(|p| *p != &info.project_id)
+            .filter(|p| !agora_core::same_project(p, &info.project_id))
             .cloned()
             .unwrap_or_default()
     }
@@ -919,6 +931,63 @@ mod tests {
         assert_eq!(Bindings::load(file.clone()).previous(&changed), "first");
         std::fs::write(&file, b"invalid").unwrap();
         assert!(Bindings::load(file).confirm(&changed).is_err());
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    /// ADR-0115: a folder confirmed while this node kept the case of a GitHub remote's path is the same project once it folds it: no
+    /// "identity changed", and the next confirmation writes the folded id. Any other change is still one; another host keeps its case.
+    #[test]
+    fn a_binding_that_differs_only_by_the_case_fold_is_the_same_project() {
+        let p = temp("binding-case");
+        let file = p.join("bindings.json");
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let (cased, folded) = (
+            format!("github.com/Ersinkoc/Agora#{root}"),
+            format!("github.com/ersinkoc/agora#{root}"),
+        );
+        let other_host = format!("git.example.org/O/R#{root}");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({"/work": cased, "/self-hosted": other_host}))
+                .unwrap(),
+        )
+        .unwrap();
+        let info = |path: &str, id: &str| v1::DirectoryInfo {
+            path: path.into(),
+            project_id: id.into(),
+            ..Default::default()
+        };
+        let mut b = Bindings::load(file.clone());
+        assert_eq!(b.previous(&info("/work", &folded)), "");
+        assert_eq!(b.previous(&info("/work", &cased)), "");
+        // Another repository, or the same name with another root, is still a change.
+        assert_eq!(
+            b.previous(&info(
+                "/work",
+                &format!("github.com/ersinkoc/agora2#{root}")
+            )),
+            folded
+        );
+        assert_eq!(
+            b.previous(&info(
+                "/work",
+                &format!("github.com/ersinkoc/agora#{}", "f".repeat(40))
+            )),
+            folded
+        );
+        assert_eq!(
+            b.previous(&info(
+                "/self-hosted",
+                &format!("git.example.org/o/r#{root}")
+            )),
+            other_host
+        );
+        b.confirm(&info("/work", &folded)).unwrap();
+        let written: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(written["/work"], folded);
+        assert_eq!(written["/self-hosted"], other_host);
         let _ = std::fs::remove_dir_all(p);
     }
 }

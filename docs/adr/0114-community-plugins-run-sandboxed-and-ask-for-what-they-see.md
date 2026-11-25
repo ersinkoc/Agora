@@ -154,7 +154,8 @@ The maintainer wants community plugins next to community themes, "like herdr".
 
 ## Build order
 
-1. **The panel registry** (ADR-0068 rung 3): built-in panels move onto it. Plugins need it.
+1. **The panel registry** (ADR-0068 rung 3): built-in panels move onto it. Plugins need it. Done: `docs/ux/layout.md`, "The
+   panel registry (rung 3)".
 2. **The sandbox host:** the frame, the page policy, the message set with the read capabilities, the host-drawn header, safe
    mode, and local development loading.
 3. **Storage on the hub,** install and remove, and per-person grants (schema messages, fixtures).

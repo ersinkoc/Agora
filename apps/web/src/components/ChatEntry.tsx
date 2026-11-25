@@ -46,8 +46,8 @@ const HOVER = 'opacity-0 transition-opacity duration-150 group-hover/msg:opacity
 function CodeBlock({ lang, text }: { lang: string; text: string }) {
   const html = useHighlightedCode(lang, text);
   return (
-    <div className="overflow-hidden rounded-s border border-line bg-surface-1">
-      <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-xs text-muted pointer-coarse:h-11"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
+    <div className="overflow-hidden rounded-s border border-codeblock-line bg-codeblock text-codeblock-ink">
+      <div className="flex h-7 items-center justify-between gap-2 border-b border-codeblock-line ps-3 pe-1 text-xs text-muted pointer-coarse:h-11"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
       <pre dir="ltr" className="m-0 max-h-96 overflow-auto p-3 font-mono text-xs leading-5">
         {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
       </pre>
@@ -87,7 +87,7 @@ const clock = (atMs: number): string => new Date(atMs).toLocaleTimeString([], { 
 const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }) {
   const parsed = useMemo(() => blocks(text), [text]);
   return (
-    <div className="group/msg relative isolate max-w-3xl" title={fullStamp(atMs)} data-role="agent">
+    <div className="chat-agent group/msg relative isolate max-w-3xl" title={fullStamp(atMs)} data-role="agent">
       <span className="sr-only">{t('chat-agent')}: </span>
       <div className="grid gap-2 leading-relaxed">{parsed.map((b, i) => <BlockView key={i} block={b} />)}</div>
       {/* On a touch screen it is always shown at full size, so it sits under the reply rather than over its top corner, where it would
@@ -102,7 +102,7 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 // (`state`); either way it is drawn quieter, as what it is.
 export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
-    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-(--line-accent) bg-tint-accent px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
+    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-personentry-line bg-personentry text-personentry-ink px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
       <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
         {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
