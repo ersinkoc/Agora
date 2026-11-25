@@ -804,7 +804,7 @@ impl Boards {
                 .or_insert_with(|| (0, BTreeSet::new()));
             // A hold that is still running keeps its end: joins one after another never hold grants longer than one wait.
             if entry.0 <= now_ms {
-                entry.0 = now_ms + JOIN_WAIT_MS;
+                entry.0 = now_ms.saturating_add(JOIN_WAIT_MS);
             }
             entry.1.extend(join.iter().cloned());
             out.extend(join.into_iter().map(|n| (n, project.clone())));
@@ -1114,6 +1114,45 @@ mod tests {
             1_000 + JOIN_WAIT_MS,
         );
         assert!(text(&late).contains("lease_id"), "{}", text(&late));
+    }
+
+    #[test]
+    fn f415_join_wait_creation_does_not_overflow_the_clock() {
+        let control = Boards::new();
+        let shared = view(&["alpha", "beta"]);
+        assert_eq!(control.membership(&shared, 1_000).len(), 2);
+        println!("CONTROL OK");
+
+        let target = Boards::new();
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            target.membership(&shared, u64::MAX - JOIN_WAIT_MS + 1)
+        }));
+        println!("EXPECTED: membership succeeds");
+        println!(
+            "ACTUAL: {}",
+            if actual.is_ok() {
+                "succeeded"
+            } else {
+                "panicked"
+            }
+        );
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(matches!(actual, Ok(pairs) if pairs.len() == 2));
+    }
+
+    #[test]
+    fn verifies_f415_join_wait_clock_boundaries() {
+        for now in [0, u64::MAX - JOIN_WAIT_MS, u64::MAX - JOIN_WAIT_MS + 1] {
+            let boards = Boards::new();
+            let shared = view(&["alpha", "beta"]);
+            assert_eq!(boards.membership(&shared, now).len(), 2);
+            assert!(boards.membership(&shared, now).is_empty());
+        }
+        println!("FIX VERIFIED");
     }
 
     #[test]

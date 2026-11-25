@@ -93,6 +93,8 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
         if !matches!(scheme.as_str(), "https" | "http" | "ssh" | "git") {
             return Err(ProjectError::InvalidRemote);
         }
+        // A URI fragment is client-side metadata, never part of the repository path sent to the Git server.
+        let rest = rest.split_once('#').map_or(rest, |(remote, _)| remote);
         let (authority, path) = rest.split_once('/').ok_or(ProjectError::InvalidRemote)?;
         (authority.to_string(), path.to_string())
     } else if let Some((prefix, suffix)) = url.split_once(':') {
@@ -197,6 +199,45 @@ mod tests {
             normalize_remote("git@gitlab.com:group/sub/repo.git").as_deref(),
             Ok("gitlab.com/group/sub/repo")
         );
+    }
+
+    #[test]
+    fn f416_http_url_fragments_do_not_change_project_identity() {
+        assert_eq!(
+            normalize_remote("https://github.com/Owner/Repo.git").as_deref(),
+            Ok("github.com/Owner/Repo")
+        );
+        println!("CONTROL OK");
+
+        let actual = normalize_remote("https://github.com/Owner/Repo.git#readme");
+        println!("EXPECTED: github.com/Owner/Repo");
+        println!("ACTUAL: {actual:?}");
+        if actual.as_deref() == Ok("github.com/Owner/Repo") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual.as_deref(), Ok("github.com/Owner/Repo"));
+    }
+
+    #[test]
+    fn verifies_f416_remote_fragment_boundaries() {
+        for (remote, expected) in [
+            ("https://github.com/o/r.git#readme", "github.com/o/r"),
+            ("ssh://git@github.com/o/r#", "github.com/o/r"),
+            (
+                "git://github.com/o/r?download=1#top",
+                "github.com/o/r?download=1",
+            ),
+            ("git@github.com:o/r#literal", "github.com/o/r#literal"),
+        ] {
+            assert_eq!(
+                normalize_remote(remote).as_deref(),
+                Ok(expected),
+                "{remote}"
+            );
+        }
+        println!("FIX VERIFIED");
     }
 
     #[test]
