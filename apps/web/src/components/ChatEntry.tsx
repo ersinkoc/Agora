@@ -122,7 +122,7 @@ export function Turn({ name, accent, kind, model, atMs, children }: { name: stri
       <span className="max-md:hidden" data-turn-avatar><AgentAvatar accent={accent ?? 'var(--agent-slate)'} kind={kind || name} /></span>
       <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
         <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
-        {model && <span className="truncate">{model}</span>}
+        {model && <span className="truncate">{visible(model)}</span>}
         {atMs > 0 && <span className="flex-none">{clock(atMs)}</span>}
       </div>
       <div className="col-start-2 flex min-w-0 flex-col gap-2.5 max-md:col-start-1">{children}</div>
@@ -140,7 +140,7 @@ export function Thought({ text, seconds, live = false }: { text: string; seconds
         <span>{live ? t('chat-thinking') : seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
         <Icon name="chevron" className="ms-auto size-3 transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
       </summary>
-      <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{text}</div>
+      <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{visible(text)}</div>
     </details>
   );
 }
@@ -235,10 +235,10 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
   const [runOpen] = useState(() => line.status === 'in_progress' && !ended && !!line.output);
   const status = line.status && shownStatus(line.status, ended);
   const heading = v.raw
-    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
+    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{visible(v.raw)}</span>
     : <>
-      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
-      {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
+      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(visible(v.title))} /> : t(`tool-${action}`)}</span>
+      {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{visible(v.subject)}</code>}
       {line.locations && <PlaceChips places={line.locations} skip={showsSubject ? v.subject : undefined} />}
     </>;
   const row = 'flex min-h-9 pointer-coarse:min-h-11 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
@@ -259,13 +259,13 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
       </summary>
       {d && diff ? <div className="border-t border-line"><DiffLines lines={d.lines} fallback={diff.text} /></div> : (
         <div className="border-t border-line bg-surface-0 px-3.5 py-2">
-          {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{v.raw}</pre> : <>
-            {action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{v.subject}</pre>}
+          {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{visible(v.raw)}</pre> : <>
+            {action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{visible(v.subject)}</pre>}
             {line.output && <div className={v.details.length ? 'mb-2 border-b border-line pb-2' : ''}><OutputBlock text={line.output} cut={line.outputCut} /></div>}
             <dl dir="ltr" className="m-0 grid max-h-72 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs">
               {v.details.map(([k, val], i) => <div key={i} className="contents">
-                <dt className="text-muted">{k}</dt>
-                <dd className="m-0 break-words whitespace-pre-wrap">{val}</dd>
+                <dt className="text-muted">{visible(k)}</dt>
+                <dd className="m-0 break-words whitespace-pre-wrap">{visible(val)}</dd>
               </div>)}
             </dl>
           </>}
@@ -300,7 +300,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
           : <Icon name="board" className="size-3.5 flex-none" />}
         <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
-        <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
+        <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${visible(sum.last)}` : ''}</span>
         <span className="flex-1 md:hidden" />
         {flag && <span className={`flex flex-none items-center gap-1 text-xs font-medium ${flag === 'needs-you' ? 'text-needs-you' : 'text-danger'}`}><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
         <Icon name="chevron" className={CHEVRON} />

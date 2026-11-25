@@ -67,6 +67,16 @@ describe('widget kit', () => {
     expect(b?.querySelector('.kit-avatar__dot')).not.toBeNull();
     expect(b?.className).toContain('kit-avatar--l');
   });
+  it('makes an avatar letter visible when hidden text leads the kind', () => {
+    render(<AgentAvatar accent="var(--agent-teal)" kind={'\u3164\u2800codex'} label="agent" />);
+    const avatar = document.querySelector('.kit-avatar') as HTMLElement;
+    expect([...avatar.textContent ?? ''].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(avatar.textContent).toBe('C');
+  });
+  it('verifies avatar letters after bidi controls and for an all-hidden kind', () => {
+    render(<><AgentAvatar accent="var(--agent-teal)" kind={'\u202eGrüße'} /><AgentAvatar accent="var(--agent-teal)" kind={'\u2066\u3164'} /></>);
+    expect([...document.querySelectorAll('.kit-avatar')].map((el) => el.textContent)).toEqual(['G', '?']);
+  });
 
   it('a card is a group, or one pressable button that says when it is selected', () => {
     render(<><Card label="laptop">x</Card><Card selected onClick={() => {}}>y</Card></>);

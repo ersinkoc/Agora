@@ -331,7 +331,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
                 : content === 'binary' ? <p className="muted p-4">{t('fm-binary')}</p>
                 : content === 'secret' ? <p role="note" className="flex items-center gap-2 p-4 text-muted"><Icon name="lock" className="size-4" />{t('files-secret')}</p>
                 : content === 'failed' ? <p role="alert" className="p-4">{t('files-too-large')}</p>
-                : <CodeView key={preview.path} label={preview.path} lines={content.lines} html={html} marks={EMPTY_MARKS} matches={[]} />}
+                : <CodeView key={preview.path} label={visible(preview.path)} lines={content.lines} html={html} marks={EMPTY_MARKS} matches={[]} />}
             </div>
           </section>
         )}

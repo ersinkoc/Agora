@@ -100,6 +100,43 @@ describe('the conversation as drawn', () => {
     expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(renderToStaticMarkup(<Thought text="t" />)).not.toContain('Thought for');
   });
+  it('makes folded thought text visible', () => {
+    const html = renderToStaticMarkup(<Thought text={'Grü\u3164ße\u2800 thinks'} seconds={1} />);
+    const text = html.replace(/<[^>]+>/g, '');
+    expect([...text].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(text).toContain('Grü\\u{3164}ße\\u{2800} thinks');
+  });
+  it('verifies folded thought text across bidi and control characters', () => {
+    const html = renderToStaticMarkup(<Thought text={'İş\u202e\u0001 sürüyor'} />);
+    expect(html).toContain('İş\\u{202e}\\u{1} sürüyor');
+    expect(html).not.toContain('\u202e');
+    expect(html).not.toContain('\u0001');
+  });
+  it('makes turn model labels visible', () => {
+    const html = renderToStaticMarkup(<Turn name="codex · teal" model={'Mo\u3164del\u2800X'} atMs={0}>x</Turn>);
+    const text = html.replace(/<[^>]+>/g, '');
+    expect([...text].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(text).toContain('Mo\\u{3164}del\\u{2800}X');
+  });
+  it('verifies turn model labels across isolate and control characters', () => {
+    const html = renderToStaticMarkup(<Turn name="codex · teal" model={'模型\u2066\u000bX'} atMs={0}>x</Turn>);
+    expect(html).toContain('模型\\u{2066}\\u{b}X');
+    expect(html).not.toContain('\u2066');
+    expect(html).not.toContain('\u000b');
+  });
+  it('makes tool title, subject, and detail metadata visible', () => {
+    const call = line(1, JSON.stringify({ tool: 'Bu\u3164ild', arguments: { path: 'Grü\u2800ße', pattern: 'ça\u034f' } }), { kind: 'tool' });
+    const html = renderToStaticMarkup(<ToolSteps lines={[call]} open />);
+    const text = html.replace(/<[^>]+>/g, '');
+    expect([...text].filter((c) => ['\u3164', '\u2800', '\u034f'].includes(c))).toEqual([]);
+    for (const shown of ['Bu\\u{3164}ild', 'Grü\\u{2800}ße', 'ça\\u{34f}']) expect(text).toContain(shown);
+  });
+  it('verifies tool metadata across bidi, isolate, and private-use characters', () => {
+    const call = line(1, JSON.stringify({ tool: 'Bu\u202eild', arguments: { path: '文\u2066件', pattern: 'ño\ue000' } }), { kind: 'tool' });
+    const html = renderToStaticMarkup(<ToolSteps lines={[call]} open />);
+    for (const shown of ['Bu\\u{202e}ild', '文\\u{2066}件', 'ño\\u{e000}']) expect(html).toContain(shown);
+    expect([...html].filter((c) => ['\u202e', '\u2066', '\ue000'].includes(c))).toEqual([]);
+  });
   it('draws a plan as a numbered list, and ticks and a bar only when a status is given', () => {
     const plain = renderToStaticMarkup(<PlanCard steps={['a', 'b']} label="Plan" />);
     expect(plain).not.toContain('progressbar');
