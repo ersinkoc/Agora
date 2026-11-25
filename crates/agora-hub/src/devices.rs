@@ -498,23 +498,33 @@ impl<'a> Devices<'a> {
         &self,
         now_ms: u64,
     ) -> Result<(Vec<DeviceEndorsement>, Vec<DeviceRevocation>), Error> {
-        let conn = self.store.lock().map_err(store_error)?;
-        let endorsements = conn
-            .prepare("SELECT payload FROM device_endorsements WHERE expires_ms > ?1 ORDER BY id")
+        let mut conn = self.store.lock().map_err(store_error)?;
+        let tx = crate::store::write_tx(&mut conn).map_err(|e| store_error(e.into()))?;
+        tx.execute(
+            "DELETE FROM device_endorsements WHERE expires_ms <= ?1",
+            [to_i64(now_ms)],
+        )
+        .map_err(|e| store_error(e.into()))?;
+        tx.execute(
+            "DELETE FROM device_revocations WHERE issued_ms < ?1",
+            [to_i64(now_ms.saturating_sub(REVOCATION_KEPT_MS))],
+        )
+        .map_err(|e| store_error(e.into()))?;
+        let endorsements = tx
+            .prepare("SELECT payload FROM device_endorsements ORDER BY id")
             .and_then(|mut s| {
-                s.query_map([to_i64(now_ms)], |row| row.get::<_, Vec<u8>>(0))
+                s.query_map([], |row| row.get::<_, Vec<u8>>(0))
                     .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             })
             .map_err(|e| store_error(e.into()))?;
-        let revocations = conn
-            .prepare("SELECT payload FROM device_revocations WHERE issued_ms >= ?1 ORDER BY id")
+        let revocations = tx
+            .prepare("SELECT payload FROM device_revocations ORDER BY id")
             .and_then(|mut s| {
-                s.query_map([to_i64(now_ms.saturating_sub(REVOCATION_KEPT_MS))], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                s.query_map([], |row| row.get::<_, Vec<u8>>(0))
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             })
             .map_err(|e| store_error(e.into()))?;
+        tx.commit().map_err(|e| store_error(e.into()))?;
         Ok((
             endorsements
                 .iter()
@@ -826,6 +836,151 @@ pub(crate) mod tests {
         assert!(!d.forget("web-old").unwrap());
         assert!(d.forget("web-new").unwrap());
         assert_eq!(d.list_for("owner").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn f388_an_expired_endorsement_cannot_return_after_clock_rollback() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let devices = Devices::new(&store);
+        let (old, new) = (Key::new(), Key::new());
+        devices
+            .register("owner", &old.register("old", "Old", 1), 1)
+            .unwrap();
+        devices
+            .register("owner", &new.register("new", "New", 1), 1)
+            .unwrap();
+        let endorsement = old.endorse("old", "new", &new.public(), 10, 90);
+        devices
+            .record_endorsement("owner", &endorsement, 10)
+            .unwrap();
+        assert_eq!(devices.for_machines(99).unwrap().0.len(), 1);
+        println!("CONTROL OK");
+
+        assert!(devices.for_machines(100).unwrap().0.is_empty());
+        let actual = devices.for_machines(99).unwrap().0.len();
+        println!("EXPECTED: 0");
+        println!("ACTUAL: {actual}");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f388_endorsement_expiry_boundaries() {
+        fn endorsed_store() -> SqliteStore {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let devices = Devices::new(&store);
+            let (old, new) = (Key::new(), Key::new());
+            devices
+                .register("owner", &old.register("old", "Old", 1), 1)
+                .unwrap();
+            devices
+                .register("owner", &new.register("new", "New", 1), 1)
+                .unwrap();
+            devices
+                .record_endorsement(
+                    "owner",
+                    &old.endorse("old", "new", &new.public(), 10, 90),
+                    10,
+                )
+                .unwrap();
+            store
+        }
+
+        let before_store = endorsed_store();
+        assert_eq!(
+            Devices::new(&before_store)
+                .for_machines(99)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+
+        let exact_store = endorsed_store();
+        let exact = Devices::new(&exact_store);
+        assert!(exact.for_machines(100).unwrap().0.is_empty());
+        assert!(exact.for_machines(99).unwrap().0.is_empty());
+
+        let late_store = endorsed_store();
+        let late = Devices::new(&late_store);
+        assert!(late.for_machines(500).unwrap().0.is_empty());
+        assert!(late.for_machines(99).unwrap().0.is_empty());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f389_a_forgotten_revocation_cannot_return_after_clock_rollback() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let devices = Devices::new(&store);
+        let (old, new) = (Key::new(), Key::new());
+        devices
+            .register("owner", &old.register("old", "Old", 1), 1)
+            .unwrap();
+        devices
+            .register("owner", &new.register("new", "New", 1), 1)
+            .unwrap();
+        devices
+            .record_revocation("owner", &old.revoke("old", "new", 10), 10)
+            .unwrap();
+        let boundary = 10 + REVOCATION_KEPT_MS;
+        assert_eq!(devices.for_machines(boundary).unwrap().1.len(), 1);
+        println!("CONTROL OK");
+
+        assert!(devices.for_machines(boundary + 1).unwrap().1.is_empty());
+        let actual = devices.for_machines(boundary).unwrap().1.len();
+        println!("EXPECTED: 0");
+        println!("ACTUAL: {actual}");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f389_revocation_retention_boundaries() {
+        fn revoked_store() -> SqliteStore {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let devices = Devices::new(&store);
+            let (old, new) = (Key::new(), Key::new());
+            devices
+                .register("owner", &old.register("old", "Old", 1), 1)
+                .unwrap();
+            devices
+                .register("owner", &new.register("new", "New", 1), 1)
+                .unwrap();
+            devices
+                .record_revocation("owner", &old.revoke("old", "new", 10), 10)
+                .unwrap();
+            store
+        }
+
+        let boundary = 10 + REVOCATION_KEPT_MS;
+        let exact_store = revoked_store();
+        assert_eq!(
+            Devices::new(&exact_store)
+                .for_machines(boundary)
+                .unwrap()
+                .1
+                .len(),
+            1
+        );
+
+        let after_store = revoked_store();
+        let after = Devices::new(&after_store);
+        assert!(after.for_machines(boundary + 1).unwrap().1.is_empty());
+        assert!(after.for_machines(boundary).unwrap().1.is_empty());
+
+        let late_store = revoked_store();
+        let late = Devices::new(&late_store);
+        assert!(late.for_machines(boundary + 500).unwrap().1.is_empty());
+        assert!(late.for_machines(boundary).unwrap().1.is_empty());
+        println!("FIX VERIFIED");
     }
 
     #[test]

@@ -111,25 +111,33 @@ impl<'a> SignIn<'a> {
         let token = new_token()?;
         let mut conn = self.store.lock()?;
         let tx = crate::store::write_tx(&mut conn)?;
+        let code_hash = hash(code);
         let live: Option<(i64, Option<String>)> = tx
             .query_row(
                 "SELECT expires_ms, user_id FROM signin_codes WHERE code_hash = ?1",
-                [hash(code)],
+                [&code_hash],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if live.as_ref().is_none_or(|(exp, _)| *exp <= to_i64(now_ms)) {
+        let Some((expires_ms, user)) = live else {
+            return Err(SignInError::BadCode);
+        };
+        if expires_ms <= to_i64(now_ms) {
+            tx.execute(
+                "DELETE FROM signin_codes WHERE code_hash = ?1",
+                [&code_hash],
+            )?;
+            tx.commit()?;
             return Err(SignInError::BadCode);
         }
         tx.execute(
             "DELETE FROM signin_codes WHERE code_hash = ?1",
-            [hash(code)],
+            [&code_hash],
         )?;
         tx.execute(
             "DELETE FROM sessions WHERE expires_ms <= ?1",
             [to_i64(now_ms)],
         )?;
-        let user = live.and_then(|(_, u)| u);
         tx.execute(
             "INSERT INTO sessions (token_hash, created_ms, expires_ms, user_id) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -206,7 +214,7 @@ impl<'a> SignIn<'a> {
             return false;
         };
         let hash = token_hash(token);
-        let live = conn
+        let expires_ms = conn
             .query_row(
                 "SELECT expires_ms FROM sessions WHERE token_hash = ?1",
                 [&hash],
@@ -214,18 +222,22 @@ impl<'a> SignIn<'a> {
             )
             .optional()
             .ok()
-            .flatten()
-            .filter(|exp| *exp > to_i64(now_ms));
-        // Use extends the session: once less than half of its time is left it runs a full term again from now.
-        if let Some(exp) = live {
-            if exp - to_i64(now_ms) < to_i64(SESSION_TTL_MS / 2) {
-                let _ = conn.execute(
-                    "UPDATE sessions SET expires_ms = ?2 WHERE token_hash = ?1",
-                    params![hash, to_i64(now_ms.saturating_add(SESSION_TTL_MS))],
-                );
-            }
+            .flatten();
+        let Some(expires_ms) = expires_ms else {
+            return false;
+        };
+        if expires_ms <= to_i64(now_ms) {
+            let _ = conn.execute("DELETE FROM sessions WHERE token_hash = ?1", [&hash]);
+            return false;
         }
-        live.is_some()
+        // Use extends the session: once less than half of its time is left it runs a full term again from now.
+        if expires_ms - to_i64(now_ms) < to_i64(SESSION_TTL_MS / 2) {
+            let _ = conn.execute(
+                "UPDATE sessions SET expires_ms = ?2 WHERE token_hash = ?1",
+                params![hash, to_i64(now_ms.saturating_add(SESSION_TTL_MS))],
+            );
+        }
+        true
     }
 
     /// What the holder of this session may do (ADR-0049); `None` for a session that is not live or whose person was removed.
@@ -849,6 +861,104 @@ mod tests {
             Err(SignInError::BadCode),
             "single use"
         );
+    }
+
+    #[test]
+    fn f385_an_expired_signin_code_cannot_return_after_clock_rollback() {
+        let control_store = SqliteStore::open_in_memory().unwrap();
+        let control = si(&control_store);
+        let fresh = control.create_code(0).unwrap();
+        assert!(control.exchange(&fresh, CODE_TTL_MS - 1, "").is_ok());
+        println!("CONTROL OK");
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let signin = si(&store);
+        let code = signin.create_code(0).unwrap();
+        assert_eq!(
+            signin.exchange(&code, CODE_TTL_MS, ""),
+            Err(SignInError::BadCode)
+        );
+        let actual = signin.exchange(&code, 1, "").map(|_| ());
+        println!("EXPECTED: Err(BadCode)");
+        println!("ACTUAL: {actual:?}");
+        if actual == Err(SignInError::BadCode) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Err(SignInError::BadCode));
+    }
+
+    #[test]
+    fn verifies_f385_signin_code_expiry_boundaries() {
+        let fresh_store = SqliteStore::open_in_memory().unwrap();
+        let fresh = si(&fresh_store);
+        let code = fresh.create_code(0).unwrap();
+        assert!(fresh.exchange(&code, CODE_TTL_MS - 1, "").is_ok());
+
+        let exact_store = SqliteStore::open_in_memory().unwrap();
+        let exact = si(&exact_store);
+        let code = exact.create_code(0).unwrap();
+        assert_eq!(
+            exact.exchange(&code, CODE_TTL_MS, ""),
+            Err(SignInError::BadCode)
+        );
+        assert_eq!(exact.exchange(&code, 1, ""), Err(SignInError::BadCode));
+
+        let late_store = SqliteStore::open_in_memory().unwrap();
+        let late = si(&late_store);
+        let code = late.create_code(0).unwrap();
+        assert_eq!(
+            late.exchange(&code, CODE_TTL_MS + 500, ""),
+            Err(SignInError::BadCode)
+        );
+        assert_eq!(late.exchange(&code, 2, ""), Err(SignInError::BadCode));
+        assert_eq!(late.exchange("unknown", 2, ""), Err(SignInError::BadCode));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f386_an_expired_session_cannot_return_after_clock_rollback() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let signin = si(&store);
+        let control = signin.start_session(0).unwrap();
+        assert!(signin.check(&control, 1));
+        assert!(!signin.check("unknown", 1));
+        println!("CONTROL OK");
+
+        let target = signin.start_session(0).unwrap();
+        assert!(!signin.check(&target, SESSION_TTL_MS));
+        let actual = signin.check(&target, 1);
+        println!("EXPECTED: false");
+        println!("ACTUAL: {actual}");
+        if !actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(!actual);
+    }
+
+    #[test]
+    fn verifies_f386_session_expiry_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let signin = si(&store);
+
+        let fresh = signin.start_session(0).unwrap();
+        assert!(signin.check(&fresh, SESSION_TTL_MS - 1));
+
+        let exact = signin.start_session(0).unwrap();
+        assert!(!signin.check(&exact, SESSION_TTL_MS));
+        assert!(!signin.check(&exact, 1));
+
+        let late = signin.start_session(0).unwrap();
+        assert!(!signin.check(&late, SESSION_TTL_MS + 500));
+        assert!(!signin.check(&late, 2));
+
+        let extended = signin.start_session(0).unwrap();
+        assert!(signin.check(&extended, SESSION_TTL_MS * 3 / 4));
+        assert!(signin.check(&extended, SESSION_TTL_MS + 1));
+        println!("FIX VERIFIED");
     }
 
     #[test]
