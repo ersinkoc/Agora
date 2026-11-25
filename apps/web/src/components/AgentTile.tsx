@@ -9,6 +9,7 @@ import { AgentAvatar, StatusPill, Tag } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
 import { LimitChip } from './Quota';
+import { visible } from '../net/hidden';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
 // other one), what the agent asks for, and the time. Without it the tile is the plain one of the gallery.
@@ -40,7 +41,7 @@ function Head({ agent, failed }: { agent: AgentTileModel; failed: boolean }) {
   return (
     <span className="tile__head">
       <AgentAvatar accent={agent.accent} kind={kindOf(agent)} />
-      <span className="tile__name">{agent.name}</span>
+      <span className="tile__name">{visible(agent.name)}</span>
       <StatusPill state={agent.state} failed={failed} />
     </span>
   );
@@ -56,16 +57,16 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         type="button"
         className={`tile tile--${failed ? 'failed' : agent.state}`}
         onClick={() => onOpen?.(agent.id)}
-        aria-label={`${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
+        aria-label={`${visible(agent.name)}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
       >
         <Head agent={agent} failed={failed} />
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <span className="muted">
-          {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
+          {t('agent-on-machine', { machine: visible(agent.machine) })} · {t('agent-workspace', { name: visible(agent.workspace) })}
         </span>
-        {agent.parentName ? <span className="muted">{t('helper-started-by', { name: agent.parentName })}</span> : null}
-        {agent.preview ? <span className="tile__preview" aria-hidden="true">{agent.preview}</span> : null}
+        {agent.parentName ? <span className="muted">{t('helper-started-by', { name: visible(agent.parentName) })}</span> : null}
+        {agent.preview ? <span className="tile__preview" aria-hidden="true">{visible(agent.preview)}</span> : null}
       </button>
     );
   }
@@ -84,16 +85,16 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       type="button"
       className={`tile tile--compact tile--${failed ? 'failed' : agent.state}${agent.closed ? ' tile--closed' : ''}`}
       onClick={() => onOpen?.(agent.id)}
-      aria-label={t('fleet-open-for', { name: `${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
+      aria-label={t('fleet-open-for', { name: `${visible(agent.name)}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
     >
       <Head agent={agent} failed={failed} />
-      {line ? <span className="tile__activity" dir="auto">{line}</span> : null}
+      {line ? <span className="tile__activity" dir="auto">{visible(line)}</span> : null}
       <span className="tile__foot">
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <LimitChip agent={agent} />
         {context.same && <ProjectChip spread={context.same} />}
-        {where.filter((x) => x.text).map((x) => <Tag key={x.icon} mono={x.mono}><Icon name={x.icon} className="size-3" /><span className="tile__where">{x.text}</span></Tag>)}
+        {where.filter((x) => x.text).map((x) => <Tag key={x.icon} mono={x.mono}><Icon name={x.icon} className="size-3" /><span className="tile__where">{visible(x.text ?? '')}</span></Tag>)}
         {changed > 0 ? <Tag>{t('changes-files', { count: changed })}</Tag> : null}
         {typeof when === 'string' ? <span className="tile__when">{when}</span> : when ? <span className="tile__when" title={when.title}><Icon name="clock" className="size-3" />{when.text}</span> : null}
       </span>

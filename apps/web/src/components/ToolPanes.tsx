@@ -14,6 +14,7 @@ import { FileManager } from './FileManager';
 import { FilesView } from './FilesView';
 import { Icon } from './Icon';
 import { StateBadge } from './StateBadge';
+import { visible } from '../net/hidden';
 
 // The tool panes of the workspace (ADR-0068, docs/ux/main-window.md, "Panes"): Changes, Files, File manager and Terminal, each one a
 // pane of its own that sits beside an agent. Every one shows one agent's folder; the bar on top switches to another folder (another
@@ -27,7 +28,7 @@ const ICON = { terminal: 'terminal', changes: 'diff', files: 'files', manager: '
 // The bar on top of a pane: which folder it shows, a menu to point it at another, and what the pane adds (its own controls).
 export function FolderBar({ agent, fleet, panel, onPick, children }: { agent: AgentTileModel; fleet: readonly AgentTileModel[]; panel: ToolPanel; onPick: (agentId: string) => void; children?: ReactNode }) {
   const items = (): MenuItem[] => folderChoices(fleet, panel === 'changes').flatMap((g, gi) => g.folders.map((f, i) => ({
-    label: `${g.project} · ${f.agent.machine}`, checked: f.key === folderKey(agent), divider: gi > 0 && i === 0,
+    label: `${visible(g.project)} · ${visible(f.agent.machine)}`, checked: f.key === folderKey(agent), divider: gi > 0 && i === 0,
     hint: f.changed > 0 ? t('changes-files', { count: f.changed }) : undefined, run: () => onPick(f.agent.id),
   })));
   const name = agent.project || agent.workspace;
@@ -35,9 +36,9 @@ export function FolderBar({ agent, fleet, panel, onPick, children }: { agent: Ag
     <div className="ide-bar flex-none flex-wrap gap-x-2 gap-y-1 border-b py-1" data-folder-bar>
       <Menu label={t('pane-switch-folder')} items={items} align="start" className="inline-flex min-h-7 min-w-0 max-w-full items-center gap-1.5 rounded-xs px-1.5 text-start text-[0.8125rem] hover:bg-surface-2">
         <Icon name="folder" className="size-3.5 text-muted" />
-        <span className="min-w-0 truncate font-medium">{name}</span>
-        <span className="hidden min-w-0 truncate text-xs text-muted sm:inline">{agent.machine}</span>
-        {agent.branch && <span className="hidden min-w-0 truncate font-mono text-xs text-muted md:inline">{agent.branch}</span>}
+        <span className="min-w-0 truncate font-medium">{visible(name)}</span>
+        <span className="hidden min-w-0 truncate text-xs text-muted sm:inline">{visible(agent.machine)}</span>
+        {agent.branch && <span className="hidden min-w-0 truncate font-mono text-xs text-muted md:inline">{visible(agent.branch)}</span>}
         <Icon name="chevronDown" className="size-3 text-muted" />
       </Menu>
       <span className="flex-1" />
@@ -66,15 +67,15 @@ export function ToolChooser({ panel, fleet, onPick, onNewTerminal }: { panel: To
         <h2 className="m-0 flex items-center gap-2"><Icon name={ICON[panel]} className="size-4 text-muted" />{t(panel === 'terminal' ? 'pane-choose-terminal' : 'pane-choose-folder', { name: t(TITLE[panel]) })}</h2>
         {groups.length === 0 && <EmptyState icon={ICON[panel]} title={t(panel === 'terminal' ? 'pane-no-terminals-title' : 'pane-no-folders-title')} hint={t(panel === 'terminal' ? 'pane-no-terminals-hint' : 'pane-no-folders-hint')} />}
         {groups.map((g) => (
-          <section key={g.project} className="grid gap-0.5" aria-label={g.project || undefined}>
-            {g.project && <h3 className="m-0 truncate text-xs font-semibold tracking-wider text-muted uppercase">{g.project}</h3>}
+          <section key={g.project} className="grid gap-0.5" aria-label={g.project ? visible(g.project) : undefined}>
+            {g.project && <h3 className="m-0 truncate text-xs font-semibold tracking-wider text-muted uppercase">{visible(g.project)}</h3>}
             <ul className="m-0 grid list-none gap-0.5 p-0">
               {g.folders.map((f) => (
                 <li key={f.key}>
                   <button type="button" data-choice className="ide-row py-1.5" onClick={() => onPick(f.agent.id)}>
                     <Icon name={panel === 'terminal' ? 'terminal' : 'folder'} className="size-3.5 text-muted" />
-                    <span className="min-w-0 flex-1 truncate">{panel === 'terminal' ? f.agent.name : f.agent.workspace}</span>
-                    <span className="truncate text-xs text-muted">{f.agent.machine}</span>
+                    <span className="min-w-0 flex-1 truncate">{visible(panel === 'terminal' ? f.agent.name : f.agent.workspace)}</span>
+                    <span className="truncate text-xs text-muted">{visible(f.agent.machine)}</span>
                     {f.changed > 0 && <span className="kit-tag flex-none">{t('changes-files', { count: f.changed })}</span>}
                   </button>
                 </li>
@@ -144,10 +145,10 @@ export function ManagerPane({ agent, fleet, filesOf, onPick, onTerminal }: { age
 export function TerminalPane({ agent, source }: { agent: AgentTileModel; source: TerminalSource }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="ide-bar flex-none flex-wrap gap-x-2 gap-y-1 border-b py-1 text-xs text-muted" title={`${agent.machine} · ${agent.workspace}`}>
-        <Icon name="machine" className="size-3.5" /><span className="min-w-0 truncate">{agent.machine}</span>
-        <Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" /><span className="min-w-0 truncate">{agent.project || agent.workspace}</span>
-        {agent.branch && <><Icon name="branch" className="size-3.5" /><span className="min-w-0 truncate font-mono">{agent.branch}</span></>}
+      <div className="ide-bar flex-none flex-wrap gap-x-2 gap-y-1 border-b py-1 text-xs text-muted" title={`${visible(agent.machine)} · ${visible(agent.workspace)}`}>
+        <Icon name="machine" className="size-3.5" /><span className="min-w-0 truncate">{visible(agent.machine)}</span>
+        <Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" /><span className="min-w-0 truncate">{visible(agent.project || agent.workspace)}</span>
+        {agent.branch && <><Icon name="branch" className="size-3.5" /><span className="min-w-0 truncate font-mono">{visible(agent.branch)}</span></>}
         <span className="flex-1" />
         <StateBadge state={agent.state} failed={endedWithError(agent)} />
         <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
@@ -158,7 +159,7 @@ export function TerminalPane({ agent, source }: { agent: AgentTileModel; source:
       </div>
       <div className="pane min-h-0 flex-1 p-1.5">
         <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
-          <TerminalView source={source} label={`${t('focus-terminal')} · ${agent.name}`} />
+          <TerminalView source={source} label={`${t('focus-terminal')} · ${visible(agent.name)}`} />
         </Suspense>
       </div>
     </div>

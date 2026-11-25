@@ -80,6 +80,24 @@ describe('a tile without a stripe', () => {
     expect(out).toMatch(/<span class="tile__foot"><span role="img" aria-label="Runs without asking[^"]*" data-no-ask="started"/);
     expect(out).toContain(`aria-label="Open claude · a, Working, ${t('agent-does-not-ask')}"`);
   });
+
+  it('makes node-supplied tile identity, location, and activity text visible', () => {
+    const out = html(<AgentTile agent={agent('a', {
+      name: 'clau\u3164de\u202e', machine: 'lap\u034ftop', project: 'lo\u2066gin', branch: 'fi\ue000x', preview: 'run\u0007ning',
+    })} context={{ group: 'kind', now: NOW }} />);
+    expect(out).toContain('clau\\u{3164}de\\u{202e}');
+    expect(out).toContain('lap\\u{34f}top');
+    expect(out).toContain('lo\\u{2066}gin');
+    expect(out).toContain('fi\\u{e000}x');
+    expect(out).toContain('run\\u{7}ning');
+  });
+
+  it('verifies tile labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u200d', '\\u{200d}'], ['\u0085', '\\u{85}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const out = html(<AgentTile agent={agent('edge', { name: `co${char}dex`, machine: `ma${char}chine`, project: `pro${char}ject`, branch: `br${char}anch`, preview: `wor${char}king` })} context={{ group: 'kind', now: NOW }} />);
+      for (const [start, end] of [['co', 'dex'], ['ma', 'chine'], ['pro', 'ject'], ['br', 'anch'], ['wor', 'king']] as const) expect(out).toContain(`${start}${escaped}${end}`);
+    }
+  });
 });
 
 describe('the CSS draws no stripe on Home', () => {
