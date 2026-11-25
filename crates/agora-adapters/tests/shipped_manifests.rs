@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use agora_adapters::{Detector, Manifest};
+use agora_adapters::{Detector, Manifest, RuleOutcome};
 use agora_vt::{AlacrittyTerminal, Size, Terminal};
 
 fn root() -> PathBuf {
@@ -67,6 +67,20 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
                 || "none".to_string(),
                 |d| format!("{:?} {}", d.state, d.rule_id),
             );
+            // `agora agent explain` decides exactly as detection does, and every rule it lists before the decision failed.
+            let why = detector.explain(&term);
+            assert_eq!(why.decided, detector.detect(&term), "{}", f.display());
+            let first = why
+                .checks
+                .iter()
+                .position(|c| c.outcome == RuleOutcome::Matched);
+            assert_eq!(
+                first.map(|i| why.checks[i].id.clone()),
+                why.decided.as_ref().map(|d| d.rule_id.clone()),
+                "{}",
+                f.display()
+            );
+            assert_eq!(why.checks.len(), manifest.rules.len(), "{}", f.display());
             let want = std::fs::read_to_string(f.with_extension("expect"));
             let screen = term.bottom_non_empty_lines(12).join("\n");
             let want = want.unwrap_or_else(|_| {

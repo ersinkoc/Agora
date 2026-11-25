@@ -20,6 +20,9 @@ agora-desktop-tunnel = { path = "../agora-desktop-tunnel" }
 agora-i18n = { path = "../agora-i18n" }
 agora-protocol = { path = "../agora-protocol" }
 agora-platform = { path = "../agora-platform" }
+# `agora agent explain` replays a captured screen on the same terminal the node detects on; already in the tree through agora-node.
+# (Also plays the user's own terminal in the attach test.)
+agora-vt = { path = "../agora-vt" }
 # The mesh bridge reads a client's line as the node does (JSON-RPC errors, batches); already in the tree through agora-node.
 agora-mesh = { path = "../agora-mesh" }
 # `agora hub run` serves on tokio (ADR-0013) with TLS; getrandom makes the client token.
@@ -38,8 +41,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "signal",
 prost = "0.14"
 # The agent id type used by the hub link test.
 agora-core = { path = "../agora-core" }
-# Plays the user's own terminal in the attach test (what `terminal attach` leaves it in); already in the tree through agora-node.
-agora-vt = { path = "../agora-vt" }
 # A signed-in client dials the hub over TLS in the routed-command test.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Seeds passkeys and injects a failure into the hub's database in the password command tests; already in the tree through agora-hub.
