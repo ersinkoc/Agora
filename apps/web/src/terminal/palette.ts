@@ -4,7 +4,10 @@
 import { ANSI, ANSI_NAMES, type AnsiName, type TerminalKey, terminalVar } from '../themes/look';
 
 const HEX6 = /^#[0-9a-f]{6}$/i;
-const camel = (n: AnsiName) => n.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+// xterm's names for the 16 colours (`brightBlack`).
+type Camel<S extends string> = S extends `${infer A}-${infer B}` ? `${A}${Capitalize<B>}` : S;
+export type XtermColour = Camel<AnsiName>;
+const camel = (n: AnsiName) => n.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()) as XtermColour;
 
 export function terminalTheme(read: (name: string) => string, light: boolean) {
   const own = (k: TerminalKey) => { const v = read(terminalVar(k)).trim(); return HEX6.test(v) ? v : undefined; };
@@ -19,6 +22,6 @@ export function terminalTheme(read: (name: string) => string, light: boolean) {
     cursor: own('cursor') ?? accent,
     selectionBackground: `${selection}66`,
     selectionInactiveBackground: `${selection}33`,
-    ...(Object.fromEntries(ANSI_NAMES.map((n, i) => [camel(n), own(n) ?? palette[i]])) as Record<string, string>),
+    ...(Object.fromEntries(ANSI_NAMES.map((n, i) => [camel(n), own(n) ?? palette[i]])) as Record<XtermColour, string>),
   };
 }

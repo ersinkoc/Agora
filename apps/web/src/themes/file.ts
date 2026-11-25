@@ -9,7 +9,9 @@ import {
   type RegionDefault, type RegionName, type Regions, type SyntaxColours, type TerminalColours, type TextStyle, type Weight, backgroundTwin,
   floorOf, hasOwn, isChromeName, isRegion, isRegionPart, isSyntaxKey, isTerminalKey, isUnsafe,
 } from './look';
-import { tints } from './tints';
+import { roleMix, tints } from './tints';
+// How much of the accent app.css mixes into the panels for a hairline (`--line`).
+const LINE_STRENGTH = 0.4;
 import {
   BUILT_IN, COLOR_TOKENS, DERIVED, MAX_NAME, type Look, type Looks, type Scheme, type Theme, type ThemeIssue, type TokenName,
   type Tokens, baseTokens, chromeOf, contrast, contrastIssues, isTokenName, looksOf, parseTheme, readValue, textOf, themeWarnings,
@@ -142,7 +144,7 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
     const field = `shape.${k}`;
     if (floorKey(k, field)) continue;
     if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
-    if (!isShapeToken(k)) { if (isFontToken(k)) issues.push({ code: 'moved-token', token: k, to: 'text' }); else if (isColourToken(k)) issues.push({ code: 'moved-token', token: k, to: 'tokens' }); else unknown(field); continue; }
+    if (!isShapeToken(k)) { if (isFontToken(k)) issues.push({ code: 'moved-token', field, token: k, to: 'text' }); else if (isColourToken(k)) issues.push({ code: 'moved-token', field, token: k, to: 'tokens' }); else unknown(field); continue; }
     if (!ok(field)) continue;
     const read = readValue(k as TokenName, v);
     if (read === undefined) issues.push({ code: 'bad-value', token: k as TokenName });
@@ -154,7 +156,7 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
   for (const [k, v] of Object.entries(textGroup ?? {})) {
     const field = `text.${k}`;
     if (floorKey(k, field)) continue;
-    if (!(TEXT_FIELDS as readonly string[]).includes(k)) { if (isShapeToken(k)) issues.push({ code: 'moved-token', token: k, to: 'shape' }); else unknown(field); continue; }
+    if (!(TEXT_FIELDS as readonly string[]).includes(k)) { if (isShapeToken(k)) issues.push({ code: 'moved-token', field, token: k, to: 'shape' }); else unknown(field); continue; }
     if (!ok(field)) continue;
     if (isFontToken(k)) {
       const read = readValue(k as TokenName, v);
@@ -207,7 +209,7 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
       if (floorKey(k, field)) continue;
       if (DERIVED[k]) { issues.push({ code: 'derived-token', token: k, base: DERIVED[k] as TokenName }); continue; }
       if (!isTokenName(k)) { issues.push({ code: 'unknown-token', token: shortKey(k) }); continue; }
-      if (!isColourToken(k)) { issues.push({ code: 'moved-token', token: k, to: isFontToken(k) ? 'text' : 'shape' }); continue; }
+      if (!isColourToken(k)) { issues.push({ code: 'moved-token', field, token: k, to: isFontToken(k) ? 'text' : 'shape' }); continue; }
       if (!ok(field)) continue;
       const c = readColour(v);
       if (c === undefined) issues.push({ code: 'bad-value', token: k });
@@ -283,7 +285,7 @@ export function regionColour(look: Look, scheme: Scheme, region: RegionName, par
   if (own) return own;
   const d: RegionDefault = REGION_DEFAULT[region][part];
   if (d === 'tint-accent') return tints(look.tokens, scheme).accent;
-  if (d === 'line-accent') return look.tokens.border; // decoration only, never judged
+  if (d === 'line-accent') return roleMix(look.tokens, scheme, LINE_STRENGTH).accent; // decoration only, never judged
   return look.tokens[d];
 }
 export const terminalColour = (look: Look, scheme: Scheme, k: (typeof TERMINAL_KEYS)[number]): string => {

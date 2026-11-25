@@ -258,7 +258,7 @@ export type ThemeIssue = (
   | { code: 'unknown-field'; field: string }
   | { code: 'unknown-token'; token: string }
   | { code: 'derived-token'; token: string; base: TokenName }
-  | { code: 'moved-token'; token: string; to: 'shape' | 'text' | 'tokens' }
+  | { code: 'moved-token'; field: string; token: string; to: 'shape' | 'text' | 'tokens' }
   | { code: 'bad-value'; token: TokenName }
   | { code: 'bad-field'; field: string; expect: FieldKind; min?: number; max?: number; values?: string }
   | { code: 'unsafe'; field: string }
