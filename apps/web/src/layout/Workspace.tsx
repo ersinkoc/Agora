@@ -14,16 +14,30 @@ import { type Pane, MIN_RATIO, bindOf, followOf, isKnownPanel, panesOf } from '.
 import { TOOL_PANELS, isToolPanel, type ToolPanel } from '../net/paneTools';
 import { visible as visibleText } from '../net/hidden';
 
-const BAR = '2.25rem'; // the height of a pane's bar (h-9)
+// The height of a pane's bar (a theme's density sets it, app.css), the space between panes (a theme's gaps and lines), and whether the
+// bars are at the bottom of their panes (1) or the top (0): CSS variables the theme sets, so the layout follows it with no state of its own.
+const BAR = 'var(--pane-bar-height, 2.25rem)';
+const SPLIT = 'var(--pane-split, 1px)';
+const AT_END = 'var(--tabs-at-end, 0)';
 const DRAG_TYPE = 'application/x-agora-pane';
 const pct = (v: number) => `${(v * 100).toFixed(4)}%`;
 const edge = (v: number) => v < 0.9999;
-// A frame's box: logical insets, so a row reads from the right in a right-to-left language. A 1px gap shows the line colour.
-function box(r: Rect, top?: string): CSSProperties {
+// A frame's box: logical insets, so a row reads from the right in a right-to-left language. The space between frames (`--pane-split`,
+// 1px by default) shows the layout's background: the line colour, or the background when a theme sets gaps.
+function box(r: Rect): CSSProperties {
   return {
-    position: 'absolute', insetInlineStart: pct(r.x), insetInlineEnd: pct(1 - r.x - r.w), top: top ? `calc(${pct(r.y)} + ${top})` : pct(r.y), bottom: pct(1 - r.y - r.h),
-    marginInlineEnd: edge(r.x + r.w) ? 1 : 0, marginBottom: edge(r.y + r.h) ? 1 : 0,
+    position: 'absolute', insetInlineStart: pct(r.x), insetInlineEnd: pct(1 - r.x - r.w), top: pct(r.y), bottom: pct(1 - r.y - r.h),
+    marginInlineEnd: edge(r.x + r.w) ? SPLIT : 0, marginBottom: edge(r.y + r.h) ? SPLIT : 0,
   };
+}
+// A pane's body: the frame without its bar, which is at the top, or at the bottom when a theme says so.
+function bodyBox(r: Rect): CSSProperties {
+  return { ...box(r), top: `calc(${pct(r.y)} + (1 - ${AT_END}) * ${BAR})`, bottom: `calc(${pct(1 - r.y - r.h)} + ${AT_END} * ${BAR})` };
+}
+// A frame's bar: its height, at the top of the frame or (with the bars at the bottom) just above the space below it.
+function barBox(r: Rect): CSSProperties {
+  const below = edge(r.y + r.h) ? SPLIT : '0px';
+  return { ...box(r), top: `calc(${pct(r.y)} + ${AT_END} * (${pct(r.h)} - ${BAR} - ${below}))`, bottom: undefined, marginBottom: 0, height: BAR };
 }
 
 // The panel names the user sees for each panel id (UI vocabulary, not internal terms).
@@ -151,7 +165,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     const a = agentFor(front);
     const ring = tiled && focused ? 'shadow-[inset_0_2px_0_var(--accent)]' : a?.state === 'needs-you' ? 'shadow-[inset_0_2px_0_var(--state-needs-you)]' : '';
     return (
-      <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`pane-bar flex items-stretch border-b border-line bg-surface-1 ${ring}`}
+      <div key={`bar:${f.key}`} style={barBox(f.rect)} className={`pane-bar flex items-stretch border-b border-panebar-line bg-panebar text-panebar-ink ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
           <TabStrip tabs={f.panes.map((p, i) => { const pa = agentFor(p); return { id: p.id, label: label(p), active: i === f.active, state: pa?.state, failed: pa ? endedWithError(pa) : undefined }; })} onPick={(id) => dispatch({ type: 'activate', pane: id })}
@@ -246,7 +260,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     const a = agentFor(p);
     const name = label(p);
     return (
-      <div key={p.id} id={`pane-${p.id}`} style={box(f.rect, BAR)} className="flex min-h-0 min-w-0 flex-col bg-surface-0"
+      <div key={p.id} id={`pane-${p.id}`} style={bodyBox(f.rect)} className="flex min-h-0 min-w-0 flex-col bg-surface-0"
         {...(f.tabs ? { role: 'tabpanel', 'aria-labelledby': `tab-${p.id}` } : { role: 'region', 'aria-label': t('layout-pane', { name }) })}
         data-pane={p.id} data-agent={a?.id} onPointerDownCapture={() => dispatch({ type: 'focus', pane: p.id })} onFocusCapture={() => dispatch({ type: 'focus', pane: p.id })}>
         {content(p)}
@@ -260,8 +274,10 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     const over = drop?.frame === f.key ? drop.place : undefined;
     const where = (e: DragEvent<HTMLDivElement>): Place => {
       const r = e.currentTarget.getBoundingClientRect();
-      // Over a group's tab strip: in among its tabs.
-      if (f.tabs && e.clientY - r.top < (e.currentTarget.firstElementChild?.getBoundingClientRect().height ?? 0)) return 'center';
+      // Over a group's tab strip (at the top, or at the bottom when a theme puts it there): in among its tabs.
+      const strip = e.currentTarget.firstElementChild?.getBoundingClientRect().height ?? 0;
+      const atEnd = document.documentElement.dataset.tabBar === 'bottom';
+      if (f.tabs && (atEnd ? r.bottom - e.clientY : e.clientY - r.top) < strip) return 'center';
       const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
       const x = (e.clientX - r.left) / Math.max(1, r.width);
       return dropPlace(rtl ? 1 - x : x, (e.clientY - r.top) / Math.max(1, r.height));
@@ -292,7 +308,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   if (lone) return <div className="flex min-h-0 flex-1 flex-col" data-layout-root>{welcome}</div>;
 
   return (
-    <div ref={host} className="relative min-h-0 flex-1 overflow-hidden bg-line" data-layout-root>
+    <div ref={host} className="relative min-h-0 flex-1 overflow-hidden" data-layout-root data-tiled>
       {frames.map(bar)}
       {bodies}
       {dividers.map((d) => <DividerLine key={`div:${d.path.join('.')}:${d.index}`} d={d} host={host} dispatch={dispatch} />)}

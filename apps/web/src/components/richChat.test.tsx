@@ -718,7 +718,9 @@ describe('the chat look', () => {
   });
   it('tints the bubble with the accent and a pending request with the needs tint', () => {
     const html = draw([L(1, { role: 'user', text: 'go' }), L(2, { kind: 'permission', text: 'run_command', approvalId: 'ap', outcome: 'pending' })]);
-    expect(html).toMatch(/class="[^"]*bg-tint-accent[^"]*"[^>]*data-role="user"/);
+    // The person's entry is a theme region (ADR-0113): its colour falls back to the accent tint.
+    expect(html).toMatch(/class="[^"]*bg-personentry[^"]*"[^>]*data-role="user"/);
+    expect(readFileSync('src/design/app.css', 'utf8')).toContain('--color-personentry: var(--person-entries-surface, var(--tint-accent));');
     expect(html).toMatch(/class="[^"]*bg-tint-needs[^"]*"[^>]*data-permission="pending"/);
     expect(html).not.toMatch(/bg-accent\/15|bg-needs-you\/8/);
   });
