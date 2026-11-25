@@ -191,6 +191,41 @@ fn is_proto2(syntax: &str) -> bool {
     syntax.is_empty() || syntax == "proto2"
 }
 
+fn effective_default(field: &FieldDescriptorProto, index: &Index<'_>) -> Option<String> {
+    if field.r#type() == Type::Enum {
+        let descriptor = index.enums.get(field.type_name().trim_start_matches('.'))?;
+        let value = match field.default_value.as_deref() {
+            Some(name) => descriptor.value.iter().find(|value| value.name() == name),
+            None => descriptor.value.first(),
+        }?;
+        return Some(format!("#{}", value.number()));
+    }
+    if let Some(value) = &field.default_value {
+        return Some(value.clone());
+    }
+    if field.label() == Label::Repeated {
+        return None;
+    }
+    match field.r#type() {
+        Type::Double
+        | Type::Float
+        | Type::Int64
+        | Type::Uint64
+        | Type::Int32
+        | Type::Fixed64
+        | Type::Fixed32
+        | Type::Uint32
+        | Type::Sfixed32
+        | Type::Sfixed64
+        | Type::Sint32
+        | Type::Sint64 => Some("0".to_string()),
+        Type::Bool => Some("false".to_string()),
+        Type::String | Type::Bytes => Some(String::new()),
+        Type::Enum => None,
+        Type::Message | Type::Group => None,
+    }
+}
+
 /// Returns one line per breaking change; empty means compatible.
 pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> Vec<String> {
     let (b, h) = (index(base), index(head));
@@ -268,12 +303,14 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                             describe(hf).trim()
                         ));
                     }
-                    if hf.default_value != bf.default_value {
+                    let base_default = effective_default(bf, &b);
+                    let head_default = effective_default(hf, &h);
+                    if describe(hf) == describe(bf) && head_default != base_default {
                         out.push(format!(
                             "{name}.{}: default value changed from `{:?}` to `{:?}`",
                             bf.name(),
-                            bf.default_value,
-                            hf.default_value
+                            base_default,
+                            head_default
                         ));
                     }
                     let base_options = bf.options.as_ref();
@@ -436,7 +473,9 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                         describe(hf).trim()
                     ));
                 }
-                if hf.default_value != bf.default_value {
+                if describe(hf) == describe(bf)
+                    && effective_default(hf, &h) != effective_default(bf, &b)
+                {
                     out.push(format!(
                         "extension {} = {number} of {extendee}: default value changed",
                         bf.name()

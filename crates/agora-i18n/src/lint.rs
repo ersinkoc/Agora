@@ -136,11 +136,12 @@ fn decode_rust_string(s: &str) -> Option<String> {
     Some(out)
 }
 
-fn without_comments(src: &str) -> String {
+fn without_comments(src: &str) -> (String, bool) {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0;
     let mut depth = 0_u32;
+    let mut ignore_file = false;
     while i < bytes.len() {
         if depth > 0 {
             if bytes.get(i..i + 2) == Some(b"/*") {
@@ -163,8 +164,15 @@ fn without_comments(src: &str) -> String {
             continue;
         }
         if bytes.get(i..i + 2) == Some(b"//") {
+            let comment = i;
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
+            }
+            let line_start = src[..comment].rfind('\n').map_or(0, |newline| newline + 1);
+            if src[line_start..comment].chars().all(char::is_whitespace)
+                && src[comment..i].contains(IGNORE_FILE_MARKER)
+            {
+                ignore_file = true;
             }
             continue;
         }
@@ -218,20 +226,18 @@ fn without_comments(src: &str) -> String {
         out.push(ch);
         i += ch.len_utf8();
     }
-    out
+    (out, ignore_file)
 }
 
 /// Extract ids from `key!("id")` references in Rust source. Comment lines are skipped, as are
 /// files containing [`IGNORE_FILE_MARKER`].
 pub fn rust_keys(src: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if src.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("//") && line.contains(IGNORE_FILE_MARKER)
-    }) {
+    let (source, ignore_file) = without_comments(src);
+    if ignore_file {
         return out;
     }
-    let source = without_comments(src)
+    let source = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
