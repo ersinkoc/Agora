@@ -105,6 +105,7 @@ function PhoneRequest({ ask, guard, onResolve, onOpen }: { ask: PhoneAsk; guard:
   // returns how it went, so the window's holds free it again when it failed.
   if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{onResolve && staleWhy}</div>;
   const name = agent?.name || approvalName(x);
+  const shownName = visible(name);
   const why = `phone-why-${x.id}`;
   const sent = guard.status(x.id) === 'sent';
   const off = { disabled: stale, 'aria-disabled': !guard.canAnswer(x.id) || undefined, 'aria-describedby': stale ? why : undefined };
@@ -112,8 +113,8 @@ function PhoneRequest({ ask, guard, onResolve, onOpen }: { ask: PhoneAsk; guard:
     <div id={`phone-ask-${x.id}`} className="phone-req">
       <ApprovalRequest density="row" stacked icon={ASK_ICON[askKind(x)]}
         avatar={<AgentAvatar accent={agent?.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />}
-        title={askTitle(x, visible(name))} where={<bdi>{visible(machine)}</bdi>}
-        titleEnd={onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
+        title={askTitle(x, shownName)} where={<bdi>{visible(machine)}</bdi>}
+        titleEnd={onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name: shownName })} title={t('approval-open-agent', { name: shownName })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
         actions={onResolve && !docked && <AnswerButtons approval={x} off={off} alwaysNote={alwaysNoteId(x, 'phone')}
           onDeny={() => send(() => onResolve(x, false))} onAllow={() => send(() => onResolve(x, true))} onAlways={() => send(() => onResolve(x, true, undefined, true))} />}
         foot={onResolve && (docked || x.always || stale || sent) ? <>
