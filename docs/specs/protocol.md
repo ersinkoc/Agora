@@ -384,7 +384,7 @@ An older node still sends such an id in its remote's case. The hub reads it fold
 event (`CheckoutDiscovered`, `WorkspaceRegistered`, `AgentStarted`, `AgentInterrupted`, `TaskChanged`, `TaskDispatched`: its view,
 snapshots, board membership, the events it sends a window) or a `BoardCall`; stored events are not rewritten. It remembers the
 spelling each node last reported for a project (its `CheckoutDiscovered`/`WorkspaceRegistered`) and puts a project id it sends that
-node (`AgentStart`, `TaskUpdate`, `TaskDispatch`, `BoardJoin`, `DeliverTaskHandoff`) in that spelling; a signed `AgentLaunch` is
+node (`AgentStart`, `TaskUpdate`, `TaskDispatch`, `BoardJoin`, and `DeliverTaskHandoff` when the hub sends one) in that spelling; a signed `AgentLaunch` is
 never changed. A board stored under an older spelling is loaded and stored again under the folded id. A node compares a confirmed
 folder binding, a resumed agent's recorded project, a signed launch's project and a device's `device.<id>.projects` with the
 folder's id after folding both, so an id that differs only by this fold is the same project (no `directory.identity_changed`,
