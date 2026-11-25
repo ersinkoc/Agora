@@ -71,7 +71,7 @@ moves by itself (the old diagram with animated links is gone):
   agents as rows (avatar, name, the acts-without-asking sign, a state pill; a failed one in red), a meter of the memory Agora uses there
   (its share of the total over all machines, with the amount and the open terminals), and **Start an agent here**, **New terminal** (with
   a live link) and **⋯** (copy the machine ID, agent settings). The machine ID is shown once, beside the name, and only when the name does
-  not already say it (two machines may share a host name).
+  not already say it (two machines may share a host name). Finished agents are hidden from the machine's card but remain in Fleet.
 - **A machine offline** has a dashed card, "last seen", a note when agents were running there ("2 agents were running: they keep going and
   report back when it connects", nodes are autonomous) and a red ghost **Forget…**. An offline machine also shows "last seen" on its row
   in the agent list and in its tooltip.

@@ -77,8 +77,8 @@ describe('My machines as cards (redesign PR 9)', () => {
     const t = text(c);
     expect(t).toMatch(/blackview Linux · 0\.3\.35 · heard 4 seconds ago Online/);
     expect(c).toContain('kit-pill kit-tone-finished');
-    for (const a of ['claude · plum', 'codex · teal', 'opencode · sky', 'claude · amber']) expect(c).toContain(`>${a}<`);
-    expect(c.match(/class="kit-row"/g)).toHaveLength(4);
+    for (const a of ['claude · plum', 'codex · teal', 'opencode · sky']) expect(c).toContain(`>${a}<`);
+    expect(c.match(/class="kit-row"/g)).toHaveLength(3);
     expect(t).toContain('Agora on this machine 17 MB · 6 terminals open');
     expect(c).toContain('aria-label="75 % of the memory Agora uses on all your machines"');
     expect(t).toContain('Start an agent here');
@@ -174,6 +174,25 @@ describe('My machines in a browser', () => {
     return b as HTMLButtonElement;
   };
   const strip = (s: string | null | undefined) => (s ?? '').replace(/[⁨⁩]/g, '');
+
+  it('hides finished agents without removing active or failed agents, and updates when an agent resumes work', () => {
+    const finished = galleryMachineAgents[3]!;
+    const closed = { ...finished, id: 'closed', closed: true, exitCode: 0 };
+    const render = (agent = finished) => {
+      const agents = galleryMachineAgents.map((a) => a.id === agent.id ? agent : a);
+      act(() => root.render(<NetworkView now={NOW} machines={galleryMachines} agents={[...agents, closed]} hubName="h" />));
+    };
+    const row = (id: string) => host.querySelector(`a[href="#/agent/${id}"]`);
+    render();
+    expect(row(finished.id)).toBeNull();
+    expect(row(closed.id)).toBeNull();
+    expect(row('g3')).not.toBeNull();
+    expect(row('g6')).not.toBeNull();
+    render({ ...finished, state: 'working' });
+    expect(row(finished.id)).not.toBeNull();
+    render();
+    expect(row(finished.id)).toBeNull();
+  });
 
   it('"Add a machine" shows the steps with agora join and the switch, and never opens the switch by itself', () => {
     const onOpen = vi.fn(async () => true);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { t } from '../i18n';
 import { Menu } from '../layout/Menu';
 import { endedWithError, machineKey, type AgentTileModel } from '../model';
+import { bucketOf } from '../net/fleet';
 import { bytesLabel, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
 import { Icon } from './Icon';
@@ -39,6 +40,8 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
   const [forgetting, setForgetting] = useState<{ list: MachineModel[]; cleanup: boolean } | undefined>();
   const machines = all.filter((m) => !isOld(m, now));
   const old = all.filter((m) => isOld(m, now));
+  // Keep Finished in Fleet, not on the machine cards. Failures are a separate bucket.
+  const listed = agents.filter((a) => bucketOf(a) !== 'finished');
   const live = agents.filter((a) => !a.closed);
   // Running means on a machine that is online now; what runs on an offline one is told on its own card ("N agents were running").
   const online = new Set(machines.filter((m) => m.online).map((m) => m.id));
@@ -79,7 +82,7 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
 
     <ul className="machines__grid">
       {machines.map((m) => <li key={m.id}>
-        <MachineCard m={m} now={now} focused={focus === m.id} agents={agents.filter((a) => machineKey(a) === m.id)} share={totalMem > 0 && m.memoryBytes ? m.memoryBytes / totalMem : undefined}
+        <MachineCard m={m} now={now} focused={focus === m.id} agents={listed.filter((a) => machineKey(a) === m.id)} share={totalMem > 0 && m.memoryBytes ? m.memoryBytes / totalMem : undefined}
           onForget={onForget ? () => setForgetting({ list: [m], cleanup: false }) : undefined} onStart={onStart} onNewTerminal={onNewTerminal} />
       </li>)}
       <li>

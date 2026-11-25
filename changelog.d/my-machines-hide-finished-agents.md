@@ -1,0 +1,1 @@
+- My machines hides finished agents from machine cards without removing them from Fleet. Failed agents stay visible.
