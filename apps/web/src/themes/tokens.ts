@@ -353,7 +353,7 @@ const EXTRA_VARS = [
   ...REGIONS.flatMap((r) => REGION_PARTS.map((p) => regionVar(r, p))), ...TERMINAL_KEYS.map(terminalVar), ...SYNTAX_KEYS.map(syntaxVar),
   '--pane-gap', '--line-width', '--ui-weight', '--ui-line-height',
 ];
-const CHROME_DATA = [...CHROME_NAMES.filter((n) => n !== 'pane-gap' && n !== 'line-width').map(chromeData), 'paneGaps', 'ligatures', 'lineHeight', 'agentEntries'];
+const CHROME_DATA = [...CHROME_NAMES.filter((n) => n !== 'pane-gap' && n !== 'line-width').map(chromeData), 'paneGaps', 'ligatures', 'lineHeight', 'weight', 'agentEntries'];
 const setData = (root: StyleTarget, key: string, v: string | undefined) => { if (v === undefined) delete root.dataset[key]; else root.dataset[key] = v; };
 
 // The variables and data attributes of one scheme of a theme beyond the format-1 tokens. Every value was checked when the theme was
@@ -382,6 +382,7 @@ export function chromeAttributes(theme: Pick<Theme, 'chrome' | 'text'>, look: Lo
   if (chrome['pane-gap'] > 0) data.paneGaps = 'on';
   if (!text.ligatures) data.ligatures = 'off';
   if (text['line-height'] !== 'normal') data.lineHeight = 'set';
+  if (text.weight !== DEFAULT_TEXT.weight) data.weight = 'set';
   // The agent's entries have no box of their own until a theme colours one.
   const agent = look.regions['agent-entries'];
   if (agent?.surface || agent?.line) data.agentEntries = 'filled';

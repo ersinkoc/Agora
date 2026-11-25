@@ -252,7 +252,7 @@ describe('applying a format-2 theme', () => {
   it('maps chrome values to data attributes and variables, and a default theme removes them all', () => {
     const { vars, root } = page();
     applyTheme(root, read(), 'dark');
-    expect(root.dataset).toMatchObject({ theme: 'dark', paneBorders: 'always', tabBar: 'bottom', tabStyle: 'pill', density: 'compact', stateDisplay: 'word', shadow: 'none', motion: 'reduced', paneGaps: 'on', ligatures: 'off', lineHeight: 'set' });
+    expect(root.dataset).toMatchObject({ theme: 'dark', paneBorders: 'always', tabBar: 'bottom', tabStyle: 'pill', density: 'compact', stateDisplay: 'word', shadow: 'none', motion: 'reduced', paneGaps: 'on', ligatures: 'off', lineHeight: 'set', weight: 'set' });
     expect(root.dataset.icons).toBeUndefined(); // the only icon set is the default
     expect([vars.get('--pane-gap'), vars.get('--line-width'), vars.get('--ui-weight'), vars.get('--ui-line-height')]).toEqual(['6px', '2px', '500', '1.5']);
     applyTheme(root, BUILT_IN[0] as Theme, 'dark');

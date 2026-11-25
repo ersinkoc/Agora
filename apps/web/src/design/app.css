@@ -80,11 +80,17 @@
 @layer base {
   html { -webkit-text-size-adjust: 100%; font-size: calc(var(--text-scale) * 100%); }
   /* Counts and times line up from one row to the next: figures are tabular. */
-  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; font-variant-numeric: tabular-nums; font-weight: var(--ui-weight, 400); }
+  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; font-variant-numeric: tabular-nums; }
+  :root[data-weight] body { font-weight: var(--ui-weight); }
   /* A theme's line height (format 2 `text`): every text size without a line height of its own takes it. */
   :root[data-line-height] body { line-height: var(--ui-line-height); }
   :root[data-line-height] * { --tw-leading: var(--ui-line-height); }
   :root[data-ligatures='off'] body { font-variant-ligatures: none; }
+  /* What needs the person keeps today's text whatever a theme's weight, line height or ligatures say (the floor, ADR-0113). */
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you),
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) * { --tw-leading: initial; font-variant-ligatures: normal; }
+  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { line-height: var(--text-sm--line-height); }
+  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-weight: 400; }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
