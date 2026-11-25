@@ -871,7 +871,9 @@ impl Hub {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         });
-        g.subs_dropped += (before - g.subs.len()) as u64;
+        g.subs_dropped = g
+            .subs_dropped
+            .saturating_add(u64::try_from(before - g.subs.len()).unwrap_or(u64::MAX));
     }
 
     /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
@@ -1240,6 +1242,79 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn f375_subscriber_drop_metrics_do_not_wrap_after_saturation() {
+        let dropped_after_publish = |starting| {
+            let hub = hub();
+            let (tx, rx) = sync_channel(1);
+            drop(rx);
+            let mut inner = hub.lock();
+            inner.subs.push(tx);
+            inner.subs_dropped = starting;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Hub::publish(
+                    &mut inner,
+                    Delivered {
+                        pos: 1,
+                        event: Event {
+                            producer_id: "n".into(),
+                            seq: 1,
+                            at_ms: 1,
+                            body: None,
+                        },
+                    },
+                );
+            }))
+            .map(|()| inner.subs_dropped)
+            .map_err(|_| ())
+        };
+
+        assert_eq!(dropped_after_publish(u64::MAX - 1), Ok(u64::MAX));
+        println!("CONTROL OK");
+
+        let actual = dropped_after_publish(u64::MAX);
+        println!("EXPECTED: Ok({})", u64::MAX);
+        println!("ACTUAL: {actual:?}");
+        if actual == Ok(u64::MAX) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(u64::MAX));
+    }
+
+    #[test]
+    fn verifies_f375_subscriber_drop_metrics_are_monotonic_at_boundaries() {
+        let dropped_after = |starting, subscribers| {
+            let hub = hub();
+            let mut inner = hub.lock();
+            for _ in 0..subscribers {
+                let (tx, rx) = sync_channel(1);
+                drop(rx);
+                inner.subs.push(tx);
+            }
+            inner.subs_dropped = starting;
+            Hub::publish(
+                &mut inner,
+                Delivered {
+                    pos: 1,
+                    event: Event {
+                        producer_id: "n".into(),
+                        seq: 1,
+                        at_ms: 1,
+                        body: None,
+                    },
+                },
+            );
+            inner.subs_dropped
+        };
+
+        assert_eq!(dropped_after(7, 0), 7);
+        assert_eq!(dropped_after(2, 3), 5);
+        assert_eq!(dropped_after(u64::MAX - 1, 2), u64::MAX);
+        println!("FIX VERIFIED");
     }
 
     /// ADR-0054: the event a node's resync lands on goes into the view and to subscribers like any applied one.
