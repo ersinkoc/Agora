@@ -67,6 +67,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     "kinds.program",
     // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
     "pairing.v1",
+    // ADR-0112: answers `BoardCall{tool: "fleet_status"}` (every machine and running agent, for agents), on a solo hub or when the
+    // owner turned it on (`agora hub fleet on`). A node offers it unless its policy says `mesh.fleet = false`.
+    agora_protocol::handshake::FLEET_STATUS_V1,
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.
@@ -690,6 +693,55 @@ fn commit_password(say: &Say, store: &SqliteStore, hashed: Option<&str>) -> Exit
     }
 }
 
+/// `agora hub fleet on|off|status` (ADR-0112): whether agents see every machine and agent of a hub that has people besides the owner.
+/// A hub with no people but the owner always answers; the switch is kept in the hub's settings and read on every call, so a running
+/// hub follows it without a restart.
+pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
+    let op = match o.positional.as_slice() {
+        [op] if matches!(op.as_str(), "on" | "off" | "status") => op.as_str(),
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let dir = hub_dir(o);
+    if private_hub_dir(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    if op == "on" || op == "off" {
+        if let Err(e) = agora_hub::users::set_fleet_switch(&store, op == "on", server::now_ms()) {
+            return fail(format!("{e:?}"));
+        }
+    }
+    let solo = match agora_hub::users::Users::new(&store).any() {
+        Ok(any) => !any,
+        Err(e) => return fail(format!("{e:?}")),
+    };
+    let on = match agora_hub::users::fleet_switch(&store) {
+        Ok(on) => on,
+        Err(e) => return fail(format!("{e:?}")),
+    };
+    say.out(
+        match (solo, on) {
+            // The stored switch is said too: once a person is added it decides (F2 of the #1205 review).
+            (true, true) => key!("cli-hub-fleet-solo-on"),
+            (true, false) => key!("cli-hub-fleet-solo"),
+            (false, true) => key!("cli-hub-fleet-on"),
+            (false, false) => key!("cli-hub-fleet-off"),
+        },
+        &[],
+    );
+    ExitCode::SUCCESS
+}
+
 /// `agora hub user add|list|role|remove|login` (ADR-0049): the people of a team hub and what each may do.
 pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
     use agora_hub::users::{Role, Users};
@@ -742,6 +794,11 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                             ("code", code.into()),
                         ],
                     );
+                    // ADR-0112: with the fleet view on, this person's agents see every project of the hub; say so now. A switch that
+                    // cannot be read is warned about too.
+                    if agora_hub::users::fleet_switch(&store).unwrap_or(true) {
+                        say.err(key!("cli-hub-fleet-user-warning"), &[]);
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),
@@ -2715,6 +2772,12 @@ mod tests {
         for c in agora_node::uplink_client::CAPABILITIES {
             assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
         }
+    }
+
+    #[test]
+    fn the_hub_offers_the_fleet_view_to_agents() {
+        // ADR-0112: a node offers it only when its policy allows, so the check above does not cover it.
+        assert!(HUB_CAPABILITIES.contains(&agora_protocol::handshake::FLEET_STATUS_V1));
     }
 
     #[test]

@@ -7,6 +7,9 @@ use crate::v1::{Hello, Resume, ResumeOk, Welcome};
 /// ADR-0109: durable cross-node task handoff delivery on the hub/node link.
 pub const TASK_HANDOFF_V1: &str = "mesh.task_handoff.v1";
 
+/// ADR-0112: the hub answers `BoardCall{tool: "fleet_status"}` (every machine and running agent of the hub, for agents).
+pub const FLEET_STATUS_V1: &str = "mesh.fleet_status.v1";
+
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Support {

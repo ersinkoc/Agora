@@ -595,6 +595,66 @@ fn the_hubs_folder_is_closed_to_other_users() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// ADR-0112: `agora hub fleet` says whether agents see every machine and agent; the switch matters once the hub has people, and a
+/// machine without a hub folder is told so (nothing is created).
+#[test]
+fn the_fleet_view_is_turned_on_and_off_from_the_command_line() {
+    let root = tmp("fleet");
+    let run = |dir: &Path, args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(dir)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let warning = "is on for this hub";
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(
+        code == Some(0) && out.contains("nobody but you") && !out.contains("switch is on"),
+        "{out}"
+    );
+    // F2 of the #1205 review: on a solo hub the stored switch is said too, and adding a person while it is on warns.
+    let (code, out, _) = run(&root, &["hub", "fleet", "on"]);
+    assert!(
+        code == Some(0) && out.contains("nobody but you") && out.contains("The switch is on"),
+        "{out}"
+    );
+    let (code, _, err) = run(&root, &["hub", "user", "add", "Eda", "--role", "member"]);
+    assert!(code == Some(0) && err.contains(warning), "{err}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(code == Some(0) && out.contains("also in projects"), "{out}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "off"]);
+    assert!(
+        code == Some(0) && out.contains("only the machines and agents of their own projects"),
+        "{out}"
+    );
+    let (code, _, err) = run(&root, &["hub", "user", "add", "Bo", "--role", "viewer"]);
+    assert!(code == Some(0) && !err.contains(warning), "{err}");
+    let (code, out, _) = run(&root, &["hub", "fleet", "status"]);
+    assert!(code == Some(0) && out.contains("own projects"), "{out}");
+    for bad in [
+        &["hub", "fleet", "maybe"][..],
+        &["hub", "fleet"],
+        &["hub", "fleet", "on", "off"],
+    ] {
+        let (code, _, err) = run(&root, bad);
+        assert!(
+            code == Some(2) && err.contains("arguments"),
+            "{bad:?}: {err}"
+        );
+    }
+    let none = root.join("no-hub");
+    let (code, _, _) = run(&none, &["hub", "fleet", "status"]);
+    assert_eq!(code, Some(1));
+    assert!(!none.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");

@@ -481,6 +481,7 @@ fn list_reply(
     mesh: &Arc<Mutex<Mesh>>,
     remote: &RemoteSlot,
     shares: &Shares,
+    fleet: bool,
 ) -> Option<Message> {
     if !conn.initialized() {
         return None;
@@ -498,6 +499,12 @@ fn list_reply(
     }
     // A `project` that is not a string goes to the broker, which refuses it (-32602) rather than listing every agent.
     let filter = agora_mesh::mcp::optional_str_param(&args, "project")?;
+    // ADR-0112: a `scope` other than these goes to the broker too, which refuses it.
+    let hub_scope = match agora_mesh::mcp::optional_str_param(&args, "scope")? {
+        None | Some(agora_mesh::mcp::SCOPE_PROJECT) => false,
+        Some(agora_mesh::mcp::SCOPE_HUB) => true,
+        Some(_) => return None,
+    };
     let (mut rows, node) = {
         let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
         let node = m.agent_info(conn.agent())?.node.clone();
@@ -531,10 +538,119 @@ fn list_reply(
             None => {}
         }
     }
+    if hub_scope {
+        // ADR-0112: the rows above, then the hub's whole view, asked only when this node offers it. Without it the list is this
+        // node's view alone: every row `partial: true`.
+        match fleet.then(|| hub_fleet(conn.agent(), remote)).flatten() {
+            Some(h) => agora_mesh::awareness::merge_fleet_list(&mut rows, &h, &node, filter),
+            None => rows.iter_mut().for_each(|r| r["partial"] = json!(true)),
+        }
+    }
     Some(Message::Response {
         id,
         result: agora_mesh::mcp::ok_tool_result(&json!(rows)),
     })
+}
+
+/// ADR-0112: the hub's `fleet_status` answer (every machine, and every running agent on an online one), waited on for at most
+/// [`STATUS_WAIT`]. `None` when it cannot be had: no hub link (or `mesh.remote = false`), the hub refused (`board.not_allowed` on a
+/// team hub) or does not know the tool, an error, or no answer in time. Asked only when the node offers the view ([`Fleet::offered`]).
+fn hub_fleet(agent: &AgentId, remote: &RemoteSlot) -> Option<Value> {
+    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    link.board(
+        agent.as_str(),
+        "",
+        "fleet_status",
+        "{}",
+        Box::new(move |r| {
+            let _ = tx.send(r);
+        }),
+    );
+    match rx.recv_timeout(STATUS_WAIT) {
+        Ok(Ok(r)) if r.shared => serde_json::from_str::<Value>(&r.result_json)
+            .ok()
+            .filter(|v| v.get("isError").and_then(Value::as_bool) != Some(true))
+            .and_then(|v| agora_mesh::mcp::tool_result_value(&v))
+            .filter(Value::is_object),
+        _ => None,
+    }
+}
+
+/// ADR-0112: `machines_list {}`: every machine of the hub (`{ machines, partial }`). When the node does not offer the view (its hub is
+/// older, or its policy says `mesh.fleet = false`) the hub is never asked; then, or without the hub's answer, the list is this
+/// machine alone with `partial: true`. `None` when the line is not that call (or the caller is not registered: the broker answers).
+fn machines_reply(
+    conn: &McpConnection,
+    line: &str,
+    mesh: &Arc<Mutex<Mesh>>,
+    remote: &RemoteSlot,
+    fleet: bool,
+) -> Option<Message> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    if method != "tools/call" || params.get("name").and_then(Value::as_str) != Some("machines_list")
+    {
+        return None;
+    }
+    if !params
+        .get("arguments")
+        .is_none_or(|a| a.is_null() || a.is_object())
+    {
+        return Some(Message::ErrorResponse {
+            id,
+            code: agora_mesh::mcp::invalid_params_error(),
+            data: None,
+        });
+    }
+    let (node, running) = {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let node = m.agent_info(conn.agent())?.node.clone();
+        let running = m
+            .agents_list(None)
+            .iter()
+            .filter(|a| a.node == node)
+            .count();
+        (node, running)
+    };
+    let answer = match fleet.then(|| hub_fleet(conn.agent(), remote)).flatten() {
+        Some(h) => json!({
+            "machines": agora_mesh::awareness::fleet_machines(&h),
+            "partial": h["partial"].as_bool().unwrap_or(true),
+        }),
+        None => json!({
+            "machines": [agora_mesh::awareness::local_machine(
+                &node, std::env::consts::OS, env!("CARGO_PKG_VERSION"), running, now_ms(),
+            )],
+            "partial": true,
+        }),
+    };
+    Some(Message::Response {
+        id,
+        result: agora_mesh::mcp::ok_tool_result(&answer),
+    })
+}
+
+/// ADR-0112: whether this node offers the hub-wide view to its agents (`machines_list`, `agents_list {scope: "hub"}`).
+struct Fleet {
+    /// Node policy `mesh.fleet` (default true). The hub cannot change it.
+    allowed: AtomicBool,
+    /// The hub agreed on `mesh.fleet_status.v1` in its last `Welcome`.
+    hub: AtomicBool,
+}
+
+impl Fleet {
+    /// Offered only when the policy allows it, messages may cross nodes (`mesh.remote`), and the hub has the capability.
+    fn offered(&self, remote_allowed: &AtomicBool) -> bool {
+        self.allowed.load(Ordering::Acquire)
+            && remote_allowed.load(Ordering::Acquire)
+            && self.hub.load(Ordering::Acquire)
+    }
 }
 
 struct AgentServer {
@@ -583,6 +699,8 @@ pub struct MeshServer {
     /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
     remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
+    /// ADR-0112: node policy `mesh.fleet` and whether the hub offers `fleet_status`.
+    fleet: Arc<Fleet>,
     shares: Arc<Shares>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
@@ -693,6 +811,10 @@ impl MeshServer {
             helpers: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote: Arc::new(Mutex::new(None)),
+            fleet: Arc::new(Fleet {
+                allowed: AtomicBool::new(true),
+                hub: AtomicBool::new(false),
+            }),
             shares: Arc::new(Shares::default()),
             mesh,
             dir: dir.to_path_buf(),
@@ -729,6 +851,27 @@ impl MeshServer {
         if !allowed {
             *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
+    }
+
+    /// ADR-0112: node policy `mesh.fleet`. With false the node neither offers `machines_list` nor asks the hub for its view, whatever
+    /// the hub offers; `agents_list {scope: "hub"}` then lists this node's agents, `partial: true`.
+    pub fn set_fleet_allowed(&self, allowed: bool) {
+        self.fleet.allowed.store(allowed, Ordering::Release);
+    }
+
+    /// Whether the policy allows the hub-wide view (`mesh.fleet`, and `mesh.remote`: a node whose messages stay here asks the hub
+    /// nothing): the node offers `mesh.fleet_status.v1` to the hub only then.
+    pub fn fleet_allowed(&self) -> bool {
+        self.fleet.allowed.load(Ordering::Acquire) && self.remote_allowed.load(Ordering::Acquire)
+    }
+
+    /// The capabilities the hub agreed on in its `Welcome` (each connection): the view is offered while they include
+    /// `mesh.fleet_status.v1`, so a reconnect to an older hub withdraws it.
+    pub fn hub_welcomed(&self, capabilities: &[String]) {
+        let has = capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1);
+        self.fleet.hub.store(has, Ordering::Release);
     }
 
     /// Opens the node-local inbox before agents are taken up or the hub connects.
@@ -1233,7 +1376,7 @@ impl MeshServer {
             .join(info, now_ms());
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent, remote, allowed, shares, helpers) = (
+            let (mesh, stop, agent, remote, allowed, shares, helpers, fleet) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
                 id.clone(),
@@ -1241,6 +1384,7 @@ impl MeshServer {
                 Arc::clone(&self.remote_allowed),
                 Arc::clone(&self.shares),
                 Arc::clone(&self.helpers),
+                Arc::clone(&self.fleet),
             );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
@@ -1261,13 +1405,14 @@ impl MeshServer {
                                     std::thread::sleep(POLL);
                                     continue;
                                 };
-                                let (mesh, stop, agent, remote, allowed, shares) = (
+                                let (mesh, stop, agent, remote, allowed, shares, fleet) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
                                     agent.clone(),
                                     Arc::clone(&remote),
                                     Arc::clone(&allowed),
                                     Arc::clone(&shares),
+                                    Arc::clone(&fleet),
                                 );
                                 let helpers =
                                     helpers.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1282,6 +1427,7 @@ impl MeshServer {
                                                 remote: &remote,
                                                 allowed: &allowed,
                                                 shares: &shares,
+                                                fleet: &fleet,
                                                 helpers,
                                             },
                                             &stop,
@@ -1495,6 +1641,7 @@ struct Links<'a> {
     remote: &'a RemoteSlot,
     allowed: &'a AtomicBool,
     shares: &'a Shares,
+    fleet: &'a Fleet,
     helpers: Option<Arc<dyn Helpers>>,
 }
 
@@ -1870,6 +2017,9 @@ enum Step {
 /// hub's board for a shared project, then the broker. Limits, rate counts and approvals apply the same however it arrived.
 fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links<'_>) -> Step {
     let (remote, allowed, shares) = (links.remote, links.allowed, links.shares);
+    // ADR-0112: what the node offers now (the hub may have reconnected since the last line).
+    let fleet = links.fleet.offered(allowed);
+    s.conn.set_fleet(fleet);
     // ADR-0057: starting and following helpers is the node's, not the broker's.
     if let Some(h) = &links.helpers {
         if let Some(answer) = spawn_call(&s.conn, text, h, &mut s.spawn_waits, &mut s.starts) {
@@ -1877,7 +2027,8 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
         }
     }
     if let Some(msg) = status_reply(&s.conn, text, mesh, remote, shares)
-        .or_else(|| list_reply(&s.conn, text, mesh, remote, shares))
+        .or_else(|| list_reply(&s.conn, text, mesh, remote, shares, fleet))
+        .or_else(|| machines_reply(&s.conn, text, mesh, remote, fleet))
     {
         return Step::Reply(msg);
     }
@@ -2885,7 +3036,7 @@ mod tests {
             let line = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"agents_list","arguments":{{{project}}}}}}}"#
             );
-            list_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+            list_reply(conn, &line, &mesh, &remote, &shares, false).unwrap_or_else(|| {
                 let mut m = mesh.lock().unwrap();
                 match conn.handle(&line, &mut m, now_ms()) {
                     Outcome::Reply(msg) => msg,
@@ -3842,5 +3993,282 @@ mod tests {
         );
         assert_eq!(items[1]["id"], 11, "{got}");
         done(server, dir);
+    }
+
+    /// ADR-0112: a hub link that answers `fleet_status` with what the test sets, and counts the times it is asked.
+    struct FleetLink {
+        asked: std::sync::atomic::AtomicUsize,
+        answer: Mutex<Result<BoardReply, String>>,
+        /// The hub's `workspace_status` answer for every project (shared), or `None` (not shared).
+        status: Option<Value>,
+    }
+
+    impl RemoteLink for FleetLink {
+        fn post(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            done: Box<dyn FnOnce(Result<(), String>) + Send>,
+        ) {
+            done(Err("node.offline".into()));
+        }
+        fn board(
+            &self,
+            _: &str,
+            project: &str,
+            tool: &str,
+            _: &str,
+            done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+        ) {
+            if tool != "fleet_status" {
+                return done(Ok(match &self.status {
+                    Some(v) => BoardReply {
+                        shared: true,
+                        result_json: agora_mesh::mcp::ok_tool_result(v).to_string(),
+                    },
+                    None => BoardReply {
+                        shared: false,
+                        result_json: String::new(),
+                    },
+                }));
+            }
+            assert_eq!(project, "", "fleet_status names no project");
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            done(self.answer.lock().unwrap().clone());
+        }
+    }
+
+    /// One MCP client on an agent's socket: a line out, a line back.
+    struct Client {
+        w: LocalStream,
+        r: BufReader<LocalStream>,
+    }
+
+    impl Client {
+        fn new(sock: &Path) -> Self {
+            let w = agora_platform::local_connect(sock).unwrap();
+            let r = w.try_clone().unwrap();
+            r.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut c = Self {
+                w,
+                r: BufReader::new(r),
+            };
+            c.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
+            c
+        }
+
+        fn rpc(&mut self, method: &str, params: Value) -> Value {
+            send_line(
+                &mut self.w,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string(),
+            )
+            .unwrap();
+            let mut line = String::new();
+            self.r.read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        fn names(&mut self) -> Vec<String> {
+            self.rpc("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        fn tool(&mut self, name: &str, args: Value) -> Value {
+            let v = self.rpc("tools/call", json!({"name": name, "arguments": args}));
+            agora_mesh::mcp::tool_result_value(&v["result"]).unwrap_or_else(|| panic!("{v}"))
+        }
+    }
+
+    /// ADR-0112, on a real endpoint: `machines_list` is listed and the hub asked only while the hub agreed on
+    /// `mesh.fleet_status.v1` and the policy allows it (`mesh.fleet`); `agents_list {scope: "hub"}` then adds the hub's agents of
+    /// other machines and projects. Without the capability, with the policy off (never asked), or with a hub that cannot be reached
+    /// or refuses, both answer from this node alone with `partial: true`. The default scope is unchanged throughout.
+    #[test]
+    fn the_hub_wide_view_needs_the_hubs_capability_and_the_nodes_policy() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-fl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let fleet = json!({
+            "machines": [{"id": "n", "online": true, "os": "linux", "build": "9", "agents_running": 1, "last_seen_ms": 3},
+                         {"id": "far", "online": true, "os": "macos", "build": "9", "agents_running": 1, "last_seen_ms": 2}],
+            "agents": [{"agent_id": "n/a1", "kind": "fixture", "machine": "n", "project": "p", "state": "idle", "workspace": "", "parent": null},
+                       {"agent_id": "far/b", "kind": "codex", "machine": "far", "project": "elsewhere", "state": "working",
+                        "workspace": "/far/elsewhere", "parent": null}],
+            "partial": false,
+        });
+        let answered = |v: &Value| BoardReply {
+            shared: true,
+            result_json: agora_mesh::mcp::ok_tool_result(v).to_string(),
+        };
+        let link = Arc::new(FleetLink {
+            asked: std::sync::atomic::AtomicUsize::new(0),
+            answer: Mutex::new(Ok(answered(&fleet))),
+            status: None,
+        });
+        server.set_remote(link.clone() as Arc<dyn RemoteLink>);
+        let id = AgentId::new("a1");
+        let sock = server
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut c = Client::new(&sock);
+        let asked = || link.asked.load(Ordering::SeqCst);
+        let ids = |rows: &Value| -> Vec<String> {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["agent_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let all_partial =
+            |v: &Value, want: bool| v.as_array().unwrap().iter().all(|r| r["partial"] == want);
+        // An older hub (no capability): not listed, never asked, this node alone.
+        let local = |c: &mut Client| {
+            assert!(!c.names().iter().any(|n| n == "machines_list"));
+            let rows = c.tool("agents_list", json!({"scope": "hub"}));
+            assert_eq!(ids(&rows), ["a1"]);
+            assert!(all_partial(&rows, true), "{rows}");
+            let m = c.tool("machines_list", json!({}));
+            assert_eq!(m["partial"], true);
+            assert_eq!(m["machines"].as_array().unwrap().len(), 1);
+            assert_eq!(m["machines"][0]["id"], "n");
+            assert_eq!(m["machines"][0]["online"], true);
+            assert_eq!(m["machines"][0]["agents_running"], 1);
+        };
+        local(&mut c);
+        assert_eq!(asked(), 0);
+
+        // The hub agreed: listed, asked, merged.
+        server.hub_welcomed(&[agora_protocol::handshake::FLEET_STATUS_V1.to_string()]);
+        assert!(c.names().iter().any(|n| n == "machines_list"));
+        let rows = c.tool("agents_list", json!({"scope": "hub"}));
+        assert_eq!(ids(&rows), ["a1", "far/b"]);
+        assert!(all_partial(&rows, false), "{rows}");
+        assert_eq!(rows[1]["project"], "elsewhere");
+        assert_eq!(rows[1]["node"], "far");
+        let only = c.tool(
+            "agents_list",
+            json!({"scope": "hub", "project": "elsewhere"}),
+        );
+        assert_eq!(ids(&only), ["far/b"]);
+        let m = c.tool("machines_list", json!({}));
+        assert_eq!(m["partial"], false);
+        assert_eq!(m["machines"].as_array().unwrap().len(), 2);
+        assert_eq!(asked(), 3);
+        // The default scope is today's: this node's projects, and the hub-wide view is not asked for.
+        let rows = c.tool("agents_list", json!({}));
+        assert_eq!(ids(&rows), ["a1"]);
+        assert_eq!(asked(), 3);
+
+        // The hub cannot be reached, or refuses (a team hub): this node alone, partial.
+        *link.answer.lock().unwrap() = Err("node.offline".into());
+        let rows = c.tool("agents_list", json!({"scope": "hub"}));
+        assert_eq!(ids(&rows), ["a1"]);
+        assert!(all_partial(&rows, true));
+        let refused = agora_mesh::mcp::protocol_error_result(&agora_protocol::Error::new(
+            agora_protocol::ErrorCode::BoardNotAllowed,
+        ));
+        *link.answer.lock().unwrap() = Ok(BoardReply {
+            shared: true,
+            result_json: refused.to_string(),
+        });
+        assert_eq!(c.tool("machines_list", json!({}))["partial"], true);
+        assert_eq!(asked(), 5);
+
+        // The node's policy says no: not listed, never asked, whatever the hub offers.
+        *link.answer.lock().unwrap() = Ok(answered(&fleet));
+        server.set_fleet_allowed(false);
+        local(&mut c);
+        assert_eq!(asked(), 5);
+        // Back on, then a reconnect to an older hub withdraws it.
+        server.set_fleet_allowed(true);
+        assert!(c.names().iter().any(|n| n == "machines_list"));
+        server.hub_welcomed(&[]);
+        local(&mut c);
+        assert_eq!(asked(), 5);
+
+        drop(c);
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ADR-0112: `scope: "hub"` keeps what the default scope says of a shared project (its other machines' agents, with their board
+    /// task), and an agent both answers name is listed once.
+    #[test]
+    fn the_hub_scope_keeps_the_default_scopes_rows_of_a_shared_project() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-fs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let status = json!({"project": "p", "machines_online": 2, "open_tasks": [], "leases": [],
+            "agents": [{"id": "far/c", "kind": "codex", "machine": "far", "state": "working", "task": "review login",
+                        "holds": 1, "parent": null, "workspace": "/far/p"}]});
+        let fleet = json!({"machines": [], "partial": false, "agents": [
+            {"agent_id": "far/c", "kind": "codex", "machine": "far", "project": "p", "state": "working", "workspace": "/far/p", "parent": null},
+            {"agent_id": "far/d", "kind": "codex", "machine": "far", "project": "q", "state": "idle", "workspace": "/far/q", "parent": null}]});
+        let link = Arc::new(FleetLink {
+            asked: std::sync::atomic::AtomicUsize::new(0),
+            answer: Mutex::new(Ok(BoardReply {
+                shared: true,
+                result_json: agora_mesh::mcp::ok_tool_result(&fleet).to_string(),
+            })),
+            status: Some(status),
+        });
+        server.set_remote(link.clone() as Arc<dyn RemoteLink>);
+        server.hub_welcomed(&[agora_protocol::handshake::FLEET_STATUS_V1.to_string()]);
+        let id = AgentId::new("a1");
+        let sock = server
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut c = Client::new(&sock);
+        let rows = c.tool("agents_list", json!({"scope": "hub"}));
+        let ids: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a1", "far/c", "far/d"], "{rows}");
+        assert_eq!(rows[1]["doing"], "working on task: review login");
+        assert_eq!(rows[1]["holds"], 1);
+        assert_eq!(rows[2]["project"], "q");
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["partial"] == false),
+            "{rows}"
+        );
+        drop(c);
+        server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

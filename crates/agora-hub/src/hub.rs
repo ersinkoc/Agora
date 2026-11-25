@@ -67,6 +67,10 @@ struct Inner {
     /// compares the online nodes with its last look, so a node that left and came back between two looks (its late end and its
     /// redial's `up` written together, #996) would otherwise look as if it never left.
     left: std::collections::BTreeSet<String>,
+    /// ADR-0112 Amendment A: the machines whose latest link agreed on `mesh.fleet_status.v1`; only they and their agents are in the
+    /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
+    /// machine is left out until it connects again.
+    fleet_agreed: std::collections::BTreeSet<String>,
 }
 
 pub struct Hub {
@@ -191,6 +195,7 @@ impl Hub {
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
+                fleet_agreed: std::collections::BTreeSet::new(),
             }),
         };
         {
@@ -568,7 +573,13 @@ impl Hub {
             .get(node)
             .map_or(0, |n| n.link_generation)
             .saturating_add(1);
-        self.emit(
+        // ADR-0112 Amendment A: a machine is in the hub-wide view only while its latest link agreed on it. A link whose opening the
+        // store refuses is not registered, and the agreement of the link before it does not stay: the machine is left out until a
+        // link is recorded (review of #1205).
+        let agreed = capabilities
+            .iter()
+            .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1);
+        let opened = self.emit(
             &mut g,
             Body::NodeLink(NodeLink {
                 node_id: node.to_string(),
@@ -578,7 +589,13 @@ impl Hub {
                 last_heard_ms: now_ms,
             }),
             now_ms,
-        )?;
+        );
+        if agreed && opened.is_ok() {
+            g.fleet_agreed.insert(node.to_string());
+        } else {
+            g.fleet_agreed.remove(node);
+        }
+        opened?;
         let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
         Ok((registration, commands, generation))
     }
@@ -767,6 +784,10 @@ impl Hub {
         if self.write_unrecorded(&mut g).is_err() {
             return refused();
         }
+        // ADR-0112: the hub-wide view for agents is read only and belongs to no project's board.
+        if call.tool == "fleet_status" {
+            return self.fleet_call(&g.view, &g.fleet_agreed, call);
+        }
         // ADR-0115: an older node names a repository on a case-insensitive host in its own case; the board is the folded project's.
         let project = agora_core::fold_project_id(&call.project_id);
         let project = project.as_ref();
@@ -824,6 +845,37 @@ impl Hub {
                 refused()
             }
         }
+    }
+
+    /// ADR-0112: `fleet_status`, answered for a solo hub, or a team hub whose owner turned it on; refused `board.not_allowed`
+    /// otherwise. It names no project and takes no arguments.
+    fn fleet_call(
+        &self,
+        view: &crate::projection::View,
+        agreed: &std::collections::BTreeSet<String>,
+        call: &agora_protocol::v1::BoardCall,
+    ) -> crate::board::Answer {
+        let invalid = |field: &str| crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::ProtocolInvalidMessage)
+                    .with("field", field),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
+        };
+        if !call.project_id.is_empty() {
+            return invalid("project_id");
+        }
+        if !serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+            .is_ok_and(|v| v.is_object())
+        {
+            return invalid("arguments_json");
+        }
+        if !crate::users::fleet_allowed(&self.store) {
+            return crate::board::fleet_refused();
+        }
+        crate::board::fleet_answer(view, agreed)
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
@@ -2500,6 +2552,25 @@ mod tests {
         remove_db(&path);
     }
 
+    /// ADR-0112 Amendment A (review of #1205): a link whose opening the store refuses does not keep the earlier link's agreement on
+    /// the hub-wide view; the machine is left out until a link is recorded.
+    #[test]
+    fn a_refused_link_does_not_keep_the_earlier_agreement_on_the_fleet_view() {
+        let (hub, path) = hub_on_file("fleet-refused-link");
+        let fleet = vec![agora_protocol::handshake::FLEET_STATUS_V1.to_string()];
+        let _first = hub.node_link_opened("n1", fleet.clone(), 1).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(REFUSE_EVENTS).unwrap();
+        assert!(hub.node_link_opened("n1", fleet.clone(), 2).is_err());
+        assert!(!hub.lock().fleet_agreed.contains("n1"));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let _again = hub.node_link_opened("n1", fleet, 3).unwrap();
+        assert!(hub.lock().fleet_agreed.contains("n1"));
+        drop(hub);
+        remove_db(&path);
+    }
+
     /// #996: a board call writes the ends the store refused before it decides anything, so the board sees a machine that left as
     /// offline (never hands work to it) and its events come after that record. While the store still refuses, the call is answered
     /// `internal` (`board.store`) and the end stays waiting.
@@ -2681,6 +2752,92 @@ mod tests {
                     (expected.clone(), Vec::new()),
                     "{nodes:?} {end:?}"
                 );
+            }
+        }
+    }
+
+    /// ADR-0112: `fleet_status` is answered on a solo hub, refused `board.not_allowed` (no parameters) once the hub has people
+    /// besides the owner, and answered again when the owner turns it on; it names no project.
+    #[test]
+    fn fleet_status_is_answered_alone_and_on_a_team_only_with_the_owners_switch() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        // Amendment A: n1's link agreed on the view; n2's did not (its policy, or an older node), so it is left out.
+        let _n1 = hub
+            .node_link_opened(
+                "n1",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                2,
+            )
+            .unwrap();
+        let mut s2 = open_session(&hub, &sup, "n2");
+        hub.ingest(&mut s2, &online("n2", 1)).unwrap();
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 3).unwrap();
+        let call = agora_protocol::v1::BoardCall {
+            from_agent: "a".into(),
+            tool: "fleet_status".into(),
+            arguments_json: "{}".into(),
+            ..Default::default()
+        };
+        let answered = |hub: &Hub| match hub.board_call("n1", &call, 5).verdict {
+            crate::board::Verdict::Done { result, is_error } => {
+                let text: serde_json::Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                (text, is_error)
+            }
+            other => panic!("{other:?}"),
+        };
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1", "{text}");
+        assert_eq!(text["machines"].as_array().unwrap().len(), 1, "{text}");
+        assert_eq!(text["partial"], false);
+        // Once n2 connects again and agrees, it is listed; a later link that does not agree takes it out again.
+        let _n2 = hub
+            .node_link_opened(
+                "n2",
+                vec![agora_protocol::handshake::FLEET_STATUS_V1.into()],
+                4,
+            )
+            .unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 2);
+        let _n2 = hub.node_link_opened("n2", Vec::new(), 5).unwrap();
+        assert_eq!(answered(&hub).0["machines"].as_array().unwrap().len(), 1);
+
+        crate::users::Users::new(hub.store())
+            .add("Eda", crate::users::Role::Member, 2)
+            .unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(is_error);
+        assert_eq!(
+            text,
+            serde_json::json!({"error": {"code": "board.not_allowed", "params": {}}})
+        );
+
+        crate::users::set_fleet_switch(hub.store(), true, 3).unwrap();
+        let (text, is_error) = answered(&hub);
+        assert!(!is_error, "{text}");
+        assert_eq!(text["machines"][0]["id"], "n1");
+        crate::users::set_fleet_switch(hub.store(), false, 4).unwrap();
+        assert!(answered(&hub).1);
+
+        // It names no project and takes an object.
+        for (project, args, field) in [("p", "{}", "project_id"), ("", "[]", "arguments_json")] {
+            let bad = agora_protocol::v1::BoardCall {
+                project_id: project.into(),
+                arguments_json: args.into(),
+                ..call.clone()
+            };
+            match hub.board_call("n1", &bad, 6).verdict {
+                crate::board::Verdict::Invalid(e) => {
+                    assert_eq!(e.code, agora_protocol::ErrorCode::ProtocolInvalidMessage);
+                    assert_eq!(
+                        e.params.get("field"),
+                        Some(&agora_protocol::ParamValue::Str(field.into()))
+                    );
+                }
+                other => panic!("{other:?}"),
             }
         }
     }

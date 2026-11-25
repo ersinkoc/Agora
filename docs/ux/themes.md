@@ -1,14 +1,19 @@
-# Themes: design tokens as data (ADR-0068, rung 2)
+# Themes: design tokens as data (ADR-0068 rung 2, ADR-0113 format 2)
 
-![The theme editor beside the agents, dark](../screenshots/adr68-theme-editor-dark.png)
-![The theme editor beside the agents, light](../screenshots/adr68-theme-editor-light.png)
+![The theme editor beside the agents, with its preview, dark](../screenshots/adr113-theme-editor-dark.png)
+![The same in light](../screenshots/adr113-theme-editor-light.png)
 ![A change that would be hard to read is shown, not applied](../screenshots/adr68-theme-contrast-warning-dark.png)
 
 A **theme** is a small file of **design tokens** (the variables in `apps/web/src/design/tokens.css`). Every colour, font, size,
 corner and spacing a component draws comes from a token (`visual-language.md` §3), so a theme restyles the whole window without
 code. This page is the file format's specification and the web window's behaviour. Rung 2 covers the web window; the terminal
 client maps the same tokens in rung 5. The hub is not involved: themes and the choice are kept in the browser (syncing them
-per person through the hub is an optional later step, ADR-0068).
+per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6).
+
+**Format 2** ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md), below) goes deeper where the look comes from:
+both schemes in one file, the terminal's palette, the colours of the window's parts, and the window's chrome (pane borders and
+gaps, the tab bar, density, how a state is shown, shadows, motion), always as values from closed lists, never CSS. A theme stays
+data: it never holds code, CSS, `url()` or anything from the network, and it can never change what needs you ([the floor](#the-floor-what-no-theme-can-change)).
 
 ## Format, version 1
 
@@ -23,9 +28,13 @@ A theme file is JSON:
 }
 ```
 
-- `agora-theme`: the format version. `1` is the only one; a file with a higher number is refused with "made by a newer
-  version", nothing of it is guessed.
-- `name`: 1 to 60 characters. Control and text-direction characters are removed before it is shown.
+- `agora-theme`: the format version: `1` here, `2` [below](#format-version-2). A file with a higher number is refused with
+  "made by a newer version", nothing of it is guessed. Format 1 files are still read as they always were, with one change the
+  floor asks for: a `text-16` under 16 px is shown at 16 px with a warning (`theme-warning-text-lifted`), so no text is under
+  12 px. Export writes format 2.
+- `name`: 1 to 60 characters. Control and text-direction characters are removed before it is shown. When a format-1 theme is
+  stored or exported as format 2, the pieces format 2 refuses (`url(`, `@import`, `;`, `}`, `expression(`, `<`) are removed from
+  its name, so every theme format 1 accepts stays one format 2 accepts.
 - `scheme`: `"dark"` or `"light"`. It decides which slot the theme fills (below), the browser's `color-scheme`, shadows and
   the terminal's 16-colour palette.
 - `tokens`: any of the tokens below. Tokens left out come from the built-in **Dark** or **Light** theme of the same scheme, so
@@ -59,11 +68,141 @@ No other field is allowed.
 - A **size** is `"18px"` or the number `18`, within the token's range.
 - `text-12`, `text-13`, `text-14`, `text-20`, `text-28` and `space-2` … `space-8` exist in `tokens.css` but **follow** from
   `text-16` and `space-1`; a file that sets one is refused with "follows from `text-16`: set `text-16` instead".
-- Motion (`motion-*`) and `shadow` are not themeable: motion follows the system's reduced-motion setting, shadows follow the
-  scheme.
+- In format 1, motion (`motion-*`) and `shadow` are not themeable: motion follows the system's reduced-motion setting, shadows
+  follow the scheme. Format 2 has `motion` and `shadow` chrome values.
 
 Sizes stay relative to the browser's own text size: `text-16: 20px` makes the root font size 125 % of the browser's, and the
 window's text and spacing (rem-based) grow with it. The terminals keep their own text size (A−/A+).
+
+## Format, version 2
+
+![A format-2 theme: its own terminal palette and parts, gaps and lines around every pane, rounded tabs, compact density (dark)](../screenshots/adr113-sample-harbour-dark.png)
+![The same theme's light colours, from the same file](../screenshots/adr113-sample-harbour-light.png)
+
+```json
+{
+  "agora-theme": 2,
+  "name": "Harbour",
+  "inherits": "slate",
+  "dark": {
+    "tokens": { "accent": "#5cc8c2" },
+    "regions": { "sidebar": { "surface": "#0b1016" }, "person-entries": { "surface": "#14302f", "line": "#2b6b68" } },
+    "terminal": { "background": "#0b1016", "foreground": "#d8e1ea", "red": "#ff7b72" },
+    "syntax": { "keyword": "#ff9e8f" }
+  },
+  "light": { "tokens": { "accent": "#0b6e69", "on-accent": "#ffffff" } },
+  "shape": { "radius-m": "10px" },
+  "text": { "font-mono": "'JetBrains Mono', monospace", "weight": 400, "line-height": "normal", "ligatures": true },
+  "chrome": { "pane-borders": "always", "pane-gap": 8, "tab-style": "pill", "density": "compact" }
+}
+```
+
+Fields (no other is allowed, at any level):
+
+- `agora-theme`: `2`. `name`: as in format 1.
+- `inherits` (optional): the id of a built-in theme (`dark`, `light`, `high-contrast`, `large-text`, `slate`, `sand`). Values the
+  file leaves out come from it: its colours for its own scheme, and its shape and fonts for both. Without it they come from the
+  default **Dark** or **Light**. A file with `inherits` and no scheme sections is that theme with the file's chrome and text.
+- `dark`, `light` (at least one, or `inherits`): the colours of that scheme. A theme with both fills both slots (below); one with
+  one fills that one. Each holds:
+  - `tokens`: the 13 colour tokens of format 1 (surfaces, lines, text, accent, states). Sizes and fonts are not here.
+  - `regions`: the colours of the window's parts, each `{ "surface", "text", "line" }`, each optional (below).
+  - `terminal`: the terminal's colours, each optional (below).
+  - `syntax`: code colours, each optional: `keyword`, `string`, `comment`, `number`, `function`, `type`, `attr`, `meta`. Left out,
+    they are mixed from the theme's colours as in format 1 (`app.css` `--syntax-*`).
+- `shape`: `text-16` (**16**–24 px: the smallest text is three quarters of it, and no text is under 12 px), `space-1`, and the
+  four corners, as in format 1.
+- `text`: `font-ui` and `font-mono` (font lists as in format 1: installed fonts only, the same safe alphabet), `weight` (300,
+  400 or 500), `line-height` (`"normal"`, each text size's own, or a number from 1.2 to 1.8) and `ligatures` (`true` or `false`;
+  the interface and code blocks, not terminals: xterm has no ligatures without an add-on).
+- `chrome`: the window's frame (below).
+
+Export writes every token, every shape, text and chrome value, and the regions, terminal and syntax colours the theme sets (not
+`inherits`), so a file reads the same in a client whose defaults differ, and a file exported and imported is identical.
+Themes are kept in this browser as format-2 files; one stored before this format is a format-1 file and is read as above.
+
+### Regions
+
+| Region | `regions` key | Drawn without a theme in (surface / text / line) |
+| --- | --- | --- |
+| Agents list (the sidebar) | `sidebar` | Panels / Text / Lines |
+| Tabs: the tab in front, and the lines between tabs | `tab-bar` | Background / Text / Lines |
+| Pane bars | `pane-bar` | Panels / Text / Lines |
+| Status line (the bottom bar) | `status-line` | Panels / Secondary text / Lines |
+| Cards (agent tiles, the kit's cards) | `cards` | Panels / Text / Lines |
+| Text fields and menus | `inputs` | Panels / Text / Lines |
+| Buttons (not the main or red ones) | `buttons` | Raised surfaces / Text / Lines |
+| Agent replies in a conversation | `agent-entries` | none (they sit on the pane) / Text / none |
+| Your messages in a conversation | `person-entries` | Accent background / Text / the accent's hairline |
+| Code blocks in a conversation | `code-blocks` | Panels / Text / Lines |
+
+Each part is a CSS variable (`--sidebar-surface`, …) that the window reads with today's token as its fallback, so nothing
+changes until a theme sets one. Agent replies get a box (padding, a corner, a line) only when a theme colours them.
+
+### Terminal
+
+`background`, `foreground`, `cursor`, `selection` and the 16 colours `black`, `red`, `green`, `yellow`, `blue`, `magenta`,
+`cyan`, `white` and their `bright-` forms. Left out, a terminal draws as before: the pane's background, the theme's text, the
+accent as cursor and selection, and the window's palette for the scheme. Every terminal pane takes them, and takes them again on
+every theme change (`agora-theme` event). The selection is drawn at 40 % over the background, fainter in a terminal not in focus,
+so text keeps its own colour on top. The terminal's frame and its search matches follow the terminal's background and text.
+
+### Chrome
+
+Every value is a word from a list or whole pixels in a range. The theme sets it on `<html>` as a data attribute (the list's own
+word, never the file's text) or as a number variable (`--pane-gap`, `--line-width`), and the stylesheet reads it; a theme never
+builds CSS.
+
+| Key | Values (default first) | What it does |
+| --- | --- | --- |
+| `pane-borders` | `auto`, `always`, `off` | Auto: a line between panes that touch (with a gap, the gap alone). Always: a line around every pane. Off: none. |
+| `pane-gap` | 0–16 px (0) | Space between panes; the background shows through. |
+| `line-width` | 0–2 px (1) | The window's lines: between and around panes, under pane bars, the header, the status line, the Agents list's edge. |
+| `tab-bar` | `top`, `bottom` | Where a pane's bar (its tabs or title) sits. |
+| `tab-style` | `underline`, `filled`, `pill` | The tab in front: an accent line, filled with the accent (its state mark on a chip of the background), or rounded tabs with no lines between them. |
+| `density` | `normal`, `compact`, `roomy` | The height of pane bars and tabs, rows and cards, with a mouse or trackpad only (under a finger every target keeps the platform's size). The Agents list's rows and a "needs you" tile keep their size. |
+| `state-display` | `symbol`, `dot`, `word` | How an agent's state shows in lists and tabs. The word is always in the tooltip and read aloud; "Needs you" always keeps its own symbol. |
+| `icons` | `lines` | The icon set. There is one so far; the key is there so a theme can name it. |
+| `shadow` | `soft`, `none`, `strong` | The one elevation (menus, overlays); cards and panels stay flat. |
+| `motion` | `system`, `reduced`, `off` | Follow the system's reduced-motion setting; reduced: the marks that pulse or breathe (a state, a working dot, a loading row) stand still; off: no animation or transition at all. |
+
+## The floor: what no theme can change
+
+A theme can make the window look like anything, but it can never make it lie or hide what needs you (ADR-0113 decision 3). A file
+that sets any of these, by these names anywhere in it, is refused with the reason (`theme-error-floor`, `theme-floor-*`):
+
+| Name in a file | What it is |
+| --- | --- |
+| `danger`, `on-danger` | The one red for errors and danger, and its label (`--danger`, `--on-danger`) |
+| `diff-removed` | The removed-line colour (the same red) |
+| `approval-card`, `approval` | A request from an agent: its frame, colours and text, and the action it asks about |
+| `focus-ring`, `focus` | The focus ring |
+| `needs-you`, `attention` | The "needs you" treatment: shape, word and place, not only colour |
+| `plugin-marker` | The mark on what a plugin adds (ADR-0114) |
+
+The names are matched whole: `state-needs-you` (the colour of the state) and `accent` (which the focus ring is drawn in) are
+format-1 tokens and stay themeable, checked for readability as before. Beyond the names:
+
+- **No text under 12 px**: `text-16` is at least 16 px in format 2 (`theme-error-text-floor`); format 1 is lifted (above).
+- **The window keeps it out of the regions, the text values and the fonts.** A request card, the "Needs you" card and tile, and
+  anything drawn in the "needs you" tone draw their buttons, cards, fields and code in the base tokens whatever the theme's regions
+  say, and keep the window's own fonts (never a theme's font list), text weight, line height and ligatures (`app.css`, the floor
+  rules). A state display never replaces the "needs you" symbol; with the filled tab style a state's mark sits on a chip of the
+  background, where every state is held to 3:1. Density never changes a "needs you" tile, and never applies under a finger (coarse
+  pointer), so every hit target keeps the platform's minimum. What the floor does not hold: the base text size (it only grows,
+  16–24 px, so text can only get larger), the base colours (`state-needs-you`, `accent`, surfaces, checked for readability as in
+  format 1), the window's layout around a card (gaps, lines, the bar's place), and motion: `reduced` and `off` still the "needs you"
+  mark's pulse as the system's reduced-motion setting does; its shape, word and place stay. A theme that
+  sets every region, chrome and text value and inherits the base colours leaves a request card pixel-identical (checked with
+  pixelmatch on the right panel's card in both schemes for this change).
+- **A file is at most 256 KiB** (`theme-error-too-large`, the per-person settings cap of ADR-0113), and at most 50 problems are
+  listed, then "…and N more" (`theme-error-more`).
+- **Never CSS**: a value anywhere (the name too) containing `url(`, `@import`, `;`, `}`, `expression(` or `<` is refused
+  (`theme-error-unsafe`), and no style property is set.
+
+The editor lists the floor as locked rows, each with its reason.
+
+![The window's chrome rows and the locked floor in the editor](../screenshots/adr113-theme-floor-dark.png)
 
 ## Reading a theme (validation)
 
@@ -99,7 +238,22 @@ never throws and reports **every** problem at once, each with a message from `lo
      2.7:1; it needs at least 3:1 to be seen" (`theme-error-control`, `theme-control-*`). A pair that item 4 or another
      warning already asks at least as much of is reported there only (an accent below 3:1 on a surface is already refused).
 
-A theme with any problem in 1–4 is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in),
+7. **Format 2** (`themes/file.ts`): every problem of 1–3 at every level of the file, named by where it is
+   (`dark.regions.sidebar.text`): an unknown field (`theme-error-unknown-field`), a value of the wrong kind
+   (`theme-error-field-color`, `-size`, `-list` with the allowed words, `-line-height`, `-switch`, `-group`), a token in the wrong
+   group ("`text-16` goes in `shape`", `theme-error-moved-token`), an `inherits` that is not a built-in theme, a theme with no
+   scheme (`theme-error-no-look`), anything the floor refuses, and any unsafe value. Then, for each scheme it has (a problem names
+   its scheme when the theme has both, `theme-issue-in-scheme`):
+   - the pairs of 4 on its own tokens;
+   - each region it colours: its text on its surface at **4.5:1**; on a surface of its own, also secondary text and the accent at
+     4.5:1 and every state at **3:1** (`theme-error-contrast`, or `theme-error-seen` for a state);
+   - the terminal's text on its background at **4.5:1**, when the theme sets either;
+   - warnings only: each of the 16 colours the theme sets, or all of them on a background it sets, at **3:1** on the terminal's
+     background (not the one the background stands in for: black on a dark background, white on a light one; programs choose these
+     colours); the cursor at 3:1; the selection (drawn at 40 % over the background) at 1.3:1 against it, so one that is the
+  background is noticed; a syntax colour it sets at 4.5:1 on the code blocks; and 5 and 6.
+
+A theme with any problem in 1–4 or the refusals of 7 is refused as a whole: an import adds nothing, a stored one is dropped (the defaults stand in),
 an edit is not applied. A problem in 5 or 6 is a **warning**: the theme is accepted, saved and shown, and the warning is listed.
 These pairs came after people had saved themes under 1–4 alone (a state colour needs only 3:1 on a surface but 4.5:1 as words
 on its own background), and refusing would drop such a stored theme on the next load.
@@ -127,7 +281,8 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
 - The title bar's three buttons are unchanged: **Follow the system**, **Dark**, **Light**.
 - Each scheme has **its theme**: "Light theme" and "Dark theme" in the editor. Following the system switches between the two
   by itself (Sand by day, Slate by night); Dark or Light shows that scheme's theme. Choosing a theme of the other scheme while
-  one is forced moves to that scheme, so the choice shows.
+  one is forced moves to that scheme, so the choice shows. A format-2 theme with both schemes is listed under both, and choosing
+  or importing it makes it the theme of both.
 - The command palette (Ctrl K) lists **Theme: ⟨name⟩** for every theme, and **Edit theme**.
 - Stored in this browser's `localStorage`: `agora.theme` (the scheme, as before this rung), `agora.theme.choice.v1` (the two
   themes) and `agora.themes.v1` (the person's own themes, at most 20). Storage that is missing, full or blocked costs only the
@@ -140,6 +295,16 @@ A panel of the window (panel id `theme`, `layout.md`), so the window it styles s
 focus (as a tab there when the layout has no room for another pane), from **Edit theme** in the palette, the **Appearance**
 section of **This device**, or a pane's **Show** menu. On a phone, which has no panels (ADR-0067 rung 2, [phone.md](phone.md)),
 the same two ways open it as a screen of its own (`#/theme`) with Back.
+
+- **Preview** (at the top): a small copy of each part of the window (the Agents list, tabs, a pane bar, an agent reply, your
+  message, a code block, a card, a button, a text field, the status line) drawn by the window's own rules, and a few lines of a
+  terminal in the theme's palette, so a change shows there as on the window.
+- The fields are grouped: **Colours** (of the scheme on screen; a theme with one scheme offers "Add Light colours" or "Add Dark
+  colours", a theme with both says which it shows), **Parts of the window** (three optional colours per region), **Terminal**
+  (the four and the 16), **Code colours**, **Text and shape** (fonts, weight, line height, ligatures, sizes, corners) and
+  **Window** (the chrome values, as segmented choices and sliders). An optional colour left empty shows the colour it follows and
+  can be cleared again.
+- **Always the same**: the floor as locked rows, each with its reason.
 
 - Built-in themes are shown read-only with **Customize**, which makes a copy "⟨name⟩ (mine)" and selects it.
 - On one of your themes every token is a field: colours as a swatch and a hex field, fonts as text, sizes as sliders. A change
@@ -161,12 +326,18 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 
   All of these are taken by `scripts/screenshots-themes.mjs` from the demo window (it turns the "Needs you" card off for
   the shot, `agora.attention.mode`).
-- **Import…** reads a theme file (refused with its reasons, or added and selected), **Export** saves the theme on screen as
-  `theme.json`, **Delete theme** removes one of yours (its scheme falls back to Light or Dark), **Reset to defaults** as above.
+- **Import…** reads a theme file of either format (refused with its reasons, or added and selected for every scheme it has),
+  **Export** saves the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back
+  to Light and Dark), **Reset to defaults** as above.
 
-## Not yet (later rungs)
+## Not yet (later steps of ADR-0113)
 
-- A separate terminal palette (the 16 ANSI colours) in the theme file: today it follows the scheme.
+- **Theme packs** and "Export as pack": a theme with its layouts (and keys, once ADR-0068 rung 4 exists); build step 2.
+- **The terminal client** reading format 2 (colours mapped to what the terminal supports, the chrome it can draw); step 3.
+- **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
+- **The community catalog** and `agora hub themes update`; step 5.
+- More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
+  ADR-0113, whose answer is: not in format 2).
+- The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.
 - A themes folder watched on disk (the desktop app, the terminal client): the browser has no folder, so "live reload" here is
   the editor and other tabs.
-- Syncing themes and the choice through the hub per person (optional, needs its own ADR, ADR-0068).

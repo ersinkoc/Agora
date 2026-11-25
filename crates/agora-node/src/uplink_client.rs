@@ -649,6 +649,10 @@ where
     if has_handoffs {
         capabilities.push(agora_protocol::handshake::TASK_HANDOFF_V1);
     }
+    // ADR-0112: offered only when the node's policy allows the hub-wide view (`mesh.fleet`), so a hub never sees it agreed otherwise.
+    if mesh.as_ref().is_some_and(|mesh| mesh.fleet_allowed()) {
+        capabilities.push(agora_protocol::handshake::FLEET_STATUS_V1);
+    }
     let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
         STREAM_CONTROL,
@@ -674,6 +678,9 @@ where
     let handoff_writer = Arc::new(tokio::sync::Semaphore::new(1));
     if let Some(c) = certs {
         c.welcomed(&welcome.capabilities);
+    }
+    if let Some(m) = &mesh {
+        m.hub_welcomed(&welcome.capabilities);
     }
     conn.send(&frame(
         STREAM_CONTROL,
