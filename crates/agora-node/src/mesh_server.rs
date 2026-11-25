@@ -539,6 +539,11 @@ struct AgentServer {
     path: PathBuf,
 }
 
+/// The longest `task_id`, `sender_node` or `sender_agent_id` a durable handoff may carry, as for an
+/// agent id the holder keeps (`holder_link::MAX_AGENT_ID`). The frame limit alone would let one
+/// record grow far beyond its summary and refs.
+const MAX_HANDOFF_ID_BYTES: usize = crate::holder_link::MAX_AGENT_ID;
+
 struct Handoffs {
     store: crate::handoff_store::Store,
     runs: HashMap<AgentId, (String, crate::handoff_store::Id)>,
@@ -826,16 +831,21 @@ impl MeshServer {
                 .with("node_id", "")
                 .with("rule", "mesh.remote"));
         }
+        // Past its deadline the hub no longer retries it, and its outcome stays unresolved.
         if delivery.valid_until_ms <= now {
             return Err(unavailable());
         }
-        if delivery.sender_node.is_empty() || delivery.sender_node.contains('/') {
+        if delivery.valid_until_ms - now > crate::handoff_store::MAX_VALIDITY_MS {
+            return Err(invalid("valid_until_ms"));
+        }
+        let id_ok = |s: &str| !s.is_empty() && s.len() <= MAX_HANDOFF_ID_BYTES;
+        if !id_ok(&delivery.sender_node) || delivery.sender_node.contains('/') {
             return Err(invalid("sender_node"));
         }
-        if delivery.sender_agent_id.is_empty() || delivery.sender_agent_id.contains('/') {
+        if !id_ok(&delivery.sender_agent_id) || delivery.sender_agent_id.contains('/') {
             return Err(invalid("sender_agent_id"));
         }
-        if delivery.task_id.is_empty() {
+        if !id_ok(&delivery.task_id) {
             return Err(invalid("task_id"));
         }
         let limits = mesh.limits();
@@ -2078,10 +2088,28 @@ fn serve(
 mod tests {
     use super::*;
 
+    /// A test's folder, removed when the test ends, whether it passed or not.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("agora-handoff-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn a_handoff_survives_reopen_only_in_its_original_run() {
-        let dir = std::env::temp_dir().join(format!("agora-handoff-reopen-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let guard = TempDir::new("reopen");
+        let dir = guard.0.clone();
         let agent = AgentId::new("receiver");
         let start = |run| {
             let node = MeshServer::new(
@@ -2188,8 +2216,261 @@ mod tests {
             agora_protocol::ErrorCode::MeshRecipientUnknown
         );
         assert_eq!(node.deliver_handoff(delivery, 14).unwrap(), receipt);
-        drop(node);
-        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A node with its durable inbox open, ids reserved, and `agents` running in project `shared` (each agent's run is `[n; 16]`).
+    fn handoff_node(dir: &Path, agents: &[(&str, u8)]) -> MeshServer {
+        let node = MeshServer::new(dir, Limits::default()).unwrap();
+        node.open_handoffs(dir).unwrap();
+        node.mesh.lock().unwrap().reserve_ids(10_000, 20_000);
+        for (agent, run) in agents {
+            let id = AgentId::new(*agent);
+            node.bind_handoff_run(&id, "shared", Some([*run; 16]));
+            node.mesh.lock().unwrap().register(AgentInfo {
+                id,
+                kind: "fixture".into(),
+                node: "local".into(),
+                project: "shared".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            });
+        }
+        node
+    }
+
+    fn handoff(
+        id: u8,
+        agent: &str,
+        run: u8,
+        valid_until_ms: u64,
+    ) -> agora_protocol::v1::DeliverTaskHandoff {
+        agora_protocol::v1::DeliverTaskHandoff {
+            delivery_id: vec![id; 16],
+            receiver_run_id: vec![run; 16],
+            agent_id: agent.into(),
+            project_id: "shared".into(),
+            task_id: "t-1".into(),
+            summary: "s".into(),
+            refs: Vec::new(),
+            valid_until_ms,
+            sender_node: "remote".into(),
+            sender_agent_id: "sender".into(),
+        }
+    }
+
+    fn record_files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir.join("handoffs"))
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().into_string().unwrap();
+                name.ends_with(".handoff").then_some(name)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn durable_inbox(node: &MeshServer, agent: &str) -> Vec<String> {
+        let mesh = node.mesh.lock().unwrap();
+        let page = mesh.inbox(&AgentId::new(agent), None, 2000).unwrap();
+        page.into_iter()
+            .filter(|m| m.kind == "handoff")
+            .map(|m| m.id)
+            .collect()
+    }
+
+    fn store_bytes(node: &MeshServer) -> usize {
+        node.handoffs
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .store
+            .bytes()
+    }
+
+    /// A refusal's parameter as text (`""` when it has none).
+    fn param(e: &agora_protocol::Error, name: &str) -> String {
+        use agora_protocol::v1::param_value::Value;
+        match e.to_info().params.get(name).and_then(|p| p.value.clone()) {
+            Some(Value::Str(s)) => s,
+            Some(Value::Int(i)) => i.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Review of #1175 (B2, N3, N4): a delivery past its deadline, one valid for longer than the node keeps receipts, and one whose
+    /// ids exceed their bound are refused; none of them leaves a record or an inbox entry.
+    #[test]
+    fn a_handoff_outside_its_window_or_bounds_is_refused_without_a_record() {
+        use agora_protocol::ErrorCode;
+        let guard = TempDir::new("window");
+        let node = handoff_node(&guard.0, &[("receiver", 2)]);
+        let now = 1_000_000;
+        let max = crate::handoff_store::MAX_VALIDITY_MS;
+        let refused = |d| node.deliver_handoff(d, now).unwrap_err();
+        let expired = refused(handoff(1, "receiver", 2, now));
+        assert_eq!(expired.code, ErrorCode::MeshUnavailable);
+        let far = refused(handoff(1, "receiver", 2, now + max + 1));
+        assert_eq!(far.code, ErrorCode::ProtocolInvalidMessage);
+        assert_eq!(param(&far, "field"), "valid_until_ms");
+        let long = "x".repeat(MAX_HANDOFF_ID_BYTES + 1);
+        for field in ["task_id", "sender_node", "sender_agent_id"] {
+            let mut d = handoff(1, "receiver", 2, now + 1);
+            match field {
+                "task_id" => d.task_id = long.clone(),
+                "sender_node" => d.sender_node = long.clone(),
+                _ => d.sender_agent_id = long.clone(),
+            }
+            let e = refused(d);
+            assert_eq!(e.code, ErrorCode::ProtocolInvalidMessage, "{field}");
+            assert_eq!(param(&e, "field"), field);
+        }
+        assert!(record_files(&guard.0).is_empty());
+        assert!(durable_inbox(&node, "receiver").is_empty());
+        // The longest window and the longest ids are taken.
+        let mut d = handoff(1, "receiver", 2, now + max);
+        d.task_id = "x".repeat(MAX_HANDOFF_ID_BYTES);
+        node.deliver_handoff(d, now).unwrap();
+        assert_eq!(record_files(&guard.0).len(), 1);
+    }
+
+    /// Review of #1175 (B2): a full store (here 1,024 records of an ended run whose deadline has not passed) refuses a new delivery
+    /// definitively, without writing a file or keeping a receipt; once the ended run's deadline passes, its records are reclaimed
+    /// and the delivery is taken.
+    #[test]
+    fn the_record_limit_refuses_without_a_file_or_a_receipt() {
+        use crate::handoff_store::{plant, Record, MAX_RECORDS};
+        let guard = TempDir::new("records");
+        let root = guard.0.join("handoffs");
+        for n in 0..MAX_RECORDS as u64 {
+            let mut d = handoff(0, "gone", 9, 5000);
+            d.delivery_id = [n.to_le_bytes(), [0xee; 8]].concat();
+            plant(
+                &root,
+                &Record {
+                    number: n + 1,
+                    accepted_at_ms: 10,
+                    delivery: d,
+                },
+            );
+        }
+        let node = handoff_node(&guard.0, &[("receiver", 2)]);
+        let d = handoff(1, "receiver", 2, 100_000);
+        for _ in 0..2 {
+            let e = node.deliver_handoff(d.clone(), 4999).unwrap_err();
+            assert_eq!(e.code, agora_protocol::ErrorCode::NodeResourceLimit);
+            assert_eq!(param(&e, "resource"), "handoff_records");
+            assert_eq!(param(&e, "limit"), "1024");
+        }
+        let files = record_files(&guard.0);
+        assert_eq!(files.len(), MAX_RECORDS);
+        assert!(!files.contains(&format!("{}.handoff", "01".repeat(16))));
+        assert!(durable_inbox(&node, "receiver").is_empty());
+        node.deliver_handoff(d, 5000).unwrap();
+        assert_eq!(
+            record_files(&guard.0),
+            [format!("{}.handoff", "01".repeat(16))]
+        );
+        assert_eq!(durable_inbox(&node, "receiver").len(), 1);
+    }
+
+    /// Review of #1175 (B2): the same for the 32 MiB of records, with one large record that leaves less room than a small delivery.
+    #[test]
+    fn the_byte_limit_refuses_without_a_file_or_a_receipt() {
+        use crate::handoff_store::{plant, Record, MAX_BYTES};
+        let guard = TempDir::new("bytes");
+        let root = guard.0.join("handoffs");
+        let big = |len| {
+            let mut d = handoff(0xee, "gone", 9, 5000);
+            d.summary = "x".repeat(len);
+            Record {
+                number: 1,
+                accepted_at_ms: 10,
+                delivery: d,
+            }
+        };
+        // Sized so that the store holds `MAX_BYTES - 16`: a delivery is larger than 16 bytes.
+        let overhead = plant(&root, &big(0));
+        let mut len = MAX_BYTES - 16 - overhead;
+        while plant(&root, &big(len)) > MAX_BYTES - 16 {
+            len -= 1;
+        }
+        let node = handoff_node(&guard.0, &[("receiver", 2)]);
+        assert_eq!(store_bytes(&node), MAX_BYTES - 16);
+        let d = handoff(1, "receiver", 2, 100_000);
+        for _ in 0..2 {
+            let e = node.deliver_handoff(d.clone(), 4999).unwrap_err();
+            assert_eq!(e.code, agora_protocol::ErrorCode::NodeResourceLimit);
+            assert_eq!(param(&e, "resource"), "handoff_bytes");
+            assert_eq!(param(&e, "limit"), MAX_BYTES.to_string());
+        }
+        assert_eq!(record_files(&guard.0).len(), 1);
+        assert!(durable_inbox(&node, "receiver").is_empty());
+        assert_eq!(store_bytes(&node), MAX_BYTES - 16);
+    }
+
+    /// Review of #1175 (B2): an ended run's receipt is kept until its deadline (a retry gets it) and its record is reclaimed after it,
+    /// when the next delivery arrives; a live run keeps its entry past its deadline for the non-destructive inbox.
+    #[test]
+    fn a_receipt_stays_until_its_deadline_and_an_ended_runs_record_goes_after_it() {
+        let guard = TempDir::new("prune");
+        let node = handoff_node(&guard.0, &[("ended", 2), ("live", 3)]);
+        let ended = handoff(1, "ended", 2, 1000);
+        let receipt = node.deliver_handoff(ended.clone(), 10).unwrap();
+        node.deliver_handoff(handoff(2, "live", 3, 1000), 11)
+            .unwrap();
+        node.bind_handoff_run(&AgentId::new("ended"), "shared", None);
+        let on_disk = || -> usize {
+            record_files(&guard.0)
+                .iter()
+                .map(|n| {
+                    std::fs::metadata(guard.0.join("handoffs").join(n))
+                        .unwrap()
+                        .len() as usize
+                })
+                .sum()
+        };
+
+        // Just before the deadline: a new delivery prunes nothing, and the retry is answered from its record.
+        node.deliver_handoff(handoff(3, "live", 3, 5000), 999)
+            .unwrap();
+        assert_eq!(node.deliver_handoff(ended.clone(), 999).unwrap(), receipt);
+        assert_eq!(record_files(&guard.0).len(), 3);
+        assert_eq!(store_bytes(&node), on_disk());
+
+        // At the deadline the ended run's record goes and its bytes are given back; the live run keeps all of its entries.
+        node.deliver_handoff(handoff(4, "live", 3, 5000), 1000)
+            .unwrap();
+        let files = record_files(&guard.0);
+        assert!(!files.contains(&format!("{}.handoff", "01".repeat(16))));
+        assert_eq!(files.len(), 3);
+        assert_eq!(durable_inbox(&node, "live").len(), 3);
+        assert_eq!(store_bytes(&node), on_disk());
+        assert_eq!(
+            node.deliver_handoff(ended, 1000).unwrap_err().code,
+            agora_protocol::ErrorCode::MeshUnavailable
+        );
+    }
+
+    /// Review of #1175 (N5): a bad file in the store is set aside; the node still opens its durable inbox and offers it.
+    #[test]
+    fn a_bad_record_does_not_turn_the_durable_inbox_off() {
+        let guard = TempDir::new("bad");
+        let root = guard.0.join("handoffs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(format!("{}.handoff", "05".repeat(16))),
+            b"not a record",
+        )
+        .unwrap();
+        let node = handoff_node(&guard.0, &[("receiver", 2)]);
+        assert!(node.has_handoffs());
+        assert!(record_files(&guard.0).is_empty());
+        node.deliver_handoff(handoff(1, "receiver", 2, 5000), 10)
+            .unwrap();
+        assert_eq!(record_files(&guard.0).len(), 1);
     }
 
     fn ask_fixture() -> (Arc<Mutex<Mesh>>, AgentId, AgentId) {

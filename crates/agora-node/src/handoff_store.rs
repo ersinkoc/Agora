@@ -10,6 +10,10 @@ use prost::Message;
 
 pub(crate) const MAX_RECORDS: usize = 1024;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
+/// The longest a delivery may stay valid after the node accepts it: the hub's 24 hours (ADR-0109
+/// amendment A) and one hour for the two clocks to differ. A later deadline is refused, so a hub
+/// cannot keep the store's records past an ended run for longer than this.
+pub(crate) const MAX_VALIDITY_MS: u64 = 25 * 60 * 60 * 1000;
 const FORMAT: &[u8] = b"AHO1";
 const HEADER_LEN: usize = 20;
 pub(crate) type Id = [u8; 16];
@@ -45,6 +49,13 @@ impl Record {
             accepted_at_ms,
             delivery,
         })
+    }
+
+    /// The delivery's deadline, never later than [`MAX_VALIDITY_MS`] after its acceptance.
+    fn deadline(&self) -> u64 {
+        self.delivery
+            .valid_until_ms
+            .min(self.accepted_at_ms.saturating_add(MAX_VALIDITY_MS))
     }
 
     fn id(&self) -> io::Result<Id> {
@@ -96,7 +107,40 @@ fn stale_temporary(name: &str) -> bool {
         && pid.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The inbox number in a record's header, or `None` when the file does not start like one.
+fn header_number(path: &Path) -> Option<u64> {
+    let mut header = [0; HEADER_LEN];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .ok()?;
+    if !header.starts_with(FORMAT) {
+        return None;
+    }
+    Some(u64::from_le_bytes(header[4..12].try_into().ok()?))
+}
+
+/// Moves a record that is not loaded out of the store's way, keeping it for a person to look at.
+/// The new name ends in `.rejected`: it neither loads as a record nor counts as a temporary.
+fn set_aside(path: &Path, reason: &str) {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".rejected");
+    match std::fs::rename(path, &aside) {
+        Ok(()) => eprintln!(
+            "mesh: durable handoff record {} set aside ({reason})",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "mesh: durable handoff record {} not loaded ({reason}); could not set it aside: {e}",
+            path.display()
+        ),
+    }
+}
+
 impl Store {
+    /// Loads what is on disk within the limits. A record that cannot be read, is not one this
+    /// node wrote, or does not fit the limits is set aside (renamed, see [`set_aside`]) and the
+    /// rest stay available: one bad file never turns the durable inbox off. When more is on
+    /// disk than the limits allow, the earliest accepted records (lowest inbox numbers) are kept.
     pub fn open(root: &Path) -> io::Result<Self> {
         agora_platform::ensure_private_dir(root)?;
         let mut store = Self {
@@ -104,35 +148,61 @@ impl Store {
             records: BTreeMap::new(),
             bytes: 0,
         };
+        let mut found = Vec::new();
         for entry in std::fs::read_dir(root)? {
-            let entry = entry?;
+            let Ok(entry) = entry else {
+                continue;
+            };
             let path = entry.path();
             if entry.file_name().to_str().is_some_and(stale_temporary) {
-                std::fs::remove_file(&path)?;
+                // Left by an interrupted write; never an accepted record.
+                let _ = std::fs::remove_file(&path);
                 continue;
             }
             if path.extension().and_then(|value| value.to_str()) != Some("handoff") {
                 continue;
             }
-            if !entry.file_type()?.is_file() || store.records.len() == MAX_RECORDS {
-                return Err(io::ErrorKind::InvalidData.into());
+            let number = entry
+                .file_type()
+                .ok()
+                .filter(std::fs::FileType::is_file)
+                .and_then(|_| header_number(&path));
+            match number {
+                Some(number) => found.push((number, path)),
+                None => set_aside(&path, "unreadable"),
+            }
+        }
+        found.sort_unstable();
+        for (_, path) in found {
+            if store.records.len() == MAX_RECORDS {
+                set_aside(&path, "handoff_records");
+                continue;
             }
             let remaining = MAX_BYTES - store.bytes;
             let mut bytes = Vec::new();
-            std::fs::File::open(&path)?
-                .take(remaining as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() > remaining {
-                return Err(io::ErrorKind::InvalidData.into());
+            let read = std::fs::File::open(&path)
+                .and_then(|f| f.take(remaining as u64 + 1).read_to_end(&mut bytes));
+            if read.is_err() {
+                set_aside(&path, "unreadable");
+                continue;
             }
-            let record = Record::decode(&bytes)?;
-            let id = record.id()?;
-            if entry.file_name() != filename(id).as_str()
-                || store.records.insert(id, (record, bytes.len())).is_some()
+            if bytes.len() > remaining {
+                set_aside(&path, "handoff_bytes");
+                continue;
+            }
+            let loaded = Record::decode(&bytes).and_then(|record| Ok((record.id()?, record)));
+            let Ok((id, record)) = loaded else {
+                set_aside(&path, "unreadable");
+                continue;
+            };
+            if path.file_name().and_then(|n| n.to_str()) != Some(filename(id).as_str())
+                || store.records.contains_key(&id)
             {
-                return Err(io::ErrorKind::InvalidData.into());
+                set_aside(&path, "unreadable");
+                continue;
             }
             store.bytes += bytes.len();
+            store.records.insert(id, (record, bytes.len()));
         }
         Ok(store)
     }
@@ -174,7 +244,7 @@ impl Store {
     /// non-destructive MCP inbox, even after the deadline.
     pub fn prune(&mut self, now: u64, live: impl Fn(&DeliverTaskHandoff) -> bool) {
         self.records.retain(|id, (record, bytes)| {
-            if record.delivery.valid_until_ms > now || live(&record.delivery) {
+            if record.deadline() > now || live(&record.delivery) {
                 return true;
             }
             if std::fs::remove_file(self.root.join(filename(*id)))
@@ -185,5 +255,215 @@ impl Store {
             self.bytes -= *bytes;
             false
         });
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
+    }
+}
+
+/// Writes `record` where [`Store::open`] looks for it, without the store (and without a sync: a
+/// test plants many). Returns the file's size.
+#[cfg(test)]
+pub(crate) fn plant(root: &Path, record: &Record) -> usize {
+    std::fs::create_dir_all(root).unwrap();
+    let bytes = record.bytes().unwrap();
+    let id = record.id().unwrap();
+    std::fs::write(root.join(filename(id)), &bytes).unwrap();
+    bytes.len()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("agora-handoff-store-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn id_of(n: u64) -> Id {
+        let mut id = [0xab; 16];
+        id[..8].copy_from_slice(&n.to_le_bytes());
+        id
+    }
+
+    fn record(number: u64, summary: String) -> Record {
+        Record {
+            number,
+            accepted_at_ms: 10,
+            delivery: DeliverTaskHandoff {
+                delivery_id: id_of(number).to_vec(),
+                receiver_run_id: vec![2; 16],
+                agent_id: "receiver".into(),
+                project_id: "shared".into(),
+                task_id: "t-1".into(),
+                summary,
+                valid_until_ms: 1000,
+                sender_node: "remote".into(),
+                sender_agent_id: "sender".into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn names(root: &Path, extension: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().into_string().unwrap();
+                name.ends_with(extension).then_some(name)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn size_on_disk(root: &Path) -> usize {
+        names(root, ".handoff")
+            .iter()
+            .map(|n| std::fs::metadata(root.join(n)).unwrap().len() as usize)
+            .sum()
+    }
+
+    #[test]
+    fn the_limits_are_the_accepted_ones() {
+        // ADR-0109 amendment A.
+        assert_eq!((MAX_RECORDS, MAX_BYTES), (1024, 32 * 1024 * 1024));
+        assert_eq!(MAX_VALIDITY_MS, (24 + 1) * 3_600_000);
+    }
+
+    /// More records on disk than the limit (a node whose store was filled by hand, or by an older limit): the earliest accepted
+    /// are loaded and the rest set aside, so the store is within its limits after `open` as after `insert`.
+    #[test]
+    fn the_record_limit_applies_on_reopen() {
+        let dir = TempDir::new("reopen-records");
+        let root = dir.0.join("handoffs");
+        for n in 1..=MAX_RECORDS as u64 + 1 {
+            plant(&root, &record(n, String::new()));
+        }
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.len(), MAX_RECORDS);
+        assert!(store.get(&id_of(MAX_RECORDS as u64 + 1)).is_none());
+        assert!(store.get(&id_of(1)).is_some());
+        assert_eq!(
+            names(&root, ".rejected"),
+            [format!(
+                "{}.rejected",
+                filename(id_of(MAX_RECORDS as u64 + 1))
+            )]
+        );
+        assert_eq!(store.bytes(), size_on_disk(&root));
+        drop(store);
+        // Opening again finds the same records and nothing more to set aside.
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.len(), MAX_RECORDS);
+        assert_eq!(names(&root, ".rejected").len(), 1);
+    }
+
+    #[test]
+    fn the_byte_limit_applies_on_reopen() {
+        let dir = TempDir::new("reopen-bytes");
+        let root = dir.0.join("handoffs");
+        let big = || "x".repeat(MAX_BYTES / 2);
+        let first = plant(&root, &record(1, big()));
+        plant(&root, &record(2, big()));
+        plant(&root, &record(3, String::new()));
+        let store = Store::open(&root).unwrap();
+        // The first fits; the second would pass 32 MiB; the third, small, still fits after it.
+        assert!(store.get(&id_of(1)).is_some());
+        assert!(store.get(&id_of(2)).is_none());
+        assert!(store.get(&id_of(3)).is_some());
+        assert!(store.bytes() > first && store.bytes() <= MAX_BYTES);
+        assert_eq!(store.bytes(), size_on_disk(&root));
+        assert_eq!(
+            names(&root, ".rejected"),
+            [format!("{}.rejected", filename(id_of(2)))]
+        );
+    }
+
+    /// Review of #1175 (N5): one file that is not a record this node wrote does not stop the store from opening (which would turn
+    /// the durable inbox off). It is set aside, and every good record is still loaded.
+    #[test]
+    fn a_bad_record_is_set_aside_and_the_rest_load() {
+        let dir = TempDir::new("bad");
+        let root = dir.0.join("handoffs");
+        let good = plant(&root, &record(1, "kept".into()));
+        // Garbage, a short file, a record under another record's name, an empty record id, and a folder.
+        std::fs::write(root.join(filename(id_of(7))), b"AHO1 not a record").unwrap();
+        std::fs::write(root.join(filename(id_of(8))), b"AH").unwrap();
+        let moved = record(9, String::new());
+        std::fs::write(root.join(filename(id_of(10))), moved.bytes().unwrap()).unwrap();
+        let mut no_id = record(11, String::new()).bytes().unwrap();
+        no_id[4..12].copy_from_slice(&0u64.to_le_bytes());
+        std::fs::write(root.join(filename(id_of(11))), no_id).unwrap();
+        std::fs::create_dir(root.join(filename(id_of(12)))).unwrap();
+        // An interrupted write is removed; other files are left alone.
+        std::fs::write(
+            root.join(format!("{}.tmp-123", filename(id_of(13)))),
+            b"partial",
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.txt"), b"left").unwrap();
+
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(&id_of(1)).unwrap().delivery.summary, "kept");
+        assert_eq!(store.bytes(), good);
+        assert_eq!(names(&root, ".handoff"), [filename(id_of(1))]);
+        assert_eq!(names(&root, ".rejected").len(), 5);
+        assert!(names(&root, "-123").is_empty());
+        assert!(root.join("notes.txt").exists());
+    }
+
+    /// Review of #1175 (B2, N3): an ended run's record keeps its receipt until its deadline and is reclaimed at it; a live run keeps
+    /// its record past the deadline; and no record outlives `MAX_VALIDITY_MS` after its acceptance, whatever deadline it names.
+    #[test]
+    fn prune_keeps_receipts_until_the_deadline_and_never_past_the_cap() {
+        let dir = TempDir::new("prune");
+        let root = dir.0.join("handoffs");
+        let mut store = Store::open(&root).unwrap();
+        let mut far = record(3, String::new());
+        far.delivery.valid_until_ms = u64::MAX;
+        for r in [record(1, String::new()), record(2, String::new()), far] {
+            store.insert(r).ok().unwrap();
+        }
+        let live = |d: &DeliverTaskHandoff| d.delivery_id == id_of(2);
+        store.prune(999, live);
+        assert_eq!(store.len(), 3);
+        store.prune(1000, live);
+        assert!(store.get(&id_of(1)).is_none());
+        assert!(store.get(&id_of(2)).is_some(), "a live run keeps its entry");
+        assert!(store.get(&id_of(3)).is_some());
+        assert!(!root.join(filename(id_of(1))).exists());
+        assert_eq!(store.bytes(), size_on_disk(&root));
+        let cap = 10 + MAX_VALIDITY_MS;
+        store.prune(cap - 1, live);
+        assert!(store.get(&id_of(3)).is_some());
+        store.prune(cap, live);
+        assert!(store.get(&id_of(3)).is_none());
+        assert_eq!(names(&root, ".handoff"), [filename(id_of(2))]);
+        assert_eq!(store.bytes(), size_on_disk(&root));
     }
 }

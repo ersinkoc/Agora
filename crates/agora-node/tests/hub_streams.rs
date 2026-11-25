@@ -570,57 +570,128 @@ fn a_handoff_delivery_is_refused_before_the_signed_command_policy() {
     );
 }
 
-#[test]
-fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
-        return;
-    }
-    let e = env("durable", "mesh.*");
-    let n = node(&e);
-    let socket = e.dir.join("c.sock");
-    let shell = start_shell(&socket);
-    let started = n
-        .events
+/// The run the node announced for `agent_id`, newest last.
+fn announced_runs(n: &Node, agent_id: &str) -> Vec<v1::AgentStarted> {
+    n.events
         .events_after(0)
         .into_iter()
-        .find_map(|e| match e.body {
-            Some(v1::event::Body::AgentStarted(a)) if a.agent_id == shell.agent_id => Some(a),
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::AgentStarted(a)) if a.agent_id == agent_id => Some(a),
             _ => None,
         })
+        .collect()
+}
+
+/// A small delivery for the shell's current run, valid for a day.
+fn handoff_for(n: &Node, agent_id: &str, delivery_id: u8) -> v1::DeliverTaskHandoff {
+    let started = announced_runs(n, agent_id)
+        .pop()
         .expect("the shell's run was announced");
     assert_eq!(started.run_id.len(), 16);
-    let delivery = v1::DeliverTaskHandoff {
-        delivery_id: vec![4; 16],
-        receiver_run_id: started.run_id.clone(),
-        agent_id: shell.agent_id.clone(),
+    v1::DeliverTaskHandoff {
+        delivery_id: vec![delivery_id; 16],
+        receiver_run_id: started.run_id,
+        agent_id: agent_id.into(),
         project_id: started.project_id,
         task_id: "t-1".into(),
         summary: "test delivery".into(),
-        valid_until_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            + 86_400_000,
+        valid_until_ms: agora_node::grants::now_ms() + 86_400_000,
         sender_node: "sender".into(),
         sender_agent_id: "agent-2".into(),
         ..Default::default()
-    };
-    let mut wrong = delivery.clone();
-    wrong.delivery_id = vec![5; 16];
-    wrong.receiver_run_id[0] ^= 1;
-    let send =
-        |id, delivery| Step::Ask(STREAM_COMMANDS, req(id, Cmd::DeliverTaskHandoff(delivery)));
+    }
+}
+
+fn deliver(id: &str, delivery: v1::DeliverTaskHandoff) -> Step {
+    Step::Ask(STREAM_COMMANDS, req(id, Cmd::DeliverTaskHandoff(delivery)))
+}
+
+fn handoffs_in(n: &Node, agent_id: &str) -> usize {
+    let broker = n.mesh.mesh();
+    let inbox = broker
+        .lock()
+        .unwrap()
+        .inbox(&agora_core::AgentId::new(agent_id), None, 10)
+        .unwrap();
+    inbox.iter().filter(|m| m.kind == "handoff").count()
+}
+
+fn handoff_files(e: &Env) -> usize {
+    std::fs::read_dir(e.dir.join("data").join("handoffs"))
+        .map(|d| {
+            d.filter(|f| {
+                f.as_ref()
+                    .is_ok_and(|f| f.path().extension().is_some_and(|x| x == "handoff"))
+            })
+            .count()
+        })
+        .unwrap_or(0)
+}
+
+/// ADR-0041 and ADR-0020: a `signed_commands` line that covers `mesh.task_handoff.v1` (here `mesh.*`) gates the hub's durable
+/// delivery as it gates a routed `mesh.post`. Without a live grant the delivery is refused before anything is stored.
+#[test]
+fn a_negotiated_handoff_under_signed_commands_needs_a_grant() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("durable-gated", "mesh.*");
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let shell = start_shell(&socket);
+    let delivery = handoff_for(&n, &shell.agent_id, 4);
     let seen = hub_test(
         &n,
         &socket,
         vec![
-            send("wrong", wrong),
-            send("first", delivery.clone()),
-            send("retry", delivery.clone()),
+            deliver("first", delivery.clone()),
+            deliver("retry", delivery),
         ],
         true,
         |_| true,
     );
+    assert_eq!(seen.answers["first"], "approval.grant_required");
+    assert_eq!(seen.answers["retry"], "approval.grant_required");
+    assert!(seen.handoffs.is_empty(), "{:?}", seen.handoffs);
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 0);
+    assert_eq!(handoff_files(&e), 0);
+    stop(&socket, &shell.agent_id);
+}
+
+/// With a live grant for it, the same policy lets the delivery through: one receipt for the addressed run, the same one for an
+/// identical retry, and a delivery naming another run is refused.
+#[test]
+fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("durable", "mesh.task_handoff.v1");
+    let owner = Owner::new(&e);
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let shell = start_shell(&socket);
+    let delivery = handoff_for(&n, &shell.agent_id, 4);
+    let mut wrong = delivery.clone();
+    wrong.delivery_id = vec![5; 16];
+    wrong.receiver_run_id[0] ^= 1;
+    let seen = hub_test(
+        &n,
+        &socket,
+        vec![
+            deliver("ungranted", delivery.clone()),
+            Step::Ask(
+                STREAM_COMMANDS,
+                owner.grant("g-handoff", "node", &["mesh.task_handoff.v1"]),
+            ),
+            deliver("wrong", wrong),
+            deliver("first", delivery.clone()),
+            deliver("retry", delivery.clone()),
+        ],
+        true,
+        |_| true,
+    );
+    assert_eq!(seen.answers["ungranted"], "approval.grant_required");
+    assert_eq!(seen.answers["g-handoff"], "ok");
     assert_eq!(seen.answers["wrong"], "mesh.recipient_unknown");
     assert_eq!(seen.handoffs["first"].delivery_id, delivery.delivery_id);
     assert_eq!(
@@ -628,13 +699,72 @@ fn a_negotiated_handoff_returns_one_receipt_and_rejects_a_different_run() {
         delivery.receiver_run_id
     );
     assert_eq!(seen.handoffs["first"], seen.handoffs["retry"]);
-    let broker = n.mesh.mesh();
-    let inbox = broker
-        .lock()
-        .unwrap()
-        .inbox(&agora_core::AgentId::new(&shell.agent_id), None, 10)
-        .unwrap();
-    assert_eq!(inbox.iter().filter(|m| m.kind == "handoff").count(), 1);
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 1);
+    assert_eq!(handoff_files(&e), 1);
+    stop(&socket, &shell.agent_id);
+}
+
+/// ADR-0109: a restart after a crash starts a new process, so the supervisor gives it a new run identity through the node's own run
+/// hook. The replacement cannot see the earlier run's entry or take a delivery for that run; an identical retry still gets its
+/// receipt.
+#[test]
+fn a_restarted_agent_gets_a_new_run_that_cannot_see_the_old_handoff() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("durable-restart", "agent.launch");
+    let n = node(&e);
+    let socket = e.dir.join("c.sock");
+    let shell = start_shell(&socket);
+    let old = handoff_for(&n, &shell.agent_id, 6);
+    let seen = hub_test(&n, &socket, vec![deliver("old", old.clone())], true, |_| {
+        true
+    });
+    let receipt = seen.handoffs["old"].clone();
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 1);
+
+    // The shell exits with a failing code; the supervisor starts it again after its back-off.
+    let mut c = Client::connect(&socket).unwrap();
+    c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: shell.terminal_id.clone(),
+        data: b"exit 3\n".to_vec(),
+    }))
+    .unwrap()
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let new_run = loop {
+        let run = announced_runs(&n, &shell.agent_id).pop().unwrap().run_id;
+        if run != old.receiver_run_id {
+            break run;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the shell was not restarted"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(new_run.len(), 16);
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 0);
+
+    let mut stale = old.clone();
+    stale.delivery_id = vec![7; 16];
+    let fresh = handoff_for(&n, &shell.agent_id, 8);
+    assert_eq!(fresh.receiver_run_id, new_run);
+    let seen = hub_test(
+        &n,
+        &socket,
+        vec![
+            deliver("stale", stale),
+            deliver("retry", old),
+            deliver("fresh", fresh),
+        ],
+        true,
+        |_| true,
+    );
+    assert_eq!(seen.answers["stale"], "mesh.recipient_unknown");
+    assert_eq!(seen.handoffs["retry"], receipt);
+    assert_eq!(seen.answers["fresh"], "ok");
+    assert_eq!(handoffs_in(&n, &shell.agent_id), 1);
     stop(&socket, &shell.agent_id);
 }
 

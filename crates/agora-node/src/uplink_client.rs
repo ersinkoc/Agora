@@ -818,16 +818,26 @@ where
                             ));
                             continue;
                         };
-                        let (mesh, tx, id, delivery) = (
+                        let (mesh, tx, grants, delivery) = (
                             Arc::clone(mesh),
                             answers_tx.clone(),
-                            req.request_id,
+                            grants.clone(),
                             delivery.clone(),
                         );
                         tokio::task::spawn_blocking(move || {
-                            let answer = mesh.deliver_handoff(delivery, crate::daemon::now_ms());
+                            // ADR-0041/ADR-0020: a `signed_commands` line that lists `mesh.task_handoff.v1` (or `mesh.*`) gates the
+                            // hub's delivery as it gates a routed `mesh.post`: the hub cannot widen this node's policy. Checked here,
+                            // after negotiation (an unnegotiated delivery is answered above) and before anything is stored. The grant
+                            // check may read the trusted-devices file, so it runs off the link's task.
+                            let gated = match (grants.as_deref(), req.command.as_ref()) {
+                                (Some(g), Some(c)) => g.gate(c, crate::grants::now_ms()),
+                                _ => Ok(()),
+                            };
+                            let answer = gated.and_then(|()| {
+                                mesh.deliver_handoff(delivery, crate::daemon::now_ms())
+                            });
                             drop(permit);
-                            let _ = tx.send(handoff_answer(id, answer));
+                            let _ = tx.send(handoff_answer(req.request_id, answer));
                         });
                         continue;
                     }
