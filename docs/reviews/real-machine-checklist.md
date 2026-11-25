@@ -374,12 +374,14 @@ not built: nothing to check.
 
 ### RM-61 `agora agent list` lists the agents a node found interrupted
 - **OS:** Linux, macOS, Windows (ADR-0107).
-- **Do:** repeat the interrupted restart from RM-20 (with `--resume ask`, so the node leaves the agent interrupted instead of
-  bringing it back automatically). Run `agora agent list`, then `agora agent resume <agent id>` (and `agora agent resume --again
-  <agent id>` for a kind that cannot resume its session).
+- **Builds:** needs Agora 0.3.37 or newer (or a build of `main` with #1137); on 0.3.33, record as **skip** ("not in 0.3.33").
+- **Do:** repeat the interrupted restart from RM-20 (with `--resume ask`, so the node leaves the agents interrupted instead of
+  bringing them back automatically), starting both a resumable fake agent (like `rm-acp` with `--load-session`, which advertises
+  `loadSession: true`) and `rm-acp` (which advertises `loadSession: false`). Run `agora agent list`, then `agora agent resume
+  <resumable id>`, then `agora agent resume <rm-acp id>` and `agora agent resume --again <rm-acp id>`.
 - **See:** `agora agent list` prints the interrupted agents in id order with `interrupted` and `resume`, `start-again` or
-  `still-running`; `agora agent resume <agent id>` brings back a resumable agent and refuses one that cannot resume until
-  `--again` is passed.
+  `still-running`; `agora agent resume <resumable id>` brings back the resumable agent; `agora agent resume <rm-acp id>` refuses
+  the non-resumable one until `--again` is passed.
 - **Evidence so far:** none recorded.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
@@ -429,10 +431,13 @@ not built: nothing to check.
 
 ### RM-62 A structured agent can be allowed always (the agent decides how long it keeps the answer)
 - **OS:** Linux, macOS, Windows (the window and the terminal client; ADR-0101).
-- **Do:** S1, S2, S4. Start `rm-acp` and trigger a permission request that offers an always-allow option (`ask`). Answer with the
-  always-allow action in the web window, then trigger the same action again; repeat in `agora tui`.
+- **Builds:** needs Agora 0.3.35 or newer (or a build of `main` with #1007 and #1012); on 0.3.33, record as **skip** ("not in 0.3.33").
+- **Do:** S1, S2, S4. Start `rm-acp` and send `ask-kinds allow_always,allow_once` (the plain `ask` prompt offers no always-allow
+  option). Answer with the always-allow action in the web window, and repeat in `agora tui`. For the no-reprompt check, use an agent
+  that keeps its always answer (the fake agent asks again on each prompt).
 - **See:** the approval card offers the always-allow choice alongside Allow and Deny, signs the `approval-always-v1` decision, and
-  subsequent matching requests from the agent proceed according to the agent's own scope without re-prompting.
+  for an agent that keeps its always answer, subsequent matching requests proceed according to the agent's own scope without
+  re-prompting.
 - **Evidence so far:** none recorded.
 
 ### RM-25 Trusting your devices in one step
@@ -477,10 +482,14 @@ not built: nothing to check.
 
 ### RM-63 A window that opens, reloads or reconnects shows the recent Team chat
 - **OS:** Linux, macOS, Windows (ADR-0103).
+- **Builds:** needs Agora 0.3.36 or newer (or a build of `main` with ADR-0103); on 0.3.33, record as **skip** ("not in 0.3.33").
 - **Do:** S1, S2. Start a Shell in `$RM/proj`, send a Team chat message from the project's Messages/Team chat view (or via S5
-  `send_message` to `#channel`), then reload the browser window and also open a second browser tab to the same hub.
-- **See:** after reload and in the newly opened tab, the recent Team chat messages (up to the newest 50 messages / 256 KiB per
-  project that the signed-in person may see) appear immediately from the snapshot without needing a new live message.
+  `send_message` to `#channel`), then: (1) reload the browser window, (2) open a second browser tab to the same hub, and (3)
+  disconnect and reconnect the existing window (e.g. toggle DevTools Offline on and back off, or restart the hub while the window
+  stays open).
+- **See:** after reload, in the newly opened tab, and after reconnecting the existing window, the recent Team chat messages appear
+  immediately from the snapshot without needing a new live message (up to the newest 50 messages / 256 KiB across all project rings
+  visible to that window, so newer messages in one project can crowd out older ones in another).
 - **Evidence so far:** none recorded.
 
 ### RM-29 Shared project board (tasks, leases)
@@ -696,12 +705,14 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-64 A window that attaches late gets the program's modes (mouse, wheel, focus, alternate screen, cursor shape)
 - **OS:** Linux, macOS, Windows (web window and terminal client; ADR-0100).
-- **Do:** S1, S2. Start a Shell in `$RM/proj`, print enough lines to populate scrollback, then start a full-screen/mouse-aware
-  program (or emit alternate-screen / mouse-mode sequences). Reload the web window, open the same agent in a second browser tab, and
-  open its agent panel in `agora tui`.
-- **See:** the late-attaching web window and `agora tui` agent panel receive the prior scrollback history (when not in alternate
-  screen) and repaint with the program's active modes (mouse, wheel, focus, alternate screen, cursor shape) intact in one synchronized
-  paint.
+- **Builds:** needs Agora 0.3.34 or newer (or a build of `main` with #953, #959, #964); on 0.3.33, record as **skip** ("not in 0.3.33").
+- **Do:** S1, S2. Start a Shell in `$RM/proj` and print enough lines to populate scrollback. First, while still in normal screen,
+  reload the web window, open a second browser tab, and open the agent panel in `agora tui`, scrolling back in each to check the
+  prior history. Then start a full-screen/mouse-aware program (or emit alternate-screen and mouse-mode sequences) and repeat the
+  reload, second tab, and `agora tui` agent panel attachment.
+- **See:** the normal-screen late attachments receive the prior scrollback history before the repaint; the alternate-screen late
+  attachments repaint with the program's active modes (mouse, wheel, focus, alternate screen, cursor shape) intact in one
+  synchronized paint (without normal-screen history).
 - **Evidence so far:** none recorded.
 
 ### RM-53 A shared terminal takes the smallest window's size
@@ -757,6 +768,7 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-65 A widget kit and one danger colour (red for failed, errors, deletions, destructive actions and acting without asking; amber only for needs you)
 - **OS:** Linux, macOS, Windows (any browser; ADR-0102).
+- **Builds:** needs Agora 0.3.35 or newer (or a build of `main` with ADR-0102 PRs 1–3); on 0.3.33, record as **skip** ("not in 0.3.33").
 - **Do:** open the web window across all six built-in themes (Dark and Light); trigger a "Needs you" approval card (`rm-chat` `ask`),
   an agent acting without asking (`rm-probe` with `skip-permissions`), and an error/destructive confirmation (such as Forget or
   Close).
