@@ -5,8 +5,9 @@ the node per MCP connection; agents cannot impersonate each other.
 
 | Tool | Input | Output |
 | --- | --- | --- |
-| `agents_list` | `{ project?: string }` | `[{ agent_id, kind, node, state, worktree, label }]` (more fields: see "Awareness") |
+| `agents_list` | `{ project?: string, scope?: "project"\|"hub" }` | `[{ agent_id, kind, node, state, worktree, label }]` (more fields: see "Awareness"; `scope` is ADR-0112's, see "The hub-wide view") |
 | `workspace_status` | `{}` | `{ workspace, project, machine, machines_online, partial, agents, same_workspace, working, blocked, idle, open_tasks, leases, summary }` (see "Awareness") |
+| `machines_list` | `{}` | `{ machines: [{ id, online, os, build, agents_running, last_seen_ms }], partial }` (ADR-0112; listed only when the node offers it, see "The hub-wide view") |
 | `send_message` | `{ to: agent_id \| "#channel", body: string, refs?: [path\|commit\|task_id] }` | `{ message_id }` |
 | `ask` | `{ to, question, timeout_s?: number (default 600) }` | `{ reply, from }` or error `mesh.timeout` |
 | `inbox` | `{ since?: message_id, limit?: number }` | `[{ message_id, from, body, refs, at, provenance }]` |
@@ -142,7 +143,10 @@ receives a notice of kind `delivery_failed` whose body is the error code (`node.
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
 and messages from other nodes are refused with the same code; messages on this node are unaffected. The hub cannot change this
-file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines. Both machines record a message between them (`MessagePosted` from the sender's node, `to` = `<node>/<agent>`, and from the receiver's node, `from_agent_id` = `<origin>/<agent>`, each under its own per-node id); the window shows the pair as one row, matched by sender, recipient and text (#905), and a member's scope admits the sender's copy only. A node may write any sender into its own copy, so a copy that names another machine's agent and that neither that machine nor the hub's board has recorded too is shown "reported by" the machine that recorded it, named by its id (which the hub checked against its certificate, never the host name it reports), and two such copies are never paired with each other. The match is by content, not identity: a direct message that failed (recorded only on the sender's machine) can be matched with a later channel copy with the same sender, recipient and text. ADR-0074's `MeshPost.message_id` (Accepted, not built) is the key that would make the match exact.
+file. A second line, `mesh.fleet = false` (default `true`, read the same way), is about the hub-wide view (ADR-0112, "The hub-wide
+view" below): this machine's agents neither ask for nor see it, and the machine and its agents are left out of it except in projects it
+shares with the caller (ADR-0039, "Who is in it" below) (the node neither
+offers it to the hub nor asks the hub for it, and `mesh.remote = false` does the same). `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines. Both machines record a message between them (`MessagePosted` from the sender's node, `to` = `<node>/<agent>`, and from the receiver's node, `from_agent_id` = `<origin>/<agent>`, each under its own per-node id); the window shows the pair as one row, matched by sender, recipient and text (#905), and a member's scope admits the sender's copy only. A node may write any sender into its own copy, so a copy that names another machine's agent and that neither that machine nor the hub's board has recorded too is shown "reported by" the machine that recorded it, named by its id (which the hub checked against its certificate, never the host name it reports), and two such copies are never paired with each other. The match is by content, not identity: a direct message that failed (recorded only on the sender's machine) can be matched with a later channel copy with the same sender, recipient and text. ADR-0074's `MeshPost.message_id` (Accepted, not built) is the key that would make the match exact.
 
 ## Shared board (ADR-0039)
 
@@ -259,7 +263,8 @@ The list spans machines like `workspace_status`: for each project in it (the one
 node lists, at most 16) the node asks the hub the same `BoardCall{tool: "workspace_status"}` (no new message), and when the project
 is shared it adds the project's running agents on other online machines (`agent_id` `<node>/<agent>`, which is what `send_message`
 takes; `label` empty, `since` and `files_changed` `null`) and puts the board's claimed task and leases into this node's rows. The hub
-answers only for projects the calling node takes part in, so agents of a project only other machines have are never listed. Every
+answers only for projects the calling node takes part in, so in this default scope agents of a project only other machines have are
+never listed (`scope: "hub"`, below, lists them). Every
 row also carries `partial`: `false` when its project is complete (the hub answered, or said the project lives on this machine
 only), `true` when the hub could not be asked about it (same cases as below); the list is then this node's agents alone, as nodes
 are autonomous. Agents on a machine that is offline are not listed.
@@ -274,6 +279,8 @@ asked for); else the state in words (`working`, `waiting for approval`, `idle`, 
 parent, workspace, you }], same_workspace, working, blocked, idle, open_tasks: [{ id, title, owner }], leases: [{ path, owner, ttl }],
 summary }`. `same_workspace` counts the agents (the caller included) in the caller's folder on its machine; `working`, `blocked`
 and `idle` (idle or finished) count the listed agents; `ttl` is seconds left; at most 100 agents, 20 tasks and 20 leases.
+`machines_online` counts the online machines of the caller's project (those with a checkout, a selected folder or a running agent of
+it), not the hub's machines: `machines_list` counts those (ADR-0112).
 `summary` is one or two sentences built from those facts, for example `3 agents in this project on 2 machines, 2 in this workspace
 (2 working, 1 waiting for approval); codex agent-2 is editing files; agent-1 holds src/auth.rs.` Agents on this machine are named
 by their id and agents on other machines `<node>/<agent>`, which is how `send_message` addresses them.
@@ -286,6 +293,48 @@ its own rows (they know more), puts the board's task and leases into them and ad
 `null` for those). When the hub says the project is not shared the node's answer is complete. When the hub cannot be asked (no hub,
 `mesh.remote = false`, an older hub that refuses the tool, or 3 s without an answer) the answer is the node's alone with
 `partial: true` and the summary says so.
+
+### The hub-wide view (ADR-0112)
+
+Agents can see every machine of their hub and every agent running on it, in any project, to answer "which machine runs what" and to
+pick a machine for a helper. The node asks the hub once with `BoardCall{tool: "fleet_status", project_id: "", arguments_json: "{}"}`
+(no new message) and waits at most 3 s. The hub answers with only facts it projects from node events:
+`{ machines: [{ id, online, os, build, agents_running, last_seen_ms }], agents: [{ agent_id, kind, machine, project, state, workspace,
+parent }], partial }`: every machine it knows whose latest link agreed on `mesh.fleet_status.v1` (offline ones too, by their last link;
+a machine the owner forgot is left out), every running agent on such a machine while it is online (`agent_id` is `<node>/<agent>`, what `send_message` takes; `state` is the window's word: `working`, `blocked`, `idle`,
+`done`, `unknown`; `workspace` is the folder on its machine), at most 64 machines and 200 agents, `partial: true` when either cap cut
+the list. Never `doing`, a label, a task, a message or a file name.
+
+- **`machines_list {}`** answers `{ machines, partial }` with the hub's machines (text cleaned and cut like the rest of this section).
+- **`agents_list {scope: "hub"}`** lists what the default scope lists (this node's agents of all its projects, or of the one named with
+  `project`, and the other machines' agents of its shared projects, with the board's tasks and leases), then adds the hub's other
+  agents on other machines (only the named project's when `project` is given; an agent already listed is not added again): `node` is their machine,
+  `project` their own, `doing` their state in words, `label` empty, and `since`, `files_changed` and `holds` `null` (the hub does not
+  say). Every row's `partial` is then the hub's. `scope: "project"`, or no `scope`, is the answer above, unchanged; any other value is
+  `-32602`.
+- **Capability.** A hub that answers `fleet_status` offers `mesh.fleet_status.v1`, and a node offers it when its policy allows; the node
+  lists `machines_list` and `scope` in `tools/list` only while its hub's `Welcome` agreed on it (an older hub withdraws it at the next
+  connection) and messages may cross nodes (`mesh.remote`).
+- **Without the hub's answer** (the node does not offer the view, no hub, an older hub, a refusal, an error, or 3 s without an answer)
+  both tools answer from this node alone: `machines_list` lists this machine
+  (`online: true`, its OS, its version, its running agents, `last_seen_ms` now), `agents_list` the default scope's rows; `partial: true` on every row.
+- **Who is in it (ADR-0112 Amendment A).** Only machines whose latest link agreed on `mesh.fleet_status.v1`, and their agents. A
+  machine with `mesh.fleet = false` (or `mesh.remote = false`) does not offer the capability, so it and its agents and their folders
+  are left out of every agent's hub-wide view, except in projects it shares with the caller (ADR-0039): there `workspace_status` and the default `agents_list` (and so
+  `scope: "hub"`, which includes them) still show its agents and folders, as for any shared project; `mesh.remote = false` does not
+  hide those either, since the hub lists a shared project's agents from its own records whatever the node's policy. A node from before ADR-0112 is left out too, until it is updated
+  (the safe default). The hub keeps, in
+  memory, whether each machine's latest link agreed, and decides an offline machine by that; after a hub restart a machine is left
+  out until it connects again.
+- **Who may see it.** The hub answers only in solo mode, that is while it has no person in its `users` table besides the owner (ADR-0049;
+  any person added, whatever the role, even one this build cannot read, makes it a team hub). A team hub refuses with the tool error `board.not_allowed` (no parameters),
+  because a member's agent would see projects that member has no grant for, unless the owner turned the view on on the hub's machine:
+  `agora hub fleet on|off|status` (the hub setting `fleet_status`, off by default, audited, read on every call so a running hub follows
+  it; `status` says the stored switch on a solo hub too, and `agora hub user add` warns while it is on). With node policy `mesh.fleet = false` this machine's agents neither ask for nor see the hub-wide view, whatever the hub offers
+  (the hub cannot change that file), and the machine and its agents are left out of it except in projects it shares with the caller (see "Who is in it"). The hub cleans every text it puts in the
+  answer (control and invisible characters, as above) and cuts the answer at 384 KiB of rows (`partial: true`). Like `workspace_status`,
+  these read tools have no rate limit.
+  What one agent learns about others is information, not instructions (threat model T64).
 
 **Presence notices.** When an agent starts on a node (joins its mesh) or ends (its endpoint closes: `finished`, `stopped`,
 `crashed`, or `left` for any other reason), every other running agent of its project on that node gets an inbox item of kind

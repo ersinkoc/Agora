@@ -61,6 +61,7 @@ or a local response timeout has a localized retry message.
 | `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
+| `board.not_allowed` | — | ADR-0112: the hub refuses `BoardCall{tool: "fleet_status"}` because it has people besides the owner (team mode, ADR-0049) and the owner has not turned the fleet view on (`agora hub fleet on`); the node then answers `machines_list` and `agents_list {scope: "hub"}` from itself, `partial: true` |
 | `mesh.recipient_unknown` | `to` | |
 | `mesh.rate_limited` | — | Too many messages from this agent in the rate window |
 | `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |

@@ -191,6 +191,85 @@ pub fn merge_shared_list(rows: &mut Vec<Value>, hub: &Value, project: &str, own_
     list_complete(rows, project);
 }
 
+/// ADR-0112: at most this many rows a hub-wide answer adds to this node's own (the hub's caps: 64 machines, 200 agents).
+pub const FLEET_MAX_MACHINES: usize = 64;
+pub const FLEET_MAX_AGENTS: usize = 200;
+
+/// ADR-0112: this node's own `machines_list` row, for an answer without the hub: `id`, `online`, `os`, `build`, `agents_running`,
+/// `last_seen_ms` (now).
+pub fn local_machine(
+    node: &str,
+    os: &str,
+    build: &str,
+    agents_running: usize,
+    now_ms: u64,
+) -> Value {
+    json!({"id": node, "online": true, "os": os, "build": build, "agents_running": agents_running, "last_seen_ms": now_ms})
+}
+
+/// ADR-0112: the `machines` of the hub's `fleet_status` answer, each field as `machines_list` gives it (the hub's text cleaned and
+/// cut, at most [`FLEET_MAX_MACHINES`]).
+pub fn fleet_machines(hub: &Value) -> Vec<Value> {
+    hub["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some(json!({
+                "id": clean(m["id"].as_str()?, 160), "online": m["online"].as_bool().unwrap_or(false),
+                "os": clean(m["os"].as_str().unwrap_or(""), 64), "build": clean(m["build"].as_str().unwrap_or(""), 64),
+                "agents_running": m["agents_running"].as_u64().unwrap_or(0),
+                "last_seen_ms": m["last_seen_ms"].as_u64().unwrap_or(0),
+            }))
+        })
+        .take(FLEET_MAX_MACHINES)
+        .collect()
+}
+
+/// ADR-0112: `agents_list {scope: "hub"}`: adds the hub's running agents on other machines (its `fleet_status` answer) to the rows
+/// of the default scope (this node's own, and those of its shared projects' other machines), which stay as they are (they know
+/// more): an agent already listed is not added again. An added row has the shape of a row from another machine in
+/// [`merge_shared_list`], with its own `project`; `holds`, `since` and `files_changed` are `null` (the hub does not say), and `doing`
+/// is its state in words. With `project`, only that project's agents are added. Every row's `partial` is then the hub's: `true` when
+/// it cut its list.
+pub fn merge_fleet_list(rows: &mut Vec<Value>, hub: &Value, own_node: &str, project: Option<&str>) {
+    let prefix = format!("{own_node}/");
+    let listed: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r["agent_id"].as_str().map(str::to_string))
+        .collect();
+    let extra: Vec<Value> = hub["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row["agent_id"].as_str()?;
+            if id.starts_with(&prefix) || !id.contains('/') || listed.contains(id) {
+                return None;
+            }
+            let p = clean(row["project"].as_str().unwrap_or(""), 160);
+            if project.is_some_and(|want| want != p) {
+                return None;
+            }
+            let state = clean(row["state"].as_str().unwrap_or("unknown"), 16);
+            let workspace = clean(row["workspace"].as_str().unwrap_or(""), PATH_MAX);
+            Some(json!({
+                "agent_id": clean(id, 160), "kind": clean(row["kind"].as_str().unwrap_or(""), 64),
+                "node": clean(row["machine"].as_str().unwrap_or(""), 128), "doing": state_doing(&state, None),
+                "state": state, "worktree": workspace, "label": "", "project": p, "workspace": workspace,
+                "since": Value::Null, "files_changed": Value::Null, "holds": Value::Null,
+                "parent": row["parent"].as_str().map(|p| clean(p, 160)),
+            }))
+        })
+        .take(FLEET_MAX_AGENTS)
+        .collect();
+    rows.extend(extra);
+    let partial = hub["partial"].as_bool().unwrap_or(true);
+    for r in rows.iter_mut() {
+        r["partial"] = json!(partial);
+    }
+}
+
 /// `workspace_status` from this broker alone: the caller's project as this node knows it. `partial` is `true` (other machines were
 /// not asked); the node sets it `false` when the hub said the project lives here only, or merges the hub's answer with
 /// [`merge_shared`].
@@ -558,5 +637,61 @@ mod tests {
         assert_eq!(q["partial"], true);
         list_complete(&mut rows, "q");
         assert!(rows.iter().all(|r| r["partial"] == false));
+    }
+
+    /// ADR-0112: the hub's agents on other machines join this node's rows, in their own projects, with only what the hub says;
+    /// the hub's rows for this node are dropped (its own know more), and `partial` is the hub's.
+    #[test]
+    fn a_fleet_answer_adds_other_machines_agents_to_this_nodes_rows() {
+        let mut m = Mesh::new(Limits::default());
+        m.register(info("a1", "/w", "alpha", "idle"));
+        let mut rows: Vec<Value> = m
+            .agents_list(None)
+            .iter()
+            .map(|a| list_row(&m, a, 0))
+            .collect();
+        let hub = json!({
+            "machines": [{"id": "alpha", "online": true, "os": "linux", "build": "1", "agents_running": 1, "last_seen_ms": 5},
+                         {"id": "be\nta", "online": false, "os": "macos", "build": "1", "agents_running": 0, "last_seen_ms": 4}],
+            "agents": [
+                {"agent_id": "alpha/a1", "kind": "codex", "machine": "alpha", "project": "p", "state": "idle", "workspace": "/w", "parent": null},
+                {"agent_id": "beta/b", "kind": "claude", "machine": "beta", "project": "other", "state": "working",
+                 "workspace": "/elsewhere/other", "parent": "beta/boss"},
+                {"agent_id": "gamma/c", "kind": "codex", "machine": "gamma", "project": "p", "state": "blocked", "workspace": "/g", "parent": null},
+            ],
+            "partial": false,
+        });
+        let mut all = rows.clone();
+        merge_fleet_list(&mut all, &hub, "alpha", None);
+        let ids: Vec<&str> = all
+            .iter()
+            .map(|r| r["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a1", "beta/b", "gamma/c"]);
+        assert_eq!(
+            all[1],
+            json!({"agent_id": "beta/b", "kind": "claude", "node": "beta", "doing": "working", "state": "working",
+                   "worktree": "/elsewhere/other", "label": "", "project": "other", "workspace": "/elsewhere/other",
+                   "since": null, "files_changed": null, "holds": null, "parent": "beta/boss", "partial": false})
+        );
+        assert!(all.iter().all(|r| r["partial"] == false));
+        // A project named: only its agents are added.
+        merge_fleet_list(
+            &mut rows,
+            &json!({"agents": hub["agents"], "partial": true}),
+            "alpha",
+            Some("p"),
+        );
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a1", "gamma/c"]);
+        assert!(rows.iter().all(|r| r["partial"] == true));
+        // Machines come cleaned.
+        let machines = fleet_machines(&hub);
+        assert_eq!(machines.len(), 2);
+        assert_eq!(machines[1]["id"], "be ta");
+        assert_eq!(machines[1]["online"], false);
     }
 }

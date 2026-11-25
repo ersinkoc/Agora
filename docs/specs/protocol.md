@@ -531,7 +531,11 @@ written later. `agora history purge` removes every transcript. Reading older ent
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
-project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
+project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`. ADR-0112 adds one tool value, no new
+message or field: `fleet_status` with an empty `project_id`, the hub's read-only view for agents of every machine whose link agreed on the capability and its running agents (Amendment A)
+(`docs/specs/mesh-tools.md#the-hub-wide-view-adr-0112`). A hub that answers it offers the generation 1 capability
+`mesh.fleet_status.v1`, and a node offers it when its policy allows (`mesh.fleet`); the hub answers on a solo hub, or when its owner
+turned it on (`agora hub fleet on`), and otherwise with the tool error `board.not_allowed` (no parameters).
 
 `BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. A node that goes offline and comes back to a shared project is asked again, also when the hub records its end late, together with its next connection (#1036). Sent only to nodes that offer the capability `board.join`.
 
