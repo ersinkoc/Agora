@@ -1322,7 +1322,10 @@ struct ViewWait {
 
 impl ViewWait {
     /// A request that already waits when the view opens is said from the start, not only one that arrives meanwhile.
-    fn new(say: &Say, ask: &Over<'_>) -> Self {
+    fn new(say: &Say, ask: &mut Over<'_>) -> Self {
+        // The view takes the screen over the console, as a question does (`Console::asked`): the rest of the console's batch was typed
+        // before it was seen and must not act after it closes (a `y` among them would answer a request on a console not drawn again).
+        ask.c.asked = true;
         let waiting = ask
             .c
             .snapshot
@@ -5084,6 +5087,26 @@ fn clean_up_old(
     c: &mut Console,
     rx: &mpsc::Receiver<u8>,
 ) -> String {
+    // ADR-0106: forgetting a machine is the owner's; the hub refuses `node.forget` to anyone else and writes it down. A viewer
+    // is told the window watches; a member gets the hub's own refusal, with nothing sent. An older hub (role not said) is asked.
+    match session.person_role() {
+        agora_protocol::v1::PersonRole::Viewer => {
+            return say.text(key!("tui-viewer-watching"), &[]);
+        }
+        agora_protocol::v1::PersonRole::Member => {
+            return say.text(
+                key!("tui-cleanup-failed"),
+                &[
+                    (
+                        "code",
+                        Arg::Str(agora_protocol::ErrorCode::AuthForbidden.as_str().into()),
+                    ),
+                    ("count", Arg::Num(0)),
+                ],
+            );
+        }
+        agora_protocol::v1::PersonRole::Owner | agora_protocol::v1::PersonRole::Unspecified => {}
+    }
     let now = now_ms();
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let old: Vec<(String, String)> = c
@@ -8239,6 +8262,32 @@ mod viewer_console_tests {
         );
         assert_eq!(c.notice, say.text(key!("tui-forget-running"), &[]));
         assert!(rows(&h).iter().all(|(action, _)| action != "pair.status"));
+    }
+
+    /// "Clean up old machines" (ADR-0073) is the owner's: the hub refuses `node.forget` to anyone else and writes the refusal
+    /// down (ADR-0106). A member's or viewer's console sends nothing, even with `y` typed in its box, and says why.
+    #[test]
+    fn clean_up_old_from_a_member_or_viewer_sends_nothing() {
+        for role in [PersonRoleOnHub::Viewer, PersonRoleOnHub::Member] {
+            let h = hub(role);
+            let say = Say(agora_i18n::Catalog::english());
+            let mut session = Session::connect(&h.hub, "token").unwrap();
+            let mut c = console();
+            if let Some(s) = c.snapshot.as_mut() {
+                s.nodes.push(agora_protocol::v1::NodeSnapshot {
+                    node_id: "old".into(),
+                    online: false,
+                    last_event_ms: now_ms() - 2 * 86_400_000,
+                    ..Default::default()
+                });
+            }
+            connected_role(&mut session, &mut c);
+            let (tx, rx) = mpsc::channel::<u8>();
+            tx.send(b'y').unwrap();
+            let line = clean_up_old(&say, &mut session, &mut c, &rx);
+            assert!(!line.is_empty(), "{role:?}");
+            assert_eq!(rows(&h), Vec::<(String, String)>::new(), "{role:?}");
+        }
     }
 
     /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal. The loop matches on
