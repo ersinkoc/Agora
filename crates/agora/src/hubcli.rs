@@ -700,7 +700,7 @@ pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
     let op = match o.positional.as_slice() {
         [op] if matches!(op.as_str(), "on" | "off" | "status") => op.as_str(),
         _ => {
-            say.err(key!("cli-usage"), &[]);
+            say.err(key!("cli-bad-arguments"), &[]);
             return ExitCode::from(2);
         }
     };
@@ -721,8 +721,8 @@ pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
             return fail(format!("{e:?}"));
         }
     }
-    let solo = match agora_hub::users::Users::new(&store).list() {
-        Ok(people) => people.is_empty(),
+    let solo = match agora_hub::users::Users::new(&store).any() {
+        Ok(any) => !any,
         Err(e) => return fail(format!("{e:?}")),
     };
     let on = match agora_hub::users::fleet_switch(&store) {
@@ -731,7 +731,9 @@ pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
     };
     say.out(
         match (solo, on) {
-            (true, _) => key!("cli-hub-fleet-solo"),
+            // The stored switch is said too: once a person is added it decides (F2 of the #1205 review).
+            (true, true) => key!("cli-hub-fleet-solo-on"),
+            (true, false) => key!("cli-hub-fleet-solo"),
             (false, true) => key!("cli-hub-fleet-on"),
             (false, false) => key!("cli-hub-fleet-off"),
         },
@@ -792,6 +794,11 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                             ("code", code.into()),
                         ],
                     );
+                    // ADR-0112: with the fleet view on, this person's agents see every project of the hub; say so now. A switch that
+                    // cannot be read is warned about too.
+                    if agora_hub::users::fleet_switch(&store).unwrap_or(true) {
+                        say.err(key!("cli-hub-fleet-user-warning"), &[]);
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),

@@ -678,26 +678,47 @@ pub const FLEET_MAX_AGENTS: usize = 200;
 /// The longest machine id, agent id, kind, project and folder in a `fleet_status` answer (bytes).
 const FLEET_ID_MAX: usize = 160;
 const FLEET_PATH_MAX: usize = 512;
+/// ADR-0112: the most bytes the rows of one `fleet_status` answer take, serialized; past it the answer is cut and says `partial: true`.
+/// The answer travels as a JSON string inside the MCP result, where each `"` or `\` of it becomes two bytes (control characters are
+/// cleaned out first), so twice this, with room for the wrapping, stays under the hub's limit for a board result.
+pub const FLEET_MAX_BYTES: usize = 384 * 1024;
+const _: () = assert!(2 * FLEET_MAX_BYTES + 1024 < crate::server::MAX_BOARD_RESULT);
 
 /// ADR-0112: `fleet_status`, the hub's read-only view for agents of every machine it knows and every running agent on an online
 /// machine. Only facts the hub projects from node events: never a task, a label, `doing`, a message or a file name. A machine the
 /// owner forgot is left out, as it is for windows. Who may see it is the caller's to decide ([`crate::hub::Hub::board_call`]).
+/// Every text is put on one line without control or invisible characters (bidi marks included) and cut, as the node does
+/// (`agora_mesh::awareness::clean`); at most [`FLEET_MAX_MACHINES`] machines, [`FLEET_MAX_AGENTS`] agents and [`FLEET_MAX_BYTES`].
 pub fn fleet(view: &View) -> Value {
+    fleet_within(view, FLEET_MAX_BYTES)
+}
+
+fn fleet_within(view: &View, max_bytes: usize) -> Value {
+    use agora_mesh::awareness::clean;
     let mut partial = false;
-    let shown: Vec<(&String, &crate::projection::NodeView)> =
-        view.nodes.iter().filter(|(_, n)| !n.forgotten).collect();
-    partial |= shown.len() > FLEET_MAX_MACHINES;
-    let machines: Vec<Value> = shown
-        .iter()
-        .take(FLEET_MAX_MACHINES)
-        .map(|(id, n)| {
-            json!({
-                "id": cut(id, FLEET_ID_MAX), "online": n.online, "os": cut(&n.os, 64),
-                "build": cut(&n.build, 64), "agents_running": n.agents_running,
-                "last_seen_ms": n.last_event_ms,
-            })
-        })
-        .collect();
+    let mut room = max_bytes;
+    // Takes `row` while it fits in what is left; a row that does not fit ends its list.
+    let mut fits = |row: &Value| {
+        let n = row.to_string().len() + 1;
+        let ok = n <= room;
+        if ok {
+            room -= n;
+        }
+        ok
+    };
+    let mut machines: Vec<Value> = Vec::new();
+    for (id, n) in view.nodes.iter().filter(|(_, n)| !n.forgotten) {
+        let row = json!({
+            "id": clean(id, FLEET_ID_MAX), "online": n.online, "os": clean(&n.os, 64),
+            "build": clean(&n.build, 64), "agents_running": n.agents_running,
+            "last_seen_ms": n.last_event_ms,
+        });
+        if machines.len() == FLEET_MAX_MACHINES || !fits(&row) {
+            partial = true;
+            break;
+        }
+        machines.push(row);
+    }
     let mut agents: Vec<Value> = Vec::new();
     for (key, a) in &view.agents {
         // The machine is the authenticated producer named in the hub-wide key, never the payload's `node_id`.
@@ -713,17 +734,19 @@ pub fn fleet(view: &View) -> Value {
         {
             continue;
         }
-        if agents.len() == FLEET_MAX_AGENTS {
+        let parent =
+            (!a.parent_agent_id.is_empty()).then(|| clean(&a.parent_agent_id, FLEET_ID_MAX));
+        let row = json!({
+            "agent_id": clean(key, FLEET_ID_MAX), "kind": clean(&a.kind, 64), "machine": clean(node, FLEET_ID_MAX),
+            "project": clean(&a.project_id, FLEET_ID_MAX), "state": state_word(a.state),
+            "workspace": view.worktrees.get(&a.worktree_id).map_or(String::new(), |w| clean(&w.path, FLEET_PATH_MAX)),
+            "parent": parent,
+        });
+        if agents.len() == FLEET_MAX_AGENTS || !fits(&row) {
             partial = true;
             break;
         }
-        let parent = (!a.parent_agent_id.is_empty()).then(|| cut(&a.parent_agent_id, FLEET_ID_MAX));
-        agents.push(json!({
-            "agent_id": cut(key, FLEET_ID_MAX), "kind": cut(&a.kind, 64), "machine": cut(node, FLEET_ID_MAX),
-            "project": cut(&a.project_id, FLEET_ID_MAX), "state": state_word(a.state),
-            "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| cut(&w.path, FLEET_PATH_MAX)),
-            "parent": parent,
-        }));
+        agents.push(row);
     }
     json!({"machines": machines, "agents": agents, "partial": partial})
 }
@@ -2095,5 +2118,82 @@ mod tests {
         let f = fleet(&v);
         assert_eq!(f["machines"].as_array().unwrap().len(), FLEET_MAX_MACHINES);
         assert_eq!(f["partial"], true);
+    }
+
+    /// F4 of the #1205 review: the hub cleans what nodes reported (control characters, bidi and other invisible marks) and keeps a
+    /// full answer well inside its limit for a board result; a byte budget that is reached cuts the answer and says `partial: true`.
+    #[test]
+    fn fleet_status_text_is_cleaned_and_the_answer_stays_under_the_board_limit() {
+        let mut v = view(&["alpha"]);
+        let dirty = |n: usize| "a\u{1b}[31m\"\\\u{202e}\u{200b}\n\t".repeat(n).to_string();
+        for node in v.nodes.values_mut() {
+            node.os = dirty(50);
+            node.build = dirty(50);
+        }
+        let template = v.agents["alpha/a"].clone();
+        for i in 0..FLEET_MAX_AGENTS {
+            let mut a = template.clone();
+            a.kind = dirty(200);
+            a.project_id = dirty(200);
+            a.parent_agent_id = dirty(200);
+            a.worktree_id = "w".into();
+            v.agents.insert(format!("alpha/x{i:03}{}", dirty(30)), a);
+        }
+        v.worktrees.insert(
+            "w".into(),
+            crate::projection::WorktreeView {
+                checkout_id: String::new(),
+                path: dirty(500),
+                branch: String::new(),
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                head_commit: String::new(),
+            },
+        );
+        let a = fleet_answer(&v);
+        let Verdict::Done { result, .. } = &a.verdict else {
+            panic!()
+        };
+        let wire = result.to_string();
+        assert!(
+            wire.len() < crate::server::MAX_BOARD_RESULT,
+            "{}",
+            wire.len()
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let f: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(f["agents"].as_array().unwrap().len(), FLEET_MAX_AGENTS);
+        // Every text value, not the serialized answer (which escapes control characters anyway).
+        fn texts(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::String(s) => out.push(s.clone()),
+                Value::Array(a) => a.iter().for_each(|x| texts(x, out)),
+                Value::Object(o) => o.values().for_each(|x| texts(x, out)),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        texts(&f, &mut all);
+        assert!(all.len() > 1000);
+        for t in &all {
+            assert!(
+                !t.chars()
+                    .any(|c| c.is_control() || agora_core::text::is_hidden(c)),
+                "{t:?}"
+            );
+        }
+        assert!(f["agents"][0]["kind"].as_str().unwrap().len() <= 64);
+        assert!(f["agents"][0]["workspace"].as_str().unwrap().len() <= FLEET_PATH_MAX);
+
+        // A small budget cuts the answer and says so.
+        let cut = fleet_within(&v, 4096);
+        assert_eq!(cut["partial"], true);
+        assert!(
+            cut.to_string().len() < 4096 + 64,
+            "{}",
+            cut.to_string().len()
+        );
+        assert!(cut["agents"].as_array().unwrap().len() < FLEET_MAX_AGENTS);
     }
 }

@@ -157,9 +157,6 @@ pub fn tools() -> Vec<Value> {
 pub const SCOPE_PROJECT: &str = "project";
 pub const SCOPE_HUB: &str = "hub";
 
-/// ADR-0112: the tool a node offers when its hub answers `fleet_status` and its policy allows it (`mesh.fleet`). The node answers it.
-pub const FLEET_TOOLS: &[&str] = &["machines_list"];
-
 /// Adds what the node offers with the hub-wide view (ADR-0112) to [`tools`]: `scope` on `agents_list`, and `machines_list` after
 /// `workspace_status`.
 pub fn with_fleet(list: &mut Vec<Value>) {
@@ -600,7 +597,7 @@ impl McpConnection {
         }
     }
 
-    /// ADR-0112: whether [`FLEET_TOOLS`] are listed and `agents_list` takes `scope`. The node sets it before each line.
+    /// ADR-0112: whether `machines_list` is listed and `agents_list` takes `scope`. The node sets it before each line.
     pub fn set_fleet(&mut self, on: bool) {
         self.fleet = on;
     }

@@ -134,6 +134,16 @@ impl<'a> Users<'a> {
         })
     }
 
+    /// Whether the hub has any person at all, whatever the role: a row whose role this build cannot read counts too (it is left out
+    /// of [`list`](Self::list)), so the hub is never taken for a solo one by mistake.
+    pub fn any(&self) -> Result<bool, StoreError> {
+        let conn = self.store.lock()?;
+        conn.query_row("SELECT 1 FROM users LIMIT 1", [], |_| Ok(()))
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(db)
+    }
+
     pub fn list(&self) -> Result<Vec<User>, StoreError> {
         let conn = self.store.lock()?;
         let mut st = conn
@@ -352,11 +362,11 @@ pub fn set_fleet_switch(store: &SqliteStore, on: bool, now_ms: u64) -> Result<()
 
 /// ADR-0112: whether agents may see every machine and agent of this hub (`BoardCall{tool: "fleet_status"}`): in solo mode (no
 /// person in `users` at all, ADR-0049: the hub is the owner's alone), or when the owner turned [`FLEET_SETTING`] on. Any person
-/// added, whatever the role, makes it a team hub. A store that cannot be read refuses.
+/// added, whatever the role (one this build cannot read included), makes it a team hub. A store that cannot be read refuses.
 pub fn fleet_allowed(store: &SqliteStore) -> bool {
-    match Users::new(store).list() {
-        Ok(people) if people.is_empty() => true,
-        Ok(_) => fleet_switch(store).unwrap_or(false),
+    match Users::new(store).any() {
+        Ok(false) => true,
+        Ok(true) => fleet_switch(store).unwrap_or(false),
         Err(_) => false,
     }
 }
@@ -389,6 +399,26 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0112, F3 of the #1205 review: a person whose role this build cannot read still makes the hub a team hub.
+    #[test]
+    fn a_person_with_an_unknown_role_ends_solo_mode() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(fleet_allowed(&store));
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO users (id, name, role, created_ms) VALUES ('x', 'X', 'admin', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(Users::new(&store).list().unwrap().is_empty());
+        assert!(Users::new(&store).any().unwrap());
+        assert!(!fleet_allowed(&store));
+        set_fleet_switch(&store, true, 2).unwrap();
+        assert!(fleet_allowed(&store));
+    }
 
     #[test]
     fn people_are_added_listed_demoted_and_removed_with_their_sessions() {
