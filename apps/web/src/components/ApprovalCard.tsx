@@ -20,7 +20,7 @@ export function FullRequest({ detail }: { detail: string }) {
   return (
     <details className="text-xs text-muted">
       <summary className="cursor-pointer">{t('approval-full-request')}</summary>
-      <pre dir="ltr" className="m-0 mt-1 max-h-48 overflow-auto font-mono break-all whitespace-pre-wrap">{detail}</pre>
+      <pre dir="ltr" className="m-0 mt-1 max-h-48 overflow-auto font-mono break-all whitespace-pre-wrap">{visible(detail)}</pre>
     </details>
   );
 }

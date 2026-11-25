@@ -6,7 +6,8 @@ import { setLanguage, t } from '../i18n';
 import type { DirectoryListing } from '../net/directory';
 import { CommandError } from '../net/live';
 import type { MachineModel } from '../net/view';
-import { StartAgent, type KindChoice } from './StartAgent';
+import { StartAgent, refusalWords, type KindChoice } from './StartAgent';
+import { missingNote } from './startChoice';
 
 // The start window with the widget kit (redesign PR 10): agent cards, the machine as a segmented control, "How it acts" with its red risk
 // state and its confirmation (ADR-0059), the not-installed note only for the chosen kind (finding L9), and the name preview.
@@ -95,6 +96,23 @@ describe('the start window, agent cards', () => {
     expect(group('Which agent').textContent).not.toContain('Installed');
   });
 
+  it('makes agent kind display names visible while retaining the raw kind id', async () => {
+    await open({ loadKinds: async () => [{ kind: 'raw-kind', name: 'Grü\u3164ße\u202e', installed: true, level: 2 }] });
+    const choice = radios('Which agent')[0] as HTMLButtonElement;
+    expect(choice.getAttribute('aria-label')).toBe('Grü\\u{3164}ße\\u{202e}');
+    expect(choice.textContent).toContain('Grü\\u{3164}ße\\u{202e}');
+    expect(choice.dataset.kind).toBe('raw-kind');
+    expect([...choice.textContent ?? ''].filter((c) => ['\u3164', '\u202e'].includes(c))).toEqual([]);
+  });
+
+  it('verifies visible kind names while starting the raw kind id', async () => {
+    const onStart = await open({ loadKinds: async () => [{ kind: 'raw-kind', name: 'İş\u2066\u0001', installed: true, level: 2 }] });
+    const choice = radios('Which agent')[0] as HTMLButtonElement;
+    expect(choice.getAttribute('aria-label')).toBe('İş\\u{2066}\\u{1}');
+    click(button('Start')); await flush();
+    expect(onStart).toHaveBeenCalledWith('n1', expect.anything(), 'raw-kind', false, false, expect.anything());
+  });
+
   it('is chosen by keyboard: one tab stop, the arrows move and choose (installed into not installed), Home and End go to the ends', async () => {
     await open();
     expect(radios('Which agent').map((r) => r.tabIndex)).toEqual([0, -1, -1, -1]);
@@ -139,6 +157,20 @@ describe('the start window, a kind the machine cannot find', () => {
     click(card('Claude Code'));
     expect(note()).toBeNull();
     expect(button('Start')?.disabled).toBe(false);
+  });
+
+  it('makes missing program names visible', async () => {
+    await open({ loadKinds: async () => [{ kind: 'broken', name: 'Broken', installed: false, level: 2, program: 'ge\u202em\u3164ini' }] });
+    click(card('Broken'));
+    const note = win().querySelector('[data-start-missing]') as HTMLElement;
+    expect(note.textContent).toContain('ge\\u{202e}m\\u{3164}ini');
+    expect([...note.textContent].filter((c) => ['\u202e', '\u3164'].includes(c))).toEqual([]);
+  });
+
+  it('verifies missing program text in selection and runtime refusal paths', () => {
+    const program = 'ça\u034f\ue000';
+    expect(missingNote({ installed: false, program })).toEqual(['start-not-installed-program', { program: 'ça\\u{34f}\\u{e000}' }]);
+    expect(refusalWords('start-program-missing', program)).toEqual(['start-not-installed-program', { program: 'ça\\u{34f}\\u{e000}' }]);
   });
 });
 
@@ -234,6 +266,21 @@ describe('the start window, machine, preview and errors', () => {
 });
 
 describe('StartAgent', () => {
+  it('makes board task title and project visible', async () => {
+    await open({ forTask: { projectId: 'p', project: 'Pr\u2800oject\u2066', title: 'Ta\u3164sk\u034f' } });
+    const note = win().querySelector('[data-start-for-task]') as HTMLElement;
+    for (const shown of ['Pr\\u{2800}oject\\u{2066}', 'Ta\\u{3164}sk\\u{34f}']) expect(note.textContent).toContain(shown);
+    expect([...note.textContent].filter((c) => ['\u2800', '\u2066', '\u3164', '\u034f'].includes(c))).toEqual([]);
+  });
+
+  it('verifies visible board task text in the other-project warning', async () => {
+    await open({ forTask: { projectId: 'other', project: 'İş\u202e\ue000', title: '模型\u2066\u000b' } });
+    expect(win().querySelector('[data-start-for-task]')?.textContent).toContain('模型\\u{2066}\\u{b}');
+    const warning = win().querySelector('[role=alert]') as HTMLElement;
+    expect(warning.textContent).toContain('İş\\u{202e}\\u{e000}');
+    expect([...win().textContent ?? ''].filter((c) => ['\u202e', '\ue000', '\u2066', '\u000b'].includes(c))).toEqual([]);
+  });
+
   it('makes folder-browser paths and entries visible', async () => {
     await act(async () => {
       root.render(<StartAgent projects={[]} machines={machines.slice(0, 1)} initialNode="n1" loadKinds={() => Promise.resolve([])}

@@ -14,7 +14,7 @@ import { attentionList } from '../net/fleet';
 import { markSkipCapable } from '../net/skipApproval';
 import type { ApprovalModel } from '../net/view';
 import { ApprovalBanner } from './ApprovalBanner';
-import { ApprovalCard } from './ApprovalCard';
+import { ApprovalCard, FullRequest } from './ApprovalCard';
 import { askKind, askTitle, NARROW_PX } from './ApprovalRequest';
 import { AttentionLayer } from './AttentionLayer';
 import { AttentionQueue } from './FleetConsole';
@@ -96,6 +96,23 @@ describe('card: the side panel, above a terminal, above a composer', () => {
     expect(chip.className).not.toMatch(/truncate|line-clamp/);
     expect(card.querySelector('details pre')!.textContent).toBe(long); // read first: the whole request is one click away
     expect(buttons(card).map((b) => b.textContent)).toEqual(['Deny', 'Allow']);
+  });
+
+  it('makes full approval request text visible', () => {
+    const detail = JSON.stringify({ command: 'Ru\u202en\u3164 tests', description: 'ça\u034f' });
+    act(() => root.render(<FullRequest detail={detail} />));
+    const text = host.querySelector('pre')?.textContent ?? '';
+    for (const shown of ['Ru\\u{202e}n\\u{3164} tests', 'ça\\u{34f}']) expect(text).toContain(shown);
+    expect([...text].filter((c) => ['\u202e', '\u3164', '\u034f'].includes(c))).toEqual([]);
+  });
+
+  it('verifies full approval text across isolate and private-use characters', () => {
+    const detail = JSON.stringify({ command: '文\u2066件', description: 'ño\ue000' });
+    act(() => root.render(<FullRequest detail={detail} />));
+    expect(host.querySelector('pre')?.textContent).toContain('文\\u{2066}件');
+    expect(host.querySelector('pre')?.textContent).toContain('ño\\u{e000}');
+    expect(detail).toContain('\u2066');
+    expect(detail).toContain('\ue000');
   });
 
   it('a narrow pane draws it in the row density with the buttons under the text, the ask still whole', () => {

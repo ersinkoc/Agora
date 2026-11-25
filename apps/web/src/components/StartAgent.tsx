@@ -20,7 +20,7 @@ import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, kee
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
 // #903: a refused start in words; a missing program is named, in the words the "not installed" note uses, when the machine said which.
 export function refusalWords(error: string, program: string | undefined): [string, Record<string, string>?] {
-  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program }] : [error];
+  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program: visible(program) }] : [error];
 }
 
 export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
@@ -195,7 +195,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   // A folder of another project: the task could not be given to an agent started there.
   const otherProject = !!forTask && !!info && info.projectId !== forTask.projectId;
 
-  const kindName = (k: string) => (Array.isArray(kinds) ? kinds.find((x) => x.kind === k)?.name ?? k : k);
+  const kindName = (k: string) => visible(Array.isArray(kinds) ? kinds.find((x) => x.kind === k)?.name ?? k : k);
   const machineLabel = online.find(m => m.id === node)?.name ?? node;
   const risky = launch.permission !== ASK;
 
@@ -210,7 +210,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
           <Dialog.Close className="ide-iconbtn" aria-label={t('start-cancel')} disabled={busy}><Icon name="close" /></Dialog.Close>
         </div>
         {!online.length ? <div className="px-5 py-4"><p className="m-0">{t('start-no-machines')}</p></div> : <div className="grid min-h-0 gap-5 overflow-y-auto px-5 py-4">
-          {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-m border border-line-accent bg-tint-accent px-3 py-2.5 text-body text-ink">{t('start-for-task', { title: forTask.title, project: forTask.project })}</p>}
+          {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-m border border-line-accent bg-tint-accent px-3 py-2.5 text-body text-ink">{t('start-for-task', { title: visible(forTask.title), project: visible(forTask.project) })}</p>}
           <div className="grid gap-2">
             <h2 className={H}>{t('start-machine')}</h2>
             {/* Many machines shrink their segments (each shows its whole name as its tooltip) rather than scroll. */}
@@ -264,7 +264,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
             </>}
           </div>
 
-          {otherProject && forTask && <p role="alert" className="m-0 text-body text-danger">{t('start-for-task-other-project', { project: forTask.project })}</p>}
+          {otherProject && forTask && <p role="alert" className="m-0 text-body text-danger">{t('start-for-task-other-project', { project: visible(forTask.project) })}</p>}
           {info && <>
             <div className="grid gap-2">
               <h2 className={H}>{t('ide-agent-pick')}</h2>

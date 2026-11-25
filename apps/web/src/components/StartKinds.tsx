@@ -1,6 +1,7 @@
 import { useId, useRef, type KeyboardEvent } from 'react';
 import { t } from '../i18n';
 import { isRegistryKind, runsAs } from '../net/agentKinds';
+import { visible } from '../net/hidden';
 import { registryInfo } from '../net/registryCatalog';
 import { AgentAvatar, Tag } from './kit';
 import type { KindChoice } from './StartAgent';
@@ -52,14 +53,15 @@ export function KindCards({ kinds, value, onChange, disabled, label }: {
   const card = (k: KindChoice, i: number) => {
     const on = k.kind === value;
     const how = runsAs(k.level ?? 0) === 'terminal' ? 'start-runs-terminal' : 'start-runs-chat';
+    const shown = visible(k.name);
     return (
       <button key={k.kind} ref={(el) => { refs.current[i] = el; }} type="button" role="radio" aria-checked={on} tabIndex={i === stop ? 0 : -1}
-        aria-label={k.name} aria-describedby={`${id}-${i}`} disabled={disabled} data-kind={k.kind} data-selected={on ? '' : undefined}
+        aria-label={shown} aria-describedby={`${id}-${i}`} disabled={disabled} data-kind={k.kind} data-selected={on ? '' : undefined}
         className={`kit-card kit-card--dense flex min-w-0 items-center gap-2.5 disabled:opacity-50 ${k.installed ? '' : 'border-dashed'}`}
         onClick={() => onChange(k.kind)}>
-        <AgentAvatar accent={NO_COLOUR} kind={k.name || k.kind} icon={registryInfo(k.kind)?.icon} />
+        <AgentAvatar accent={NO_COLOUR} kind={shown || visible(k.kind)} icon={registryInfo(k.kind)?.icon} />
         <span className="grid min-w-0 gap-0.5">
-          <span className={`truncate font-medium ${k.installed ? 'text-ink' : 'text-muted'}`}>{k.name}</span>
+          <span className={`truncate font-medium ${k.installed ? 'text-ink' : 'text-muted'}`}>{shown}</span>
           <span id={`${id}-${i}`} className="flex flex-wrap gap-1"><Tag>{t(how)}</Tag>{isRegistryKind(k.kind) && <Tag>{t('agents-untested')}</Tag>}{!k.installed && <span className="sr-only">{t('start-not-installed')}</span>}</span>
         </span>
       </button>
