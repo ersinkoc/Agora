@@ -169,13 +169,16 @@ fn an_adapter_agent_gets_its_own_worktree_and_reports_its_state() {
             }
         )
     });
+    // The adapter reported it: it is said to be the agent's own state, not something read from a screen.
     assert!(ev.iter().any(|e| matches!(
         e,
         SupervisorEvent::StateChanged {
             state: AgentState::Working,
+            reported: true,
             ..
         }
     )));
+    assert!(s.list().iter().any(|v| v.id == id && v.reported));
     // Chat and usage are passed on as adapter events, and the native session id is recorded.
     let all = ev;
     assert!(all.iter().any(|e| matches!(e, SupervisorEvent::Adapter { event: AdapterEvent::Chat { item: ChatItem::Text(t), .. }, .. } if t == "hello")), "{all:#?}");
@@ -436,14 +439,17 @@ fn a_crashing_adapter_ends_its_agent_as_unknown_without_taking_the_node_down() {
     let ev = until(&mut s, |e| {
         matches!(e, SupervisorEvent::AdapterCrashed { .. })
     });
+    // The node's own fact, not the adapter's report.
     assert!(ev.iter().any(|e| matches!(
         e,
         SupervisorEvent::StateChanged {
             state: AgentState::Unknown,
+            reported: false,
             ..
         }
     )));
     let list = s.list();
+    assert!(!list.iter().find(|v| v.id == id).unwrap().reported);
     assert!(!list.iter().find(|v| v.id == id).unwrap().running);
     assert!(
         list.iter().find(|v| v.id == other).unwrap().running,

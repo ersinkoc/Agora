@@ -629,7 +629,7 @@ impl EventSink {
         record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
             state: proto_state(view.state) as i32,
-            reported: false,
+            reported: view.reported,
         }));
         if let Some(session) = session {
             record(Body::AgentSessionReported(v1::AgentSessionReported {
@@ -812,11 +812,15 @@ impl EventSink {
                         session_id: session.clone(),
                     }));
                 }
-                SupervisorEvent::StateChanged { agent, state } => {
+                SupervisorEvent::StateChanged {
+                    agent,
+                    state,
+                    reported,
+                } => {
                     self.record(Body::AgentStateChanged(v1::AgentStateChanged {
                         agent_id: agent.as_str().to_string(),
                         state: proto_state(*state) as i32,
-                        reported: false,
+                        reported: *reported,
                     }));
                 }
                 SupervisorEvent::Exited { agent, status } => {
@@ -3136,7 +3140,7 @@ fn chat_event(
         }
         // Review of #1103, round 3: the transcript writer holds the agent's newest words back only while it is in a turn; leaving one
         // (or ending) closes them.
-        SupervisorEvent::StateChanged { agent, state } => {
+        SupervisorEvent::StateChanged { agent, state, .. } => {
             chat.set_working(agent, *state == agora_core::AgentState::Working);
         }
         SupervisorEvent::Exited { agent, .. } => {
@@ -3599,6 +3603,7 @@ mod announce_tests {
             id: AgentId::new(id),
             kind: "probe".into(),
             state: AgentState::Idle,
+            reported: false,
             worktree: PathBuf::from(format!("/wt/{id}")),
             branch: format!("agent/{id}"),
             project: "p".into(),
@@ -3629,6 +3634,27 @@ mod announce_tests {
             "probe",
             terminal,
         );
+    }
+
+    /// An agent taken up from the holder, or said again by an announcement, is stated with where its state came from.
+    #[test]
+    fn a_restated_agent_says_where_its_state_came_from() {
+        let s = sink("reported");
+        let mut own = view("own", true, false);
+        own.reported = true;
+        let mut seen = view("seen", true, true);
+        seen.state = AgentState::Working;
+        let mark = s.next_seq() - 1;
+        s.agent_taken_up(&own, None);
+        s.announce_present(&[seen], &[], Announce::Present);
+        let states: Vec<(String, bool)> = said(&s, mark)
+            .into_iter()
+            .filter_map(|b| match b {
+                Body::AgentStateChanged(c) => Some((c.agent_id, c.reported)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, [("own".into(), true), ("seen".into(), false)]);
     }
 
     /// ADR-0055 section 2: without `NodeOnline` every agent of this process is stated once. An ended one gets `AgentExited` with
@@ -4322,6 +4348,7 @@ mod process_record_tests {
             id: AgentId::new("agent-1"),
             kind: "fake".into(),
             state,
+            reported: false,
             worktree: std::path::PathBuf::from("/wt/agent-1"),
             branch: "main".into(),
             project: "p".into(),
@@ -4384,6 +4411,7 @@ mod process_record_tests {
                 let done = SupervisorEvent::StateChanged {
                     agent: AgentId::new("agent-1"),
                     state: AgentState::Done,
+                    reported: false,
                 };
                 sink.supervisor_events(&[exited(0), done], &[view(false, AgentState::Done)]);
                 up.to_vec()

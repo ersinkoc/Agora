@@ -170,6 +170,9 @@ pub enum SupervisorEvent {
     StateChanged {
         agent: AgentId,
         state: AgentState,
+        /// True when the agent itself said this state ([`Supervisor::report_state`], its ACP bridge, its adapter); false when it was
+        /// read from the screen or is the node's own fact about the process (a start, a stop, an end, a crash). `AgentStateChanged.reported`.
+        reported: bool,
     },
     Exited {
         agent: AgentId,
@@ -707,6 +710,8 @@ pub struct AgentView {
     pub id: AgentId,
     pub kind: String,
     pub state: AgentState,
+    /// Where `state` came from, as [`SupervisorEvent::StateChanged`] last said it: true when the agent itself reported it.
+    pub reported: bool,
     pub worktree: PathBuf,
     pub branch: String,
     pub project: String,
@@ -1128,6 +1133,8 @@ impl AdapterEntry {
 
 struct AdapterEntry {
     agent: Agent,
+    /// The agent's current state is one it reported itself (see [`Origin`]).
+    state_reported: bool,
     run_id: Option<[u8; 16]>,
     /// `None` once a user stop has ended the adapter process.
     adapter: Option<Adapter>,
@@ -1168,6 +1175,8 @@ struct AdapterEntry {
 
 struct Entry {
     agent: Agent,
+    /// The agent's current state is one it reported itself (see [`Origin`]).
+    state_reported: bool,
     run_id: Option<[u8; 16]>,
     worktree: PathBuf,
     branch: String,
@@ -1353,6 +1362,7 @@ impl Supervisor {
         e.running = true;
         if let Some(state) = reattach.state {
             e.agent.observe(state, StateSource::Reported);
+            e.state_reported = held_state_reported(state);
         }
         Ok(())
     }
@@ -2169,6 +2179,7 @@ impl Supervisor {
             id.clone(),
             Entry {
                 agent,
+                state_reported: false,
                 run_id: process_run_id(terminal.pid(), terminal.is_held()),
                 worktree,
                 branch,
@@ -2360,6 +2371,7 @@ impl Supervisor {
                 id.clone(),
                 AdapterEntry {
                     agent,
+                    state_reported: false,
                     run_id: process_run_id(adapter.pid(), adapter.is_held()),
                     adapter: Some(adapter),
                     session_id,
@@ -2429,6 +2441,7 @@ impl Supervisor {
                 id.clone(),
                 Entry {
                     agent,
+                    state_reported: false,
                     run_id: process_run_id(terminal.pid(), terminal.is_held()),
                     worktree,
                     branch: String::new(),
@@ -2627,6 +2640,7 @@ impl Supervisor {
             id.clone(),
             AdapterEntry {
                 agent,
+                state_reported: false,
                 run_id: process_run_id(adapter.pid(), adapter.is_held()),
                 adapter: Some(adapter),
                 session_id,
@@ -2765,12 +2779,13 @@ impl Supervisor {
                                 begin_send(e, id, next, &sent, events);
                             }
                         }
-                        if e.agent.observe(state, StateSource::Reported) {
-                            events.push(SupervisorEvent::StateChanged {
-                                agent: id.clone(),
-                                state,
-                            });
-                        }
+                        apply_state(
+                            &mut e.agent,
+                            &mut e.state_reported,
+                            state,
+                            Origin::Agent,
+                            events,
+                        );
                     }
                     AdapterEvent::Options { options, .. } => {
                         let options = bounded_options(options);
@@ -2833,12 +2848,13 @@ impl Supervisor {
                                 tags: dropped,
                             });
                         }
-                        if e.agent.observe(AgentState::Unknown, StateSource::Reported) {
-                            events.push(SupervisorEvent::StateChanged {
-                                agent: id.clone(),
-                                state: AgentState::Unknown,
-                            });
-                        }
+                        apply_state(
+                            &mut e.agent,
+                            &mut e.state_reported,
+                            AgentState::Unknown,
+                            Origin::Node,
+                            events,
+                        );
                         // #902: how its process ended, for the end the node reports if it gives up on it now. A crash path only
                         // (rare), and at most 50 ms under this lock; a held adapter's is what its output's reader heard from the holder, never a question.
                         let status = e
@@ -2970,6 +2986,7 @@ impl Supervisor {
                 e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
+                e.state_reported = false;
                 // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
                 if kept_launch {
                     e.launch = LaunchChoice::default();
@@ -3910,10 +3927,10 @@ impl Supervisor {
                     .and_then(|k| k.manifest.resume.as_ref())
                     .is_some_and(|r| !r.fresh_argv.is_empty());
             if status.success() {
-                set_state(entry, AgentState::Done, StateSource::Reported, events);
+                set_state(entry, AgentState::Done, Origin::Node, events);
             } else if entry.restarts < self.cfg.restart.max_restarts {
                 let after = self.cfg.restart.delay(entry.restarts);
-                set_state(entry, AgentState::Unknown, StateSource::Reported, events);
+                set_state(entry, AgentState::Unknown, Origin::Node, events);
                 entry.restart_at = Some(now + after);
                 events.push(SupervisorEvent::Restarting {
                     agent: id.clone(),
@@ -3922,7 +3939,7 @@ impl Supervisor {
                 });
             } else {
                 entry.gave_up = true;
-                set_state(entry, AgentState::Unknown, StateSource::Reported, events);
+                set_state(entry, AgentState::Unknown, Origin::Node, events);
                 events.push(SupervisorEvent::GaveUp {
                     agent: id.clone(),
                     exit_code: status.code.or_else(|| status.signal.map(|s| -s)),
@@ -3938,17 +3955,7 @@ impl Supervisor {
             return;
         };
         let detected = term.inspect(|t| kind.detector.detect(t)).map(|d| d.state);
-        let before = entry.agent.state();
-        if let Some(state) = detected {
-            entry.agent.observe(state, StateSource::Screen);
-        }
-        let changed = entry.agent.state() != before;
-        if changed {
-            events.push(SupervisorEvent::StateChanged {
-                agent: id.clone(),
-                state: entry.agent.state(),
-            });
-        }
+        let changed = detected.is_some_and(|state| set_state(entry, state, Origin::Screen, events));
         entry.pacer.record(changed);
         entry.next_check = now + entry.pacer.interval(entry.visible);
     }
@@ -3990,6 +3997,7 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                entry.state_reported = false;
                 // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
                 // restarted process runs without them, so it is not shown with them any more.
                 if kept_launch {
@@ -4115,12 +4123,13 @@ impl Supervisor {
             {
                 e.git_config = None;
             }
-            if e.agent.observe(AgentState::Done, StateSource::Reported) {
-                events.push(SupervisorEvent::StateChanged {
-                    agent: id.clone(),
-                    state: AgentState::Done,
-                });
-            }
+            apply_state(
+                &mut e.agent,
+                &mut e.state_reported,
+                AgentState::Done,
+                Origin::Node,
+                &mut events,
+            );
             // ADR-0090: the prompts that waited for its turn will never be sent.
             let dropped = e.rich.forget();
             if !dropped.is_empty() {
@@ -4141,7 +4150,7 @@ impl Supervisor {
         // Dropping the handle kills the process and joins the actor.
         entry.terminal = None;
         self.ended_usage.push(id.clone());
-        set_state(entry, AgentState::Done, StateSource::Reported, &mut events);
+        set_state(entry, AgentState::Done, Origin::Node, &mut events);
         events.push(SupervisorEvent::Stopped { agent: id.clone() });
         Ok(events)
     }
@@ -4188,6 +4197,7 @@ impl Supervisor {
                 r.id,
                 AdapterEntry {
                     agent,
+                    state_reported: false,
                     run_id: None,
                     folder: r.directory.then(|| r.folder.clone()),
                     adapter: None,
@@ -4230,6 +4240,7 @@ impl Supervisor {
             r.id,
             Entry {
                 agent,
+                state_reported: false,
                 run_id: None,
                 folder: r.directory.then(|| r.folder.clone()),
                 worktree: r.folder,
@@ -4398,6 +4409,7 @@ impl Supervisor {
             // A resume is a new run: nothing approved for the last one carries over (ADR-0090 Amendment A).
             entry.rich.epoch += 1;
             entry.agent.process_restarted();
+            entry.state_reported = false;
             let mut events = vec![SupervisorEvent::Resumed {
                 agent: id.clone(),
                 native,
@@ -4477,10 +4489,12 @@ impl Supervisor {
             native,
         }];
         // A resumed agent starts from an unknown screen; clear the "done" left by the stop.
-        if entry.agent.process_restarted() {
+        let was_reported = std::mem::take(&mut entry.state_reported);
+        if entry.agent.process_restarted() || was_reported {
             events.push(SupervisorEvent::StateChanged {
                 agent: id.clone(),
                 state: AgentState::Unknown,
+                reported: false,
             });
         }
         events.extend(session_report(&entry.agent));
@@ -4499,7 +4513,7 @@ impl Supervisor {
             .get_mut(id)
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
         let mut events = Vec::new();
-        set_state(entry, state, StateSource::Reported, &mut events);
+        set_state(entry, state, Origin::Agent, &mut events);
         Ok(events)
     }
 
@@ -4682,6 +4696,7 @@ impl Supervisor {
                 id: id.clone(),
                 kind: e.agent.kind.clone(),
                 state: e.agent.state(),
+                reported: e.state_reported,
                 worktree: e.worktree.clone(),
                 branch: e.branch.clone(),
                 project: e.agent.project.to_string(),
@@ -4700,6 +4715,7 @@ impl Supervisor {
             id: id.clone(),
             kind: e.agent.kind.clone(),
             state: e.agent.state(),
+            reported: e.state_reported,
             worktree: e.worktree.clone(),
             branch: e.branch.clone(),
             project: e.agent.project.to_string(),
@@ -5613,18 +5629,76 @@ fn gave_up_status(last: Option<ExitStatus>) -> (ExitStatus, Option<i32>) {
     )
 }
 
+/// Where a state the supervisor applies came from. It decides both its precedence ([`Agent::observe`]: anything but the screen
+/// outranks the screen) and the `reported` flag it is told with ([`SupervisorEvent::StateChanged`], `AgentStateChanged.reported`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Read from the terminal's screen.
+    Screen,
+    /// The agent itself said it: [`Supervisor::report_state`], its ACP bridge, its adapter.
+    Agent,
+    /// The node's own fact about the process (a stop, an end, a crash): it outranks the screen as a report does, but the agent did not
+    /// say it.
+    Node,
+}
+
+/// Whether the state the ledger last saw a held adapter agent in, put back when it is taken up, was the adapter's own report. The
+/// ledger keeps no source, but only the adapter sets the state of a running adapter agent: the node's own facts (a stop, an end, a
+/// crash) end it, and its start and restarts leave `Unknown`. So a state other than `Unknown` is one it reported (and an `Unknown` is
+/// never said to be, as [`apply_state`] never keeps one so after a fact of the node's own).
+fn held_state_reported(state: AgentState) -> bool {
+    state != AgentState::Unknown
+}
+
+/// [`apply_state`] for a terminal agent.
 fn set_state(
     entry: &mut Entry,
     state: AgentState,
-    source: StateSource,
+    origin: Origin,
     events: &mut Vec<SupervisorEvent>,
-) {
-    if entry.agent.observe(state, source) {
+) -> bool {
+    apply_state(
+        &mut entry.agent,
+        &mut entry.state_reported,
+        state,
+        origin,
+        events,
+    )
+}
+
+/// Applies `state` from `origin` to `agent`, whose current state it reported itself when `reported`. A [`SupervisorEvent::StateChanged`]
+/// says so when the state or where it came from changed: the agent's own report of the state the screen already showed is news too.
+/// A screen reading never changes where the state came from: either it is taken (the state was not the agent's own) or it is not. A
+/// fact of the node's own that leaves the state as it was (a stop of an agent that said it was done) changes nothing either: the state
+/// is still the agent's word, and a second `Done` or `Blocked` would be news to the hub's notifications. Except for `Unknown` (never a
+/// notification): an agent that said it did not know and then crashed or was given up on is not left showing its own word for an
+/// ended process. Returns whether the state changed.
+fn apply_state(
+    agent: &mut Agent,
+    reported: &mut bool,
+    state: AgentState,
+    origin: Origin,
+    events: &mut Vec<SupervisorEvent>,
+) -> bool {
+    let source = match origin {
+        Origin::Screen => StateSource::Screen,
+        Origin::Agent | Origin::Node => StateSource::Reported,
+    };
+    let changed = agent.observe(state, source);
+    let now = match origin {
+        Origin::Agent => true,
+        Origin::Node if changed || state == AgentState::Unknown => false,
+        Origin::Screen | Origin::Node => *reported,
+    };
+    if changed || now != *reported {
+        *reported = now;
         events.push(SupervisorEvent::StateChanged {
-            agent: entry.agent.id.clone(),
-            state,
+            agent: agent.id.clone(),
+            state: agent.state(),
+            reported: now,
         });
     }
+    changed
 }
 
 /// Writes `contents` at `path`, which must be inside `worktree`, without ever following a symlink: a repository can
@@ -5742,6 +5816,72 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// A held adapter agent taken up: the ledger's state is the adapter's own word unless it is `Unknown`.
+    #[test]
+    fn a_taken_up_adapter_agents_state_is_its_own_unless_unknown() {
+        use AgentState::*;
+        for (state, reported) in [
+            (Working, true),
+            (Blocked, true),
+            (Idle, true),
+            (Done, true),
+            (Unknown, false),
+        ] {
+            assert_eq!(held_state_reported(state), reported, "{state:?}");
+        }
+    }
+
+    /// `AgentStateChanged.reported` follows where the state came from: the agent's own report sets it (also for the state the screen
+    /// already showed), a screen reading never changes it, and a fact of the node's own clears it only when it changes the state
+    /// or leaves it `Unknown`.
+    #[test]
+    fn the_reported_flag_follows_where_the_state_came_from() {
+        let mut agent = Agent::new(
+            AgentId::new("agent-1"),
+            agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            NodeId::new("n"),
+            None,
+            "fake",
+            IntegrationLevel::L1Manifest,
+        );
+        let mut reported = false;
+        let mut step = |state, origin| {
+            let mut events = Vec::new();
+            apply_state(&mut agent, &mut reported, state, origin, &mut events);
+            let said = events
+                .into_iter()
+                .map(|e| match e {
+                    SupervisorEvent::StateChanged {
+                        state, reported, ..
+                    } => (state, reported),
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>();
+            (said, reported)
+        };
+        use AgentState::{Blocked, Done, Unknown, Working};
+        assert_eq!(
+            step(Working, Origin::Screen),
+            (vec![(Working, false)], false)
+        );
+        assert_eq!(step(Working, Origin::Screen), (vec![], false));
+        // The agent says what the screen showed: only where it came from changed.
+        assert_eq!(step(Working, Origin::Agent), (vec![(Working, true)], true));
+        assert_eq!(step(Working, Origin::Agent), (vec![], true));
+        // The screen does not outrank it, and does not take the flag away.
+        assert_eq!(step(Blocked, Origin::Screen), (vec![], true));
+        assert_eq!(step(Done, Origin::Agent).0, [(Done, true)]);
+        // A stop of an agent that said it was done: nothing new, the state is still its word.
+        assert_eq!(step(Done, Origin::Node), (vec![], true));
+        // An end that changes the state is the node's fact.
+        assert_eq!(step(Blocked, Origin::Agent).0, [(Blocked, true)]);
+        assert_eq!(step(Done, Origin::Node), (vec![(Done, false)], false));
+        // The agent says it does not know, then its process crashes: the state is the same, but no longer its own word.
+        assert_eq!(step(Unknown, Origin::Agent), (vec![(Unknown, true)], true));
+        assert_eq!(step(Unknown, Origin::Node), (vec![(Unknown, false)], false));
+        assert_eq!(step(Unknown, Origin::Node), (vec![], false));
+    }
 
     /// #896: an agent given the mesh may read (and so run) the mesh bridge it is told to start, the node's own executable, which may
     /// sit in a folder only the user may open; that file is added to what it may read, not its folder.
