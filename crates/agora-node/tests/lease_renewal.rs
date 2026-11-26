@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
+use agora_node::lease_renewal::Policy;
 use agora_node::mesh_server::{BoardReply, MeshServer, RemoteLink};
 use agora_platform::LocalStream;
 use serde_json::{json, Value};
@@ -80,6 +81,10 @@ impl Drop for Directory {
 struct Board {
     mesh: Mutex<Mesh>,
     online: AtomicBool,
+    /// Whether the hub says the project is shared (else the node's own broker answers).
+    shared: AtomicBool,
+    /// The hub is taking over the project's local work (ADR-0039 amendment B): lease calls answer `board.unavailable` meanwhile.
+    joining: AtomicBool,
     /// Every call that reached the board: (caller, tool, arguments).
     calls: Mutex<Vec<(String, String, Value)>>,
 }
@@ -89,6 +94,8 @@ impl Board {
         Arc::new(Self {
             mesh: Mutex::new(Mesh::new(Limits::default())),
             online: AtomicBool::new(true),
+            shared: AtomicBool::new(true),
+            joining: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -177,6 +184,24 @@ impl RemoteLink for Board {
             done(Err("node.offline".into()));
             return;
         }
+        if !self.shared.load(Ordering::SeqCst) {
+            done(Ok(BoardReply {
+                shared: false,
+                result_json: String::new(),
+            }));
+            return;
+        }
+        if self.joining.load(Ordering::SeqCst) && tool == "lease_acquire" {
+            let e =
+                json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
+            done(Ok(BoardReply {
+                shared: true,
+                result_json:
+                    json!({"content": [{"type": "text", "text": e.to_string()}], "isError": true})
+                        .to_string(),
+            }));
+            return;
+        }
         assert_eq!(project, "p");
         let args: Value = serde_json::from_str(arguments_json).unwrap();
         let result = self.call(&format!("n1/{from_agent}"), tool, &args);
@@ -230,6 +255,34 @@ impl Client {
     }
 }
 
+/// The tests' renewal policy: the node's, with a 2 s TTL floor and a 1 s gap, so a test takes seconds, not minutes.
+fn short() -> Policy {
+    Policy {
+        min_ttl_ms: 2_000,
+        min_gap_ms: 1_000,
+        ..Policy::default()
+    }
+}
+
+/// A node's mesh server in `dir` (`m` for the sockets), with the tests' policy.
+fn node(dir: &Directory) -> Arc<MeshServer> {
+    let server = Arc::new(MeshServer::new(&dir.0.join("m"), Limits::default()).unwrap());
+    server.set_lease_renewal_policy(short());
+    server
+}
+
+fn agent_a() -> AgentInfo {
+    AgentInfo {
+        id: AgentId::new("a"),
+        kind: "acp-fake".into(),
+        node: "n1".into(),
+        project: "p".into(),
+        label: "a".into(),
+        worktree: String::new(),
+        state: "working".into(),
+    }
+}
+
 /// A node with one running agent `a` of project `p` (a fake agent process), its MCP connection, and the hub's board.
 struct Scene {
     _server: Arc<MeshServer>,
@@ -244,7 +297,7 @@ struct Scene {
 impl Scene {
     fn new() -> Self {
         let dir = Directory::new();
-        let server = Arc::new(MeshServer::new(&dir.0.join("m"), Limits::default()).unwrap());
+        let server = node(&dir);
         let board = Board::new();
         server.set_remote(board.clone() as Arc<dyn RemoteLink>);
         let id = AgentId::new("a");
@@ -402,4 +455,107 @@ fn a_node_cut_off_from_the_hub_loses_the_lease_at_its_ttl_and_does_not_take_it_b
         "the lease outlived its TTL with no renewal"
     );
     assert!(!s.exited.load(Ordering::SeqCst), "the agent kept running");
+}
+
+/// Review of #1243 (F2): an agent the next run of the node takes up again (from the holder, after a restart) keeps having its
+/// leases renewed: the table is kept in the node's data folder, read back when the node starts, and given back when the agent joins
+/// the mesh again; the agent's original id still releases the lease the earlier run renewed.
+#[test]
+fn an_agent_taken_up_after_a_node_restart_keeps_its_lease_renewed() {
+    let dir = Directory::new();
+    let data = dir.0.join("data");
+    let board = Board::new();
+    let first = node(&dir);
+    first.open_lease_renewals(&data).unwrap();
+    first.set_remote(board.clone() as Arc<dyn RemoteLink>);
+    let socket = first.register(agent_a()).unwrap();
+    let mut client = Client::connect(&socket);
+    let (answer, failed) = client.tool("lease_acquire", json!({"paths": [PATH], "ttl_s": TTL_S}));
+    assert!(!failed, "{answer}");
+    let id = answer["lease_id"].as_str().unwrap().to_string();
+    // Renewed once by the first run (its board id changed), then the node stops; the agent keeps running in the holder.
+    let start = Instant::now();
+    while board.acquires_by_a(0) < 2 {
+        assert!(start.elapsed() < Duration::from_secs(TTL_S), "not renewed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(client);
+    drop(first);
+    let kept = std::fs::read_to_string(data.join("sessions").join("lease-renewals.json")).unwrap();
+    assert!(kept.contains(PATH), "{kept}");
+    // The next run, a moment later.
+    std::thread::sleep(Duration::from_millis(500));
+    let next = node(&dir);
+    next.open_lease_renewals(&data).unwrap();
+    next.set_remote(board.clone() as Arc<dyn RemoteLink>);
+    let socket = next.register(agent_a()).unwrap();
+    assert_eq!(
+        next.renewing(&AgentId::new("a")),
+        1,
+        "taken up with its lease"
+    );
+    let restarted = Instant::now();
+    while restarted.elapsed() < Duration::from_secs(TTL_S * 2) {
+        assert_eq!(
+            board.probe(),
+            Err("lease.held".to_string()),
+            "ended at {:?} after the restart",
+            restarted.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut client = Client::connect(&socket);
+    let (answer, failed) = client.tool("lease_release", json!({"lease_id": id}));
+    assert!(!failed, "{answer}");
+    assert!(board.probe().is_ok(), "the released path is still held");
+}
+
+/// Review of #1243 (F2): a lease the node's own broker granted (the project was on this machine only) is renewed on the board once
+/// the project becomes shared and the node hands it over (`BoardJoin`), and the agent's local id still releases it.
+#[test]
+fn a_local_lease_handed_to_the_board_is_renewed_there() {
+    let dir = Directory::new();
+    let board = Board::new();
+    board.shared.store(false, Ordering::SeqCst);
+    let server = node(&dir);
+    server.set_remote(board.clone() as Arc<dyn RemoteLink>);
+    let socket = server.register(agent_a()).unwrap();
+    let mut client = Client::connect(&socket);
+    let (answer, failed) = client.tool("lease_acquire", json!({"paths": [PATH], "ttl_s": TTL_S}));
+    assert!(!failed, "{answer}");
+    let local_id = answer["lease_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        board.acquires_by_a(0),
+        0,
+        "granted by the node's own broker"
+    );
+    // A second machine checks the project out: the hub asks for the node's work and puts each lease on the board for its holder.
+    board.shared.store(true, Ordering::SeqCst);
+    board.joining.store(true, Ordering::SeqCst);
+    let handed = server.board_join("p").unwrap();
+    assert_eq!(handed.leases.len(), 1);
+    for l in &handed.leases {
+        let r = board.call(
+            &format!("n1/{}", l.agent_id),
+            "lease_acquire",
+            &json!({"paths": [l.path], "ttl_s": TTL_S}),
+        );
+        assert_ne!(r["isError"], true, "{r}");
+    }
+    board.joining.store(false, Ordering::SeqCst);
+    let joined = Instant::now();
+    let put = board.calls_so_far();
+    while joined.elapsed() < Duration::from_secs(TTL_S * 2) {
+        assert_eq!(
+            board.probe(),
+            Err("lease.held".to_string()),
+            "ended at {:?} after the move",
+            joined.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(board.acquires_by_a(put) >= 2, "not renewed on the board");
+    let (answer, failed) = client.tool("lease_release", json!({"lease_id": local_id}));
+    assert!(!failed, "{answer}");
+    assert!(board.probe().is_ok(), "the released path is still held");
 }

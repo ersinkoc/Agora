@@ -1884,6 +1884,10 @@ impl Node {
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             eprintln!("mesh: durable handoffs unavailable: {e}");
         }
+        // ADR-0039: before agents are taken up, so each gets back the shared-board leases the last run renewed for it.
+        if let Err(e) = mesh.open_lease_renewals(&cfg.data_dir) {
+            eprintln!("mesh: lease renewals are not kept across a restart: {e}");
+        }
         // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
         // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
         mesh.reserve_ids(&cfg.data_dir);

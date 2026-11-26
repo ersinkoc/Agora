@@ -168,20 +168,27 @@ hub's view; one that ended gives its tasks and leases back, and a lease also end
 **Lease renewal (ADR-0039).** On a shared project the holder's node renews each lease the board granted its agent while the agent
 runs, so the lease lasts until the agent releases it or ends; its `ttl_s` bounds only how long it outlives a node that went away.
 The node sends the renewal as the agent's own `lease_acquire` on the same paths with the same `ttl_s` (no new message), when half
-the TTL has passed since the call that last granted it was sent (by the node's clock, so never later than the hub's end). A TTL
-below 2 s is not renewed (it ends as asked; nothing is renewed more than once a second). A renewal the hub cannot answer (the node
-is offline, the call timed out, `board.unavailable`, `internal`) is tried again every second until the lease's end as the node
-reckons it; after that the lease is gone, and a node that reconnects later does not take it back. A renewal the board refuses
-(`lease.held`, `agent.not_found` when the hub no longer counts the agent as running and gave its leases back, or the project is no
-longer shared) ends it at once. Renewal stops when the agent releases the lease, when it ends
-(finished, stopped, crashed, given up: the node takes it off the mesh), and when `mesh.remote` is switched off. Each renewal gives the
-paths a new board lease id; the agent keeps the id it was given, and the node puts the current one into its `lease_release`. The
-agent's own lease calls and the node's renewals of its leases reach the board one at a time (a call waits up to 10 s for a renewal
-on its way). A path the agent takes again under a newer grant leaves the older one, as on the board. At most 64 grants per agent are
-renewed (a further one ends at its TTL); the board records every renewal (`LeaseGranted` with the new end). Not renewed: leases on
-the node's own broker (a project only this machine has; ADR-0039 leaves local-only projects untouched), leases a node handed over in
-`BoardJoin` (they run their remaining time, at most one hour), and leases of agents a restarted node takes up from the holder (the
-renewal state is in the node's memory).
+the TTL has passed since the call that last granted it was sent (by the node's monotonic clock, so never later than the hub's end).
+Only a TTL of 30 s or more is renewed, so a lease is renewed at most once every 15 s; a shorter one ends as asked. An agent has at
+most 256 paths and 64 grants renewed over all its leases; a lease beyond that is granted as usual and ends at its TTL. Each renewal
+is one stored board change and one `LeaseGranted` per path. A renewal the hub cannot answer (the node is offline, the call timed
+out, `board.unavailable`, `internal`) is tried again every second until the lease's end as the node reckons it; after that the
+lease is gone, and a node that reconnects later does not take it back. A renewal the board refuses (`lease.held`, `agent.not_found`
+when the hub no longer counts the agent as running and gave its leases back, or the project is no longer shared) ends it at once.
+Renewal stops when the agent releases the lease, when the node takes the agent off the mesh (it finished, was stopped, or the node
+gave up restarting it; an agent the supervisor is restarting keeps its endpoint and its renewals, and the hub's answer decides), and
+when `mesh.remote` is switched off. Each renewal gives the paths a new board lease id; the agent keeps the id it was given, and the
+node puts the current one into its `lease_release` (either id releases it). A release the hub did not decide (no answer,
+`board.unavailable`) is not renewed again but keeps the id, so the agent's next try reaches the board's lease. The agent's own
+lease calls and the node's renewals of its leases reach the board one at a time: while an agent's call waits (up to 10 s) for a
+renewal on its way, no other renewal of that agent starts. A path the agent takes again under a newer grant leaves the older one, as
+on the board. The table is kept beside the ledger (`<data>/sessions/lease-renewals.json`, owner-only, replaced whole by a rename,
+written by its own thread whenever it changed): an agent the next run of the node takes up again from the holder gets its leases
+back and they keep being renewed (each row's grant time is stored on the wall clock and read back as an age; a row dated after the
+current time, or whose end passed, is dropped; a file that is not a renewals file is set aside, renamed). A lease the node's own
+broker granted is not renewed (ADR-0039 leaves local-only projects untouched), but when the project becomes shared and the node
+hands it over in `BoardJoin`, the node renews it on the board at once (to learn the board's id) and from then on, and the agent's
+local id still releases it.
 
 A `handoff` that names a task goes only to an agent of the task's own project (an agent of another project could neither see nor finish the task): to any other it fails with `mesh.recipient_unknown` and nothing moves; a `handoff` without a task is a message and may cross projects. A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message from the giver in one step; if the receiving node
 
