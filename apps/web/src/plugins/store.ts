@@ -54,6 +54,8 @@ export function createPluginStore(env: PluginStoreEnv) {
   let hubTurn = 0;
   let started = safe;
   const cache = new Map<string, CheckedPlugin>();
+  // Each hub plugin's package hash: a grant names the package the person was shown.
+  let hubSha = new Map<string, string>();
   const show = () => {
     state = Object.freeze({ plugins: Object.freeze([...devs, ...hubs.filter((h) => !devs.some((d) => d.plugin.manifest.id === h.plugin.manifest.id))]), safe, ready: started });
     listeners.forEach((l) => l());
@@ -123,7 +125,7 @@ export function createPluginStore(env: PluginStoreEnv) {
       if (!h || !hub) return false;
       const m = h.plugin.manifest;
       const g = grant(m, allow);
-      try { await hub.command({ pluginGrantSet: { pluginId: m.id, version: m.version, granted: [...g.granted] } }); } catch { return false; }
+      try { await hub.command({ pluginGrantSet: { pluginId: m.id, version: m.version, granted: [...g.granted], sha256: hubSha.get(m.id) ?? '' } }); } catch { return false; }
       hubs = hubs.map((x) => (x.plugin === h.plugin ? entry(h.plugin, '', g, false) : x));
       show();
       return true;
@@ -144,10 +146,11 @@ export function createPluginStore(env: PluginStoreEnv) {
       if (safe) return;
       const turn = ++hubTurn;
       hub = link;
-      if (!link) { hubs = []; show(); return; }
+      if (!link) { hubs = []; hubSha = new Map(); show(); return; }
       const [found, given] = await Promise.all([loadHubPlugins(link, env.version, cache), loadHubGrants(link)]);
       if (turn !== hubTurn) return;
       hubs = found.map(({ plugin }) => entry(plugin, '', given[plugin.manifest.id], false));
+      hubSha = new Map(found.map(({ plugin, info }) => [plugin.manifest.id, info.sha256]));
       show();
     },
     /** The plugins this browser keeps, by their manifests only (nothing is checked or run): what safe mode lists for removal. */

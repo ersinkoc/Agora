@@ -100,8 +100,8 @@ fn the_typed_messages_read_what_the_fixtures_say() {
         panic!("not a grant")
     };
     assert_eq!(
-        (g.version.as_str(), g.granted.as_slice()),
-        ("0.2.0", &["agents.read".to_string()][..])
+        (g.version.as_str(), g.granted.as_slice(), g.sha256.len()),
+        ("0.2.0", &["agents.read".to_string()][..], 64)
     );
     let Some(command_ok::Result::PluginList(l)) = ok("plugin_list").result else {
         panic!("not a list")
@@ -126,5 +126,53 @@ fn the_typed_messages_read_what_the_fixtures_say() {
             g.grants[0].granted.len()
         ),
         ("0.1.0", 2, 1)
+    );
+}
+
+/// Only the owner installs, on the hub's machine (`agora hub plugin add`): no message a client can send installs or removes a plugin.
+/// The plugin arms of `CommandRequest` are exactly the five that read the installed plugins and keep the sender's own grants.
+#[test]
+fn no_message_installs_or_removes_a_plugin() {
+    let pool = DescriptorPool::decode(agora_protocol::FILE_DESCRIPTOR_SET).expect("descriptor set");
+    let req = pool
+        .get_message_by_name("agora.v1.CommandRequest")
+        .expect("CommandRequest");
+    let mut arms: Vec<String> = req
+        .fields()
+        .filter(|f| f.name().starts_with("plugin"))
+        .map(|f| f.name().to_string())
+        .collect();
+    arms.sort();
+    assert_eq!(
+        arms,
+        [
+            "plugin_fetch",
+            "plugin_grant_list",
+            "plugin_grant_remove",
+            "plugin_grant_set",
+            "plugin_list"
+        ]
+    );
+    // And the schema's plugin messages are only these: none carries a package towards the hub.
+    let mut names: Vec<String> = pool
+        .all_messages()
+        .filter(|m| m.name().starts_with("Plugin"))
+        .map(|m| m.name().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "PluginFetch",
+            "PluginFetchResult",
+            "PluginGrant",
+            "PluginGrantList",
+            "PluginGrantListResult",
+            "PluginGrantRemove",
+            "PluginGrantSet",
+            "PluginInfo",
+            "PluginList",
+            "PluginListResult"
+        ]
     );
 }

@@ -179,7 +179,8 @@ plugin's is kept by the hub for the person (below). The two never share a grant.
 **The owner installs, on the hub's machine.** `agora hub plugin add FILE` checks a package (as above) and keeps it for the hub;
 `agora hub plugin list` shows what is installed (id, version, name, what it asks to see, when); `agora hub plugin remove ID` removes one.
 They work like `agora hub fleet`: run where the hub's folder is, by whoever can open it, and each add (refused or not) and remove is a row
-of the audit trail as the owner's (`plugin.add`, `plugin.remove`; the outcome names the plugin, or why it was refused). No protocol message
+of the audit trail as the owner's (`plugin.add`, `plugin.remove`; the row names the plugin where a row names its target, and a refused
+package's row says why). No protocol message
 installs or removes a plugin, so nobody installs one from a window, the owner's included. Adding a plugin whose id is installed replaces
 it (another version). A hub keeps at most 16.
 
@@ -195,8 +196,9 @@ manifest must name the listed id and version, or the plugin is left out. Package
 A hub plugin shows the **Plugin** marker without **development**, and "installed on this hub" in the plugins list.
 
 - **Showing one is each person's choice.** A hub plugin nobody chose is listed as not shown; none of its panels is offered.
-  **Look at it** opens the install screen; **Show it** sends the grant (`PluginGrantSet`: the id, the version shown and the capabilities
-  allowed), and the window changes only once the hub kept it. **What it can see** changes it; **Stop showing** forgets the person's grant
+  **Look at it** opens the install screen; **Show it** sends the grant (`PluginGrantSet`: the id, the version and package shown, and the
+  capabilities allowed), and the window changes only once the hub kept it. The hub refuses a grant for any other package than the installed
+  one, so a package the owner put in meanwhile, even under the same version, is never taken as seen. **What it can see** changes it; **Stop showing** forgets the person's grant
   (`PluginGrantRemove`) and closes its panes. A hub plugin has no **Remove**: only the owner removes it.
 - **A version that asks for more is held**, as for a development plugin: the grant names what the older version asked for, so its panels
   wait until the person looks again. One that asks for nothing new stays shown.

@@ -39,7 +39,7 @@ function fakeHub(piece = 100) {
       if (body.pluginGrantSet) {
         const g = body.pluginGrantSet;
         const p = installed.get(g.pluginId ?? '');
-        if (!p || p.version !== g.version) throw new Error('plugin.not_found');
+        if (!p || p.version !== g.version || sha(p.bytes) !== g.sha256) throw new Error('plugin.not_found');
         grants.set(g.pluginId ?? '', { version: p.version, seen: p.caps, granted: p.caps.filter((c) => (g.granted ?? []).includes(c)) });
         return { empty: {} };
       }
@@ -148,6 +148,10 @@ describe('plugins installed on the hub', () => {
     hub.install('agents', '1.0.1', ['agents.read']);
     expect(await s.regrant('agents', ['agents.read'])).toBe(false);
     expect(ids(s)).toEqual(['agents@1.0.0:hub:new']);
+    // Or put another package in under the same version (asking for more): the grant names the package shown, so it is refused too.
+    hub.install('agents', '1.0.0', ['agents.read', 'chat.read']);
+    expect(await s.regrant('agents', ['agents.read'])).toBe(false);
+    expect(hub.grants.has('agents')).toBe(false);
   });
 
   it('means no hub plugins with an older hub, and asks the hub nothing in safe mode', async () => {

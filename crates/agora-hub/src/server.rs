@@ -2105,12 +2105,12 @@ pub(crate) fn plugin_command(
             && id
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-        let outcome = match (&result, plain) {
-            (Ok(_), true) => format!("ok {id}"),
-            (Ok(_), false) => "ok".to_string(),
-            (Err(e), _) => e.code.as_str().to_string(),
+        // The row's place names the plugin, as for the owner's `plugin.add` and `plugin.remove`.
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(e) => e.code.as_str(),
         };
-        audit(hub, who, action, "", &outcome);
+        audit(hub, who, action, if plain { id } else { "" }, outcome);
     }
     Some(match result {
         Ok(ok) => v1::CommandResponse {

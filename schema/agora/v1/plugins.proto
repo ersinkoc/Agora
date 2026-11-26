@@ -82,13 +82,15 @@ message PluginGrantListResult {
 }
 
 // client -> hub, answered with `Empty`: the caller allows `granted` of what the installed `version` of `plugin_id` asks for, and has
-// seen all of it. Replaces the caller's grant for that plugin. Refused with `plugin.not_found` unless that version is installed now,
-// and with `protocol.invalid_message` (`granted`) for a capability that version does not ask for. The hub records `seen` from the
-// installed manifest itself.
+// seen all of it. Replaces the caller's grant for that plugin. Refused with `plugin.not_found` unless that version, with the package
+// `sha256`, is installed now (the person was shown exactly that package), and with `protocol.invalid_message` (`granted`) for a
+// capability it does not ask for. The hub records `seen` from the installed manifest itself.
 message PluginGrantSet {
   string plugin_id = 1;
   string version = 2;
   repeated string granted = 3;
+  // `PluginInfo.sha256` of the package the person was shown.
+  string sha256 = 4;
 }
 
 // client -> hub, answered with `Empty`: the caller stops showing `plugin_id` and forgets their grant for it (the plugin stays installed

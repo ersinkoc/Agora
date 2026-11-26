@@ -729,21 +729,23 @@ fn plugins_are_added_listed_and_removed_from_the_command_line_and_audited() {
     }
     // Each change is the owner's row in the audit trail.
     let store = SqliteStore::open(&hub.join("hub.db")).unwrap();
-    let rows: Vec<(String, String, String)> = agora_hub::audit::Audit::new(&store)
+    let rows: Vec<(String, String, String, String)> = agora_hub::audit::Audit::new(&store)
         .list(0, None, 100)
         .unwrap()
         .into_iter()
         .filter(|r| r.action.starts_with("plugin."))
-        .map(|r| (r.who, r.action, r.outcome))
+        .map(|r| (r.who, r.action, r.node, r.outcome))
         .collect();
-    let want = |w: &str, a: &str, o: &str| (w.to_string(), a.to_string(), o.to_string());
+    let want = |w: &str, a: &str, n: &str, o: &str| {
+        (w.to_string(), a.to_string(), n.to_string(), o.to_string())
+    };
     assert_eq!(
         rows,
         [
-            want("owner", "plugin.add", "ok demo@1.0.0"),
-            want("owner", "plugin.add", "package.hash"),
-            want("owner", "plugin.remove", "plugin.not_found"),
-            want("owner", "plugin.remove", "ok demo"),
+            want("owner", "plugin.add", "demo@1.0.0", "ok"),
+            want("owner", "plugin.add", "", "package.hash"),
+            want("owner", "plugin.remove", "nope", "plugin.not_found"),
+            want("owner", "plugin.remove", "demo", "ok"),
         ]
     );
     // A machine without a hub folder is told so, and nothing is made.

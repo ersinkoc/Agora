@@ -498,7 +498,7 @@ fn base64(s: &JStr) -> Option<Vec<u8>> {
 // ---- the JSON reader: JSON.parse's results, with JavaScript's strings and key order ----
 
 /// A string as JavaScript holds it: UTF-16 units, a lone surrogate allowed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct JStr(Vec<u16>);
 
 impl JStr {
@@ -602,6 +602,8 @@ impl Parser<'_> {
     fn object(&mut self, depth: usize) -> Option<J> {
         self.at += 1;
         let mut out: Vec<(JStr, J)> = Vec::new();
+        // Where each key is in `out`, so a 2 MiB object of distinct keys is read in linear time, not quadratic.
+        let mut place: std::collections::HashMap<JStr, usize> = std::collections::HashMap::new();
         self.space();
         if self.peek()? == b'}' {
             self.at += 1;
@@ -620,9 +622,12 @@ impl Parser<'_> {
             self.at += 1;
             let v = self.value(depth + 1)?;
             // A key given again keeps its first place and takes the new value (JSON.parse's CreateDataProperty).
-            match out.iter_mut().find(|(x, _)| *x == k) {
-                Some(slot) => slot.1 = v,
-                None => out.push((k, v)),
+            match place.get(&k) {
+                Some(&i) => out[i].1 = v,
+                None => {
+                    place.insert(k.clone(), out.len());
+                    out.push((k, v));
+                }
             }
             self.space();
             match self.peek()? {
@@ -803,6 +808,17 @@ mod tests {
         assert_eq!(decode_json(b"\xEF\xBB\xBF1"), Some(J::Num(1.0)));
         assert_eq!(decode_json(b"\xEF\xBB\xBF\xEF\xBB\xBF1"), None);
         assert_eq!(decode_json(b"\"\xff\""), None);
+        // An object of 200,000 distinct keys is read at once (the duplicate check is not quadratic).
+        let many = format!(
+            "{{{}}}",
+            (0..200_000)
+                .map(|i| format!("\"k{i}\":0"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let started = std::time::Instant::now();
+        assert!(matches!(decode_json(many.as_bytes()), Some(J::Obj(o)) if o.len() == 200_000));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
         // Nesting past the reader's depth is refused, never a stack overflow.
         let deep = "[".repeat(100_000);
         assert_eq!(decode_json(deep.as_bytes()), None);

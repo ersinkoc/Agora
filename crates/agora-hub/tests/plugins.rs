@@ -181,11 +181,12 @@ async fn fetch(c: &mut Conn<TcpStream>, id: &str, sha: &str) -> Result<Vec<u8>, 
     }
 }
 
-fn grant(id: &str, version: &str, granted: &[&str]) -> cr::Command {
+fn grant(id: &str, version: &str, granted: &[&str], sha: &str) -> cr::Command {
     cr::Command::PluginGrantSet(v1::PluginGrantSet {
         plugin_id: id.into(),
         version: version.into(),
         granted: granted.iter().map(|c| (*c).to_string()).collect(),
+        sha256: sha.into(),
     })
 }
 
@@ -212,10 +213,26 @@ async fn every_person_reads_the_installed_plugins_and_keeps_grants_of_their_own(
         assert_eq!(fetch(c, "demo", &l[0].sha256).await.unwrap(), bytes);
         assert!(grants(c).await.is_empty());
     }
+    let sha = list(&mut owner).await[0].sha256.clone();
+
+    // Only the owner installs, and only on the hub's machine: no message adds a plugin, and a grant for one that is not installed
+    // installs nothing (whoever sends it).
+    for c in [&mut member, &mut viewer, &mut owner] {
+        assert_eq!(
+            err(&ask(c, "", grant("evil", "1.0.0", &[], &sha)).await),
+            "plugin.not_found"
+        );
+        assert_eq!(list(c).await.len(), 1);
+    }
 
     // Each sets their own grant; a viewer too (choosing what a plugin may see changes nothing on any machine).
-    ok(ask(&mut member, "", grant("demo", "1.0.0", &["agents.read"])).await);
-    ok(ask(&mut viewer, "", grant("demo", "1.0.0", &[])).await);
+    ok(ask(
+        &mut member,
+        "",
+        grant("demo", "1.0.0", &["agents.read"], &sha),
+    )
+    .await);
+    ok(ask(&mut viewer, "", grant("demo", "1.0.0", &[], &sha)).await);
     let m = grants(&mut member).await;
     assert_eq!(
         (m.len(), m[0].granted.as_slice()),
@@ -235,11 +252,16 @@ async fn every_person_reads_the_installed_plugins_and_keeps_grants_of_their_own(
 
     // Not the installed version, or a capability it does not ask for, or a node named.
     assert_eq!(
-        err(&ask(&mut member, "", grant("demo", "0.9.0", &[])).await),
+        err(&ask(&mut member, "", grant("demo", "0.9.0", &[], &sha)).await),
         "plugin.not_found"
     );
     assert_eq!(
-        err(&ask(&mut member, "", grant("demo", "1.0.0", &["chat.read"])).await),
+        err(&ask(
+            &mut member,
+            "",
+            grant("demo", "1.0.0", &["chat.read"], &sha)
+        )
+        .await),
         "protocol.invalid_message"
     );
     assert_eq!(
@@ -252,7 +274,7 @@ async fn every_person_reads_the_installed_plugins_and_keeps_grants_of_their_own(
         "protocol.invalid_message"
     );
     assert_eq!(
-        err(&ask(&mut viewer, "n1", grant("demo", "1.0.0", &[])).await),
+        err(&ask(&mut viewer, "n1", grant("demo", "1.0.0", &[], &sha)).await),
         "protocol.invalid_message"
     );
 
@@ -269,7 +291,6 @@ async fn every_person_reads_the_installed_plugins_and_keeps_grants_of_their_own(
     assert_eq!(grants(&mut member).await.len(), 1);
 
     // The owner removes it on the hub's machine: the next list and fetch no longer have it, and its grants are gone.
-    let sha = list(&mut member).await[0].sha256.clone();
     assert!(Plugins::new(st.hub.store()).remove("demo", 2).unwrap());
     assert!(list(&mut member).await.is_empty());
     assert_eq!(
@@ -282,17 +303,20 @@ async fn every_person_reads_the_installed_plugins_and_keeps_grants_of_their_own(
     let rows = agora_hub::audit::Audit::new(st.hub.store())
         .list(0, None, 100)
         .unwrap();
-    let mine: Vec<(String, String, String)> = rows
+    let mine: Vec<(String, String, String, String)> = rows
         .into_iter()
         .filter(|r| r.action.starts_with("plugin.") && r.who != "owner")
-        .map(|r| (r.who, r.action, r.outcome))
+        .map(|r| (r.who, r.action, r.node, r.outcome))
         .collect();
-    let row = |w: &str, a: &str, o: &str| (w.to_string(), a.to_string(), o.to_string());
+    let row = |w: &str, a: &str, n: &str, o: &str| {
+        (w.to_string(), a.to_string(), n.to_string(), o.to_string())
+    };
     for want in [
-        row("eda", "plugin.grant", "ok demo"),
-        row("bo", "plugin.grant", "ok demo"),
-        row("eda", "plugin.grant", "plugin.not_found"),
-        row("bo", "plugin.ungrant", "ok demo"),
+        row("eda", "plugin.grant", "demo", "ok"),
+        row("bo", "plugin.grant", "demo", "ok"),
+        row("eda", "plugin.grant", "demo", "plugin.not_found"),
+        row("eda", "plugin.grant", "evil", "plugin.not_found"),
+        row("bo", "plugin.ungrant", "demo", "ok"),
     ] {
         assert!(mine.contains(&want), "{want:?} in {mine:?}");
     }

@@ -97,17 +97,18 @@ impl<'a> Plugins<'a> {
     /// not. `agora_version` is the hub's own: a plugin that needs a newer Agora is refused, as a window of this release would refuse it.
     pub fn add(&self, package: &[u8], agora_version: &str, now_ms: u64) -> Result<Added, AddError> {
         let result = self.add_checked(package, agora_version, now_ms);
-        let outcome = match &result {
-            Ok(a) => format!("ok {}@{}", a.id, a.version),
-            Err(AddError::Refused(r)) => format!("package.{}", r.code.as_str()),
-            Err(AddError::Full) => "plugin.full".to_string(),
-            Err(AddError::Store(_)) => "internal".to_string(),
+        // The row's place names the plugin (as `user.*` rows name the person); a refused package has none it could name.
+        let (target, outcome) = match &result {
+            Ok(a) => (format!("{}@{}", a.id, a.version), "ok".to_string()),
+            Err(AddError::Refused(r)) => (String::new(), format!("package.{}", r.code.as_str())),
+            Err(AddError::Full) => (String::new(), "plugin.full".to_string()),
+            Err(AddError::Store(_)) => (String::new(), "internal".to_string()),
         };
         let _ = crate::audit::Audit::new(self.store).record(
             now_ms,
             "owner",
             "plugin.add",
-            "cli",
+            &target,
             &outcome,
         );
         result
@@ -170,17 +171,13 @@ impl<'a> Plugins<'a> {
             tx.commit()?;
             n > 0
         };
-        let outcome = if removed {
-            format!("ok {id}")
-        } else {
-            "plugin.not_found".to_string()
-        };
+        let outcome = if removed { "ok" } else { "plugin.not_found" };
         let _ = crate::audit::Audit::new(self.store).record(
             now_ms,
             "owner",
             "plugin.remove",
-            "cli",
-            &outcome,
+            id,
+            outcome,
         );
         Ok(removed)
     }
@@ -265,15 +262,15 @@ impl<'a> Plugins<'a> {
     }
 
     /// `user` allows `set.granted` of what the installed version asks for, and has seen all of it. Refused with `plugin.not_found` unless
-    /// `set.version` is the installed one, and with `protocol.invalid_message` (`granted`) for a capability that version does not ask for.
+    /// `set.version` with the package `set.sha256` is the installed one (the person was shown exactly that package), and with `protocol.invalid_message` (`granted`) for a capability that version does not ask for.
     /// `seen` is the installed manifest's own list.
     pub fn set_grant(&self, user: &str, set: &PluginGrantSet, now_ms: u64) -> Result<(), Error> {
         let mut conn = self.store.lock().map_err(|_| internal())?;
         let tx = write_tx(&mut conn).map_err(|_| internal())?;
         let caps: Option<String> = tx
             .query_row(
-                "SELECT capabilities FROM plugins WHERE id = ?1 AND version = ?2",
-                params![set.plugin_id, set.version],
+                "SELECT capabilities FROM plugins WHERE id = ?1 AND version = ?2 AND sha256 = ?3",
+                params![set.plugin_id, set.version, set.sha256],
                 |r| r.get(0),
             )
             .optional()
@@ -397,6 +394,7 @@ mod tests {
                 plugin_id: "demo".into(),
                 version: "1.0.0".into(),
                 granted: vec!["agents.read".into()],
+                sha256: hex(&Sha256::digest(&one)),
             },
             11,
         )
@@ -420,22 +418,21 @@ mod tests {
         );
         // Every add and remove is the owner's row in the audit trail.
         let rows = crate::audit::Audit::new(&s).list(0, None, 100).unwrap();
-        let mine: Vec<(String, String)> = rows
+        let mine: Vec<(String, String, String)> = rows
             .iter()
             .filter(|r| r.action.starts_with("plugin."))
-            .map(|r| (r.action.clone(), r.outcome.clone()))
+            .map(|r| (r.action.clone(), r.node.clone(), r.outcome.clone()))
             .collect();
-        for want in [
-            ("plugin.add", "ok demo@1.0.0"),
-            ("plugin.add", "ok demo@1.1.0"),
-            ("plugin.remove", "ok demo"),
-            ("plugin.remove", "plugin.not_found"),
-        ] {
-            assert!(
-                mine.iter().any(|(a, o)| a == want.0 && o == want.1),
-                "{want:?} in {mine:?}"
-            );
-        }
+        let row = |a: &str, n: &str, o: &str| (a.to_string(), n.to_string(), o.to_string());
+        assert_eq!(
+            mine,
+            [
+                row("plugin.add", "demo@1.0.0", "ok"),
+                row("plugin.add", "demo@1.1.0", "ok"),
+                row("plugin.remove", "demo", "ok"),
+                row("plugin.remove", "demo", "plugin.not_found"),
+            ]
+        );
         assert!(rows
             .iter()
             .filter(|r| r.action.starts_with("plugin."))
@@ -537,23 +534,30 @@ mod tests {
     fn grants_are_per_person_and_checked_against_the_installed_version() {
         let s = store();
         let p = Plugins::new(&s);
-        p.add(
-            &package("demo", "1.0.0", &["agents.read", "theme.read"], 0),
-            "0.3.0",
-            1,
-        )
-        .unwrap();
-        let set = |user: &str, version: &str, granted: &[&str]| {
+        let bytes = package("demo", "1.0.0", &["agents.read", "theme.read"], 0);
+        p.add(&bytes, "0.3.0", 1).unwrap();
+        let sha = hex(&Sha256::digest(&bytes));
+        let set_for = |user: &str, version: &str, granted: &[&str], sha: &str| {
             p.set_grant(
                 user,
                 &PluginGrantSet {
                     plugin_id: "demo".into(),
                     version: version.into(),
                     granted: granted.iter().map(|c| c.to_string()).collect(),
+                    sha256: sha.into(),
                 },
                 5,
             )
         };
+        let set =
+            |user: &str, version: &str, granted: &[&str]| set_for(user, version, granted, &sha);
+        // Not the package the person was shown (the owner added another one under the same version meanwhile).
+        assert_eq!(
+            set_for("ayse", "1.0.0", &[], &"0".repeat(64))
+                .unwrap_err()
+                .code,
+            ErrorCode::PluginNotFound
+        );
         set(
             "ayse",
             "1.0.0",

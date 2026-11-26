@@ -1429,13 +1429,14 @@ remove ID`, docs/ux/plugins.md).
 - **`PluginGrantList`** → `PluginGrantListResult.grants`: the caller's own grants, one per plugin: `plugin_id`, the `version` it was given
   for (possibly older than the installed one), `seen` (what that version asked for), `granted` (what the person allowed, each in
   `seen`) and `set_ms`. A window holds a plugin whose installed version asks for a capability not in `seen`.
-- **`PluginGrantSet { plugin_id, version, granted }`** → `Empty`: replaces the caller's grant for that plugin. `plugin.not_found` unless
-  `version` is the installed one; `protocol.invalid_message` (`granted`) for a capability that version does not ask for. The hub records
+- **`PluginGrantSet { plugin_id, version, granted, sha256 }`** → `Empty`: replaces the caller's grant for that plugin. `plugin.not_found`
+  unless `version` with the package `sha256` (the one the person was shown) is the installed one; `protocol.invalid_message` (`granted`) for a capability that version does not ask for. The hub records
   `seen` from the installed manifest and `granted` in the manifest's order.
 - **`PluginGrantRemove { plugin_id }`** → `Empty`: forgets the caller's grant (stop showing it); none is not an error.
 - **Kept per person.** Grants are keyed by the person (`owner` on a hub with one person) and plugin id. Removing a plugin forgets everyone's
   grant for it; removing a person forgets theirs. Setting and removing a grant are audit rows of the person (`plugin.grant`,
-  `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`).
+  `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`). The row's `node` names the plugin
+  (`<id>` or `<id>@<version>`), as a `user.*` row names the person.
 - Golden fixtures: `schema/fixtures/v1/agora.v1.Plugin*` and `schema/fixtures/plugins/` (`crates/agora-protocol/tests/plugins.rs`).
 
 ## Durable cross-node task handoffs (ADR-0109)

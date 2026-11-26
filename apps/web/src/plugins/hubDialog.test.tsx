@@ -56,7 +56,7 @@ describe('a plugin installed on the hub in the plugins dialog', () => {
     act(() => box?.click());
     act(() => button('Show it')?.click());
     await settle();
-    expect(sent.find((b) => b.pluginGrantSet)?.pluginGrantSet).toEqual({ pluginId: 'agents', version: '1.0.0', granted: ['agents.read'] });
+    expect(sent.find((b) => b.pluginGrantSet)?.pluginGrantSet).toEqual({ pluginId: 'agents', version: '1.0.0', granted: ['agents.read'], sha256: sha });
     expect(pluginStore.state().plugins[0]?.state).toBe('ready');
     expect(document.querySelector('[data-plugin-row="agents"]')?.textContent).toContain('It sees one thing you allowed');
     act(() => button('Stop showing')?.click());
