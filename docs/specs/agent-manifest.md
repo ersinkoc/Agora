@@ -153,7 +153,9 @@ regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 terminal's foreground program (its foreground process group, looked at every 2 s while the terminal is watched or not idle; never its
 screen, its arguments or its path) and reads the terminal with this kind's screen rules until it ends; the shell stays a shell (same
 id, kind, ledger entry and resume) and the mark grants nothing (skip-permissions rules apply only to agents started as a kind). Linux
-reports at most 15 characters of a name. A renamed program is not recognised. Windows has no foreground group for a pseudoconsole: there
+reports at most 15 characters of a name, the one the program was started by; macOS reports the executable file's name, so a program
+started through a link is listed under its file's name too (Claude Code's npm install runs `claude.exe`; its native installer's
+version-numbered file is not recognised). A renamed program is not recognised. Windows has no foreground group for a pseudoconsole: there
 the program in front is the shell's newest direct child, followed down through shells (`cmd`, `pwsh`, `powershell`, `sh`, `bash`), and
 the name is the image's file name without `.exe`, compared ignoring ASCII case (ADR-0094 Amendment A). An agent installed as an npm `.cmd`/`.ps1` shim runs as `node`
 and is not recognised, and a program started in the background stays marked while the prompt is in front.

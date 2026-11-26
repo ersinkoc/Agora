@@ -1,12 +1,13 @@
 kind = "claude-code"
 display_name = "Claude Code"
-version = "2026.11.17.1"
+version = "2026.11.27.1"
 min_engine = 4
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
 
 [process]
-names = ["claude"]
+# ADR-0094: macOS reports a process by its executable file's name, and an npm install runs `claude` as a link to `claude.exe`.
+names = ["claude", "claude.exe"]
 launch = ["claude"]
 
 # ADR-0059: chosen in the start window, never preselected; the node's `skip_permissions` policy decides whether it may be used.
