@@ -36,7 +36,7 @@ export function themeFacts(): ThemeFacts {
 const FLUSH_MS = 250;
 const READ_TIMEOUT_MS = 5000;
 
-interface Watch { cap: Capability; last?: string; close?: () => void; lines?: ChatLine[]; key?: string }
+interface Watch { cap: Capability; last?: string; close?: () => void; lines?: ChatLine[]; key?: string; reads?: number; newest?: number }
 
 export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: CheckedPlugin; panel: PluginPanelDecl; granted: readonly Capability[]; view: PluginView; dev: boolean }) {
   const frame = useRef<HTMLIFrameElement>(null);
@@ -83,14 +83,21 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
       const v = latest.current;
       const agent = v.pane.agent;
       if (w) w.key = v.changesKey;
+      // F1823: a watch's reads can finish out of order; one that finishes after a newer one is dropped, so the last answer is the
+      // changes as they are (and a watch whose changes keep moving still gets every read that is not overtaken).
+      const read = w ? (w.reads = (w.reads ?? 0) + 1) : 0;
+      const stale = () => !!w && (!watches.has(id) || read < (w.newest ?? 0));
+      const answered = () => !!w && (w.newest ?? 0) > 0;
       if (!v.diff || !agent) { if (first) refuse(id, w); return; }
       try {
         const data = projectChanges(agent.id, await v.diff());
-        if (w && !watches.has(id)) return;
+        if (stale()) return;
+        const result = first || (!!w && !answered());
+        if (w) w.newest = read;
         const s = JSON.stringify(data);
         if (w) { if (s === w.last) return; w.last = s; }
-        answer(id, data, first);
-      } catch { if (first) refuse(id, w); }
+        answer(id, data, result);
+      } catch { if ((first || !answered()) && !stale()) refuse(id, w); }
     };
     // The bound agent's conversation: a read takes the first batch and closes; a watch keeps the stream and sends each change.
     const readChat = (id: number, w: Watch | undefined) => {

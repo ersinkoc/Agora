@@ -222,4 +222,40 @@ describe('the bridge', () => {
     send({ agora: 1, type: 'watch', id: 100, cap: 'agents.read' });
     expect(got.find((m) => m.id === 100)).toMatchObject({ ok: true });
   });
+
+  // F1823: a `changes.read` watch reads the bound agent's changes again each time they move; reads that finish out of order leave the
+  // plugin with the newest, never an older one sent last.
+  it('answers a watch of the changes with the newest read, whatever order the reads finish in', async () => {
+    const files = { 'panel.js': ENTRY };
+    const r = await checkPackage(bundle(files, { manifest: baseManifest(files, { capabilities: ['changes.read'], panels: [{ id: 'main', kind: 'tool' }] }) }), '0.3.39');
+    if (!r.ok) throw new Error(r.code);
+    const granted = ['changes.read'] as const;
+    const pending: ((d: string) => void)[] = [];
+    const loadDiff = () => new Promise<string>((res) => { pending.push(res); });
+    const diff = (line: string) => `diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+${line}\n`;
+    const draw = (n: number) => act(() => root.render(<PluginFrame plugin={r.plugin} panel={r.plugin.manifest.panels[0]!} granted={granted} dev
+      view={viewOf({ pane: 'p1', kind: 'tool', agent: { ...fleet[0]!, filesChanged: n }, fleet, boards: [], now: 0, loadDiff })} />));
+    draw(1);
+    const win = (host.querySelector('iframe') as HTMLIFrameElement).contentWindow as Window;
+    const got: { type: string; data?: { files: { lines: { text: string }[] }[] } }[] = [];
+    (win as unknown as { postMessage: (m: unknown) => void }).postMessage = (m) => { got.push(m as never); };
+    const added = () => got.map((m) => m.data?.files[0]?.lines.at(-1)?.text);
+    const settle = (f: () => void) => act(async () => { f(); for (let i = 0; i < 3; i++) await Promise.resolve(); });
+    act(() => { window.dispatchEvent(new MessageEvent('message', { source: win, data: { agora: 1, type: 'watch', id: 1, cap: 'changes.read' } })); });
+    await settle(() => pending.shift()?.(diff('v1')));
+    // The changes move twice; each starts a read, and the newer one finishes first.
+    for (const n of [2, 3]) { draw(n); await act(async () => { await new Promise((res) => setTimeout(res, 300)); }); }
+    expect(pending).toHaveLength(2);
+    const [older, newer] = [pending.shift()!, pending.shift()!];
+    await settle(() => newer(diff('v3')));
+    await settle(() => older(diff('v2')));
+    expect(added()).toEqual(['v1', 'v3']);
+    expect(got.map((m) => m.type)).toEqual(['result', 'update']);
+    // In order, every read answers: a watch whose changes keep moving is not starved of updates.
+    for (const n of [4, 5]) { draw(n); await act(async () => { await new Promise((res) => setTimeout(res, 300)); }); }
+    expect(pending).toHaveLength(2);
+    await settle(() => pending.shift()?.(diff('v4')));
+    await settle(() => pending.shift()?.(diff('v5')));
+    expect(added()).toEqual(['v1', 'v3', 'v4', 'v5']);
+  });
 });
