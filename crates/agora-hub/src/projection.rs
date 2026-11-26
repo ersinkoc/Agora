@@ -832,6 +832,10 @@ impl View {
                 for a in self.agents.values_mut().filter(|a| a.node_id == e.node_id) {
                     a.forgotten = true;
                 }
+                // #1150: its decisions are not remembered for it (a bounded aid against late requests, not history).
+                if self.resolved_approvals.contains_key(&e.node_id) {
+                    Arc::make_mut(&mut self.resolved_approvals).remove(&e.node_id);
+                }
             }
             Body::NodeForgotten(_) => {}
             Body::NodeResources(e) => {
@@ -2561,6 +2565,18 @@ mod tests {
         assert!(v.approvals.contains_key("n1/r-0"), "r-0 was the oldest");
         v.apply(&ev("n1", 10 + first, asked("r-1")));
         assert!(!v.approvals.contains_key("n1/r-1"));
+        // Review of #1234: a forgotten machine's decisions are not kept for it; only the hub can forget one.
+        let forgot = |node: &str| {
+            Body::NodeForgotten(NodeForgotten {
+                node_id: node.into(),
+                refused_return: false,
+            })
+        };
+        v.apply(&ev("n1", 11 + first, forgot("n2")));
+        assert!(v.resolved_approvals.contains_key("n2"));
+        v.apply(&ev(RESERVED_HUB_ID, 1, forgot("n2")));
+        assert!(!v.resolved_approvals.contains_key("n2"));
+        assert!(v.resolved_approvals.contains_key("n1"));
     }
 
     #[test]

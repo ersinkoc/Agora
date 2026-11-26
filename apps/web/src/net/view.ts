@@ -304,6 +304,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const id = e.nodeForgotten.nodeId ?? '';
       const n = v.nodes.get(id);
       if (n) n.forgotten = true;
+      v.resolved?.delete(id); // #1150: its decisions are not remembered for it, as in the hub's view
       for (const [key, a] of [...v.agents]) {
         if (a.nodeId !== id) continue;
         if (a.running) a.hidden = true;

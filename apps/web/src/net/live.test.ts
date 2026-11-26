@@ -312,6 +312,11 @@ describe('view', () => {
     expect(v.approvals.has('n/p')).toBe(true); // `p` was the oldest of 257
     applyEvent(v, pos++, ev('n', pos, { approvalRequested: { approvalId: 'r-0', agentId: 'a', action: 'write' } }));
     expect(v.approvals.has('n/r-0')).toBe(false);
+    // Review of #1234: a forgotten machine's decisions are not kept for it; only the hub can forget one.
+    applyEvent(v, pos++, ev('m', 2, { nodeForgotten: { nodeId: 'n' } }));
+    expect(v.resolved?.has('n')).toBe(true);
+    applyEvent(v, pos++, ev('hub', 1, { nodeForgotten: { nodeId: 'n' } }));
+    expect(v.resolved?.has('n')).toBe(false);
   });
 
   it('ignores events at or before its position, so a replayed tail is harmless', () => {

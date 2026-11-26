@@ -108,11 +108,12 @@ fn owed_bytes(owed: &[crate::board::Notice]) -> Vec<u8> {
     serde_json::Value::Array(items).to_string().into_bytes()
 }
 
-/// Whether `agent` (`<node>/<agent>`) runs in `project`, as the board's `sync` keeps an agent registered.
+/// Whether `agent` (`<node>/<agent>`) runs in `project`, as the board's `sync` keeps an agent registered. An agent of a forgotten
+/// machine does not (ADR-0073: nothing is owed to it, #1150), until the machine connects again.
 fn runs_in(view: &View, agent: &str, project: &str) -> bool {
     view.agents
         .get(agent)
-        .is_some_and(|a| a.running && a.project_id == project)
+        .is_some_and(|a| a.running && !a.forgotten && a.project_id == project)
 }
 
 pub struct Hub {
@@ -570,14 +571,12 @@ impl Hub {
         )
         .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
         // #1150: nor are its board notices.
-        if !self.owed_notices(node).is_empty() {
-            if let Err(e) = self
-                .store
-                .set_setting(&format!("{OWED_NOTICES_KEY}{node}"), b"[]")
-            {
-                // Operational log, not UI text.
-                eprintln!("node.forget: {node}: its board notices stay: {e}");
-            }
+        if let Err(e) = self
+            .store
+            .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
+        {
+            // Operational log, not UI text.
+            eprintln!("node.forget: {node}: its board notices stay: {e}");
         }
         drop(g);
         // ADR-0108: nothing is owed to a machine the owner forgot (its files go by retention, as before).
@@ -787,7 +786,7 @@ impl Hub {
         if !owed.is_empty() {
             if let Err(e) = self
                 .store
-                .set_setting(&format!("{OWED_NOTICES_KEY}{node}"), b"[]")
+                .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
             {
                 // Operational log, not UI text.
                 eprintln!("board notices: {node}: given but still stored: {e}");
@@ -2720,6 +2719,11 @@ mod tests {
         );
         assert!(owed[0].body.contains("task_moved"), "{}", owed[0].body);
         assert!(hub.take_owed_notices("old").is_empty(), "given once");
+        assert_eq!(
+            hub.store().setting("board-notices.old").unwrap(),
+            None,
+            "given notices leave no row"
+        );
         drop(link);
         drop(hub);
         let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
@@ -2738,6 +2742,16 @@ mod tests {
         drop(hub);
         let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
         assert!(hub.take_owed_notices("old").is_empty());
+        assert_eq!(hub.store().setting("board-notices.old").unwrap(), None);
+        drop(hub);
+        remove_db(&path);
+
+        // Review of #1234: a merge after the machine was forgotten owes its agents nothing (they are not counted as running).
+        let (hub, path, folded, links) = merge_scenario("adr0115-merge-forgot-first", &["new"]);
+        hub.forget_node("old", false, 6).unwrap();
+        hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 7);
+        assert_eq!(hub.store().setting("board-notices.old").unwrap(), None);
+        drop(links);
         drop(hub);
         remove_db(&path);
     }
