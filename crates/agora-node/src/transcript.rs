@@ -1707,6 +1707,7 @@ pub fn flush(board: &crate::chat::ChatBoard) {
     if let Some(store) = board.store() {
         let all = board.take_unsaved();
         let mut written: Vec<AgentId> = all.iter().map(|b| b.agent.clone()).collect();
+        written.sort();
         written.dedup();
         write_batches(board, &store, all, &mut HashMap::new());
         // Herdr G11: the node is stopping (an OS shutdown may follow): the files it just wrote are made to last through a power loss.

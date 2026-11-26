@@ -1557,9 +1557,14 @@ pub(crate) fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) 
 static SESSION_ENDING: AtomicBool = AtomicBool::new(false);
 
 /// How long a session-end notice is held once it came: the system ends the process as soon as its handler returns, so the handler
-/// waits while the process stops cleanly (`agora node`: at most its own 5 s deadline, then it ends itself). The system's own limit
-/// (a few seconds before it offers to end what still runs) may come first.
-const SESSION_END_HOLD: Duration = Duration::from_secs(6);
+/// waits while the process stops cleanly (`agora node`: its ledger, usage and event log first, within moments; its conversation's
+/// last batch after the drain, within its own 5 s deadline). Windows ends a process with only a hidden window about 5 s after
+/// `WM_ENDSESSION` anyway, so a stop that takes that long loses the conversation's last batch (up to a second of it).
+///
+/// A Restart Manager close (an installer replacing a file the node holds: `ENDSESSION_CLOSEAPP` in `lParam`) is heard the same way and
+/// stops the node cleanly; its supervisor does not start it again after that clean end, so the node is down until the next logon or
+/// `agora up`.
+const SESSION_END_HOLD: Duration = Duration::from_secs(5);
 
 fn hold_for_stop() {
     SESSION_ENDING.store(true, Ordering::SeqCst);

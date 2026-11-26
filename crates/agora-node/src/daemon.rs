@@ -968,7 +968,7 @@ impl EventSink {
                     // Stopped on request: the exit code is not known (same convention as the terminal exit frame).
                     self.record(Body::AgentExited(v1::AgentExited {
                         agent_id: agent.as_str().to_string(),
-                        exit_code: i32::MIN,
+                        exit_code: crate::ledger::STOPPED_ON_REQUEST,
                     }));
                     self.record(Body::TerminalClosed(v1::TerminalClosed {
                         terminal_id: crate::control::terminal_id_of(agent),
