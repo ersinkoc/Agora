@@ -481,7 +481,7 @@ fn open(
         join_hint(listen, &served_names(dir), ifaces.as_deref())
     });
     for line in hint_lines(say, &hint) {
-        let _ = writeln!(std::io::stdout(), "{line}");
+        crate::out_line(&line);
     }
     say_fingerprint(say, fingerprint.as_deref());
     say.out(key!("pair-open-waiting"), &[]);

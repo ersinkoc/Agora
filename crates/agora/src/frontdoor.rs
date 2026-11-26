@@ -1054,7 +1054,7 @@ fn ensure(
                             key!("frontdoor-in-job"),
                             &[("role", role.label(say).into())],
                         );
-                        eprintln!("{text}");
+                        crate::err_line(&text);
                         let _ = agora_platform::open_append_private(&log)
                             .and_then(|mut f| writeln!(f, "{text}"));
                     }
@@ -1238,12 +1238,12 @@ fn agents_running(home: &Path) -> Option<i64> {
 
 /// A line under a role in `agora status`, indented under it.
 fn detail(say: &Say, id: &str, args: &[(&str, Arg)]) {
-    let _ = writeln!(std::io::stdout(), "  {}", say.text(id, args));
+    crate::out_line(&format!("  {}", say.text(id, args)));
 }
 
 /// A line already rendered, indented under its role.
 fn detail_text(line: &str) {
-    let _ = writeln!(std::io::stdout(), "  {line}");
+    crate::out_line(&format!("  {line}"));
 }
 
 /// The node's hub line in `agora status`. `link`: the hub and the id this machine is enrolled as, `None` when it is not enrolled.
@@ -1318,11 +1318,7 @@ pub fn status(say: &Say, o_data: &Option<PathBuf>) -> ExitCode {
             // Its supervisor runs, the role does not: it crashed and starts again shortly.
             (Some(_), _) if waiting.is_some() => {
                 if let Some((pid, r)) = &waiting {
-                    let _ = writeln!(
-                        std::io::stdout(),
-                        "{}",
-                        crate::supervise::restarting_line(say, role, *pid, r)
-                    );
+                    crate::out_line(&crate::supervise::restarting_line(say, role, *pid, r));
                 }
             }
             (Some(l), _) => match supervised_child(l.pid) {
@@ -1394,7 +1390,7 @@ pub fn status(say: &Say, o_data: &Option<PathBuf>) -> ExitCode {
             }
         }
         for line in crate::supervise::status_lines(say, &h, role, held.is_some(), answers) {
-            let _ = writeln!(std::io::stdout(), "  {line}");
+            crate::out_line(&format!("  {line}"));
         }
         detail(say, key!("status-log"), &[("log", log)]);
     }

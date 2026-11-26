@@ -1327,7 +1327,9 @@ pub fn hub_audit(say: &Say, o: &Opts) -> ExitCode {
     match rows {
         Ok(rows) => {
             for e in rows {
-                println!("{}", agora_hub::audit::json_line(&e));
+                if !crate::out_line(&agora_hub::audit::json_line(&e)) {
+                    break;
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1493,7 +1495,9 @@ pub fn hub_ssh(say: &Say, o: &Opts) -> ExitCode {
                     .lines()
                     .find_map(|l| l.strip_prefix(&format!("{} ", m.name)))
                     .unwrap_or("not running");
-                println!("{} {} {} {state}", m.name, m.destination, m.port);
+                if !crate::out_line(&format!("{} {} {} {state}", m.name, m.destination, m.port)) {
+                    break;
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1723,7 +1727,7 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
         };
         let target = format!("{kind} {}:{}", t.url.host, t.url.port);
         if !o.test {
-            println!("{target}");
+            crate::out_line(&target);
             continue;
         }
         let title = say.text(key!("notify-title"), &[]);
