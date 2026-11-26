@@ -18,7 +18,7 @@ use agora_platform::LocalStream;
 use serde_json::{json, Value};
 
 const PATH: &str = "src/a.rs";
-const TTL_S: u64 = 3;
+const TTL_S: u64 = 4;
 
 fn now_ms() -> u64 {
     u64::try_from(

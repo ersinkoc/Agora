@@ -309,25 +309,41 @@ impl Renewals {
         out
     }
 
-    /// The answer to the renewal `key` sent at `sent_at_ms`. Ignored when the grant is gone (released, or its agent ended).
+    /// The answer to the renewal `key` sent at `sent_at_ms`. Ignored when the grant is gone (released, or its agent ended). A late
+    /// answer to a renewal that was given up as unanswered counts only when it is newer than what the grant knows: a grant
+    /// counts from the newest renewal the board answered, under that renewal's id (the board's id now).
     pub fn answered(&mut self, key: u64, outcome: Outcome, sent_at_ms: u64, now_ms: u64) {
         let Some(i) = self.grants.iter().position(|g| g.key == key) else {
             return;
         };
         let g = &mut self.grants[i];
-        g.in_flight_since = None;
+        let awaited = g.in_flight_since == Some(sent_at_ms);
+        if awaited {
+            g.in_flight_since = None;
+        }
+        let newer = sent_at_ms >= g.granted_at_ms;
         match outcome {
             Outcome::Renewed { lease_id } => {
-                g.current = lease_id;
-                g.granted_at_ms = sent_at_ms;
-                g.not_before_ms = 0;
+                if newer {
+                    g.current = lease_id;
+                    g.granted_at_ms = sent_at_ms;
+                }
+                if awaited {
+                    g.not_before_ms = 0;
+                }
             }
-            Outcome::Retry if now_ms < g.ends_at() => {
+            Outcome::Retry if awaited && now_ms < g.ends_at() => {
                 g.not_before_ms = now_ms.saturating_add(RETRY_MS);
             }
-            Outcome::Retry | Outcome::Lost => {
+            Outcome::Retry if awaited => {
                 self.grants.remove(i);
             }
+            // A failure of a renewal given up on changes nothing: the one on its way now (or the next) decides.
+            Outcome::Retry => {}
+            Outcome::Lost if newer => {
+                self.grants.remove(i);
+            }
+            Outcome::Lost => {}
         }
     }
 
@@ -458,17 +474,55 @@ mod tests {
     fn an_unanswered_renewal_counts_as_failed_after_its_deadline() {
         let mut r = Renewals::new();
         grant(&mut r, "l-1", &["a"], json!(600), 0);
-        let d = r.due(300_000);
-        assert_eq!(d.len(), 1);
+        let first = r.due(300_000);
+        assert_eq!(first.len(), 1);
         assert!(r.due(300_000 + IN_FLIGHT_MS - 1).is_empty());
         assert!(
             r.due(300_000 + IN_FLIGHT_MS).is_empty(),
             "waits the retry gap"
         );
-        assert_eq!(r.due(300_000 + IN_FLIGHT_MS + RETRY_MS).len(), 1);
-        // The late answer to the first one is still applied to the grant (same key): harmless, it was granted.
-        r.answered(d[0].key, renewed("l-9"), 300_000, 400_000);
+        let second = r.due(300_000 + IN_FLIGHT_MS + RETRY_MS);
+        assert_eq!(second.len(), 1);
+        // The late answer to the first is newer than what the grant knows: the board's id now. The second is still on its way.
+        r.answered(first[0].key, renewed("l-9"), first[0].sent_at_ms, 400_000);
         assert_eq!(r.release_target(&a(), "l-1").as_deref(), Some("l-9"));
+        assert!(r.in_flight(&a()));
+        r.answered(
+            second[0].key,
+            renewed("l-10"),
+            second[0].sent_at_ms,
+            400_001,
+        );
+        assert_eq!(r.release_target(&a(), "l-1").as_deref(), Some("l-10"));
+        assert!(!r.in_flight(&a()));
+    }
+
+    #[test]
+    fn a_late_answer_older_than_the_grant_changes_nothing() {
+        let mut r = Renewals::new();
+        grant(&mut r, "l-1", &["a"], json!(600), 0);
+        let first = r.due(300_000);
+        // Given up as unanswered, then sent again.
+        assert!(r.due(300_000 + IN_FLIGHT_MS).is_empty());
+        let second = r.due(300_000 + IN_FLIGHT_MS + RETRY_MS);
+        r.answered(
+            second[0].key,
+            renewed("l-10"),
+            second[0].sent_at_ms,
+            400_000,
+        );
+        // The given-up first renewal answers after the second: an id the board already replaced, or a failure, is ignored.
+        r.answered(first[0].key, renewed("l-9"), first[0].sent_at_ms, 400_001);
+        assert_eq!(r.release_target(&a(), "l-1").as_deref(), Some("l-10"));
+        r.answered(first[0].key, Outcome::Lost, first[0].sent_at_ms, 400_002);
+        r.answered(first[0].key, Outcome::Retry, first[0].sent_at_ms, 400_003);
+        assert_eq!(r.len(), 1);
+        assert!(
+            r.due(400_003).is_empty(),
+            "no retry gap from a stale failure"
+        );
+        // The grant now counts from the second renewal.
+        assert_eq!(r.due(second[0].sent_at_ms + 300_000).len(), 1);
     }
 
     #[test]
