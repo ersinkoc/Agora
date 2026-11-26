@@ -167,7 +167,11 @@ The maintainer wants community plugins next to community themes, "like herdr".
 2. **The sandbox host:** the frame, the page policy, the message set with the read capabilities, the host-drawn header, safe
    mode, and local development loading. Done: `docs/ux/plugins.md`.
 3. **Storage on the hub,** install and remove, and per-person grants (schema messages, fixtures). Done: `docs/ux/plugins.md`, "Plugins installed on the hub". This narrows ADR-0049's "viewers have no commands" for one case: a viewer may set and remove their own plugin grants (hub only; nothing reaches a node).
-4. **The catalog:** repository, review rules, signatures, `agora hub plugin` commands.
+4. **The catalog:** repository, review rules, signatures, `agora hub plugin` commands. Done on the hub's side: `docs/ux/plugins.md`, "The
+   community catalog" (`agora hub plugins key set|on|off|status|update|install|upgrade`; the index signed with `ssh-keygen -Y sign` and
+   checked under the key the owner pinned, a serial against going back, an archive installed only when it is exactly the signed entry,
+   the owner asked first; windows list it read only with `PluginCatalogList`; threat-model row T68). The catalog's repository, its CI
+   and its key are the maintainer's to make, by the procedure on that page.
 5. **Further capabilities,** each by amendment.
 
 ## Verification

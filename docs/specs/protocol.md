@@ -1495,6 +1495,16 @@ remove ID`, docs/ux/plugins.md).
   `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`). The row's `node` names the plugin
   (`<id>` or `<id>@<version>`), as a `user.*` row names the person.
 - Golden fixtures: `schema/fixtures/v1/agora.v1.Plugin*` and `schema/fixtures/plugins/` (`crates/agora-protocol/tests/plugins.rs`).
+- **`PluginCatalogList`** (ADR-0114 decision 7, build step 4; `CommandRequest.plugin_catalog_list` 120, `CommandOk.plugin_catalog_list`
+  39) → `PluginCatalogListResult { on, entries, updated_at_ms }`: the community catalog's plugins as the hub kept them from the last index
+  whose signature it verified under the key its owner pinned (docs/ux/plugins.md, "The community catalog"), ordered by name then
+  `plugin_id`. Each `PluginCatalogEntry` is `plugin_id`, `name`, `version`, `author`, `licence`, `description` (empty when none),
+  `capabilities` (rung-1 names), the archive's `sha256` and `size`; all of it is the index's text, shown as text. While the owner has the
+  catalog off: `on: false` and nothing else (not an error). With no key pinned, or a key pinned since the last fetch: `on: true` with no
+  entry and `updated_at_ms` 0. Read only and answered like the others above (any signed-in person; `target_node` refused; a node never
+  receives it; no capability, an older hub refuses it and the window shows no catalog). No message installs, upgrades or fetches a
+  catalog archive: the owner does, on the hub's machine (`agora hub plugins install|upgrade ID`). Golden fixtures:
+  `schema/fixtures/plugin-catalog/` (`crates/agora-protocol/tests/plugin_catalog.rs`).
 
 ## Durable cross-node task handoffs (ADR-0109)
 

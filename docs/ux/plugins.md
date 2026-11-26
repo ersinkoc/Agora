@@ -1,13 +1,15 @@
 # Plugins: sandboxed panels in the window
 
 ADR-0114 (Accepted) lets community plugins add panels to the web window (and the desktop app, which loads it). This page is build steps
-2 and 3. Step 2: the frame, its page policy, the message set with the rung-1 read capabilities, the window's header and marker, safe mode,
+2 to 4. Step 2: the frame, its page policy, the message set with the rung-1 read capabilities, the window's header and marker, safe mode,
 and loading a package from a local file for development. Step 3: plugins the hub's owner installs for the hub, and grants kept per person
-on the hub ("Plugins installed on the hub"). The reviewed catalog is step 4.
+on the hub ("Plugins installed on the hub"). Step 4: the reviewed, signed community catalog the hub fetches on its owner's command ("The
+community catalog"; the hub side is built, the catalog's repository and key are the maintainer's to make).
 
 The code is in `apps/web/src/plugins/` (`hub.ts` for the hub's plugins); the frame page and its loader are
 `apps/web/public/plugin-frame.html` and `plugin-frame.js`; the hub's headers for them are in `crates/agora-hub/src/web.rs`; the hub's
-package check, storage and messages are `crates/agora-hub/src/plugin_package.rs`, `plugins.rs` and `schema/agora/v1/plugins.proto`; a
+package check, storage and messages are `crates/agora-hub/src/plugin_package.rs`, `plugins.rs` and `schema/agora/v1/plugins.proto`; the
+catalog is `crates/agora-hub/src/plugin_catalog.rs` (with `sshsig.rs`, the signature check) and `crates/agora/src/plugincmd.rs`; a
 sample plugin is `apps/web/plugins/sample/`.
 
 ## What a plugin is
@@ -216,6 +218,114 @@ any machine, so a viewer may show a plugin too. The hub answers these itself; a 
 (`protocol.invalid_message`, `target_node`). Setting and removing a grant are audit rows of the person (`plugin.grant`, `plugin.ungrant`).
 The messages are in `docs/specs/protocol.md`, "Plugins (ADR-0114)".
 
+## The community catalog
+
+ADR-0114 decision 7: a public repository of reviewed plugin archives, separate from the theme catalog, with an index signed by the
+catalog's key. **Off until the hub's owner turns it on.** The hub, never a browser, fetches it, and only on the owner's command on the
+hub's machine; nothing is installed, upgraded or fetched on its own, and no protocol message installs anything.
+
+**The owner, on the hub's machine** (like `agora hub themes`, by whoever can open the hub's folder; every command is an audit row as the
+owner's, refused or not):
+
+| Command | What it does |
+| --- | --- |
+| `agora hub plugins key set FILE` | Pins the catalog's public key (its `.pub` file, one `ssh-ed25519 AAAA…` line, or an allowed-signers line `agora-plugin-catalog ssh-ed25519 AAAA…`) and prints its fingerprint as `ssh-keygen -l` does, to compare with the one the project publishes. A private key is refused and nothing of it is kept. Pinning another key forgets the catalog fetched under the old one and its serial (`plugin_catalog.key`, with the fingerprint). |
+| `agora hub plugins on` / `off` / `status` | The switch (off by default), the pinned key's fingerprint (or that there is none: then the catalog cannot be used at all), and the last fetch: how many plugins, the index's serial, when and from where. |
+| `agora hub plugins update [--url URL]` | Fetches `index.json` and `index.json.sig` beside it, checks the signature under the pinned key over the index's exact bytes before reading any of it, refuses an index whose serial is lower than the last accepted, reads the entries strictly (each one with a problem is refused and named, the others are kept), and replaces the stored catalog in one transaction. It names each installed plugin the catalog has a newer version of. It installs nothing. Without `--url`, the last address. |
+| `agora hub plugins install ID [--yes]` | Fetches that plugin's archive, refuses it unless its size and SHA-256 are the signed entry's, checks it as a window checks a package, refuses it unless its manifest's id, version, name, author, licence and capabilities are the entry's, shows what it asks to see and asks (`[y/N]`); only then keeps it through the hub's plugin storage (as `agora hub plugin add` would, `plugin_catalog.install`). With no terminal to ask in, only `--yes` installs. Refused while the catalog is off, without a key, or before an update under the key pinned now. |
+| `agora hub plugins upgrade ID [--yes]` | The same for a newer version of an installed plugin: **what changes in what it asks to see comes first** (what it asks to see more, what it no longer asks for, what it still asks for), then the version, then the question. A version not newer than the installed one is refused. Each person who allowed the old version is asked again in the window if the new one asks to see more (as for any new version). |
+
+Everything printed that came from the catalog (ids, names, authors, field names, the address) has every control, invisible and
+direction-changing character written as a visible escape (`\u{1b}`), so a catalog cannot drive the owner's terminal.
+
+**What the hub checks.**
+
+- **The signature, first.** `index.json.sig` is an SSH signature (`ssh-keygen -Y sign`, PROTOCOL.sshsig, the format of the release files)
+  with the namespace `agora-plugin-catalog`, checked in the hub with `ring` (no program is run): made by the pinned key, for that namespace,
+  over exactly the bytes fetched. Anything else refuses the whole index and changes nothing. The index lists every archive's SHA-256 and
+  size, so the one signature covers every archive it names.
+- **No going back.** `serial` must not be lower than the last index the hub accepted under the same key: an old signed index (with a version
+  withdrawn since) cannot be served again. The same serial again is fine.
+- **Fetching** is the theme catalog's: `https://` (plain `http://` only to this machine), no redirect (a 3xx is a refusal), an archive only
+  from a relative path under the index's folder on the same host; index at most 256 KiB, signature 8 KiB, archive 2 MiB; each step at most
+  10 s and each command 120 s.
+- **The index** is read strictly: the format marker, no field it does not know at either level, at most 200 entries, each field of a closed
+  kind (below), only the rung-1 capability names.
+
+**What a window shows.** While the catalog is on, the plugins dialog lists, under **From the hub's catalog**, each plugin not installed on
+the hub (or newer than the installed version): its name, version, author, licence and description as text, what it asks to see in plain
+words (`plugin-cap-*`), and the command the hub's owner runs on the hub's machine (`agora hub plugins install ID`, or `upgrade ID`), as
+plain text to copy. Nothing in a window installs. The window asks the hub with `PluginCatalogList` (`docs/specs/protocol.md`, "Plugins
+(ADR-0114)"); an older hub refuses it and the window shows no catalog; safe mode asks nothing.
+
+### The catalog's repository (for the maintainer)
+
+The repository does not exist yet; the hub's default address is a placeholder that can never resolve (`plugins.agora.invalid`), so an owner
+gives the real one with `--url` once. Its layout:
+
+```
+agora-plugins/
+  index.json                                   the signed index (below)
+  index.json.sig                               its signature
+  agora-plugin-catalog.pub                     the catalog's public key (its fingerprint is also published in Agora's docs)
+  plugins/<id>/<id>-<version>.json             each reviewed archive, as `scripts/pack-plugin.mjs` packs it
+  plugins/<id>/src/                            the readable source the archive is packed from
+  plugins/<id>/README.md                       what it does, its author and licence, a link to its own repository
+```
+
+```json
+{
+  "agora-plugin-catalog": 1,
+  "serial": 7,
+  "plugins": [
+    {
+      "id": "sample-agents", "name": "Agent list", "version": "0.2.0", "author": "The Agora authors", "licence": "Apache-2.0",
+      "description": "Lists the agents and their states in the theme's colours.",
+      "capabilities": ["agents.read", "theme.read"],
+      "sha256": "<the archive's SHA-256>", "size": 1834, "file": "plugins/sample-agents/sample-agents-0.2.0.json"
+    }
+  ]
+}
+```
+
+| Field | Rule |
+| --- | --- |
+| `agora-plugin-catalog` | `1`; a hub refuses a newer format |
+| `serial` | a whole number from 1 that only grows: one more on every signed release |
+| `id`, `version`, `name`, `author`, `licence`, `capabilities` | exactly the archive's manifest (the hub refuses an archive whose manifest differs); `licence` is an SPDX identifier and required |
+| `description` | optional, one line of at most 300 characters, no control or invisible characters |
+| `sha256`, `size` | of the archive file exactly as served; at most 2 MiB |
+| `file` | the archive's path under the index's folder: letters, digits, `.`, `_`, `-` and `/`, ending in `.json`, no `.` or `..` part |
+
+**Review.** Every addition and every update is a pull request reviewed by a person; the licence is required; minified or obfuscated code
+is refused (the source in `plugins/<id>/src/` is what is reviewed, and the archive must be what `pack-plugin.mjs` makes of it); and CI
+checks the manifest, the sizes and hashes, that the index entry says what the manifest says, and that the capabilities are what the
+description says the plugin needs. The hub repeats every check it can on its own.
+
+**The key, once.** On a machine kept offline, `ssh-keygen -t ed25519 -C agora-plugin-catalog -f agora-plugin-catalog`, with a passphrase.
+The private key never goes into a repository, CI or any hub. Publish `agora-plugin-catalog.pub` in the catalog's repository and its
+fingerprint (`ssh-keygen -l -f agora-plugin-catalog.pub`) in Agora's documentation and release notes, so owners can compare what
+`key set` prints.
+
+**Each release.**
+
+1. Merge the reviewed pull requests.
+2. Write `index.json` with `serial` one more than the last, each entry's `sha256` (`sha256sum`) and `size` (`wc -c`) of the archive as committed.
+3. Sign it: `ssh-keygen -Y sign -f agora-plugin-catalog -n agora-plugin-catalog index.json` (writes `index.json.sig`).
+4. Check it as a hub would: with an allowed-signers file holding `agora-plugin-catalog ssh-ed25519 AAAA…`,
+   `ssh-keygen -Y verify -f allowed_signers -I agora-plugin-catalog -n agora-plugin-catalog -s index.json.sig < index.json`.
+5. Commit `index.json` and `index.json.sig` together. Never change `index.json` after signing: any change is a new serial and a new signature.
+
+**Withdrawing a version** is a release (a new serial) without it, or with the version before it. Once that index is accepted, a hub
+never goes back to an older index that still lists it (the serial), but a hub that installed it keeps it: `upgrade` never goes back.
+Tell owners to remove it (`agora hub plugin remove ID`) and install the listed version again.
+
+**Rotating the key, or after a leak.** Make a new key as above, publish its public half and fingerprint, say why (a leak is announced at
+once), and sign the next index with it, starting the serial anywhere. Each owner pins the new key with `agora hub plugins key set FILE`:
+the hub forgets the catalog fetched under the old key and its serial, so nothing verified under the old key is offered again. A hub that has
+not pinned the new key refuses the new index (another key) and keeps what it had. Plugins already installed stay installed; an owner removes
+one with `agora hub plugin remove ID`. What a leaked key can and cannot do is threat-model row T68.
+
 ## Safe mode
 
 `?safe` in the address, or the safe-mode key **Ctrl+Alt+Shift+S** (⌘⌥⇧S on a Mac, by the key's place), opens the window with no plugins
@@ -275,6 +385,14 @@ runs.
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
   package loads through the dialog.
+- Catalog: the signature check against keys and signatures made in the test and by `ssh-keygen` itself (`src/sshsig.rs`,
+  `tests/plugin_catalog.rs`): a good index kept and listed only while on; a bad signature, another key, another namespace, no signature, a
+  lower serial, a redirect, an index or archive too large or too slow change nothing; a tampered archive (hash), a wrong size, a manifest
+  that asks for more than its entry or installs under another id is never installed; an upgrade's capability changes, never a downgrade; a
+  new key forgets what the old one verified; every step an audit row. Over real sockets, every person lists the catalog only while it is on
+  and a request naming a node is refused (`tests/plugins.rs`); the whole procedure with `ssh-keygen` and the real command line, including
+  the question, `--yes`, the order of an upgrade's lines and escaped terminal output (`crates/agora/tests/hub_cli.rs`); golden fixtures
+  (`schema/fixtures/plugin-catalog/`); the window's list, read only, with the owner's command (`catalog.test.ts`, `hubDialog.test.tsx`).
 - Real hub (`scripts/e2e-plugin-hub.mjs`, headless Chromium with a real hub and node): the owner installs the sample plugin; the window lists
   it as the hub's without Remove and draws none of its panes until the person shows it; then it draws the real agents, and after a reload
   it is drawn with the grant the hub kept (nothing in this browser's storage); once the owner removes it, the next load drops it.
