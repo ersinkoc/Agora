@@ -3,6 +3,7 @@
 // origin, and checks a theme again before it shows or installs it. Installing copies the theme into the person's own themes
 // (store.ts `install`); it changes only when the person picks a newer version (`upgrade`).
 import type { agora } from '../gen/agora';
+import { demoCatalog } from './catalogDemo';
 import type { CatalogOrigin, Theme } from './tokens';
 
 /** One theme of the catalog, as the window shows it. Every text is the index's: shown as text, never as markup. */
@@ -52,6 +53,12 @@ export function setCatalogSource(next: CatalogAsk | undefined) {
   listeners.forEach((l) => l());
 }
 export const catalogSource = () => ask;
+/** Where the window asks, from its connection: the hub once its first view came (a question sent before the link is open is refused,
+ *  and the editor asks only once), nothing while signed in but not connected yet, and the sample catalog in the demo window (no hub). */
+export function catalogAskFor(api: { command: (node: string, body: Body) => Promise<agora.v1.CommandOk.$Properties> } | undefined, viewed: boolean, hub: boolean): CatalogAsk | undefined {
+  if (api && viewed) return (body) => api.command('', body);
+  return hub ? undefined : demoCatalog;
+}
 export function subscribeCatalogSource(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; }
 
 /** The catalog, or `undefined` when the hub cannot say (an older hub, or the connection is down). */

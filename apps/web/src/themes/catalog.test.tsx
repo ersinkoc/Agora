@@ -5,7 +5,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage, t } from '../i18n';
-import { type CatalogAsk, installedOf, listOf, setCatalogSource } from './catalog';
+import { type CatalogAsk, catalogAskFor, installedOf, listOf, setCatalogSource } from './catalog';
+import { demoCatalog } from './catalogDemo';
 import { writeTheme } from './file';
 import { USER_KEY, loadState, themeStore } from './store';
 import { ThemeEditor } from './ThemeEditor';
@@ -125,6 +126,18 @@ describe('the theme catalog', () => {
     expect(themeStore.state().choice.dark).toBe(id);
     expect(card('night').querySelector('[data-newer]')).toBeNull();
     expect(card('night').textContent).toContain(t('theme-catalog-installed'));
+  });
+
+  it('asks the hub only once the window has its first view, and the demo window its sample catalog', async () => {
+    const sent: [string, unknown][] = [];
+    const api = { command: async (node: string, body: unknown) => { sent.push([node, body]); return {}; } };
+    expect(catalogAskFor(api, false, true)).toBeUndefined();
+    expect(catalogAskFor(undefined, false, true)).toBeUndefined();
+    expect(catalogAskFor(undefined, false, false)).toBe(demoCatalog);
+    await catalogAskFor(api, true, true)?.({ themeCatalogList: {} });
+    expect(sent).toEqual([['', { themeCatalogList: {} }]]); // no machine named: the hub answers it
+    const l = listOf((await demoCatalog({ themeCatalogList: {} })).themeCatalogList);
+    expect(l.on && l.entries.map((e) => e.id)).toEqual(['harbour', 'meadow']);
   });
 
   it('reads the hub\'s answers strictly', () => {

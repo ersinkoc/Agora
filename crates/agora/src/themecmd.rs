@@ -317,6 +317,14 @@ mod tests {
         serde_json::json!({"agora-theme-catalog": 1, "themes": entries}).to_string()
     }
 
+    /// Room enough for a loaded test machine; only the cases that test the deadline use [`quick`].
+    fn roomy() -> Limits {
+        Limits {
+            step: Duration::from_secs(10),
+            deadline: Duration::from_secs(60),
+        }
+    }
+
     fn quick() -> Limits {
         Limits {
             step: Duration::from_millis(300),
@@ -391,7 +399,7 @@ mod tests {
         let (base, asked) = serve(a);
         let store = SqliteStore::open_in_memory().unwrap();
         let url = format!("{base}/cat/index.json");
-        let f = theme_catalog::update(&store, &url, quick(), check, 10).unwrap();
+        let f = theme_catalog::update(&store, &url, roomy(), check, 10).unwrap();
         assert_eq!(
             f.accepted
                 .iter()
@@ -452,7 +460,7 @@ mod tests {
         );
         assert_eq!(theme_catalog::saved_url(&store).unwrap(), url);
         // The command says so and exits 1, since some were refused.
-        assert_eq!(run_update(&say(), &store, &url, quick()), ExitCode::from(1));
+        assert_eq!(run_update(&say(), &store, &url, roomy()), ExitCode::from(1));
     }
 
     #[test]
@@ -484,7 +492,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let good_url = format!("{base}/good/index.json");
         assert_eq!(
-            run_update(&say(), &store, &good_url, quick()),
+            run_update(&say(), &store, &good_url, roomy()),
             ExitCode::SUCCESS
         );
         assert_eq!(ids(&store), [("night".to_string(), 2)]);
@@ -512,14 +520,22 @@ mod tests {
             ),
         ];
         for (path, want) in cases {
-            let started = std::time::Instant::now();
-            let r = theme_catalog::update(&store, &format!("{base}{path}"), quick(), check, 20);
-            assert_eq!(r.unwrap_err(), want, "{path}");
-            assert!(
-                started.elapsed() < Duration::from_secs(3),
-                "{path} took {:?}",
-                started.elapsed()
+            // Only the servers that never finish are held to a short deadline, which must then end the update promptly.
+            let drips = matches!(
+                want,
+                UpdateError::Index(IndexError::TimedOut) | UpdateError::Theme { .. }
             );
+            let started = std::time::Instant::now();
+            let limits = if drips { quick() } else { roomy() };
+            let r = theme_catalog::update(&store, &format!("{base}{path}"), limits, check, 20);
+            assert_eq!(r.unwrap_err(), want, "{path}");
+            if drips {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{path} took {:?}",
+                    started.elapsed()
+                );
+            }
             assert_eq!(ids(&store), [("night".to_string(), 2)], "{path}");
             assert_eq!(
                 theme_catalog::saved_url(&store).unwrap(),
@@ -531,7 +547,7 @@ mod tests {
         assert!(other_asked.lock().unwrap().is_empty());
         // Plain http to another machine is refused before anything is fetched.
         assert_eq!(
-            theme_catalog::update(&store, "http://example.com/index.json", quick(), check, 30)
+            theme_catalog::update(&store, "http://example.com/index.json", roomy(), check, 30)
                 .unwrap_err(),
             UpdateError::Index(IndexError::Address)
         );

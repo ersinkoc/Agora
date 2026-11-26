@@ -454,6 +454,10 @@ catalog of two themes.
 - **An installed theme never changes by itself.** When the catalog has a higher version, the theme says **Version N available** and
   offers **Update to version N**, which replaces that theme in place (same place in the list, still chosen; a scheme the new version no
   longer has goes back to the default). Editing an installed theme keeps where it came from.
+- The editor asks when it opens: a catalog the owner turns on while the editor is open shows the next time it is opened.
+
+`scripts/e2e-theme-catalog.mjs` runs all of this in a real browser on a real hub: the owner's `update` from a catalog served on the
+machine, nothing shown while off, the list once on, a preview and an install, and no request to any origin but the hub's.
 
 ### The protocol
 
