@@ -9,7 +9,11 @@
 //! The port is fixed per hub: the first run takes [`PREFERRED_PORT`] (or any free one when that is taken) and keeps it in
 //! `<link dir>/panel-port`, because a device key and a sign-in belong to the page's origin, which includes the port. A later run
 //! that finds its port taken by something else refuses to start rather than moving, since a new port would be a new device.
-//! The listener exists only while the command runs.
+//! The listener exists only while the command runs, bound exclusively (no other program can bind the same port beside it, T27).
+//!
+//! With a person at the terminal on a machine with a screen, the command also asks the system to open the address in the browser
+//! (`crate::frontdoor::may_open_browser`: not without a terminal, over SSH, on Linux without a display, in CI, or with
+//! `AGORA_NO_BROWSER` set); it prints the address in any case.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -114,10 +118,13 @@ pub fn panel(say: &Say) -> ExitCode {
     run_to_end(rt, async {
         match start(&link_dir(), PREFERRED_PORT).await {
             Ok(p) => {
-                say.out(
-                    key!("cli-panel"),
-                    &[("url", format!("http://127.0.0.1:{}/", p.port).into())],
-                );
+                let browser: Option<&Opener<'_>> = if crate::frontdoor::may_open_browser_here() {
+                    Some(&agora_platform::open_url)
+                } else {
+                    None
+                };
+                // The system's opener may wait a few seconds for the browser; the forwarder runs on the other workers meanwhile.
+                tokio::task::block_in_place(|| announce(say, p.port, browser));
                 if !p.port_kept {
                     say.err(key!("cli-panel-port-unsaved"), &[]);
                 }
@@ -142,6 +149,22 @@ pub fn panel(say: &Say) -> ExitCode {
             }
         }
     })
+}
+
+/// What asks the system to show an address in the browser ([`agora_platform::open_url`]; a recorder in tests).
+type Opener<'a> = dyn Fn(&str) -> std::io::Result<()> + 'a;
+
+/// Says where the panel is and, when `browser` is given (a person at a terminal with a screen, see
+/// [`crate::frontdoor::may_open_browser`]), asks it to open the address (ADR-0056 Amendment A). The address is printed in any case,
+/// so a browser that does not open costs nothing. Returns whether a browser was asked and said yes.
+fn announce(say: &Say, port: u16, browser: Option<&Opener<'_>>) -> bool {
+    let url = format!("http://127.0.0.1:{port}/");
+    say.out(key!("cli-panel"), &[("url", url.clone().into())]);
+    let opened = browser.is_some_and(|open| open(&url).is_ok());
+    if opened {
+        say.out(key!("cli-panel-opened"), &[]);
+    }
+    opened
 }
 
 /// Runs `fut` on `rt` and returns as soon as it ends. Dropping the runtime would wait, with no limit, for its blocking pool: a hub
@@ -248,6 +271,28 @@ mod tests {
         assert!(got.is_err());
         let took = start.elapsed();
         assert!(took < Duration::from_secs(3), "took {took:?}");
+    }
+
+    /// ADR-0056 Amendment A: the panel's own loopback address is what the browser is asked to open, and only when a browser may be
+    /// opened at all; the address is printed either way. Never a real browser: the opener is a recorder.
+    #[test]
+    fn the_browser_is_asked_for_the_panels_address_only_when_one_may_be_opened() {
+        let say = Say(agora_i18n::Catalog::english());
+        let asked = std::sync::Mutex::new(Vec::<String>::new());
+        let record = |u: &str| -> std::io::Result<()> {
+            asked.lock().unwrap().push(u.to_string());
+            Ok(())
+        };
+        assert!(announce(&say, 7480, Some(&record)));
+        assert_eq!(*asked.lock().unwrap(), vec!["http://127.0.0.1:7480/"]);
+        // The address is one the system's opener accepts.
+        assert!(agora_platform::is_openable_url("http://127.0.0.1:7480/"));
+        // Negative control: no browser allowed, nothing is asked.
+        assert!(!announce(&say, 7480, None));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // A browser that cannot be opened is not an error: the address was printed.
+        let refuse = |_: &str| -> std::io::Result<()> { Err(std::io::ErrorKind::NotFound.into()) };
+        assert!(!announce(&say, 7480, Some(&refuse)));
     }
 
     #[test]

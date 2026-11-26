@@ -338,6 +338,86 @@ fn the_price_table_is_refreshed_only_on_request_and_a_bad_answer_changes_nothing
     assert!(hub.join("prices-catalog.json").exists());
 }
 
+/// ADR-0021: the owner's prices are set, shown and removed by the command and win over the catalog; the hub's own daily fetch is off
+/// until the owner turns it on (ADR-0033), and the command says so.
+#[test]
+fn the_owners_prices_and_the_daily_fetch_are_set_from_the_command_line() {
+    let root = tmp("price-overrides");
+    let hub = root.join("hub");
+    let h = hub.to_str().unwrap();
+    let run = |args: &[&str]| {
+        let mut all = vec!["hub", "prices"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&["--hub-dir", h]);
+        let out = agora(&root, &all).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+    let (code, text) = run(&["show"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains("came with this version")
+            && text.contains("Fetching by itself: off")
+            && text.contains("Your prices: none"),
+        "{text}"
+    );
+    assert!(!hub.join("prices-auto").exists());
+
+    let (code, text) = run(&["set", "example/big", "2.5", "10", "0.25"]);
+    assert_eq!(code, Some(0), "{text}");
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hub.join("prices.json")).unwrap()).unwrap();
+    assert_eq!(file["example/big"]["input"], 2.5);
+    assert_eq!(file["example/big"]["cache_read"], 0.25);
+    let (_, text) = run(&["show"]);
+    assert!(
+        text.contains("Your price for example/big: input 2.5, output 10"),
+        "{text}"
+    );
+
+    // Refusals change nothing.
+    for (args, want) in [
+        (vec!["set", "example/big", "-1", "10"], "a number from 0"),
+        (vec!["set", "has space", "1", "1"], "without spaces"),
+        (vec!["set", "example/big", "1"], "Usage"),
+        (vec!["unset", "example/none"], "no price of yours"),
+        (vec!["auto", "on", "--url", "ftp://x/y"], "not an http"),
+    ] {
+        let (code, text) = run(&args);
+        assert_ne!(code, Some(0), "{args:?}: {text}");
+        assert!(text.contains(want), "{args:?}: {text}");
+    }
+    let again: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hub.join("prices.json")).unwrap()).unwrap();
+    assert_eq!(again, file);
+    assert!(!hub.join("prices-auto").exists());
+
+    let (code, text) = run(&["auto", "on", "--url", "http://127.0.0.1:9/api.json"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(hub.join("prices-auto"))
+            .unwrap()
+            .trim(),
+        "http://127.0.0.1:9/api.json"
+    );
+    let (_, text) = run(&["show"]);
+    assert!(
+        text.contains("Fetching by itself: on, from http://127.0.0.1:9/api.json"),
+        "{text}"
+    );
+    let (code, _) = run(&["auto", "off"]);
+    assert_eq!(code, Some(0));
+    assert!(!hub.join("prices-auto").exists());
+
+    let (code, text) = run(&["unset", "example/big"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (_, text) = run(&["show"]);
+    assert!(text.contains("Your prices: none"), "{text}");
+}
+
 // The stand-in for ssh is a shell script with the executable bit.
 #[cfg(unix)]
 #[test]

@@ -33,7 +33,8 @@ cli-usage =
       agora password set|clear|status [--hub-dir DIR]
       agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
-      agora hub prices update [--url URL] [--hub-dir DIR]
+      agora hub prices update [--url URL] | set MODEL INPUT OUTPUT [CACHE_READ [CACHE_WRITE]] | unset MODEL [--hub-dir DIR]
+      agora hub prices auto on [--url URL] | auto off | show [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
@@ -316,6 +317,30 @@ cli-hub-notify-unreachable = Could not reach { $target }: { $reason }
 cli-hub-prices-updated = Price table updated: { $count } models.
 cli-hub-prices-failed = Could not update the price table: { $reason }
 cli-hub-prices-skipped = { $count } entries of prices.json were not understood and are ignored. Each needs input and output prices (USD per million tokens).
+cli-hub-prices-auto-running = The hub fetches the price table from { $url } by itself, about once a day ("agora hub prices auto off" stops it).
+cli-hub-prices-bad-url = That is not an http:// or https:// address.
+cli-hub-prices-status = The price catalog's server answered with status { $status }, so nothing was changed. A redirect is not followed: give its final address with --url.
+cli-hub-prices-not-catalog = The answer is not a price catalog (or is too large), so nothing was changed.
+cli-hub-prices-shrunk = The catalog has prices for only { $count } models, fewer than half of the table in use ({ $floor } is the least kept), so it was not used.
+cli-hub-prices-store-failed = Could not write to the hub's folder: { $reason }
+cli-hub-prices-set = The hub now prices { $model } at your price. A running hub uses it within a few seconds.
+cli-hub-prices-unset = Your price for { $model } is removed; the catalog's price applies again. A running hub uses it within a few seconds.
+cli-hub-prices-no-override = There is no price of yours for { $model }.
+cli-hub-prices-bad-model = A model name must be 1 to 128 characters without spaces, for example anthropic/claude-sonnet-4-5.
+cli-hub-prices-bad-price = A price is in US dollars per million tokens, a number from 0 to 1000000.
+cli-hub-prices-too-many = Your price list already has { $count } models, the most it can hold. Remove one with "agora hub prices unset MODEL".
+cli-hub-prices-overrides-unreadable = { $file } is not a list of prices this command can change, so it was left as it is. Fix or remove it, then try again.
+cli-hub-prices-auto-on = The hub will fetch the price table from { $url } by itself, about once a day, starting within a few minutes if its table is older than a day. A running hub starts within a few seconds.
+cli-hub-prices-auto-off = The hub no longer fetches the price table by itself. "agora hub prices update" still does it once when you ask.
+cli-hub-prices-show-bundled = Prices: the table that came with this version ({ $count } models).
+cli-hub-prices-show-refreshed = Prices: the table fetched at { $at } ({ $count } models).
+cli-hub-prices-show-auto-off = Fetching by itself: off ("agora hub prices auto on" turns it on).
+cli-hub-prices-show-auto-on = Fetching by itself: on, from { $url }, about once a day.
+cli-hub-prices-show-last-ok = Last fetch: { $at }, done.
+cli-hub-prices-show-last-failed = Last fetch: { $at }, failed ({ $code }); it is tried again later.
+cli-hub-prices-show-no-overrides = Your prices: none.
+cli-hub-prices-show-override = Your price for { $model }: input { $input }, output { $output }, cache read { $cache_read }, cache write { $cache_write } (USD per million tokens).
+cli-hub-prices-show-override-bad = Your price for { $model } is not understood and is ignored (it needs input and output).
 cli-hub-ssh-started = Keeping SSH tunnels open to { $count } machine(s) from { $file }.
 cli-hub-ssh-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `NAME DESTINATION [PORT]`.
 cli-hub-ssh-none = No SSH machines yet. Add one with "agora hub ssh add NAME DESTINATION".
@@ -366,6 +391,7 @@ cli-panel-no-port = The panel could not open a port on this machine.
 cli-panel-port-unsaved = The panel's port could not be saved, so the next "agora panel" may use another port, and your browser would treat it as a new device and ask you to sign in again. Check that this machine's node folder is writable.
 cli-panel-unreachable = The hub does not answer from this machine, so there is no panel to open. The agents here keep running.
 cli-panel-untrusted = The hub's certificate is not from the certificate this machine was enrolled with, so the panel was not opened.
+cli-panel-opened = Opened it in your browser.
 
 # ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Welcome to Agora. What should this machine do?

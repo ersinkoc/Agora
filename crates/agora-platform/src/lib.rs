@@ -2980,6 +2980,25 @@ pub fn interface_addresses() -> io::Result<Vec<InterfaceAddr>> {
     }
 }
 
+/// A TCP listener on `127.0.0.1:port` (0 picks a free port) that no other socket, of this user or another, can bind beside while it
+/// is open: `SO_EXCLUSIVEADDRUSE` on Windows (where a `SO_REUSEADDR` binder could otherwise share it), and on Linux and macOS a socket
+/// without `SO_REUSEPORT` (checked, not assumed). For a fixed, predictable loopback port such as the panel's (threat model T27). It
+/// does not keep the port while nothing is bound to it: that is the caller's to say.
+pub fn bind_loopback_exclusive(port: u16) -> io::Result<std::net::TcpListener> {
+    #[cfg(unix)]
+    {
+        unix::bind_loopback_exclusive(port)
+    }
+    #[cfg(windows)]
+    {
+        windows::bind_loopback_exclusive(port)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+    }
+}
+
 /// Whether `url` may be handed to the system's opener: `http://` or `https://` (any case), a host, no `@` in the host part (no
 /// credentials), at most 2048 bytes, and only the bytes of `url_byte_ok` (RFC 3986 characters minus `^ " ( ) ! < > |`, with `%` only before two hex digits). Platform-neutral
 /// so it is tested everywhere.

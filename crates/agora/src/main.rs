@@ -178,6 +178,7 @@ mod meshbridge;
 mod orchestrate;
 mod paircmd;
 mod panelcmd;
+mod pricefeed;
 mod remotecmd;
 mod secretcmd;
 mod servicecmd;

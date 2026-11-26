@@ -1702,11 +1702,139 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     Err(os_error(unsafe { GetLastError() }))
 }
 
+/// A listener on `127.0.0.1:port` that no other socket can share while it is open (threat model T27). Windows lets a socket with
+/// `SO_REUSEADDR` bind beside one that did not ask for exclusivity, and the standard library and tokio never ask; so the socket is
+/// made here with `SO_EXCLUSIVEADDRUSE` set before `bind`, the way the standard library makes its own (overlapped, not inherited
+/// by child processes), and handed over as a standard listener.
+pub(crate) fn bind_loopback_exclusive(port: u16) -> io::Result<std::net::TcpListener> {
+    use std::os::windows::io::FromRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        bind, closesocket, listen, setsockopt, WSAGetLastError, WSASocketW, WSAStartup, AF_INET,
+        INADDR_LOOPBACK, INVALID_SOCKET, IN_ADDR, IN_ADDR_0, IPPROTO_TCP, SOCKADDR, SOCKADDR_IN,
+        SOCK_STREAM, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, WSADATA, WSA_FLAG_NO_HANDLE_INHERIT,
+        WSA_FLAG_OVERLAPPED,
+    };
+    static STARTED: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    // Winsock counts its starts; the standard library starts it too, and neither ever stops it while the process runs.
+    let started = *STARTED.get_or_init(|| {
+        // SAFETY: `data` is a writable WSADATA that outlives the call.
+        let mut data: WSADATA = unsafe { std::mem::zeroed() };
+        unsafe { WSAStartup(0x0202, &mut data) }
+    });
+    if started != 0 {
+        return Err(io::Error::from_raw_os_error(started));
+    }
+    let last = || io::Error::from_raw_os_error(unsafe { WSAGetLastError() });
+    // SAFETY: no protocol info is passed; the flags are the ones the standard library uses for its own sockets.
+    let s = unsafe {
+        WSASocketW(
+            i32::from(AF_INET),
+            SOCK_STREAM,
+            IPPROTO_TCP,
+            null(),
+            0,
+            WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,
+        )
+    };
+    if s == INVALID_SOCKET {
+        return Err(last());
+    }
+    // From here the socket is closed on every error path.
+    let fail = |e: io::Error| {
+        // SAFETY: `s` is a socket this function made and has not handed out.
+        unsafe { closesocket(s) };
+        Err(e)
+    };
+    let on: i32 = 1;
+    // SAFETY: an int option of the size given, on the socket just made.
+    if unsafe {
+        setsockopt(
+            s,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&on as *const i32).cast(),
+            std::mem::size_of::<i32>() as i32,
+        )
+    } != 0
+    {
+        return fail(last());
+    }
+    let addr = SOCKADDR_IN {
+        sin_family: AF_INET,
+        sin_port: port.to_be(),
+        sin_addr: IN_ADDR {
+            S_un: IN_ADDR_0 {
+                S_addr: INADDR_LOOPBACK.to_be(),
+            },
+        },
+        sin_zero: [0; 8],
+    };
+    // SAFETY: a SOCKADDR_IN of the length given, alive for the call.
+    if unsafe {
+        bind(
+            s,
+            (&addr as *const SOCKADDR_IN).cast::<SOCKADDR>(),
+            std::mem::size_of::<SOCKADDR_IN>() as i32,
+        )
+    } != 0
+    {
+        return fail(last());
+    }
+    // The standard library's own backlog.
+    if unsafe { listen(s, 128) } != 0 {
+        return fail(last());
+    }
+    // SAFETY: a valid, bound and listening socket this function owns; the listener takes it over and closes it when dropped.
+    Ok(unsafe { std::net::TcpListener::from_raw_socket(s as u64) })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// T27: while the panel's port is open, a socket with `SO_REUSEADDR` cannot bind beside it (it could beside a plain std or tokio
+    /// listener), and it is free again once closed.
+    #[test]
+    fn the_panel_port_cannot_be_shared_while_it_is_open_and_is_free_again_after() {
+        use windows_sys::Win32::Networking::WinSock::{
+            bind, closesocket, setsockopt, socket, AF_INET, INADDR_LOOPBACK, IN_ADDR, IN_ADDR_0,
+            IPPROTO_TCP, SOCKADDR, SOCKADDR_IN, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR,
+        };
+        let squat = |port: u16| -> bool {
+            // SAFETY: plain socket calls on a socket this test owns and closes.
+            unsafe {
+                let s = socket(i32::from(AF_INET), SOCK_STREAM, IPPROTO_TCP);
+                let on: i32 = 1;
+                setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (&on as *const i32).cast(), 4);
+                let addr = SOCKADDR_IN {
+                    sin_family: AF_INET,
+                    sin_port: port.to_be(),
+                    sin_addr: IN_ADDR {
+                        S_un: IN_ADDR_0 {
+                            S_addr: INADDR_LOOPBACK.to_be(),
+                        },
+                    },
+                    sin_zero: [0; 8],
+                };
+                let ok = bind(
+                    s,
+                    (&addr as *const SOCKADDR_IN).cast::<SOCKADDR>(),
+                    std::mem::size_of::<SOCKADDR_IN>() as i32,
+                ) == 0;
+                closesocket(s);
+                ok
+            }
+        };
+        let l = bind_loopback_exclusive(0).unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(l.local_addr().unwrap().ip().is_loopback());
+        assert!(!squat(port), "a SO_REUSEADDR socket bound beside the panel");
+        assert!(bind_loopback_exclusive(port).is_err());
+        drop(l);
+        assert!(bind_loopback_exclusive(port).is_ok());
+    }
 
     #[test]
     fn verbatim_paths_get_their_ordinary_spelling_only_when_it_means_the_same_file() {

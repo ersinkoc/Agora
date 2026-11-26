@@ -1288,6 +1288,110 @@ fn transient_addrs(text: &str) -> Vec<std::net::Ipv6Addr> {
     out
 }
 
+/// A listener on `127.0.0.1:port` that no other socket can share while it is open (threat model T27). The standard library binds with
+/// `SO_REUSEADDR` (so a fixed port can be bound again at once after a run whose connections are still in `TIME_WAIT`; on Linux and
+/// macOS that never lets a second socket bind a port that a socket is *listening* on) and without `SO_REUSEPORT`, the option that
+/// would let another socket of the same user bind the same address beside it. That is checked here rather than assumed: a listener
+/// with `SO_REUSEPORT` on is turned off before it is handed out, and one whose option cannot be read is refused.
+pub(crate) fn bind_loopback_exclusive(port: u16) -> io::Result<std::net::TcpListener> {
+    let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
+    if reuse_port(&l)? {
+        let off: libc::c_int = 0;
+        // SAFETY: a valid socket of this process, an int option of the size given.
+        let rc = unsafe {
+            libc::setsockopt(
+                l.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                (&off as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 || reuse_port(&l)? {
+            return Err(io::Error::from(io::ErrorKind::AddrInUse));
+        }
+    }
+    Ok(l)
+}
+
+/// Whether `SO_REUSEPORT` is on for `l`.
+fn reuse_port(l: &std::net::TcpListener) -> io::Result<bool> {
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a valid socket of this process; `v` and `len` outlive the call and `len` is the size of `v`.
+    let rc = unsafe {
+        libc::getsockopt(
+            l.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            (&mut v as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(v != 0)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod exclusive_bind_tests {
+    use std::os::fd::AsRawFd;
+
+    /// A socket bound with both reuse options on, as a squatter would make it.
+    fn squat(port: u16) -> std::io::Result<()> {
+        // SAFETY: plain socket calls on a socket this test owns and closes; the option values outlive each call.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0);
+            let on: libc::c_int = 1;
+            for opt in [libc::SO_REUSEADDR, libc::SO_REUSEPORT] {
+                let rc = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    opt,
+                    (&on as *const libc::c_int).cast(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                assert_eq!(rc, 0);
+            }
+            let mut sa: libc::sockaddr_in = std::mem::zeroed();
+            sa.sin_family = libc::AF_INET as libc::sa_family_t;
+            sa.sin_port = port.to_be();
+            sa.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+            let rc = libc::bind(
+                fd,
+                (&sa as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            );
+            let err = std::io::Error::last_os_error();
+            let rc = if rc == 0 { libc::listen(fd, 1) } else { rc };
+            let err = if rc == 0 { None } else { Some(err) };
+            libc::close(fd);
+            err.map_or(Ok(()), Err)
+        }
+    }
+
+    #[test]
+    fn the_panel_port_cannot_be_shared_while_it_is_open_and_is_free_again_after() {
+        let l = super::bind_loopback_exclusive(0).unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(l.local_addr().unwrap().ip().is_loopback());
+        assert!(!super::reuse_port(&l).unwrap());
+        // A second socket with SO_REUSEADDR and SO_REUSEPORT cannot bind beside it.
+        let e = squat(port).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "{e}");
+        // Neither can a second exclusive bind.
+        assert!(super::bind_loopback_exclusive(port).is_err());
+        drop(l);
+        // Negative control: the same squatter binds once the port is closed, and so does the next run.
+        squat(port).unwrap();
+        let again = super::bind_loopback_exclusive(port).unwrap();
+        assert!(again.as_raw_fd() >= 0);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {

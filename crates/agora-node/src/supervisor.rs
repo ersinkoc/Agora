@@ -2892,10 +2892,24 @@ impl Supervisor {
                             },
                         });
                     }
-                    other => events.push(SupervisorEvent::Adapter {
-                        agent: id.clone(),
-                        event: other,
-                    }),
+                    mut other => {
+                        // ADR-0021: usage names the price catalog's model id when the kind's `[usage.model_map]` lists the one the
+                        // agent reported (never the ids of its session options, which `AgentSetModel` takes back).
+                        if let AdapterEvent::Usage { model, .. } = &mut other {
+                            if let Some(id) = self
+                                .kinds
+                                .get(&e.agent.kind)
+                                .and_then(|k| k.manifest.usage.as_ref())
+                                .and_then(|u| u.model_map.get(model.as_str()))
+                            {
+                                model.clone_from(id);
+                            }
+                        }
+                        events.push(SupervisorEvent::Adapter {
+                            agent: id.clone(),
+                            event: other,
+                        });
+                    }
                 }
             }
             // After what the adapter said, so the notice is the newest entry and a long reply cannot push it out of the conversation.
@@ -4741,6 +4755,11 @@ impl Supervisor {
             tool: manifest.kind.clone(),
             quota: manifest.quota.clone(),
             session: e.agent.session.clone(),
+            model_map: manifest
+                .usage
+                .as_ref()
+                .map(|u| u.model_map.clone())
+                .unwrap_or_default(),
         })
     }
 

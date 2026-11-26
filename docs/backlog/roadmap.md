@@ -189,8 +189,10 @@ Items already in M2 and M3 are not repeated here.
 - [ ] **M7.4 Where am I signed in** (ADR-0067 rung 5): the session list with revoke; the rung-4 banner
 - [ ] **M7.5 Pairing leftovers** (ADR-0065): the owner's devices trusted in the same step, the push notice, discovery over IPv6
   (**schema**)
-- [ ] **M7.6 Prices and the panel** (ADR-0021, ADR-0056): periodic price-catalog fetch, owner overrides, manifest `model_map`, `agora`
-  opening the browser, an exclusive bind of the panel port
+- [x] **M7.6 Prices and the panel** (ADR-0021, ADR-0056): periodic price-catalog fetch (off until `agora hub prices auto on`), owner
+  overrides (`agora hub prices set|unset|show`), manifest `model_map`, `agora panel` and `agora web` opening the browser, an exclusive
+  bind of the panel port. Left: the desktop app's stored port, plain `agora` opening the panel on a node-only machine, ADR-0033's
+  declared-provider lookup
 - [ ] **M7.7 ACP authenticate** (ADR-0092 steps 2 and 3, **human** to verify): the states in the window; the registry update job
 - [ ] **M7.8 Live update** (ADR-0019, ADR-0075; G4): the hub hands out signed node binaries after approval; stable and preview channels
   (M2.7 is the handoff)

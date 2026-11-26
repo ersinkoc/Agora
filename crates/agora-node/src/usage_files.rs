@@ -50,6 +50,21 @@ pub struct Target {
     pub quota: Option<QuotaSpec>,
     /// The agent's own session id, when the node knows it (chosen at start, or found by `session_files`).
     pub session: Option<String>,
+    /// ADR-0021: the kind's `[usage.model_map]`, applied to the model of every sample read for this agent.
+    pub model_map: BTreeMap<String, String>,
+}
+
+/// ADR-0021: the samples just read for `t` carry the price catalog's id of their model (`[usage.model_map]`), so the hub prices them;
+/// a model the map does not list keeps the id the agent wrote.
+fn catalog_models(samples: &mut [(AgentId, Sample)], t: &Target) {
+    if t.model_map.is_empty() {
+        return;
+    }
+    for (_, s) in samples {
+        if let Some(id) = t.model_map.get(&s.model) {
+            s.model.clone_from(id);
+        }
+    }
 }
 
 /// What a scan needs to know of every live agent to tell whether another shares this one's folder and files.
@@ -266,7 +281,9 @@ impl UsageWatcher {
         };
         let peers = self.peers.clone();
         for t in targets {
+            let from = out.len();
             self.step(now, t, &peers, &home, &mut out);
+            catalog_models(&mut out[from..], t);
         }
         out
     }
@@ -283,7 +300,9 @@ impl UsageWatcher {
                 a.next_scan = now;
                 a.next_read = now;
             }
+            let from = out.len();
             self.step(now, t, &peers, &home, &mut out);
+            catalog_models(&mut out[from..], t);
             self.agents.remove(&t.agent);
         }
         out
@@ -612,6 +631,7 @@ mod tests {
             tool: "t".into(),
             quota: None,
             session: None,
+            model_map: BTreeMap::new(),
         }
     }
 
@@ -678,6 +698,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    /// ADR-0021: a model the kind's `[usage.model_map]` lists is reported by the catalog's id, also in an ended agent's last read; one
+    /// it does not list keeps the agent's id.
+    #[test]
+    fn the_kinds_model_map_names_the_catalog_model() {
+        let d = tmp("model-map");
+        let work = d.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let mut a = target("a1", &work);
+        a.model_map
+            .insert("m".to_string(), "example/m-2026".to_string());
+        let t = [a];
+        assert!(step(&mut w, &t, 0).is_empty());
+        let file = d.join("logs/p/s.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, "{}", line(&work.to_string_lossy(), "x1", 4, 1)).unwrap();
+        let got = step(&mut w, &t, 1);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1.model, "example/m-2026");
+        let other = serde_json::json!({"type":"assistant","cwd":work.to_string_lossy(),"model":"z","id":"x2","in":1,"out":1});
+        writeln!(f, "{other}").unwrap();
+        let got = w.finish(Instant::now() + Duration::from_secs(100), &t);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1.model, "z", "not in the map: as the agent wrote it");
+        // Negative control: without the map the same line keeps its own id.
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let plain = [target("a2", &work)];
+        let _ = std::fs::remove_file(&file);
+        assert!(step(&mut w, &plain, 0).is_empty());
+        std::fs::write(
+            &file,
+            format!("{}\n", line(&work.to_string_lossy(), "x3", 4, 1)),
+        )
+        .unwrap();
+        let got = step(&mut w, &plain, 1);
+        assert_eq!(got[0].1.model, "m");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     #[test]
     fn follows_the_agents_own_file_and_reports_only_new_lines_once() {
         let d = tmp("own");
@@ -716,6 +775,7 @@ mod tests {
         let two = "22222222-aaaa-4bbb-8ccc-000000000002";
         let with = |agent: &str, id: Option<&str>| Target {
             session: id.map(str::to_string),
+            model_map: BTreeMap::new(),
             ..target(agent, &work)
         };
         // The second agent's id is not known yet (Codex: found later, or never when its folder is shared).
@@ -775,6 +835,7 @@ mod tests {
         let two = "22222222-aaaa-4bbb-8ccc-000000000002";
         let with = |agent: &str, id: Option<&str>| Target {
             session: id.map(str::to_string),
+            model_map: BTreeMap::new(),
             ..target(agent, &work)
         };
         // a1 alone takes its file; then a2 comes, writes its own, then stops: a1 never counts a2's file.
@@ -829,10 +890,12 @@ mod tests {
         let pair = [
             Target {
                 session: None,
+                model_map: BTreeMap::new(),
                 ..quota_target("c1", &work)
             },
             Target {
                 session: None,
+                model_map: BTreeMap::new(),
                 ..quota_target("c2", &work)
             },
         ];
@@ -862,6 +925,7 @@ mod tests {
         let cwd = work.to_string_lossy().into_owned();
         let with = |agent: &str, id: Option<&str>| Target {
             session: id.map(str::to_string),
+            model_map: BTreeMap::new(),
             ..target(agent, &work)
         };
         let total = |got: &[(AgentId, Sample)], agent: &str| -> u64 {
@@ -917,6 +981,7 @@ mod tests {
         let cwd2 = work2.to_string_lossy().into_owned();
         let with2 = |agent: &str, id: Option<&str>| Target {
             session: id.map(str::to_string),
+            model_map: BTreeMap::new(),
             ..target(agent, &work2)
         };
         let own = "33333333-aaaa-4bbb-8ccc-000000000003";
