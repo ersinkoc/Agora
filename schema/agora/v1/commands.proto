@@ -9,6 +9,7 @@ import "agora/v1/events.proto";
 import "agora/v1/pairing.proto";
 import "agora/v1/plugins.proto";
 import "agora/v1/preview.proto";
+import "agora/v1/settings.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
 // and an idempotency_key; the response is Ok or Err.
@@ -116,6 +117,10 @@ message CommandRequest {
     PluginGrantList plugin_grant_list = 115;
     PluginGrantSet plugin_grant_set = 116;
     PluginGrantRemove plugin_grant_remove = 117;
+    // ADR-0113 decision 6 (step 4): the caller's own settings value the hub keeps opaque (settings.proto). Answered by the hub for any
+    // signed-in person; they name no node.
+    UserSettingsGet user_settings_get = 118;
+    UserSettingsSet user_settings_set = 119;
   }
 }
 
@@ -176,6 +181,8 @@ message CommandOk {
     PluginListResult plugin_list = 35;
     PluginFetchResult plugin_fetch = 36;
     PluginGrantListResult plugin_grant_list = 37;
+    // ADR-0113 decision 6 (step 4): the answer to `UserSettingsGet` and `UserSettingsSet`.
+    UserSettingsValue user_settings = 38;
   }
 }
 

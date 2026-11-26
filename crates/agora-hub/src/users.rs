@@ -205,6 +205,9 @@ impl<'a> Users<'a> {
         // ADR-0114: what this person allowed plugins to see goes with them.
         conn.execute("DELETE FROM plugin_grants WHERE user_id = ?1", [id])
             .map_err(db)?;
+        // ADR-0113 decision 6: and their own settings values (their themes, packs and theme choice).
+        conn.execute("DELETE FROM user_settings WHERE user_id = ?1", [id])
+            .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
             .map_err(db)?;

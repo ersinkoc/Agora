@@ -1,0 +1,11 @@
+{
+  "requestId": "s2",
+  "err": {
+    "code": "settings.too_large",
+    "params": {
+      "max": {
+        "int": "262144"
+      }
+    }
+  }
+}

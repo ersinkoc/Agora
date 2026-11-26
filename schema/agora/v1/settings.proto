@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0113 decision 6 (build step 4): a person's own settings kept by the hub, so the phone and the laptop agree.
+//
+// The hub keeps one value per person and key as opaque bytes: it never parses, checks or shows it; every client checks what it reads
+// before using it. A value is at most 256 KiB (`settings.too_large`). Each value has a version, a counter the hub raises on every
+// write, so two windows never overwrite each other unseen: a write names the version it was based on, and one based on an older version
+// is refused (`settings.stale`); the client reads again, merges and writes again. Keys are a closed set the hub knows: today only
+// `themes` (the person's themes, theme packs and theme choice, docs/ux/themes.md "Keeping themes the same on your devices"). Everyone
+// signed in, owner, member or viewer, reads and writes only their own values: the hub keys them by the session's person, never by
+// anything a request names. Every message here is answered by the hub itself and names no node (`CommandRequest.target_node` empty).
+
+// client -> hub, answered with `UserSettingsValue`: the caller's own value under `key`. One never written is version 0, empty.
+message UserSettingsGet {
+  // `themes`; any other key is refused (`protocol.invalid_message`, `field: key`).
+  string key = 1;
+}
+
+// client -> hub, answered with `UserSettingsValue` (the new version): replaces the caller's own value under `key`.
+message UserSettingsSet {
+  string key = 1;
+  // The whole value, opaque to the hub, at most 262144 bytes.
+  bytes value = 2;
+  // The version this write was based on (the last `UserSettingsValue.version` the client read or wrote; 0 for none yet). Anything
+  // else than the hub's current version is refused with `settings.stale`, which names the current version.
+  uint64 base_version = 3;
+}
+
+// The caller's value under `key` as the hub keeps it.
+message UserSettingsValue {
+  string key = 1;
+  bytes value = 2;
+  // Raised by one on every write; 0 for a value never written.
+  uint64 version = 3;
+  // When it was last written, in milliseconds since the Unix epoch, hub clock; 0 for a value never written.
+  uint64 updated_ms = 4;
+}

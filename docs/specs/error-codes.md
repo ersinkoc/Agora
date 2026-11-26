@@ -115,6 +115,8 @@ or a local response timeout has a localized retry message.
 | `theme.catalog_off` | — | ADR-0113 decision 6: `ThemeCatalogGet` while the hub's owner has not turned the community theme catalog on (`agora hub themes on`). `ThemeCatalogList` is not refused: it answers `on: false` with no entries, so a window that opens the theme editor writes no refused row |
 | `theme.not_found` | `id` | ADR-0113 decision 6: the community theme catalog has no theme with this id (never fetched, or gone from the catalog at its last `agora hub themes update`) |
 | `plugin.not_found` | `plugin_id` | ADR-0114: no plugin `plugin_id` is installed on the hub as asked: `PluginFetch` names a package that was removed or replaced by another version, or `PluginGrantSet` names a version that is not the installed one. A window lists the plugins again |
+| `settings.too_large` | `max` | ADR-0113 decision 6 (step 4): `UserSettingsSet` with a value larger than the hub keeps per person and key (`max`, 262144 bytes). Nothing changed; the window keeps the person's themes in the browser and says the synced set is too large |
+| `settings.stale` | `version` | ADR-0113 decision 6 (step 4): `UserSettingsSet` based on another version than the hub's current one (`version`): another window wrote first. Nothing changed; the window reads the value again, merges and writes again |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
 
 ### Command-line codes (ADR-0067 rung 3)

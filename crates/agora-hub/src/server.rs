@@ -1226,6 +1226,12 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0113 decision 6 (step 4): each person's own settings value, answered by the hub for owner, member and viewer alike.
+    if let Some(resp) = settings_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Who may do what is decided apart from the transport (R9, `dispatch.rs`); here only what the answer says is done.
     let ok_empty = |request_id: String| v1::CommandResponse {
         request_id,
@@ -2140,6 +2146,47 @@ pub(crate) fn plugin_command(
             request_id: req.request_id.clone(),
             result: Some(command_response::Result::Ok(v1::CommandOk {
                 result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0113 decision 6 (step 4): a person's own settings value, answered here; `None` for any other command. Every signed-in person,
+/// owner, member or viewer, reads and writes only their own: the value is keyed by the session's person (`who.user`), and nothing in
+/// the request names a person. The hub keeps the value as opaque bytes and never reads it. A write is an audit row of the person
+/// (`settings.set`, its `node` the key) with its outcome, and nothing of the value; a read writes no row. A request that names a node
+/// is refused, as for the device and plugin commands.
+pub(crate) fn settings_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let settings = crate::user_settings::UserSettings::new(hub.store());
+    let result = match &req.command {
+        Some(C::UserSettingsGet(_) | C::UserSettingsSet(_)) if !req.target_node.is_empty() => {
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        }
+        Some(C::UserSettingsGet(g)) => settings.get(&who.user, &g.key),
+        Some(C::UserSettingsSet(s)) => {
+            let r = settings.set(&who.user, s, now_ms());
+            // The key when it is one the hub keeps (anything else a window sent is not written into the trail).
+            let key = crate::user_settings::known_key(&s.key).unwrap_or("");
+            let outcome = match &r {
+                Ok(_) => "ok",
+                Err(e) => e.code.as_str(),
+            };
+            audit(hub, who, "settings.set", key, outcome);
+            r
+        }
+        _ => return None,
+    };
+    Some(match result {
+        Ok(value) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::UserSettings(value)),
             })),
         },
         Err(e) => error_response(&req.request_id, &e),

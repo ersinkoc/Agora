@@ -37,5 +37,6 @@ pub mod theme_catalog;
 pub mod tls;
 pub mod transport;
 pub mod usage;
+pub mod user_settings;
 pub mod users;
 pub mod web;

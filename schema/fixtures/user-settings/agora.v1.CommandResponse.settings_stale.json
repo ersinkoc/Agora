@@ -1,0 +1,11 @@
+{
+  "requestId": "s2",
+  "err": {
+    "code": "settings.stale",
+    "params": {
+      "version": {
+        "int": "4"
+      }
+    }
+  }
+}

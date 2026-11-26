@@ -585,6 +585,7 @@ audit-action-plugin-add = Bir eklenti kurdu
 audit-action-plugin-remove = Bir eklentiyi kaldırdı
 audit-action-plugin-grant = Bir eklentinin neleri görebileceğini seçti
 audit-action-plugin-ungrant = Bir eklentiyi göstermeyi bıraktı
+audit-action-settings-set = Temalarını cihazları için hub'da sakladı
 audit-action-pair-open = Yeni makinelerin katılmak istemesine izin verdi
 audit-action-pair-close = Yeni makinelerin katılmak istemesini kapattı
 audit-action-pair-status = Yeni makinelerin katılmak isteyip isteyemeyeceğine baktı

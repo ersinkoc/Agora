@@ -136,4 +136,6 @@ agent-program_missing = { $kind } başlamadı: bu makine { $program } programın
 theme-catalog_off = Bu hub'da topluluk tema kataloğu kapalı. Sahibi agora hub themes on ile açabilir.
 theme-not_found = Tema kataloğunda { $id } adlı bir tema yok. Son güncellemede kaldırılmış olabilir.
 plugin-not_found = { $plugin_id } eklentisi bu hub'da kurulu değil ya da bu sürümüyle kurulu değil.
+settings-too_large = Temalarınız hub'da saklanamayacak kadar büyük (en fazla { $max } bayt). Bu tarayıcıda kalıyorlar.
+settings-stale = Temalarınız az önce başka bir cihazda değişti (sürüm { $version }). Birleştirilip yeniden kaydedilecek.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

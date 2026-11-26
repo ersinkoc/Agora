@@ -607,6 +607,7 @@ audit-action-plugin-add = Installed a plugin
 audit-action-plugin-remove = Removed a plugin
 audit-action-plugin-grant = Chose what a plugin may see
 audit-action-plugin-ungrant = Stopped showing a plugin
+audit-action-settings-set = Kept their themes on the hub for their devices
 audit-action-pair-open = Let new machines ask to join
 audit-action-pair-close = Stopped new machines from asking to join
 audit-action-pair-status = Checked whether new machines may ask to join
