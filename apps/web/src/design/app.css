@@ -127,6 +127,8 @@
      largest width or the strip's own, whichever is less. */
   .tab-strip .ide-tab[aria-selected='true'] { flex-shrink: 0; min-width: min(8.5rem, 100%); max-width: min(13.75rem, 100%); }
   .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: min(11rem, 100%); }
+  /* Tabs that would not fit even at their floors keep their whole names and the strip scrolls (TabStrip.tsx `data-crowded`). */
+  .tab-strip[data-crowded] .ide-tab { flex-shrink: 0; }
   .ide-tab > :not(.truncate) { flex: none; }
   .ide-tab > .truncate { min-width: 6ch; }
   .ide-tab[aria-selected='true'] { @apply bg-tabbar text-tabbar-ink; box-shadow: inset 0 2px 0 var(--accent); }
