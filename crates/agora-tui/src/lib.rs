@@ -8,6 +8,7 @@ pub mod clip;
 pub mod device;
 pub mod files;
 pub mod input;
+pub mod layout;
 pub mod pair;
 pub mod pane;
 pub mod picker;
