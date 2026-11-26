@@ -357,7 +357,8 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   again when it changed. A file that can no longer be used leaves the terminal's own colours with a notice ("press t to see why");
   the choice is kept, so the theme comes back when the file is fixed. The folder itself is read when the list opens. No file-watch
   dependency is used.
-- **Reading.** One function that never panics reads a file and reports every problem at once, in the web's words
+- **Reading.** The file's bytes are decoded as the web's import decodes them (a leading byte-order mark dropped, a byte that is not
+  UTF-8 read as U+FFFD). One function that never panics reads a file and reports every problem at once, in the web's words
   (`locales/<lang>/tui.ftl`, `tui-theme-error-*`): the size cap (asked of the file system before anything is read), unknown fields
   at every level, closed value kinds, the floor, unsafe pieces, and the readability pairs of items 1–4 and 7, so **a file is
   accepted or refused alike in both clients**, including for a region this client does not draw. The warnings are the ones about
