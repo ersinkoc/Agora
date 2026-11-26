@@ -140,8 +140,8 @@ Linux, runs the frame in the window's own process and thread, so the window cann
 paused the window 3.2–3.3 s (Playwright's WPE WebKit 27.2), of which only 50–140 ms was the window reading after the loop, within the
 same budgets as Chromium; a 200,000-field object sent 20 times paused it 1.3–1.5 s (Chromium 0.5–0.7 s). Nothing the window does can
 bound this: a loop that never ends freezes the window, the safe-mode key and the pane's menu included, until it is closed. In a browser,
-`?safe` in the address then opens it without plugins. The desktop app shows no address and reopens its hub as it was, so a plugin that
-freezes the window as it starts does so at every start there; it has no way into safe mode before the page runs yet (threat model T63).
+`?safe` in the address then opens it without plugins. The desktop app shows no address, so it has ways into safe mode of its own that do
+not need the page (below, and threat model T63).
 
 In the frame the loader gives the plugin `agora`: `agora.read(cap)` (a Promise, rejected with an `Error` whose message is the code),
 `agora.watch(cap, onData, onError)` (returns a function that stops it), `agora.file(name)`, `agora.granted`, `agora.plugin`,
@@ -184,6 +184,21 @@ with **Leave safe mode**.
 The key is heard by the window first, in the capture phase, before any handler of the page's own; no plugin, theme or keybinding can
 change it (it is a fixed key, `keybindings.md`, and in safe mode the keys are the defaults). **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
 app, which shows no address.
+
+**In the desktop app** two more ways into safe mode belong to the app itself, not the page, so they work even when a plugin has frozen
+the page (as it can in WebKit, the app's webview on macOS and Linux, below):
+
+- **Open in Safe Mode** in the app's **Help** menu (on a Mac, the Help menu of the menu bar; on Windows and Linux, the window's own
+  menu bar, which has only that menu, so no menu shortcut takes a key from a terminal). The menu is drawn and run by the app, while the
+  page runs in the webview's separate web process, so it answers while the page cannot. It starts the app again with `--safe`, and
+  the hub opens again in safe mode at its start page; asking the frozen page to load `?safe` does nothing, as the web process handles
+  the load and never comes back to it (seen with WebKitGTK 2.52). WebKit ends the frozen web process about 10 s after the old app has
+  gone. On the connect screen the item makes the hub open in safe mode once connected.
+- **`--safe`** at start (`agora-desktop --safe`; on a Mac `open -a Agora --args --safe`) opens the hub in safe mode before any
+  plugin runs.
+
+Holding a key at start (Shift, as some Mac apps do) is not built: reading a key's state before any window exists needs code for each
+system, which belongs in `agora-platform`, and Wayland does not tell an app without a focused window which keys are down.
 
 **The focus is the person's.** A plugin's frame is `inert` until the person clicks into it (or presses Enter on it), and inert again as
 soon as they click or move the focus anywhere else in the window; focus that reaches a frame not in use is sent back to the window. So a
