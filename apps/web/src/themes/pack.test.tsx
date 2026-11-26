@@ -257,6 +257,13 @@ describe('importing a pack in the window', () => {
     expect(snapshot()).toEqual(before);
   });
 
+  it('keeps the packs of a visit without storage when another tab changes its own (safe mode; review of audit F2002)', () => {
+    const packs = createPackStore();
+    expect(packs.keep(JSON.parse(serialisePack(PACK)) as Record<string, unknown>)).toBeDefined();
+    packs.reload();
+    expect(packs.list()).toHaveLength(1);
+  });
+
   it('applies only the parts ticked: a theme is added (not chosen), a layout is saved, nothing else is touched (no plugin)', () => {
     const packs = createPackStore();
     act(() => root.render(<ImportPack onClose={() => {}} themes={themes} keys={keys} packs={packs} mac={false} />));

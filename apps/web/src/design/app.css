@@ -675,7 +675,7 @@
   .approval-req__where { @apply inline-flex min-w-0 flex-wrap items-center gap-1.5 font-normal text-muted; font-size: var(--text-caption); }
   .approval-req__open { @apply -my-0.5 size-6 flex-none; }
   .approval-req__what { @apply m-0 min-w-0 break-words text-ink; }
-  .approval-req__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .approval-req__cmd { @apply inline-block max-w-full rounded-xs align-top font-mono; font-size: var(--text-caption); padding: 0.0625rem 0.375rem; background: color-mix(in oklab, var(--text) 7%, transparent); overflow-wrap: anywhere; white-space: pre-wrap; max-height: 16rem; overflow-y: auto; }
   .approval-req__foot { @apply col-start-2 col-end-4 min-w-0; }
   /* Card and full: the buttons under the ask, at the end. */
   .approval-req--card .kit-callout__actions, .approval-req--full .kit-callout__actions { @apply col-start-2 col-end-4 row-span-1 row-start-auto mt-1 justify-end; }

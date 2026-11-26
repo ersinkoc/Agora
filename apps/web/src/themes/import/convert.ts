@@ -107,7 +107,8 @@ export function importName(own: unknown, fileName: string, fallback: string): st
   for (const c of [own, base, fallback]) {
     const clean = cleanName(c);
     if (clean === '') continue;
-    const safe = safeName(clean).slice(0, MAX_NAME).trim();
+    // Cut before cleaning too: an imported name has no cap of its own, and cleaning runs until nothing is left to remove.
+    const safe = safeName(clean.slice(0, 4 * MAX_NAME)).slice(0, MAX_NAME).trim();
     if (safe !== '' && safe !== '—') return safe;
   }
   return '—';

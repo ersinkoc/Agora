@@ -124,6 +124,8 @@ export function detailText(detail: string): string {
   for (const [key] of SUBJECTS) {
     const v = stringField(s, key);
     if (v) return v;
+    // A key that is there but cut (or not text): a later key would show something else than what is asked, so the detail as it came.
+    if (s.includes(`"${key}"`)) return detail;
   }
   return detail;
 }

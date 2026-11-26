@@ -37,7 +37,8 @@ A theme file is JSON:
   "made by a newer version", nothing of it is guessed. Format 1 files are still read as they always were, with one change the
   floor asks for: a `text-16` under 16 px is shown at 16 px with a warning (`theme-warning-text-lifted`), so no text is under
   12 px. Export writes format 2.
-- `name`: 1 to 60 characters. Control and text-direction characters are removed before it is shown. When a format-1 theme is
+- `name`: 1 to 60 characters. Control and text-direction characters are removed before it is shown, and a format-2 name is judged
+  after that removal, so a name those characters split (`ur` + a direction mark + `l(`) is refused. When a format-1 theme is
   stored or exported as format 2, the pieces format 2 refuses (`url(`, `@import`, `;`, `}`, `expression(`, `<`) are removed from
   its name, so every theme format 1 accepts stays one format 2 accepts.
 - `scheme`: `"dark"` or `"light"`. It decides which slot the theme fills (below), the browser's `color-scheme`, shadows and

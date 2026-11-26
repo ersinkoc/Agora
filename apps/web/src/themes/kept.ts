@@ -49,7 +49,8 @@ export function createPackStore(kv?: KV) {
   return {
     list: () => packs,
     subscribe: (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; },
-    reload: () => { packs = load(); removed = removedOf(read(kv, PACKS_REMOVED_KEY)); notify(); },
+    // Without storage (safe mode) nothing stored is read, so the packs kept this visit stay.
+    reload: () => { if (!kv) return; packs = load(); removed = removedOf(read(kv, PACKS_REMOVED_KEY)); notify(); },
     /** Keeps a pack the person imported (the same file once). The ninth replaces the one kept longest ago, which is marked as forgotten. */
     keep(file: Record<string, unknown>): KeptPack | undefined {
       const have = packs.find((p) => same(p.file, file));

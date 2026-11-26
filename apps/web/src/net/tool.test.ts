@@ -91,6 +91,10 @@ describe('approval details in words', () => {
     expect(detailText('{"command":["bash","-lc","echo ok\\nrm -rf ~"]}')).toBe('echo ok\nrm -rf ~');
     expect(detailText('{"command":"echo ok\\nrm -rf ~","description":"a very long descr…')).toBe('echo ok\nrm -rf ~');
     expect(detailText('{"description":"two\\nlines","file_path":"a.rs"}')).toBe('a.rs');
+    // A cut command is never replaced by a later key: the detail is shown as it came (review of audit F2081).
+    const cut = '{"abs_path":"README.md","command":"rm -rf ~ xxx…';
+    expect(detailText(cut)).toBe(cut);
+    expect(detailText('{"command":["bash","-lc","rm -rf ~"],"path":"a.rs"…')).toBe('{"command":["bash","-lc","rm -rf ~"],"path":"a.rs"…');
     expect(toolView(call('Bash', '{"command":"echo ok\\nrm -rf ~"}')).subject).toBe('echo ok');
   });
 });
