@@ -50,13 +50,14 @@ function stringField(text: string, key: string): string | undefined {
   try { return JSON.parse(m[1] as string) as string; } catch { return undefined; }
 }
 
-function pickSubject(args: Record<string, unknown>): { subject: string; hint: ToolAction } {
+// `whole`: an approval's ask, which is decided on, keeps every line of it (F2081); a row in a conversation shows the first.
+function pickSubject(args: Record<string, unknown>, whole = false): { subject: string; hint: ToolAction } {
   for (const [key, hint] of SUBJECTS) {
     const v = args[key];
     if (v === undefined || v === null || v === '') continue;
     const s = asText(v);
     if (s && !s.includes('\n')) return { subject: s, hint };
-    if (s && key !== 'description') return { subject: s.split('\n')[0] as string, hint };
+    if (s && key !== 'description') return { subject: whole ? s : s.split('\n')[0] as string, hint };
   }
   return { subject: '', hint: 'other' };
 }
@@ -115,14 +116,14 @@ export function detailText(detail: string): string {
   let parsed: unknown;
   try { parsed = JSON.parse(s); } catch { parsed = undefined; }
   if (isObject(parsed)) {
-    const { subject } = pickSubject(parsed);
+    const { subject } = pickSubject(parsed, true);
     if (subject) return subject;
     const plain = Object.entries(parsed).filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean');
     return plain.length ? plain.slice(0, 3).map(([k, v]) => `${k}: ${String(v)}`).join(' · ') : detail;
   }
   for (const [key] of SUBJECTS) {
     const v = stringField(s, key);
-    if (v) return v.split('\n')[0] as string;
+    if (v) return v;
   }
   return detail;
 }

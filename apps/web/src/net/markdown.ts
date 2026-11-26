@@ -13,7 +13,35 @@ export type Block =
   /** `text` is the table as written (the fallback); `head` and `rows` are its cells when it has a header and a separator row. */
   | { kind: 'table'; text: string; head?: Inline[][]; rows?: Inline[][][] };
 
-const LINK = /(\[[^\]\n]+\]\([^)\s]+\)|https?:\/\/[^\s<>()[\]"']+)/;
+const BARE_LINK = /https?:\/\/[^\s<>()[\]"']+/y;
+const SPACE = /\s/;
+
+// What `text.split(/(\[[^\]\n]+\]\([^)\s]+\)|https?:\/\/[^\s<>()[\]"']+)/)` returns (text, link, text, ..., text), found in one pass: the
+// pattern took time with the square of a run of `[` (F2082). The next `]` (or line break) and the next `)` (or white space) are each
+// looked for once, not again from every `[`.
+function splitLinks(s: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  let close = -1; // the first `]` or line break after the last `[` looked at
+  let shut = -1; // the first `)` or white space at or after the last address start looked at
+  for (let i = 0; i < s.length; i++) {
+    let end = -1;
+    if (s[i] === '[') {
+      if (close <= i) { close = i + 1; while (close < s.length && s[close] !== ']' && s[close] !== '\n') close++; }
+      if (close > i + 1 && s[close] === ']' && s[close + 1] === '(') {
+        const at = close + 2;
+        if (shut < at) { shut = at; while (shut < s.length && s[shut] !== ')' && !SPACE.test(s[shut] as string)) shut++; }
+        if (shut > at && s[shut] === ')') end = shut + 1;
+      }
+    } else if (s[i] === 'h') {
+      BARE_LINK.lastIndex = i;
+      if (BARE_LINK.test(s)) end = BARE_LINK.lastIndex;
+    }
+    if (end > 0) { out.push(s.slice(from, i), s.slice(i, end)); from = end; i = end - 1; }
+  }
+  out.push(s.slice(from));
+  return out;
+}
 
 // `code` first (nothing inside it is read), then links, then **bold** in what is left. A link is drawn only when its address is a plain
 // web address: [x](javascript:...) stays as the text it was written as, never as a link.
@@ -33,14 +61,17 @@ export function inlines(text: string): Inline[] {
   };
   for (const part of text.split(/(`[^`\n]+`)/)) {
     if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) { push('code', part.slice(1, -1)); continue; }
-    for (const piece of part.split(LINK)) {
+    for (const piece of splitLinks(part)) {
       const md = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(piece);
       if (md) {
         const href = safeLink(md[2] as string);
         if (href) push('link', md[1] as string, href); else push('text', piece);
       } else if (/^https?:\/\//.test(piece)) {
-        // A sentence's closing punctuation is not part of the address.
-        const trimmed = piece.replace(/[.,;:!?]+$/, '');
+        // A sentence's closing punctuation is not part of the address (cut by hand: `/[.,;:!?]+$/` took time with the square of a run
+        // of dots, F2082).
+        let cut = piece.length;
+        while (cut > 0 && '.,;:!?'.includes(piece[cut - 1] as string)) cut--;
+        const trimmed = piece.slice(0, cut);
         const href = safeLink(trimmed);
         if (href) { push('link', trimmed, href); push('text', piece.slice(trimmed.length)); } else push('text', piece);
       } else bolds(piece);
@@ -49,20 +80,49 @@ export function inlines(text: string): Inline[] {
   return out;
 }
 
-const FENCE = /^\s*(`{3,}|~{3,})\s*([\w+.-]*)\s*$/;
+// Read on the trimmed line (F2080): two runs of `\s*` that meet backtrack with the square of a run of spaces in what an agent writes.
+const FENCE = /^(`{3,}|~{3,})\s*([\w+.-]*)$/;
 const CLOSE = /^\s*(`{3,}|~{3,})\s*$/;
-const HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
-const ITEM = /^(\s*)([-*+]|(\d+)[.)])\s+(.*)$/;
+const HEADING_START = /^\s{0,3}#{1,6}\s+/;
+const ITEM_START = /^(\s*)([-*+]|(\d+)[.)])\s+/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const TABLE = /^\s*\|.*\|\s*$/;
-const SEPARATOR = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+const SEPARATOR_CELL = /^:?-+:?$/;
+
+// A heading's text: what follows the `#`s, without the closing `#`s and the spaces around them; undefined for a line that is not one. Cut
+// by hand, not by one pattern, which backtracked with the cube of a run of spaces (F2080). Its text holds no line break, as `.` does not.
+function headingText(line: string): string | undefined {
+  const start = HEADING_START.exec(line)?.[0].length;
+  if (start === undefined) return undefined;
+  let end = line.trimEnd().length;
+  while (end > start && line[end - 1] === '#') end--;
+  const text = line.slice(start, end).trimEnd();
+  return /[\r\n\u2028\u2029]/.test(text) ? undefined : text;
+}
+
+// A list item: its indent, its number (an ordered one) and its text; undefined for a line that is not one. Its text holds no line break,
+// as `.` does not; cut by hand, as one pattern for the whole line took time with the square of it (F2082).
+function listItem(line: string): { indent: string; number?: string; text: string } | undefined {
+  const m = ITEM_START.exec(line);
+  if (!m) return undefined;
+  const text = line.slice(m[0].length);
+  return /[\r\n\u2028\u2029]/.test(text) ? undefined : { indent: m[1] ?? '', number: m[3], text };
+}
+
+// A table's separator row (`|---|:-:|`): every cell a run of dashes with an optional colon at either end. Cells split by hand (F2080).
+function separator(row: string): boolean {
+  let t = row.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').every((c) => SEPARATOR_CELL.test(c.trim()));
+}
 
 const cells = (row: string): string[] => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
 
 // A table with a header and a separator row becomes cells; anything else stays as the text it was.
 function table(rows: string[]): Block {
   const text = rows.join('\n');
-  if (rows.length >= 2 && SEPARATOR.test(rows[1] as string)) {
+  if (rows.length >= 2 && separator(rows[1] as string)) {
     return { kind: 'table', text, head: cells(rows[0] as string).map(inlines), rows: rows.slice(2).map((r) => cells(r).map(inlines)) };
   }
   return { kind: 'table', text };
@@ -78,7 +138,7 @@ export function blocks(text: string): Block[] {
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] as string;
-    const fence = FENCE.exec(line);
+    const fence = FENCE.exec(line.trim());
     if (fence) {
       endPara();
       const body: string[] = [];
@@ -91,8 +151,8 @@ export function blocks(text: string): Block[] {
       continue;
     }
     if (!line.trim()) { endPara(); continue; }
-    const heading = HEADING.exec(line);
-    if (heading) { endPara(); out.push({ kind: 'heading', inlines: inlines(heading[1] ?? '') }); continue; }
+    const heading = headingText(line);
+    if (heading !== undefined) { endPara(); out.push({ kind: 'heading', inlines: inlines(heading) }); continue; }
     if (TABLE.test(line)) {
       endPara();
       const rows = [line];
@@ -100,20 +160,20 @@ export function blocks(text: string): Block[] {
       out.push(table(rows));
       continue;
     }
-    const item = ITEM.exec(line);
+    const item = listItem(line);
     if (item && !para.length) {
-      const ordered = item[3] !== undefined;
-      const items: string[] = [item[4] ?? ''];
+      const ordered = item.number !== undefined;
+      const items: string[] = [item.text];
       // Items of the same list follow; an indented line that is not an item continues the one before it.
       while (i + 1 < lines.length) {
         const next = lines[i + 1] as string;
-        const m = ITEM.exec(next);
-        if (m && (m[3] !== undefined) === ordered) { items.push(m[4] ?? ''); i++; }
-        else if (m && (m[1] ?? '').length > 0) { items.push(m[4] ?? ''); i++; }
+        const m = listItem(next);
+        if (m && (m.number !== undefined) === ordered) { items.push(m.text); i++; }
+        else if (m && m.indent.length > 0) { items.push(m.text); i++; }
         else if (next.trim() && /^\s{2,}/.test(next)) { items[items.length - 1] += `\n${next.trim()}`; i++; }
         else break;
       }
-      out.push({ kind: 'list', ordered, start: ordered ? Number(item[3]) || 1 : 1, items: items.map(inlines) });
+      out.push({ kind: 'list', ordered, start: ordered ? Number(item.number) || 1 : 1, items: items.map(inlines) });
       continue;
     }
     const quote = QUOTE.exec(line);
