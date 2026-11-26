@@ -1,0 +1,1 @@
+- In the terminal client, "Clean up old machines" is no longer sent by members and viewers (only the owner can forget machines), and keys typed together with b, r or o no longer act on the console after that view closes. (#1221)

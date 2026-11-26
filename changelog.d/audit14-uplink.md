@@ -1,0 +1,1 @@
+- The node's link to the hub no longer drops a working connection when a send is slow (it took a slow send for a suspended computer), and a hub that stops reading during a resync no longer leaves the link stuck. (#1221)

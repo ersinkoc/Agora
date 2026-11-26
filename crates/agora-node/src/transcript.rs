@@ -1369,15 +1369,20 @@ impl Store {
         }
         let mut f = agora_platform::open_append_private(&path)?;
         let len = f.metadata()?.len();
+        // The file's length before this batch's lines, with the header or line break written here (F1602).
+        let mut before = len;
         if len == 0 {
-            f.write_all(&header(false))?;
+            let h = header(false);
+            f.write_all(&h)?;
+            before += h.len() as u64;
         } else if !ends_a_line(&path, len) {
             // A write cut short (a full disk) left half a line: ended here, so the next line is whole and only the torn one is lost.
             f.write_all(b"\n")?;
+            before += 1;
         }
         f.write_all(&out)?;
         f.flush()?;
-        if len + out.len() as u64 > self.limits.max_bytes {
+        if before + out.len() as u64 > self.limits.max_bytes {
             drop(f);
             self.rotate(&path, batch.high)?;
         }
@@ -1392,9 +1397,11 @@ impl Store {
         let len = f.metadata()?.len();
         let keep = self.limits.max_bytes / 2;
         let start = len.saturating_sub(keep);
-        f.seek(SeekFrom::Start(start))?;
+        // F1600: the byte before the half too, so a half that begins on a line start keeps that line (its break is skipped).
+        let at = start.saturating_sub(1);
+        f.seek(SeekFrom::Start(at))?;
         let mut tail = Vec::new();
-        f.take(keep).read_to_end(&mut tail)?;
+        f.take(len - at).read_to_end(&mut tail)?;
         let from = if start == 0 {
             0
         } else {
@@ -1582,9 +1589,11 @@ fn read_tail(path: &Path) -> io::Result<Seed> {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     let start = meta.len().saturating_sub(TAIL_READ);
-    f.seek(SeekFrom::Start(start))?;
+    // F1601: the byte before the tail too, so a tail that begins on a line start keeps that line (its break is skipped).
+    let at = start.saturating_sub(1);
+    f.seek(SeekFrom::Start(at))?;
     let mut bytes = Vec::new();
-    f.take(TAIL_READ).read_to_end(&mut bytes)?;
+    f.take(meta.len() - at).read_to_end(&mut bytes)?;
     let from = if start == 0 {
         0
     } else {
@@ -2063,6 +2072,89 @@ mod tests {
             .write(&batch("a", 43, vec![text(43, &"m".repeat(1500))]))
             .unwrap();
         assert_eq!(Store::new(&dir, limits, None).read("a").high, 43);
+    }
+
+    /// An entry `id` whose encoded line (written with `high`, its line break included) is exactly `len` bytes.
+    fn line_of(high: u64, id: u64, len: usize) -> Line {
+        let base = encode_line(high, &text(id, "x")).len();
+        let line = text(id, &"x".repeat(len + 1 - base));
+        assert_eq!(encode_line(high, &line).len(), len);
+        line
+    }
+
+    fn ids(seed: &Seed) -> Vec<u64> {
+        seed.entries.iter().map(|(e, _)| e.entry_id).collect()
+    }
+
+    /// F1601: when the last [`TAIL_READ`] bytes of a file begin exactly on a line start, that line is read back too (before, the
+    /// first line of the tail was always skipped as a partial one, so entry 2 was lost).
+    #[test]
+    fn a_tail_that_begins_on_a_line_start_keeps_that_line() {
+        let dir = temp("tail-on-line");
+        let store = Store::new(&dir, Limits::default(), None);
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let three = encode_line(3, &text(3, "y"));
+        let two = encode_line(3, &line_of(3, 2, TAIL_READ as usize - three.len()));
+        let mut body = header(false);
+        body.extend(encode_line(3, &text(1, "a")));
+        let start = body.len();
+        body.extend(two);
+        body.extend(three);
+        // The tail read is exactly lines 2 and 3.
+        assert_eq!(body.len() - start, TAIL_READ as usize);
+        std::fs::write(store.path("a").unwrap(), &body).unwrap();
+        let seed = store.read("a");
+        assert_eq!(ids(&seed), [2, 3]);
+        assert_eq!(seed.high, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F1600: a rotation whose kept half (2,048 bytes of a 4,096-byte bound) begins exactly on a line start keeps that line (before,
+    /// it was skipped as a partial one, so entry 2 was lost).
+    #[test]
+    fn a_rotation_whose_half_begins_on_a_line_start_keeps_that_line() {
+        let dir = temp("rotate-on-line");
+        let limits = Limits {
+            max_bytes: 4096,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        // The header and entry 1: more than the half, within the bound, so this write does not rotate.
+        let first = 3000 - header(false).len();
+        store
+            .write(&batch("a", 1, vec![line_of(1, 1, first)]))
+            .unwrap();
+        let path = store.path("a").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3000);
+        // Entries 2 and 3 are exactly the half kept.
+        let three = text(3, "y");
+        let two = line_of(3, 2, 2048 - encode_line(3, &three).len());
+        store.write(&batch("a", 3, vec![two, three])).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"truncated\":true"), "it rotated");
+        let seed = store.read("a");
+        assert_eq!(ids(&seed), [2, 3]);
+        assert_eq!(seed.high, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F1602: a new file's header counts toward its bound: a first batch of 4,086 bytes under a 4,096-byte bound rotates instead of
+    /// leaving a 4,127-byte file.
+    #[test]
+    fn a_new_files_header_counts_toward_its_bound() {
+        let dir = temp("new-bound");
+        let limits = Limits {
+            max_bytes: 4096,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        let line = line_of(1, 1, 4086);
+        assert!(header(false).len() + 4086 > 4096);
+        store.write(&batch("a", 1, vec![line])).unwrap();
+        let len = std::fs::metadata(store.path("a").unwrap()).unwrap().len();
+        assert!(len <= limits.max_bytes, "{len}");
+        assert_eq!(store.read("a").high, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// "Start again" moves the file aside; the new session's file starts with the earlier session's highest id, so a node that takes
