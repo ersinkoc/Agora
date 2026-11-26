@@ -1,13 +1,14 @@
 // Plugins loaded for development, and the install screen (ADR-0114 decisions 3 and 6; docs/ux/plugins.md). Opened from the command
 // palette ("Plugins"). A package is loaded from a local file into this browser only; the install screen lists what it asks to see in
 // plain words and the person allows each one. Everything a plugin's name, author or licence says is shown as text, never as the window's
-// own words.
+// own words. A file chosen with the picker that lets this page read it again is watched for this visit (reload on save, devReload.ts).
 import * as Dialog from '@radix-ui/react-dialog';
 import { useId, useRef, useState } from 'react';
 import { t } from '../i18n';
 import { Button } from '../components/kit';
 import { PluginMark } from '../layout/Workspace';
 import { type Capability, capabilityKey } from './capabilities';
+import { type ReloadProblem, type WatchedFile, canWatchFiles, devReload, pickPackage, useDevReload } from './devReload';
 import type { CheckedPlugin, PackageError } from './package';
 import { unsafeAddress } from './safe';
 import { pluginStore } from './store';
@@ -16,31 +17,46 @@ import { usePlugins } from './usePlugins';
 // eslint-disable-next-line no-control-regex
 const plain = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁯﻿]/g, '').slice(0, 100);
 export const packageErrorText = (code: PackageError | 'full', detail?: string) => t(`plugin-error-${code}`, { detail: plain(detail ?? '') });
+/** Why a development plugin's changed file was not loaded (reload on save). */
+export const reloadProblemText = (name: string, p: ReloadProblem): string => t('plugin-reload-refused', {
+  name,
+  reason: p.code === 'other-id' ? t('plugin-reload-other-id', { id: plain(p.detail ?? '') })
+    : p.code === 'unreadable' ? t('plugin-reload-unreadable')
+      : packageErrorText(p.code, p.detail),
+});
 
 type Screen =
   | { at: 'list'; error?: string; note?: string }
-  | { at: 'grant'; plugin: CheckedPlugin; text?: string; allow: Capability[] };
+  | { at: 'grant'; plugin: CheckedPlugin; text?: string; allow: Capability[]; watch?: { handle: WatchedFile; file: Pick<File, 'size' | 'lastModified'> } };
 
 export function PluginsDialog({ onClose }: { onClose: () => void }) {
   const { plugins, safe } = usePlugins();
+  const reload = useDevReload();
   const [screen, setScreen] = useState<Screen>({ at: 'list' });
   const file = useRef<HTMLInputElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
-  const choose = async (f: File | undefined) => {
+  const choose = async (f: File | undefined, handle?: WatchedFile) => {
     if (!f) return;
     const r = await pluginStore.check(f);
     if (file.current) file.current.value = '';
     if (!r.ok) { setScreen({ at: 'list', error: packageErrorText(r.code, r.detail) }); return; }
     // A plugin loaded again keeps what the person allowed it, for the capabilities it still asks for.
     const before = plugins.find((p) => p.plugin.manifest.id === r.plugin.manifest.id)?.grant?.granted ?? [];
-    setScreen({ at: 'grant', plugin: r.plugin, text: r.text, allow: r.plugin.manifest.capabilities.filter((c) => before.includes(c)) });
+    setScreen({ at: 'grant', plugin: r.plugin, text: r.text, allow: r.plugin.manifest.capabilities.filter((c) => before.includes(c)), ...(handle ? { watch: { handle, file: f } } : {}) });
+  };
+  // The picker that lets this page read the file again where there is one (reload on save), else the file input.
+  const load = async () => {
+    if (!canWatchFiles()) { file.current?.click(); return; }
+    const picked = await pickPackage(t('plugin-file-kind'));
+    if (picked) await choose(picked.file, picked.handle);
   };
   const save = (s: Extract<Screen, { at: 'grant' }>) => {
     if (s.text === undefined) { pluginStore.regrant(s.plugin.manifest.id, s.allow); setScreen({ at: 'list' }); return; }
     const kept = pluginStore.install(s.plugin, s.text, s.allow);
     if (kept === 'full') { setScreen({ at: 'list', error: packageErrorText('full') }); return; }
+    if (s.watch) devReload.watch(s.plugin.manifest.id, s.watch.handle, s.watch.file); else devReload.unwatch(s.plugin.manifest.id);
     setScreen({ at: 'list', note: t(kept === 'kept' ? 'plugin-added' : 'plugin-added-visit', { name: s.plugin.manifest.name }) });
   };
 
@@ -77,6 +93,8 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                       <span className="text-xs text-muted">{t('plugin-version-by', { version: m.version, author: m.author })}</span>
                     </div>
                     <p className="m-0 text-xs text-muted">{p.state === 'held' ? t('plugin-held') : t('plugin-sees', { count: p.granted.length })}</p>
+                    {reload.watching.includes(m.id) && <p className="m-0 text-xs text-muted" data-plugin-reload={m.id}>{t('plugin-reload-on')}</p>}
+                    {reload.problems[m.id] && <p role="alert" className="m-0 text-xs text-danger">{reloadProblemText(m.name, reload.problems[m.id]!)}</p>}
                     <div className="flex flex-wrap gap-2">
                       <Button size="sm" onClick={() => setScreen({ at: 'grant', plugin: p.plugin, allow: [...p.granted] })}>{t(p.state === 'held' ? 'plugin-review' : 'plugin-change')}</Button>
                       <Button size="sm" variant="danger-ghost" onClick={() => pluginStore.remove(m.id)}>{t('plugin-remove')}</Button>
@@ -85,12 +103,13 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                 );
               })}
             </ul>}
+            {!safe && !canWatchFiles() && <p className="m-0 text-xs text-muted" data-plugin-reload-unsupported="">{t('plugin-reload-unsupported')}</p>}
             {screen.error && <p role="alert" className="m-0 text-danger">{screen.error}</p>}
             {screen.note && <p role="status" className="m-0">{screen.note}</p>}
             <div className="mt-1 flex flex-wrap justify-end gap-2">
               {safe ? <Button onClick={() => location.assign(unsafeAddress(location.href))}>{t('safe-mode-leave')}</Button>
                 : <><input ref={file} type="file" accept=".json,application/json" className="sr-only" tabIndex={-1} aria-hidden data-plugin-file="" onChange={(e) => void choose(e.target.files?.[0])} />
-                  <Button onClick={() => file.current?.click()}>{t('plugin-load')}</Button></>}
+                  <Button onClick={() => void load()}>{t('plugin-load')}</Button></>}
               <Button variant="primary" onClick={onClose}>{t('plugins-done')}</Button>
             </div>
           </> : <Grant titleId={titleId} screen={screen} onChange={(allow) => setScreen({ ...screen, allow })} onCancel={() => setScreen({ at: 'list' })} onSave={() => save(screen)} />}

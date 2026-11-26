@@ -11,6 +11,17 @@ import { type PanelDef, type PanelInfo, type PanelRegistry, panelRegistry } from
 import type { LoadedPlugin } from './store';
 import { viewOf } from './projection';
 import { PluginFrame } from './PluginFrame';
+import type { CheckedPlugin } from './package';
+
+// Each package loaded has a number of its own, so one loaded again (reload on save, devReload.ts) starts its frames again: the frame's
+// loader takes the window's `load` once, and a new frame starts inert.
+const revisions = new WeakMap<CheckedPlugin, number>();
+let lastRevision = 0;
+const revision = (p: CheckedPlugin) => {
+  let r = revisions.get(p);
+  if (r === undefined) { r = ++lastRevision; revisions.set(p, r); }
+  return r;
+};
 
 /** A plugin panel's id in a layout: `plugin.<plugin id>.<panel id>`, so it can never be a built-in's. */
 export const pluginPanelId = (plugin: string, panel: string) => `plugin.${plugin}.${panel}`;
@@ -34,9 +45,9 @@ export function pluginPanels(plugins: readonly LoadedPlugin[]): PanelDef[] {
             pane: ctx.pane, kind, ...(follows ? { follows } : {}), agent: ctx.agent, fleet: ctx.state.fleet, boards: ctx.state.boards, now: ctx.state.now,
             chatOf: ctx.sources.chatOf, loadDiff: ctx.sources.loadDiff,
           });
-          // A new grant, or another bound agent (its conversation and changes are read from the agent the frame started with), starts
-          // the frame again.
-          return <PluginFrame key={`${id}:${p.granted.join(',')}:${ctx.agent?.id ?? ''}`} plugin={p.plugin} panel={decl} granted={p.granted} view={view} dev={p.dev} />;
+          // A new package (reload on save), a new grant, or another bound agent (its conversation and changes are read from the agent
+          // the frame started with), starts the frame again.
+          return <PluginFrame key={`${id}:${revision(p.plugin)}:${p.granted.join(',')}:${ctx.agent?.id ?? ''}`} plugin={p.plugin} panel={decl} granted={p.granted} view={view} dev={p.dev} />;
         },
       });
     }

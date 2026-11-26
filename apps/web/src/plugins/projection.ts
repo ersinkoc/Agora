@@ -81,15 +81,28 @@ export function viewOf(i: ViewInputs): PluginView {
 /** The theme's colours as the window draws them now, so a plugin can match them (`theme.read`). */
 export interface ThemeFacts { readonly scheme: 'dark' | 'light'; readonly tokens: Readonly<Record<string, string>> }
 
+/** What each capability answers. The plugin author's types (`apps/web/plugins/starter/agora-plugin.d.ts`, `AgoraPlugin.Answers`) are
+ *  checked against this (`apps/web/plugins/kit.check.ts`), so they cannot drift from what the bridge sends. */
+export interface Answers {
+  'agents.read': { agents: PluginView['agents'] };
+  'usage.read': { agents: PluginView['usage']; totalTokens: number };
+  'tasks.read': { boards: PluginView['boards'] };
+  'changes.read': ReturnType<typeof projectChanges>;
+  'chat.read': ReturnType<typeof projectChat>;
+  'theme.read': ThemeFacts;
+  'pane.context': { pane: PluginView['pane'] };
+}
+const answer = <C extends Capability>(_cap: C, data: Answers[C]): Answers[C] => data;
+
 /** The answer to a capability that is answered from the view at once; undefined for the two that are read from the node (`changes.read`,
  *  `chat.read`) and for one with nothing to answer (`unavailable`). */
 export function project(cap: Capability, v: PluginView, theme: () => ThemeFacts): unknown {
   switch (cap) {
-    case 'agents.read': return { agents: v.agents };
-    case 'usage.read': return { agents: v.usage, totalTokens: v.usage.reduce((n, a) => n + a.tokens, 0) };
-    case 'tasks.read': return { boards: v.boards };
-    case 'pane.context': return { pane: v.pane };
-    case 'theme.read': return theme();
+    case 'agents.read': return answer(cap, { agents: v.agents });
+    case 'usage.read': return answer(cap, { agents: v.usage, totalTokens: v.usage.reduce((n, a) => n + a.tokens, 0) });
+    case 'tasks.read': return answer(cap, { boards: v.boards });
+    case 'pane.context': return answer(cap, { pane: v.pane });
+    case 'theme.read': return answer(cap, theme());
     case 'changes.read':
     case 'chat.read':
       return undefined;
@@ -114,7 +127,7 @@ export function projectChanges(agentId: string, src: DiffSource) {
 /** The bound agent's conversation as the window shows it, already redacted (`chat.read`): the newest entries, without requests for
  *  approval (a permission entry, an approval's id) and without anything the window would act on. */
 export function projectChat(agentId: string, lines: readonly ChatLine[]) {
-  const entries = lines.filter((l) => l.kind !== 'permission').slice(-MAX_ENTRIES).map((l) => ({
+  const entries = lines.filter((l): l is ChatLine & { kind: Exclude<ChatLine['kind'], 'permission'> } => l.kind !== 'permission').slice(-MAX_ENTRIES).map((l) => ({
     id: l.id, atMs: l.atMs, role: l.role, kind: l.kind, text: cut(l.text) as string,
     ...(l.path ? { path: l.path } : {}),
     ...(l.code ? { code: l.code, params: { ...(l.params ?? {}) } } : {}),
