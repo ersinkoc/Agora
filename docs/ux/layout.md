@@ -298,13 +298,16 @@ writes it back as the same JSON; the file the Rust writer makes was also read ba
 - **The arrangement in use** is `tui-layout.json` beside `tui-theme` (`{ "version": 1, "layout", "focus", "zoom" }`, the object the web
   keeps in its storage). It is written when it changes (looked at only after a key, a click or a snapshot) and read at the start.
 - **Agents that are gone:** a pane of an agent that its machine, online, no longer has is pruned as in the web (a tab closes, a pane of
-  its own stays, empty). An agent of a machine that is offline stays, since the hub cannot say it is gone.
+  its own stays, empty); this holds for the tabs too. An agent of a machine that is offline or not listed stays, since the hub cannot
+  say it is gone, and a snapshot with no agent at all prunes nothing.
 - **Performance (ADR-0022, decision 7):** only panes on screen are watched. The client takes the terminals to watch from the same
   placement it draws (`App::tile_streams`): a tab behind another, every pane behind a maximized one, and every pane but the one in
   focus in a window too small to tile hold no stream and are closed when they leave the screen. Two panes of one agent share its
-  stream; the pane in focus uses the client's own stream as before. Each stream takes at most 256 items per turn of the loop and keys
-  are read every turn before any of them (2 ms waits while typing), so a flood in one pane costs another pane or the keyboard at most
-  one batch. Each terminal on screen is sized to its pane once per size, as the web window reports every tile (the hub keeps the
+  stream; the pane in focus uses the client's own stream as before. Keys are read every turn of the loop before any stream (2 ms waits
+  while typing); then the pane in focus takes at most 256 stream items, as before, and every other pane at most 32 (with the node's
+  16 KiB chunks, 512 KiB: about 5 ms of feeding at the 100 MB/s `examples/pane_timing.rs` measures for a pane). So floods in other panes
+  cost the keyboard and the pane being typed in about 5 ms per flooding pane per turn, never a pane's whole backlog; what does not fit
+  waits for the next turn, and a stream that falls too far behind is watched again for its screen. Each terminal on screen is sized to its pane once per size, as the web window reports every tile (the hub keeps the
   smallest size a terminal is shown at); the terminal this client runs in is never sized. `streams.rs` and `app.rs` test the
   subscriptions with fakes (a 2 × 2 watches four, a tab behind none, maximize one, too small one, a chat or another panel none).
 

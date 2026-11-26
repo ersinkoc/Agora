@@ -1958,10 +1958,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             c.notice = n;
         }
         // ADR-0068: the arrangement of the last run (the tabs, or a tiled layout), when it can be read.
-        if let Some(ws) = agora_tui::layout::store::load_workspace(&current_layout_file()) {
+        let file = current_layout_file();
+        if let Some(ws) = agora_tui::layout::store::load_workspace(&file) {
             c.app.set_workspace(ws);
         }
         c.layout_saved = layout_text(&c.app);
+        c.layout_file = Some(file);
     }
     let _full = FullScreen(keys && console_state.is_none());
     if keys && console_state.is_none() {
@@ -2649,6 +2651,8 @@ struct Console {
     theme: ThemeUse,
     /// ADR-0068: the arrangement in use as last written to `tui-layout.json`, so it is written again only when it changed.
     layout_saved: String,
+    /// Where it is written: set only when the console is started for real (a console made in a test never writes a file).
+    layout_file: Option<PathBuf>,
 }
 
 /// ADR-0113 step 3: the theme the console uses (`theme::folder::Choice`, kept in `tui-theme` in the Agora folder) and the stamp of its
@@ -2806,7 +2810,16 @@ fn layout_error_text(say: &Say, name: &str, e: agora_tui::layout::store::LoadErr
 /// The agents a layout's panes may keep: those the hub lists, and any of a machine that is not online now (the hub cannot say it
 /// is gone). A pane of an agent its own online machine no longer has is closed (`Prune`).
 fn layout_alive(s: &Snapshot, ws: &agora_tui::layout::engine::Workspace) -> Vec<String> {
-    agora_tui::layout::tree::panes_of(&ws.layout.root)
+    let panes = agora_tui::layout::tree::panes_of(&ws.layout.root);
+    // A snapshot with no agent at all (the hub just started) says nothing about which are gone, as in the web window.
+    if s.agents.is_empty() {
+        return panes
+            .iter()
+            .filter_map(|p| p.bound_agent())
+            .map(str::to_string)
+            .collect();
+    }
+    panes
         .iter()
         .filter_map(|p| p.bound_agent())
         .filter(|a| {
@@ -2900,6 +2913,7 @@ impl Console {
             give_lacking: agora_tui::board::Lacking::default(),
             theme: ThemeUse::default(),
             layout_saved: String::new(),
+            layout_file: None,
         }
     }
 }
@@ -3041,11 +3055,13 @@ fn console(
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
         // be (any frame from the hub wakes this at once anyway).
-        let mut wait = Duration::from_millis(if preview.is_some() || chat.is_some() {
-            15
-        } else {
-            50
-        });
+        let mut wait = Duration::from_millis(
+            if preview.is_some() || chat.is_some() || !tiles.is_empty() {
+                15
+            } else {
+                50
+            },
+        );
         if redraw {
             wait = wait.min(FRAME.saturating_sub(last_draw.elapsed()));
         }
@@ -3127,11 +3143,18 @@ fn console(
             // (`agora tui` started in an agent's shell, then that agent opened). Sizing it again would shrink this window again,
             // down to nothing (seen on Windows: 1x17 for good), so that agent's terminal is left at its size from now on. A pane is
             // always smaller than the window, so this never matches an ordinary resize.
-            if let Some((agent, w, h)) = sized.as_ref() {
-                if (*w, *h) == (now.width, now.height) && !c.not_sized.contains(agent) {
-                    c.not_sized.insert(agent.clone());
-                    c.notice = say.text(key!("tui-app-self-terminal"), &[]);
-                }
+            // The same for a terminal of another pane of a tiled layout, sized to its pane.
+            let given = sized
+                .iter()
+                .map(|(a, w, h)| (a, (*w, *h)))
+                .chain(tile_sized.iter().map(|(a, s)| (a, *s)));
+            if let Some(agent) = given
+                .filter(|(a, s)| *s == (now.width, now.height) && !c.not_sized.contains(*a))
+                .map(|(a, _)| a.clone())
+                .next()
+            {
+                c.not_sized.insert(agent);
+                c.notice = say.text(key!("tui-app-self-terminal"), &[]);
             }
             area = now;
             let _ = c.window.resized();
@@ -3487,10 +3510,9 @@ fn console(
             c.layout_saved.clone()
         };
         if arranged != c.layout_saved {
-            let _ = agora_tui::layout::store::save_workspace(
-                &current_layout_file(),
-                &c.app.workspace(),
-            );
+            if let Some(file) = &c.layout_file {
+                let _ = agora_tui::layout::store::save_workspace(file, &c.app.workspace());
+            }
             c.layout_saved = arranged;
         }
         // While typing stays refused, its notice stays (or comes back after another one) so the key that asks is never hidden.
@@ -3519,28 +3541,18 @@ fn console(
         // again (the agent before stays watched in its own pane while it is on screen; the one now in focus was watched in its pane).
         if c.app.tiled.is_some() {
             let active = c.app.active_agent().map(str::to_string);
-            if preview
-                .as_ref()
-                .is_some_and(|p| Some(&p.agent) != active.as_ref())
+            let (left, came) = tiles.hand_over(
+                &mut preview,
+                |p| p.agent.clone(),
+                active.as_deref(),
+                |p| p.close(session),
+            );
+            if let Some((agent, w, h)) = sized.as_ref().filter(|(a, _, _)| left.as_ref() == Some(a))
             {
-                if let Some(old) = preview.take() {
-                    if let Some((agent, w, h)) = sized.as_ref().filter(|(a, _, _)| *a == old.agent)
-                    {
-                        tile_sized.insert(agent.clone(), (*w, *h));
-                    }
-                    if tiles.get(&old.agent).is_some() {
-                        old.close(session);
-                    } else {
-                        let agent = old.agent.clone();
-                        tiles.insert(&agent, old);
-                    }
-                }
+                tile_sized.insert(agent.clone(), (*w, *h));
             }
-            if let Some(a) = active.as_deref().filter(|_| preview.is_none()) {
-                if let Some(p) = tiles.forget(a) {
-                    preview = Some(p);
-                    sized = tile_sized.remove(a).map(|(w, h)| (a.to_string(), w, h));
-                }
+            if let Some(a) = active.as_deref().filter(|_| came) {
+                sized = tile_sized.remove(a).map(|(w, h)| (a.to_string(), w, h));
             }
         }
         if let Some(s) = &c.snapshot {
@@ -3644,11 +3656,12 @@ fn console(
                 }
             }
         }
-        // The other panes' terminals: each pump takes at most a batch, so a flood in one never holds up another or the keyboard.
+        // The other panes' terminals: each takes at most a small batch per turn, so floods in them never hold up the pane in focus or
+        // the keyboard (what does not fit waits for the next turn; a stream that falls too far behind is watched again for its screen).
         let mut tiles_ended = Vec::new();
         let mut tiles_lost = false;
         for (agent, p) in tiles.each_mut() {
-            match p.pump(session) {
+            match p.pump_up_to(session, agora_tui::preview::TILE_BATCH) {
                 Pumped::Nothing => {}
                 Pumped::Changed => redraw = true,
                 Pumped::Ended => tiles_ended.push(agent.to_string()),
@@ -9121,5 +9134,60 @@ mod registry_picker_tests {
         assert_eq!(pick(b"", &kinds).0, None);
         assert_eq!(pick(b" ", &kinds).0, None);
         assert_eq!(pick(b"1", &kinds).0, Some(0));
+    }
+}
+
+/// ADR-0068: which panes of a layout a snapshot prunes.
+#[cfg(test)]
+mod layout_prune_tests {
+    use super::*;
+    use agora_protocol::v1::{AgentSnapshot, NodeSnapshot};
+    use agora_tui::layout::engine::{reduce, Action, Preset, Workspace};
+    use agora_tui::layout::tree::Layout;
+
+    fn ws(agents: &[&str]) -> Workspace {
+        reduce(
+            &Workspace::of(Layout::default_layout()),
+            &Action::Preset {
+                preset: Preset::TwoByTwo,
+                agents: agents.iter().map(|a| a.to_string()).collect(),
+            },
+        )
+    }
+
+    fn snapshot(nodes: &[(&str, bool)], agents: &[&str]) -> Snapshot {
+        Snapshot {
+            nodes: nodes
+                .iter()
+                .map(|(id, online)| NodeSnapshot {
+                    node_id: id.to_string(),
+                    online: *online,
+                    ..Default::default()
+                })
+                .collect(),
+            agents: agents
+                .iter()
+                .map(|a| AgentSnapshot {
+                    agent_id: a.to_string(),
+                    node_id: a.split_once('/').map_or("", |(n, _)| n).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_an_agent_its_online_machine_no_longer_has_is_pruned() {
+        let w = ws(&["mac/agent-1", "mac/agent-2", "vps/agent-1", "gone/agent-1"]);
+        // mac is online and lists agent-1 only; vps is offline; "gone" is not listed at all.
+        let s = snapshot(&[("mac", true), ("vps", false)], &["mac/agent-1"]);
+        assert_eq!(
+            layout_alive(&s, &w),
+            ["mac/agent-1", "vps/agent-1", "gone/agent-1"]
+        );
+        // A snapshot with no agent at all (a hub that just started) prunes nothing.
+        let empty = snapshot(&[("mac", true)], &[]);
+        assert_eq!(layout_alive(&empty, &w).len(), 4);
     }
 }

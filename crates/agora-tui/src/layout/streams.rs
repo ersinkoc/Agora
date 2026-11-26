@@ -150,8 +150,8 @@ impl<H> Streams<H> {
         self.open.keys().map(String::as_str)
     }
 
-    /// Every open stream, to pump. Each pump is bounded by the caller (the terminal client's `Preview::pump` takes at most a batch),
-    /// so a flood in one stream never holds up another or the keyboard.
+    /// Every open stream, to pump. Each pump is bounded by the caller (the terminal client's panes not in focus take at most
+    /// `preview::TILE_BATCH` items a turn), so a flood in one stream never holds up another or the keyboard.
     pub fn each_mut(&mut self) -> impl Iterator<Item = (&str, &mut H)> {
         self.open.iter_mut().map(|(a, h)| (a.as_str(), h))
     }
@@ -159,6 +159,42 @@ impl<H> Streams<H> {
     /// Keeps a stream the caller already has (handed over from elsewhere); answers the one it replaces, if any.
     pub fn insert(&mut self, agent: &str, h: H) -> Option<H> {
         self.open.insert(agent.to_string(), h)
+    }
+
+    /// The keyboard moved to another pane: the caller's stream of the pane in focus (`front`, of agent `front_agent`) and these change
+    /// hands instead of closing and opening again. The stream of the agent before joins these (it stays watched while its pane is on
+    /// screen; the next sync closes it otherwise, `close` when one is open already); the stream of `active` (the agent now in focus)
+    /// becomes `front` when it was here. Answers the agent that left the front and whether the new one came from here.
+    pub fn hand_over(
+        &mut self,
+        front: &mut Option<H>,
+        front_agent: impl Fn(&H) -> String,
+        active: Option<&str>,
+        mut close: impl FnMut(H),
+    ) -> (Option<String>, bool) {
+        let mut left = None;
+        if front
+            .as_ref()
+            .is_some_and(|h| Some(front_agent(h).as_str()) != active)
+        {
+            if let Some(old) = front.take() {
+                let agent = front_agent(&old);
+                if self.open.contains_key(&agent) {
+                    close(old);
+                } else {
+                    self.open.insert(agent.clone(), old);
+                }
+                left = Some(agent);
+            }
+        }
+        let mut came = false;
+        if let Some(a) = active.filter(|_| front.is_none()) {
+            if let Some(h) = self.open.remove(a) {
+                *front = Some(h);
+                came = true;
+            }
+        }
+        (left, came)
     }
 
     /// Drops one stream that ended (closed by the caller already).
@@ -416,6 +452,56 @@ mod tests {
         assert!(assign_attention(&panes, &next, &[]).is_empty());
     }
 
+    #[test]
+    fn moving_the_keyboard_between_panes_hands_the_streams_over_without_reconnecting() {
+        let f = Fake::default();
+        let mut s = Streams::default();
+        let ws = grid(Preset::TwoByOne, &["a", "b"]);
+        let watched = |s: &Streams<String>, front: &Option<String>| -> Vec<String> {
+            let mut v: Vec<String> = s
+                .agents()
+                .map(str::to_string)
+                .chain(front.iter().cloned())
+                .collect();
+            v.sort();
+            v
+        };
+        // a in focus is the caller's own stream; b is watched in its pane.
+        let mut front = f.open("a");
+        s.sync(["b"], |x| f.open(x), |h| f.close(h));
+        // The keyboard moves to b: b becomes the front, a stays watched in its pane.
+        let (left, came) = s.hand_over(&mut front, String::clone, Some("b"), |h| f.close(h));
+        assert_eq!(
+            (left.as_deref(), came, front.as_deref()),
+            (Some("a"), true, Some("b"))
+        );
+        let plan = stream_plan(
+            &visible_panes(&ws, false),
+            &Bindings::default(),
+            streams_panel,
+            terminals,
+        );
+        let others: Vec<&str> = plan
+            .values()
+            .map(String::as_str)
+            .filter(|a| Some(*a) != front.as_deref())
+            .collect();
+        s.sync(others, |x| f.open(x), |h| f.close(h));
+        assert_eq!(watched(&s, &front), ["a", "b"]);
+        assert_eq!(*f.connects.borrow(), 2, "nothing reconnected");
+        assert_eq!(f.live(), ["a", "b"]);
+        // The keyboard moves to a pane of another panel: no front; a's stream comes back from the pane only when it is in focus again.
+        let (left, came) = s.hand_over(&mut front, String::clone, None, |h| f.close(h));
+        assert_eq!(
+            (left.as_deref(), came, front.as_deref()),
+            (Some("b"), false, None)
+        );
+        assert_eq!(f.live(), ["a", "b"]);
+        let _ = s.hand_over(&mut front, String::clone, Some("a"), |h| f.close(h));
+        assert_eq!(front.as_deref(), Some("a"));
+        assert_eq!(*f.connects.borrow(), 2);
+    }
+
     /// A fake stream that holds `queued` items and hands out at most `batch` per pump, as `Preview::pump` does.
     struct Flood {
         queued: usize,
@@ -424,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_flood_in_one_pane_never_starves_another() {
-        const BATCH: usize = 256;
+        const BATCH: usize = crate::preview::TILE_BATCH;
         let mut s: Streams<Flood> = Streams::default();
         s.sync(
             ["flood", "quiet"],
