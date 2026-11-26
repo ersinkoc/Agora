@@ -91,6 +91,7 @@ fn env(name: &str, policy: Option<&str>) -> Env {
         ("startauto", &["--start-auto-approve"][..]),
         ("startunlisted", &["--start-mode=yolo"][..]),
         ("turnsskip", &["--turns"][..]),
+        ("neverreports", &["--report-delay-ms=60000"][..]),
         (
             "slowskip",
             &["--report-delay-ms=3000", "--start-mode=bypassPermissions"][..],
@@ -1068,8 +1069,9 @@ fn a_forbidding_policy_refuses_the_start_of_an_agent_that_starts_in_a_mode_that_
                 agent_id: "agent-1".into(),
                 text: "hang".into(),
             }));
+            // Before the start: no such agent; while it is judged: no prompt yet; once refused: the refusal.
             assert!(
-                matches!(&r, Ok(Err(e)) if e.code == "agent.not_found"),
+                matches!(&r, Ok(Err(e)) if ["agent.not_found", "adapter.no_answer", "agent.option_forbidden"].contains(&e.code.as_str())),
                 "a prompt was taken: {r:?}"
             );
         }
@@ -1265,7 +1267,13 @@ fn a_resume_into_a_mode_that_skips_is_refused() {
         .lock()
         .unwrap()
         .set_skip_permissions(agora_node::launch_options::SkipPermissions::Forbid);
-    let r = n.supervisor.lock().unwrap().resume(&agent, Instant::now());
+    n.supervisor
+        .lock()
+        .unwrap()
+        .resume(&agent, Instant::now())
+        .expect("resumed, to be judged");
+    // Judged by the tick, waited for off the supervisor's lock as the node's own resume does.
+    let r = agora_node::supervisor::await_first_reports(&n.supervisor, &agent);
     match r {
         Err(agora_node::supervisor::SupervisorError::OptionForbidden(kind, option, policy)) => {
             assert_eq!(
@@ -1332,4 +1340,75 @@ fn an_allowing_policy_keeps_an_agent_that_starts_in_a_mode_that_skips() {
     std::thread::sleep(Duration::from_millis(600));
     assert!(view(&n, &id).is_some_and(|v| v.running));
     assert!(skip_refusals(&n, &id).is_empty());
+}
+
+/// P2-16 (review of #1244): the wait for an agent's first reports never holds the supervisor's lock and never runs in the tick. Under
+/// `forbid`, while a start waits for an agent that does not report (its wait runs out after 2 s), another running agent takes a
+/// prompt and answers it at once (its answer is read by the tick); the agent still being judged takes no prompt.
+#[test]
+fn an_agent_that_does_not_report_delays_no_other_agent_and_not_the_tick() {
+    if !local() {
+        return;
+    }
+    let e = env("no-report", Some("skip_permissions = forbid\n"));
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (other, _) = agent(&n, &mut c);
+    let sock = n.socket().unwrap().to_path_buf();
+    let began = Instant::now();
+    let slow = std::thread::spawn(move || {
+        let mut c2 = Client::connect(&sock).unwrap();
+        let r = c2.call(Cmd::AgentStart(v1::AgentStart {
+            kind: "neverreports".into(),
+            ..Default::default()
+        }));
+        (r, began.elapsed())
+    });
+    // The slow start is in its wait (its process runs, its reports do not come).
+    let end = Instant::now() + Duration::from_secs(10);
+    while !n
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .iter()
+        .any(|v| v.kind == "neverreports")
+    {
+        assert!(Instant::now() < end, "the slow agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let asked = Instant::now();
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: other.clone(),
+        text: "still here".into(),
+    })));
+    let agent = agora_core::AgentId::new(&other);
+    while !n
+        .chat
+        .snapshot(&agent)
+        .iter()
+        .any(|e| e.text.contains("still here"))
+    {
+        assert!(
+            asked.elapsed() < Duration::from_millis(1500),
+            "another agent's answer waited for the judgement"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let answered = asked.elapsed();
+    assert!(!slow.is_finished(), "the slow start did not wait");
+    let (r, waited) = slow.join().unwrap();
+    let id = match ok(r).result {
+        Some(Ok_::AgentStart(s)) => s.agent_id,
+        other => panic!("{other:?}"),
+    };
+    assert!(waited >= Duration::from_millis(1900), "{waited:?}");
+    assert!(answered < Duration::from_millis(1500), "{answered:?}");
+    // Still being judged: no prompt reaches it.
+    let err = error(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "hang".into(),
+    })));
+    assert_eq!(err.code, "adapter.no_answer", "{err:?}");
+    assert_eq!(param(&err, "call"), "session");
 }

@@ -459,8 +459,14 @@ fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
                 out.contains("does not let agents act without asking"),
                 "{out}"
             );
+            // What the node started to judge it was stopped: nothing of it runs.
             let (_, list) = agora(&home, &["agent", "list"]);
-            assert!(!list.contains("acp-startbypass"), "{list}");
+            assert!(
+                list.lines()
+                    .filter(|l| l.contains("acp-startbypass"))
+                    .all(|l| l.contains("done")),
+                "{list}"
+            );
             // An agent that starts in a mode that asks runs under the same policy, and takes a prompt.
             let normal = started_agent_of(&home, "acp-fake");
             let (code, out) = agora(&home, &["agent", "prompt", &normal, "hello"]);

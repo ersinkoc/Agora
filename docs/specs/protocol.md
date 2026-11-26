@@ -1188,10 +1188,12 @@ forwards either to a node that did not offer it.
   choice; a boolean's value as `AgentSetConfig` judges it, so `ask_for_approval` off counts and a permission boolean whose words do not
   say which value protects counts at either value; the model by the strong words only, as `AgentSetModel`). Each report is judged as
   the adapter sent it, before the node bounds it: an id in use that is not in its own list, or not kept of it (past a cap, repeated,
-  too long), is judged on the id alone (a mode id the node's rule cannot place counts as skipping). After a start or a resume (and a
-  restart after a crash) the node reads the adapter's first reports, up to 2 s, before the agent can take a prompt: a start or resume
-  they refuse is answered `agent.option_forbidden` (`kind`, `option`: the mode, model or config option id in use, `policy`) and nothing
-  runs (the process is killed). A refusal later (after a restart, on take-up from the holder, by a report the agent makes of its own,
+  too long), is judged on the id alone (a mode id the node's rule cannot place counts as skipping). After a start, a resume or a restart
+  after a crash the agent is being judged until its first reports came and were judged (by the node's tick, as every report is; nothing
+  waits for them under the node's lock or in its tick): it takes no prompt meanwhile. `AgentStart`, `AgentLaunch` and `agent.resume`
+  wait for that judgement, off the node's lock, up to 2 s, before they answer: one the reports refuse is answered
+  `agent.option_forbidden` (`kind`, `option`: the mode, model or config option id in use, `policy`), the agent is stopped as below and
+  nothing of it runs; one whose reports did not come within the wait is answered as started and stays being judged. A refusal later (after a restart, on take-up from the holder, by a report the agent makes of its own,
   for example a switch it makes itself) stops the agent as `AgentStop` would (`AgentExited`; the process is killed, not asked to
   stop), its report is not kept or passed on (no `AgentSessionOptions` / `AgentSessionConfig` carries it), no prompt queued behind its
   turn goes out (it leaves with `adapter.queue_dropped`), and its conversation gets the node's notice

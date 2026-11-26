@@ -1299,11 +1299,8 @@ struct AdapterEntry {
     /// Review of #1103 (B1): what a resumed session said before it answered its start (see `open_session`), read by the next tick
     /// before anything newer.
     replayed: Vec<AdapterEvent>,
-    /// P2-16: what the adapter said after it answered its start, read while the node waited for its first reports ([`first_reports`]),
-    /// read by the next tick before anything newer (after `replayed`).
-    early: Vec<AdapterEvent>,
     /// P2-16: under a policy that refuses skipping, the first report of the mode (`.0`) or the config options (`.1`) after this launch
-    /// has not been judged yet (the start's wait ran out): no prompt is sent until it has.
+    /// has not been judged yet: the agent is being judged, and no prompt is sent to it until it has been ([`first_awaited`]).
     awaiting: (bool, bool),
     /// P2-16: what the node holds in use is refused by its policy and the agent is to be stopped by the next tick (an agent taken up from
     /// the holder, whose recorded mode no report repeats). No prompt is sent meanwhile.
@@ -2509,19 +2506,8 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            // P2-16: judged before the agent can take a prompt; a refused one is ended at once and nothing was started.
-            let (early, awaiting) =
-                match self.judge_first_reports(&req.kind, &adapter, &capabilities, confinement) {
-                    Ok(first) => first,
-                    Err(e) => {
-                        drop(adapter);
-                        drop(git_config);
-                        if let Some(hook) = &self.abort_hook {
-                            hook(&id);
-                        }
-                        return Err(e);
-                    }
-                };
+            // P2-16: judged by its first reports before it takes a prompt (by the tick; the caller waits for that off the lock).
+            let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -2556,7 +2542,6 @@ impl Supervisor {
                     git_config,
                     confinement,
                     replayed: Vec::new(),
-                    early,
                     awaiting,
                     verdict: None,
                     refusal: Arc::default(),
@@ -2795,17 +2780,8 @@ impl Supervisor {
                 return Err(error);
             }
         };
-        // P2-16: judged before the agent can take a prompt; a refused one is ended at once and nothing was started.
-        let (early, awaiting) =
-            match self.judge_first_reports(&req.kind, &adapter, &capabilities, confinement) {
-                Ok(first) => first,
-                Err(error) => {
-                    drop(adapter);
-                    drop(git_config);
-                    self.abandon(&id, created);
-                    return Err(error);
-                }
-            };
+        // P2-16: judged by its first reports before it takes a prompt (by the tick; the caller waits for that off the lock).
+        let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
         let mut agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -2840,7 +2816,6 @@ impl Supervisor {
                 git_config,
                 confinement,
                 replayed: Vec::new(),
-                early,
                 awaiting,
                 verdict: None,
                 refusal: Arc::default(),
@@ -2949,8 +2924,6 @@ impl Supervisor {
                             items,
                         });
                     }
-                    // P2-16: what the start's wait for its first reports read, then what came since.
-                    rest.append(&mut e.early);
                     rest.extend(adapter.poll());
                     rest
                 }
@@ -3213,13 +3186,10 @@ impl Supervisor {
         });
         match launched {
             Ok((adapter, session_id, capabilities, git_config, confinement, replayed)) => {
-                // P2-16 (security review of #1244, F1): its first reports are read and judged before it can take a prompt; a refusal
-                // stops it in this same tick (`verdict`, read by the poll that follows).
-                let (early, verdict, awaiting) =
-                    first_reports(&adapter, &capabilities, skip_policy, confinement);
-                e.early = early;
-                e.verdict = verdict;
-                e.awaiting = awaiting;
+                // P2-16 (security review of #1244, F1): judged by its first reports, read by a later tick (never waited for here),
+                // before it can take a prompt.
+                e.awaiting = first_awaited(&capabilities, skip_policy, confinement);
+                e.verdict = None;
                 e.refusal = Arc::default();
                 e.run_id = process_run_id(adapter.pid(), adapter.is_held());
                 e.adapter = Some(adapter);
@@ -3288,34 +3258,18 @@ impl Supervisor {
         }
     }
 
-    /// P2-16 (security review of #1244, F1): a just-launched adapter of `kind` is judged by its first reports before it can take a
-    /// prompt ([`first_reports`]). Refused: `agent.option_forbidden` (`kind`, the mode, model or config option id in use, the policy),
-    /// and the caller ends the process and starts nothing. Otherwise what was read, for the entry's `early`, and which first report is
-    /// still missing, for its `awaiting`.
-    fn judge_first_reports(
-        &self,
-        kind: &str,
-        adapter: &Adapter,
-        capabilities: &[String],
-        confinement: Confinement,
-    ) -> Result<(Vec<AdapterEvent>, (bool, bool)), SupervisorError> {
-        let (early, verdict, awaiting) =
-            first_reports(adapter, capabilities, self.skip_permissions, confinement);
-        match verdict {
-            Some(v) => {
-                // Operational log, not UI text.
-                eprintln!(
-                    "agent.skip_refused: kind={kind} policy={} setting={} at=start",
-                    v.policy, v.setting
-                );
-                Err(SupervisorError::OptionForbidden(
-                    kind.to_string(),
-                    v.option,
-                    v.policy,
-                ))
-            }
-            None => Ok((early, awaiting)),
+    /// P2-16: where the judgement of an adapter agent's first reports after its launch stands ([`await_first_reports`]).
+    pub fn first_report_state(&self, id: &AgentId) -> FirstReport {
+        let Some(e) = self.adapters.get(id) else {
+            return FirstReport::Done;
+        };
+        if let Some(v) = e.refusal.get() {
+            return FirstReport::Refused(e.agent.kind.clone(), v.clone());
         }
+        if e.running && (e.awaiting.0 || e.awaiting.1 || e.verdict.is_some()) {
+            return FirstReport::Pending;
+        }
+        FirstReport::Done
     }
 
     /// P2-16 (security review of #1244, F1): under a policy that refuses skipping, no prompt reaches an agent whose mode, model or
@@ -4539,7 +4493,6 @@ impl Supervisor {
                     // ADR-0101: no process yet; the launch (or the take-up) that follows records how it runs.
                     confinement: Confinement::Unknown,
                     replayed: Vec::new(),
-                    early: Vec::new(),
                     awaiting: (false, false),
                     verdict: None,
                     refusal: Arc::default(),
@@ -4714,25 +4667,9 @@ impl Supervisor {
                         return Err(e);
                     }
                 };
-            // P2-16 (security review of #1244, F1): judged before it can take a prompt; a refused one is ended at once and stays
-            // stopped.
-            let kind = entry.agent.kind.clone();
-            let (early, awaiting) =
-                match self.judge_first_reports(&kind, &adapter, &capabilities, confinement) {
-                    Ok(first) => first,
-                    Err(e) => {
-                        drop(adapter);
-                        drop(git_config);
-                        if let Some(hook) = &self.abort_hook {
-                            hook(id);
-                        }
-                        if let Some(entry) = self.adapters.get_mut(id) {
-                            entry.options = SessionOptions::default();
-                            entry.rich.config.clear();
-                        }
-                        return Err(e);
-                    }
-                };
+            // P2-16 (security review of #1244, F1): judged by its first reports before it takes a prompt (by the tick; the caller
+            // waits for that off the lock). What the last run reported does not stand for this one.
+            let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
             let entry = self
                 .adapters
                 .get_mut(id)
@@ -4740,7 +4677,8 @@ impl Supervisor {
             entry.run_id = process_run_id(adapter.pid(), adapter.is_held());
             entry.adapter = Some(adapter);
             entry.replayed = replayed;
-            entry.early = early;
+            entry.options = SessionOptions::default();
+            entry.rich.config.clear();
             entry.awaiting = awaiting;
             entry.verdict = None;
             entry.refusal = Arc::default();
@@ -5285,63 +5223,60 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
     }
 }
 
-/// P2-16: the longest a launch waits for an adapter's first reports of its mode and config options, under a policy that refuses
-/// skipping ([`first_reports`]). The ACP bridge sends them right after it answers the start.
-const FIRST_REPORT_WAIT: Duration = Duration::from_secs(2);
+/// P2-16: the longest a start or resume waits, off the supervisor's lock, for the judgement of the agent's first reports
+/// ([`await_first_reports`]). The ACP bridge sends them right after it answers the start. An agent whose reports come later stays
+/// being judged: it takes no prompt until they came and were judged.
+pub const FIRST_REPORT_WAIT: Duration = Duration::from_secs(2);
 
-/// P2-16 (security review of #1244, F1): under a policy that refuses skipping for this launch (`policy`, `confinement`), what a
-/// just-started adapter says first is read here, up to [`FIRST_REPORT_WAIT`], until it reported its mode (it declared `set_mode` or
-/// `set_model`) and its config options (`config`), and each report is judged as it comes ([`skip_in_use_refused`], on the report as
-/// sent). Returns what was read (the next tick takes it, in order, before anything newer), the verdict, and which report did not come
-/// in time (`awaiting`: prompts wait for it, [`Supervisor::prompt_gate`]). Any other policy, or an adapter that declares neither:
-/// nothing is read and nothing waits. Reading stops at a refusal or at the adapter's end.
-fn first_reports(
-    adapter: &Adapter,
+/// P2-16 (security review of #1244, F1): which first reports a just-launched adapter is judged by before it can take a prompt, under a
+/// policy that refuses skipping for this launch (`policy`, `confinement`): its mode (it declared `set_mode` or `set_model`) and its
+/// config options (`config`). Any other policy, or an adapter that declares neither: none. Nothing is read or waited for here: the
+/// tick reads the reports as they come and judges them (`poll_adapters`).
+fn first_awaited(
     capabilities: &[String],
     policy: SkipPermissions,
     confinement: Confinement,
-) -> (Vec<AdapterEvent>, Option<SkipVerdict>, (bool, bool)) {
-    let mut early = Vec::new();
+) -> (bool, bool) {
     if policy_refusal(policy, confinement).is_none() {
-        return (early, None, (false, false));
+        return (false, false);
     }
     let has = |c: &str| capabilities.iter().any(|x| x == c);
-    let mut awaiting = (has("set_mode") || has("set_model"), has("config"));
-    let (mut options, mut config) = (SessionOptions::default(), Vec::new());
+    (has("set_mode") || has("set_model"), has("config"))
+}
+
+/// P2-16: where the judgement of an adapter agent's first reports after its launch stands ([`Supervisor::first_report_state`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstReport {
+    /// Not judged yet: the agent takes no prompt.
+    Pending,
+    /// Judged and allowed, or nothing to judge (any other policy, an adapter that reports nothing, an agent that ended).
+    Done,
+    /// Refused: the node stopped the agent (its `kind`, and what it had in use).
+    Refused(String, SkipVerdict),
+}
+
+/// P2-16 (security review of #1244, F1): waits, never holding the supervisor's lock (`sup` is taken only for a look, every 20 ms),
+/// until the tick judged the first reports of the agent just started or resumed as `id`, at most [`FIRST_REPORT_WAIT`]. Refused:
+/// `agent.option_forbidden` (`kind`, the mode, model or config option id in use, the policy); the tick has already stopped the agent
+/// and killed its process. Allowed, nothing to judge, or the wait ran out: `Ok` (an agent still being judged then takes no prompt
+/// until it has been: `adapter.no_answer`, call `session`). The tick and every other agent go on meanwhile.
+pub fn await_first_reports(sup: &Mutex<Supervisor>, id: &AgentId) -> Result<(), SupervisorError> {
     let end = Instant::now() + FIRST_REPORT_WAIT;
-    while awaiting.0 || awaiting.1 {
-        let left = end.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        let Some(ev) = adapter.next_event(left) else {
-            break;
-        };
-        let judge = match &ev {
-            AdapterEvent::Options { options: o, .. } => {
-                awaiting.0 = false;
-                options = o.clone();
-                true
+    loop {
+        let state = sup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .first_report_state(id);
+        match state {
+            FirstReport::Refused(kind, v) => {
+                return Err(SupervisorError::OptionForbidden(kind, v.option, v.policy));
             }
-            AdapterEvent::Config { options: o, .. } => {
-                awaiting.1 = false;
-                config = o.clone();
-                true
+            FirstReport::Pending if Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(20));
             }
-            _ => false,
-        };
-        let ended = matches!(ev, AdapterEvent::Exited);
-        early.push(ev);
-        if judge {
-            if let Some(v) = skip_in_use_refused(policy, confinement, &options, &config) {
-                return (early, Some(v), awaiting);
-            }
-        }
-        if ended {
-            break;
+            _ => return Ok(()),
         }
     }
-    (early, None, awaiting)
 }
 
 /// P2-16 (ADR-0090): stops an adapter agent whose mode, model or config option in use skips permissions under a policy that refuses
@@ -5368,7 +5303,6 @@ fn refuse_skipping(
     let _ = e.refusal.set(verdict);
     e.verdict = None;
     e.awaiting = (false, false);
-    e.early.clear();
     e.restart_at = None;
     e.running = false;
     let adapter = e.adapter.take();
