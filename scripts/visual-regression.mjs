@@ -1,4 +1,4 @@
-// Visual regression: the component gallery, Home (the demo window's fleet console), the window with one empty pane, a plugin's panel, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, Home (the demo window's fleet console), the window with one empty pane, a plugin's panel, the theme packs' dialogs, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -54,10 +54,45 @@ const pages = [
       'agora.plugins.grants.v1': JSON.stringify({ 'sample-agents': { version: '0.1.0', seen: ['agents.read', 'theme.read'], granted: ['agents.read', 'theme.read'] } }),
       'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'split', direction: 'row', ratios: [0.6, 0.4], children: [{ type: 'pane', id: 'p1', panel: 'plugin.sample-agents.list' }, { type: 'pane', id: 'p2', panel: 'usage' }] } }, focus: 'p1', touched: true }),
     } },
+  // Theme packs (ADR-0113 decision 5, docs/ux/themes.md "Theme packs"): the theme editor's three dialogs, opened by `act` (a desktop only:
+  // the editor is a pane). One of the person's themes, a saved layout and a key of their own, so each part has something to list.
+  ...packPages(),
   { name: 'signin', hash: '', ready: 'form' },
   // Its dates are written in the browser's zone and language, so both are fixed; notifications are allowed so the switch is enabled.
   { name: 'settings', hash: '#/gallery/settings', ready: '[data-settings] .set-kind', context: { locale: 'en-US', timezoneId: 'UTC', permissions: ['notifications'] } },
 ];
+function packPages() {
+  const harbour = { 'agora-theme': 2, name: 'Harbour', inherits: 'slate', dark: { tokens: { accent: '#5cc8c2' } }, light: { tokens: { accent: '#0b6e69', 'on-accent': '#ffffff' } } };
+  const review = { version: 1, root: { type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [{ type: 'pane', id: 'p1', panel: 'changes', bind: { follow: 'selection' } }, { type: 'pane', id: 'p2', panel: 'plugin.clock.face' }] } };
+  const storage = {
+    'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'pane', id: 'p1', panel: 'theme' } }, focus: 'p1', touched: true }),
+    'agora.themes.v1': JSON.stringify([{ id: 'user-1', file: harbour }]),
+    'agora.layouts.v1': JSON.stringify({ version: 1, items: [{ name: 'Review', layout: review }] }),
+    'agora.keybindings.v1': JSON.stringify({ version: 1, bindings: [{ command: 'palette.open', keys: ['ctrl+o'] }, { command: 'go.home', keys: ['ctrl+k 2'] }] }),
+  };
+  const pack = JSON.stringify({
+    'agora-pack': 1, name: 'Harbour set', themes: [{ ...harbour, name: 'Harbour night' }],
+    layouts: [{ name: 'Review', layout: review }],
+    keybindings: { version: 1, bindings: [{ command: 'palette.open', keys: ['ctrl+p'] }, { command: 'layout.preset-2x2', keys: ['ctrl+k 2'] }] },
+  });
+  const preview = async (page) => {
+    await page.getByRole('button', { name: 'Import pack…' }).click();
+    await page.locator('[data-pack-dialog="read"] textarea').fill(pack);
+    await page.getByRole('button', { name: "See what's in it" }).click();
+    await page.waitForSelector('[data-pack-dialog="preview"]');
+  };
+  const base = { hash: '#/demo', ready: '[data-theme-preview]', quiet: true, only: 'desktop', storage };
+  return [
+    { ...base, name: 'pack-export', act: async (page) => { await page.getByRole('button', { name: 'Export as pack…' }).click(); await page.waitForSelector('[data-pack-dialog="export"]'); } },
+    { ...base, name: 'pack-import', act: preview },
+    { ...base, name: 'pack-keys', act: async (page) => {
+      await preview(page);
+      await page.locator('[data-pack-dialog="preview"] input[type="checkbox"]').last().check();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.waitForSelector('[data-pack-dialog="keys"]');
+    } },
+  ];
+}
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
 
 // A page is captured once it has settled, so two runs of the same UI match (#1023): its fonts have loaded, every dwell has passed and
@@ -141,6 +176,7 @@ for (const p of pages) {
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
       if (p.frameReady) await page.frameLocator(p.ready).locator(p.frameReady).waitFor();
+      if (p.act) await p.act(page);
       await settle(page);
       const shot = await capture(page, cdp);
       await ctx.close();

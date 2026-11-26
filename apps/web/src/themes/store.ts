@@ -161,6 +161,25 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       const r = adopt({ id: freshId(), ...p.theme });
       return r.ok && p.warnings ? { ...r, warnings: p.warnings } : r;
     },
+    // How many more of the person's own themes fit.
+    room: () => Math.max(0, MAX_USER_THEMES - state.user.length),
+    // ADR-0113 decision 5: themes from a pack the person chose to add, checked again like an imported file and added to their own themes
+    // all or none (when they do not all fit, or one is refused, nothing changes). Unlike an import, nothing is chosen: the theme on screen
+    // stays, and the person picks an added one when they want it.
+    add(themes: readonly ThemeData[]): { ok: true; themes: Theme[] } | { ok: false; full: true } | { ok: false; issues: ThemeIssue[] } {
+      if (themes.length > MAX_USER_THEMES - state.user.length) return { ok: false, full: true };
+      const added: Theme[] = [];
+      let next = Math.max(0, ...state.user.map((u) => Number(u.id.slice(5))));
+      for (const data of themes) {
+        const p = readTheme(writeTheme(data, data.name));
+        if (!p.ok) return p;
+        added.push({ id: `user-${++next}`, ...p.theme });
+      }
+      const user = [...state.user, ...added];
+      persistUser(user);
+      set({ ...state, user });
+      return { ok: true, themes: added };
+    },
     // ADR-0113 decision 6: a theme from the hub's catalog, checked like an imported file and added to the person's own themes with
     // where it came from. It changes only through `upgrade`, when the person picks a newer version.
     install(text: string, origin: CatalogOrigin): Saved {

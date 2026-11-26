@@ -118,7 +118,8 @@ and exported as files and kept in the browser. The terminal palette follows the 
 ## Build order
 
 1. Format 2 in the web window: both schemes, terminal palette, regions, chrome values, the floor and its checks, editor rows.
-2. Packs (themes and layouts; keybindings when rung 4 lands).
+2. Packs (themes, layouts and keybindings). Done: `docs/ux/themes.md`, "Theme packs": the pack format, Import pack… with a preview
+   and Export as pack… in the theme editor, and the terminal client reading a pack's themes from its themes folder.
 3. The terminal client reads format 2 (ADR-0068 rung 5). Done: `docs/ux/themes.md`, "The terminal client".
 4. Per-person sync through the hub (schema message, fixtures).
 5. The catalog repository and `agora hub themes update`. Hub side done: `agora hub themes on|off|status|update`, `ThemeCatalogList` and

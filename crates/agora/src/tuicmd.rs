@@ -2709,10 +2709,7 @@ fn apply_theme(
         }
         Err(_) => {
             c.app.look = None;
-            let file = match &choice {
-                folder::Choice::File { name, .. } => name.clone(),
-                _ => String::new(),
-            };
+            let file = choice.file_name().unwrap_or_default().to_string();
             Some(say.text(key!("tui-theme-fell-back"), &[("file", Arg::Str(file))]))
         }
     };

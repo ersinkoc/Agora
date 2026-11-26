@@ -435,6 +435,30 @@ tui-theme-no-colour = Colours are off in this terminal (NO_COLOR), so no theme i
 tui-theme-chosen = Theme: { $name }.
 tui-theme-not-kept = Theme: { $name }, for now: it could not be kept for the next start ({ $code }).
 tui-theme-fell-back = The theme file { $file } can't be used now, so your terminal's colours are shown. Press t to see why.
+tui-theme-in-pack = In the pack "{ $pack }" (file { $file }): theme { $n } of { $count }.
+tui-theme-pack-unused = Also in the pack, not used in the terminal client: { $list }.
+tui-theme-pack-layouts = { $count ->
+    [one] 1 saved layout
+   *[other] { $count } saved layouts
+}
+tui-theme-pack-keys = { $count ->
+    [one] keys for 1 command
+   *[other] keys for { $count } commands
+}
+tui-theme-error-pack-field = "{ $field }" is not part of a theme pack.
+tui-theme-error-pack-name = A theme pack needs a name of 1 to { $max } characters, without ";", "<" or "url(".
+tui-theme-error-pack-part = "{ $part }" is not in the form a theme pack keeps it in.
+tui-theme-error-pack-too-many-themes = A theme pack holds at most { $max } themes.
+tui-theme-error-pack-too-many-layouts = A theme pack holds at most { $max } layouts.
+tui-theme-error-pack-theme-format = Theme { $n } of the pack is not a theme of the current format.
+tui-theme-error-in-pack-theme = Theme { $n } of the pack: { $text }
+tui-theme-error-pack-no-themes = This theme pack has no theme. Its { $layouts ->
+    [one] 1 layout
+   *[other] { $layouts } layouts
+} and keys for { $keys ->
+    [one] 1 command
+   *[other] { $keys } commands
+} are for the web window; the terminal client does not use them.
 tui-theme-token-surface-0 = Background
 tui-theme-token-surface-1 = Panels
 tui-theme-token-surface-2 = Raised surfaces

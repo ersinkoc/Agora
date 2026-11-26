@@ -16,6 +16,9 @@ both schemes in one file, the terminal's palette, the colours of the window's pa
 gaps, the tab bar, density, how a state is shown, shadows, motion), always as values from closed lists, never CSS. A theme stays
 data: it never holds code, CSS, `url()` or anything from the network, and it can never change what needs you ([the floor](#the-floor-what-no-theme-can-change)).
 
+A **theme pack** ([below](#theme-packs), ADR-0113 decision 5) is one file with themes, saved layouts and keys, to share a look with
+the arrangement and keys it was made for.
+
 ## Format, version 1
 
 A theme file is JSON:
@@ -329,7 +332,109 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
   the shot, `agora.attention.mode`).
 - **Import…** reads a theme file of either format (refused with its reasons, or added and selected for every scheme it has),
   **Export** saves the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back
-  to Light and Dark), **Reset to defaults** as above.
+  to Light and Dark), **Reset to defaults** as above. **Import pack…** and **Export as pack…** are [theme packs](#theme-packs).
+
+## Theme packs
+
+A **pack** is one JSON file that bundles one or more themes, saved layouts ([layout.md](layout.md)) and keybindings
+([keybindings.md](keybindings.md)), so a look can be shared with the arrangement and the keys it was made for
+([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 5, build step 2). Like a theme it is data and is never
+run: a pack never contains or references code, never names an agent, and **never installs or enables anything**, plugins included.
+
+![Import pack: what the pack holds, nothing ticked, so nothing changes yet (dark)](../../apps/web/visual/pack-import-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-import-desktop-light.png)
+![Merging the pack's keys: which of yours they replace and which keys would do two things (dark)](../../apps/web/visual/pack-keys-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-keys-desktop-light.png)
+![Export as pack: pick the themes, saved layouts and keys that go in (dark)](../../apps/web/visual/pack-export-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-export-desktop-light.png)
+
+### Format, version 1
+
+```json
+{
+  "agora-pack": 1,
+  "name": "Harbour set",
+  "themes": [{ "agora-theme": 2, "name": "Harbour", "inherits": "slate", "dark": { "tokens": { "accent": "#5cc8c2" } } }],
+  "layouts": [{ "name": "Review", "layout": { "version": 1, "root": { "type": "split", "direction": "row", "ratios": [0.5, 0.5],
+    "children": [{ "type": "pane", "id": "p1", "panel": "changes", "bind": { "follow": "selection" } },
+                 { "type": "pane", "id": "p2", "panel": "plugin.clock.face" }] } } }],
+  "keybindings": { "version": 1, "bindings": [{ "command": "palette.open", "keys": ["ctrl+p"] }] }
+}
+```
+
+- `agora-pack`: the format version, `1`. A higher number is refused with "made by a newer version"; nothing of it is guessed.
+- `name`: the pack's name, 1 to 60 characters, with the rules of a theme's name (control and text-direction characters removed, none
+  of `url(`, `@import`, `;`, `}`, `expression(`, `<`). Shown as text.
+- `themes` (optional): up to **20** themes, each a whole [format 2](#format-version-2) theme file. A format-1 theme in a pack is
+  refused (a window writes format 2).
+- `layouts` (optional): up to **50** saved layouts, each `{ "name": …, "layout": <layout version 1> }` with a name of 1 to 60
+  characters, unique in the pack.
+- `keybindings` (optional): one [keybindings file](keybindings.md#the-keybindings-file-version-1), version 1.
+- No other field is allowed. A pack with nothing in it is refused.
+
+### Reading a pack (validation)
+
+One function (`apps/web/src/themes/pack.ts` `readPack`) reads every pack. It never throws, and like a theme file it is refused
+**whole** for any problem, with **every problem listed at once** (at most 50, then how many more), each one saying which theme or
+layout it is in:
+
+1. Larger than **256 KiB** (a theme file's cap): refused before it is read. Not JSON, not an object with an integer `agora-pack`
+   ≥ 1, or newer: refused.
+2. An unknown field at the top, a missing or bad name, a part that is not a list (or, for keybindings, an object), more than 20
+   themes or 50 layouts.
+3. **Themes** are read by the theme reader (`readTheme`) with all its rules: unknown fields at every level, closed value kinds,
+   unsafe pieces, the floor and readability. A theme's warnings are shown in the preview, as for an import.
+4. **Layouts** are held to the closed set of layout version 1 at every level (`version` and `root`; a pane's `type`, `id`,
+   `panel` and `bind`; a tab group's `type`, `active` and `children`; a split's `type`, `direction`, `ratios` and `children`),
+   then read by the layout reader (`parseLayout`) with its rules and limits (32 panes, 6 levels). The window reads its own stored
+   layouts more leniently (it keeps a newer client's fields); a pack is someone else's file. In a pack:
+   - a panel is named **only by id**: a built-in's word (`terminal`), or a plugin's `plugin.<plugin id>.<panel id>` (ADR-0114),
+     or a newer client's of the same shape; any other text is refused, so nothing else reaches the "unknown panel" placeholder;
+   - a pane may follow what needs you or the selection, but **never names an agent** (`bind.agent` is refused): an agent is on
+     someone's own machine;
+   - a pane id is letters, digits, `_` and `-`, at most 64.
+5. **Keybindings** are read by the keybindings reader (`readKeysValue`) with all its rules, so **the fixed keys stay fixed**: the
+   safe-mode key, moving around the window, a terminal's copy and paste and editing keys can't be bound, `window.safe-mode` can't be
+   named, and no command answers a request (`request.*`, `approval.*`, …). The part is capped at the keybindings file's own 64 KiB.
+
+### Import pack
+
+**Import pack…** in the theme editor takes a pasted pack or a file (a file over the cap is refused before it is read) and shows a
+**preview**: the pack's name, then each part with what it holds: each theme with its schemes (and how many things are hard to see
+in it), each layout with its number of panes, the keybindings with how many commands they set (and those this window does not
+have). **Nothing is ticked**, and nothing is applied until the person ticks a part and confirms; Back and Cancel change nothing.
+
+- **Themes** are **added** to the person's own themes. None is chosen: the theme on screen stays, and an added one is chosen as any
+  other. When the ticked themes do not all fit (20 of your own), the preview says how many fit and nothing is added.
+- **Layouts** are **added** as saved layouts (the layout menu's **Saved layouts…**). A name that is taken gets a number
+  ("Review (2)"), so a saved layout is never replaced; when they do not all fit (50 saved layouts), nothing is added.
+- **A layout that names a panel this window does not draw** says so in the preview. A plugin's panel shows only once that plugin is
+  installed and allowed ([plugins.md](plugins.md)), which a pack never does; until then the pane shows the "unknown panel"
+  placeholder, as does a panel of a newer client.
+- **Keybindings** are **merged**: each command the pack names takes the pack's keys; every other command keeps yours. Before
+  anything is kept, a confirmation shows **which of your own keys they replace** (yours, then the pack's) and **which keys would
+  then do two things** (a key on two commands, or one that starts another's chord), with Back. A merge that could not be kept as a
+  keybindings file (over 200 entries or 64 KiB) is refused, so the person's own keys are never lost on the next load.
+- Every part ticked is checked before any is kept, so a part that cannot be applied leaves all of them as they were. The last step
+  says what was added: the themes, the layouts with the names they were saved under, the keys merged.
+
+### Export as pack
+
+**Export as pack…** in the theme editor asks for the pack's name (the theme on screen's, or "My pack" for a built-in theme) and
+which **themes** (your own first, then the built-in ones; the one on screen is ticked), **saved layouts** and **your keys** go in,
+and saves `theme-pack.json`. A pane bound to one of your agents is written unbound (its panel stays; following what needs you or the
+selection is kept), since a pack names panels only. What is written is read back before it is saved, so a pack over the cap is
+never written. Reading an exported pack gives the same themes (as Export writes them), the same layouts (unbound, in the layout
+reader's normal form) and the same keys.
+
+### Where packs are read
+
+- **The web and desktop window:** the theme editor's Import pack… (above). Syncing packs per person through the hub is ADR-0113
+  step 4.
+- **The terminal client:** a pack in its themes folder gives its themes ([below](#the-terminal-client)). Its layouts and keys are
+  the window's and are listed as not used there.
+- **The community catalog** holds themes only: a catalog entry that is a pack would need a `kind` in the index and in
+  `ThemeCatalogEntry` (a schema change, so an ADR) and the hub's check to read layouts and keys, which it does not (see "Not yet").
 
 ## The terminal client
 
@@ -348,8 +453,18 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
 
 - **Where themes come from.** The six built-in themes above, and every `*.json` file directly in the **themes folder**:
   `themes` in the Agora folder, so `~/.agora/themes` (or `$AGORA_HOME/themes`), beside the client's device key. The theme in use
-  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>` or `file <dark|light> <file name>`). The first entry,
+  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>`, `file <dark|light> <file name>` or
+  `pack <dark|light> <theme number from 0> <file name>`). The first entry,
   **Your terminal's colours**, is no theme: the client draws exactly as it did before themes (the default).
+- **Theme packs.** A `*.json` file in the folder that is a [theme pack](#theme-packs) gives each of its themes as rows of the list
+  (one per scheme, as a theme file). Under a pack's theme the list says which pack and file it is in ("In the pack "Harbour set"
+  (file set.json): theme 1 of 2") and what else the pack holds that this client does not use ("Also in the pack, not used in the
+  terminal client: 2 saved layouts; keys for 3 commands"): this client has no layout model or keybindings yet. The pack's own
+  fields are held to the closed set and its name to the name rules, and every theme is read by the theme reader, so one bad theme
+  makes the whole pack a file that "can't be used", with every reason. The layouts and keybindings are checked only for their form
+  (a list of at most 50 objects, an object with a `bindings` list), since their rules are the window's; a pack the window refuses
+  for a layout or a key can still give this client its themes, each of which passed the theme rules. A pack with no theme is a file
+  that can't be used, and says its layouts and keys are for the web window. Live reload covers a pack's file too.
 - **Choosing.** `t` in the agents list, or **Theme…** in the commands (Ctrl K), opens the theme list: whole-screen, drawn in the
   theme the keyboard is on, so a theme shows before it is chosen. Enter uses it at once and keeps it for the next start; q or Esc
   goes back. A theme with both schemes is two rows ("Harbour · dark", "Harbour · light"): a terminal has no light or dark setting
@@ -519,10 +634,12 @@ for example with `agora tui`'s reader or the web window's (`apps/web/src/themes/
 
 ## Not yet (later steps of ADR-0113)
 
-- **Theme packs** and "Export as pack": a theme with its layouts (and keys, once ADR-0068 rung 4 exists); build step 2.
 - **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
 - **The catalog repository itself** (step 5's hub side is built, [above](#the-community-catalog)): the maintainer creates it; the hub
-  then fetches it with `--url`. Packs in the catalog wait for packs (step 2).
+  then fetches it with `--url`. **Packs in the catalog** are left out: an entry that is a pack needs a `kind` field in the index and in
+  `ThemeCatalogEntry` (a schema change, which needs an ADR), the hub's check to read a pack's layouts and keys (it has only the theme
+  rules), and the editor's install to show a pack's preview.
+- In the terminal client: a pack's layouts and keybindings (it has neither yet; ADR-0068 rung 5).
 - More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
   ADR-0113, whose answer is: not in format 2).
 - The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.
