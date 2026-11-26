@@ -142,7 +142,7 @@ pub fn tools() -> Vec<Value> {
           "Take an exclusive, time-limited claim on files or folders so no other agent edits them meanwhile. \
            All paths or none.",
           schema(&[("paths", strings("Paths relative to the project root; a folder covers everything below it")),
-                   ("ttl_s", number("Seconds to hold it")), ("reason", string("Why, for the others to read"))],
+                   ("ttl_s", number("Seconds to hold it. On a project shared with other machines your node renews a lease of 30 s or more while you run, so this only bounds how long it outlives a machine that went away")), ("reason", string("Why, for the others to read"))],
                  &["paths", "ttl_s"])),
         t("lease_release", "Release a lease early.",
           schema(&[("lease_id", string("The lease"))], &["lease_id"])),

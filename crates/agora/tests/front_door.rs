@@ -1156,6 +1156,174 @@ fn a_stop_that_reaches_the_node_twice_at_once_still_stops_it_cleanly() {
     let _ = std::fs::remove_dir_all(home);
 }
 
+/// The agent's entry in the node's session ledger, read from its file.
+#[cfg(unix)]
+fn ledger_entry(home: &Path, id: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join("data/sessions/ledger.json")).ok()?)
+            .ok()?;
+    v["entries"]
+        .as_array()?
+        .iter()
+        .find(|e| e["agent_id"] == id)
+        .cloned()
+}
+
+/// The first number of a `pid start ...` file under `run/` (a role's lock, the holder's note).
+#[cfg(unix)]
+fn pid_in(home: &Path, file: &str) -> u32 {
+    std::fs::read_to_string(home.join("run").join(file))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Shutdown safety: an OS shutdown or reboot. A login session's end (or launchd's, or systemd's for a node started outside its unit)
+/// signals every process of the session at once: the node's supervisor (which passes it on to the node), the agents and the terminal
+/// holder. An agent's end could then reach the node before it acted on its own stop (it polls for the request), and was recorded as the
+/// agent having ended: after the reboot it was not offered to Resume. The rule itself is pinned by the ledger's unit test (this order
+/// rarely hit the window before); this is the whole path. An end the node sees once a stop request has come is not an end: both
+/// agents (a terminal one and a structured one) are interrupted at the next start, Resume brings each back in its own session, and what
+/// the node wrote before (the conversation, the ledger) is all there.
+#[cfg(unix)]
+#[test]
+fn an_os_shutdown_that_stops_the_node_and_its_agents_at_once_leaves_them_to_resume() {
+    if !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (home, repo) = node_home_with_an_adapter_kind("g11");
+    // A terminal agent that resumes its own session, and says how it was started (`--resume <session>` when resumed).
+    let probe = |file: &str| {
+        vec![
+            fake_agent().to_string_lossy().into_owned(),
+            "--probe-directory".into(),
+            home.join(file).to_string_lossy().into_owned(),
+        ]
+    };
+    let mut resume = probe("resume-{pid}.json");
+    resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+    let q = |v: Vec<String>| serde_json::to_string(&v).unwrap();
+    std::fs::write(
+        home.join("manifests/probe.toml"),
+        format!(
+            "kind = \"probe\"\ndisplay_name = \"probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
+            q(probe("start-{pid}.json")),
+            q(resume)
+        ),
+    )
+    .unwrap();
+    let _down = DownAgents(home.clone());
+    let up = || {
+        let (code, out, err) = run(&home, &[]);
+        assert_eq!(code, 0, "{out}{err}");
+        wait_for("the node", Duration::from_secs(30), || {
+            run(&home, &["agent", "list"]).0 == 0
+        });
+    };
+    let start = |kind: &str| {
+        let (code, out, err) = run(
+            &home,
+            &["agent", "start", kind, "--cwd", &repo.to_string_lossy()],
+        );
+        assert_eq!(code, 0, "{out}{err}");
+        agent_id_in(&out)
+    };
+    let pid_of = |id: &str| {
+        let mut pid = 0;
+        wait_for(
+            "the agent's process in the ledger",
+            Duration::from_secs(20),
+            || {
+                pid = ledger_entry(&home, id)
+                    .and_then(|e| e["pid"].as_u64())
+                    .unwrap_or(0);
+                pid > 0 && ledger_entry(&home, id).is_some_and(|e| e["session_id"] != "")
+            },
+        );
+        pid
+    };
+    up();
+    let structured = start("k");
+    let terminal = start("probe");
+    let (code, out, err) = run(&home, &["agent", "prompt", &structured, "first"]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for("the answer on disk", Duration::from_secs(20), || {
+        written_answer(&home, &structured, "first")
+    });
+    let agents = [pid_of(&structured), pid_of(&terminal)];
+    let supervisor = pid_in(&home, "node.lock");
+    let holder = pid_in(&home, "hold.pid");
+    // The shutdown, in the order that let the agents' ends reach the node before it acted on its own stop: the node's supervisor (which
+    // passes it on to the node), a moment later the agents, then the holder (processes this test started, never any other).
+    assert!(Command::new("sh")
+        .args([
+            "-c",
+            "kill -TERM \"$0\"; sleep 0.02; kill -TERM \"$1\" \"$2\"; sleep 0.3; kill -TERM \"$3\"",
+            &supervisor.to_string(),
+            &agents[0].to_string(),
+            &agents[1].to_string(),
+            &holder.to_string(),
+        ])
+        .status()
+        .unwrap()
+        .success());
+    wait_for("the node's end", Duration::from_secs(20), || {
+        agora_platform::process_start_time(supervisor).is_none()
+    });
+    wait_for("the holder's end", Duration::from_secs(20), || {
+        agora_platform::process_start_time(holder).is_none()
+    });
+    for id in [&structured, &terminal] {
+        let entry = ledger_entry(&home, id).unwrap();
+        assert_eq!(entry["ended"], false, "the shutdown ended {id}: {entry}");
+    }
+
+    // After the reboot: both are offered to Resume, the conversation is there, and Resume brings each back in its own session.
+    up();
+    let (_, list, _) = run(&home, &["agent", "list"]);
+    for id in [&structured, &terminal] {
+        let entry = ledger_entry(&home, id).unwrap();
+        assert_eq!(entry["ended"], false, "{entry}");
+        assert!(entry["interrupted_at_ms"].as_u64().unwrap() > 0, "{entry}");
+        assert!(
+            list.lines()
+                .any(|l| l.starts_with(&format!("{id}\t")) && l.ends_with("\tinterrupted\tresume")),
+            "{list}"
+        );
+        let (code, out, err) = run(&home, &["agent", "resume", id]);
+        assert_eq!(code, 0, "{out}{err}");
+    }
+    assert!(written_answer(&home, &structured, "first"));
+    let (code, out, err) = run(&home, &["agent", "prompt", &structured, "again"]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for(
+        "the resumed agent's answer",
+        Duration::from_secs(20),
+        || written_answer(&home, &structured, "again"),
+    );
+    let session = ledger_entry(&home, &terminal).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for(
+        "the terminal agent resumed in its session",
+        Duration::from_secs(20),
+        || {
+            std::fs::read_dir(&home).unwrap().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("resume-")
+                    && name.ends_with(".json")
+                    && std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains(&session))
+            })
+        },
+    );
+    drop(_down);
+    let _ = std::fs::remove_dir_all(home);
+}
+
 /// #1119 item 2: `agora down` while an agent is being started. The start holds the node's supervisor while its adapter answers
 /// `initialize` (up to 30 s; here a program that never answers). The node's stop cannot have that lock in time, and still writes what
 /// does not need it: the usage it was still gathering for another agent's turn. `agora down` succeeds within its wait. Before, the stop

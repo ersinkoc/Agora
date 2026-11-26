@@ -219,8 +219,8 @@ pub struct View {
     /// ADR-0115: `<producer>/<folded project id>` → the spelling that producer gave it, when that is not the folded one: an older
     /// node's current spelling (from its latest `CheckoutDiscovered` or `WorkspaceRegistered`, which also clears it once the node
     /// spells it folded), so a command about the project reaches that node in the spelling it knows ([`View::spelled_for`]); and an
-    /// older hub's spelling of a shared board's project (its `TaskChanged`, kept), so the board it stored is found
-    /// ([`View::spellings_of`]). The view itself holds folded ids only.
+    /// older hub's spellings of a shared board's project (each one its `TaskChanged` named, kept, keyed `<hub>/<folded>\0<spelling>`),
+    /// so every board it stored is found ([`View::spellings_of`]). The view itself holds folded ids only.
     pub spellings: BTreeMap<String, String>,
 }
 
@@ -506,6 +506,9 @@ impl View {
         let folded = agora_core::fold_project_id(id);
         let key = qualified(&ev.producer_id, &folded);
         if folded != id.as_str() {
+            // F1821: an older hub stored a board per spelling it saw, so each of its spellings is kept (`<hub>/<folded>\0<spelling>`);
+            // a node's is its latest only.
+            let key = if board { format!("{key}\0{id}") } else { key };
             self.spellings.insert(key, id.clone());
         } else if current {
             self.spellings.remove(&key);
@@ -526,7 +529,10 @@ impl View {
     pub fn spellings_of<'a>(&'a self, project: &'a str) -> impl Iterator<Item = &'a str> + 'a {
         self.spellings
             .iter()
-            .filter(move |(k, _)| split_key(k).is_some_and(|(_, p)| p == project))
+            .filter(move |(k, _)| {
+                split_key(k)
+                    .is_some_and(|(_, p)| p.split_once('\0').map_or(p, |(p, _)| p) == project)
+            })
             .map(|(_, raw)| raw.as_str())
     }
 }
