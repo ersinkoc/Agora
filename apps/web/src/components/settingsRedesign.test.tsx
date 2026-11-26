@@ -48,7 +48,7 @@ describe('the Settings page', () => {
     expect([...host.querySelectorAll('h2')].map((h) => h.textContent)).toEqual(['This device', 'My machines']);
     for (const h of host.querySelectorAll('h2')) expect(h.className).toContain('set-group__title');
     const titles = [...host.querySelectorAll('section.set-card h3')].map((h) => h.textContent);
-    expect(titles).toEqual(['Appearance', 'Needs you', 'Passkey', 'Your other devices', 'Machines']);
+    expect(titles).toEqual(['Appearance', 'Keyboard', 'Needs you', 'Passkey', 'Your other devices', 'Machines']);
     // Each card is a region named by its title.
     for (const s of host.querySelectorAll('section.set-card')) expect(document.getElementById(s.getAttribute('aria-labelledby') ?? '')?.tagName).toBe('H3');
     // The only uppercase text is the side index's group labels.

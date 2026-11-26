@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { shownKey, useKeymap } from '../keys/view';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -111,6 +112,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   pairing?: PairingUi;
 }) {
   const machineName = (id: string) => machines.find((m) => m.id === id)?.name;
+  // The key of "Next that needs me" as it is now (N unless the person changed it; none, no hint).
+  const nextKey = shownKey(useKeymap(), 'attention.next');
   // A glance is a few rows: the most urgent ones, and the rest one press away. Many identical asks are one row.
   const [all, setAll] = useState(false);
   const [each, setEach] = useState<ReadonlySet<string>>(new Set());
@@ -225,7 +228,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     <section className="fleet-attention" aria-labelledby="fleet-attention-h">
       <div className="fleet-section__head">
         <h2 id="fleet-attention-h" className="fleet-section__title">{t('attention-title')}{items.length > 0 && <Pill tone="needs"><span className="sr-only">· </span>{items.length}</Pill>}</h2>
-        {items.length > 0 && <span className="fleet-hint"><kbd className="ide-kbd">N</kbd> {t('ide-welcome-next')}</span>}
+        {items.length > 0 && nextKey && <span className="fleet-hint"><kbd className="ide-kbd">{nextKey}</kbd> {t('ide-welcome-next')}</span>}
       </div>
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">

@@ -1,11 +1,17 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
 import { demoAgents } from '../fixtures';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
-import { badgeText, loadRailTab, railItems, resolveTab, saveRailTab, shortcutIndex, shortcutLabel } from './rail';
+import { badgeText, loadRailTab, railItems, resolveTab, saveRailTab } from './rail';
+import { commandById } from '../keys/commands';
+import { EMPTY_FILE, keymap } from '../keys/file';
+import { createDispatcher } from '../keys/registry';
+import { bindingLabel, parseBinding } from '../keys/strokes';
+// The keys are shown as on Linux and Windows whatever system runs the test (a Mac shows its own symbols).
+vi.mock('../keys/strokes', async (original) => ({ ...(await original<typeof import('../keys/strokes')>()), IS_MAC: false }));
 
 beforeEach(() => setLanguage('en'));
 
@@ -25,13 +31,17 @@ describe('the right panel rail', () => {
     expect(badgeText(99)).toBe('99');
     expect(badgeText(100)).toBe('99+');
   });
-  it('opens the subject at Alt+Shift+digit and ignores every other combination', () => {
-    const key = (o: object) => ({ altKey: true, shiftKey: true, ctrlKey: false, metaKey: false, code: 'Digit2', ...o });
-    expect(shortcutIndex(key({}))).toBe(1);
-    expect(shortcutIndex(key({ code: 'Digit0' }))).toBeUndefined();
-    expect(shortcutIndex(key({ shiftKey: false }))).toBeUndefined(); // Alt+digit picks a tab of the pane group
-    expect(shortcutIndex(key({ ctrlKey: true }))).toBeUndefined();
-    expect(shortcutLabel(0)).toBe('Alt+Shift+1');
+  it('opens the subject at Alt+Shift+digit (its place in the rail) and ignores every other combination', () => {
+    // The keys are the side panel's commands now (docs/ux/keybindings.md); the defaults are the old shortcuts, matched by the key's place.
+    const ran: string[] = [];
+    const d = createDispatcher({ map: () => keymap(EMPTY_FILE), mac: false, available: () => true, run: (id) => { ran.push(id); return true; } });
+    const key = (o: object) => ({ key: '@', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false, code: 'Digit2', ...o });
+    d.handle(key({}), 'other');
+    d.handle(key({ code: 'Digit0', key: ')' }), 'other');
+    d.handle(key({ shiftKey: false, key: '2' }), 'other'); // Alt+digit picks a tab of the pane group
+    d.handle(key({ ctrlKey: true }), 'other');
+    expect(ran).toEqual(['side.place-2', 'pane.tab-2']);
+    expect(bindingLabel(parseBinding(commandById('side.place-1')?.keys[0]) ?? [], false)).toBe('Alt+Shift+1');
   });
   it('falls back to Needs you when the remembered subject is gone', () => {
     expect(resolveTab('board', railItems(counts))).toBe('needs');
