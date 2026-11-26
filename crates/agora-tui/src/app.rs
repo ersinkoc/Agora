@@ -1203,11 +1203,13 @@ impl App {
         };
         // The floor (ADR-0113 decision 3): what needs the user keeps its own colours under any theme.
         let attention = attention_style(s.colors);
-        buf.set_style(whole, base.fill);
-        buf.set_style(a.tree_box, tree.fill);
-        buf.set_style(a.tabs, tabs.fill);
-        buf.set_style(a.inspector_box, inspector.fill);
-        buf.set_style(a.footer, footer.fill);
+        if self.look.is_some() {
+            buf.set_style(whole, base.fill);
+            buf.set_style(a.tree_box, tree.fill);
+            buf.set_style(a.tabs, tabs.fill);
+            buf.set_style(a.inspector_box, inspector.fill);
+            buf.set_style(a.footer, footer.fill);
+        }
         for (rule, width) in [(a.tab_rule, a.tabs.width), (a.footer_rule, whole.width)] {
             if let Some(r) = rule {
                 Span::styled(chrome.rule().repeat(usize::from(width)), line).render(r, buf);
@@ -4688,8 +4690,9 @@ mod theme_tests {
             .collect()
     }
 
-    /// ADR-0113 decision 3 and its verification: under any theme, the request's box and every "needs you" mark are drawn exactly as
-    /// without one: the same character, colours and attributes in every cell.
+    /// ADR-0113 decision 3 and its verification: under any theme, the request's box and every "needs you" mark off the selected row
+    /// are drawn exactly as without one: the same character, colours and attributes in every cell. (On the selected row the row's
+    /// highlight is the accent instead of inverted; the mark keeps its colour and the terminal's own background there too.)
     #[test]
     fn the_request_box_and_the_needs_you_marks_are_the_same_under_every_theme() {
         let question = vec![

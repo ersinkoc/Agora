@@ -19,6 +19,8 @@ use crate::pane::{nearest16, nearest256, xterm_rgb, ColorMode};
 
 /// Text and the secondary text drawn on a background.
 const TEXT_MIN: f64 = 4.5;
+/// One of the 16 colours on the terminal's background (the web's warning threshold for them).
+const ANSI_MIN: f64 = 3.0;
 /// A line between panes: decoration, but it must still be seen (the web's own lines are about 1.2:1 to 1.3:1 on the background).
 const LINE_MIN: f64 = 1.2;
 
@@ -264,13 +266,22 @@ pub fn pane_palette(look: &Look, scheme: Scheme, mode: ColorMode) -> PanePalette
         TEXT_MIN,
         mode,
     );
+    // The one of the 16 the background stands in for (black on a dark background, white on a light one) is never asked to stand out.
+    let twin = twin_of(bg_rgb);
     let ansi = std::array::from_fn(|i| {
         let c = terminal_colour(look, scheme, T_ANSI + i);
         match mode {
-            // With 16 colours the terminal's own red is the best red there is.
-            ColorMode::Ansi16 => Color::Indexed(u8::try_from(i).unwrap_or(0)),
-            ColorMode::Ansi256 => Color::Indexed(nearest256(c[0], c[1], c[2])),
             ColorMode::Full | ColorMode::Mono => Color::Rgb(c[0], c[1], c[2]),
+            ColorMode::Ansi256 | ColorMode::Ansi16 if i == twin => background(c, mode).0,
+            // With 16 colours the terminal's own red is the best red there is, where it can be seen on the pane's mapped background.
+            ColorMode::Ansi16
+                if contrast(rgb_of(xterm_rgb(u8::try_from(i).unwrap_or(0))), shown) >= ANSI_MIN =>
+            {
+                Color::Indexed(u8::try_from(i).unwrap_or(0))
+            }
+            // Otherwise each is the nearest entry that can still be seen there (3:1, as the web warns): on a light theme's white, the
+            // palette's own white, yellow and green would vanish.
+            ColorMode::Ansi256 | ColorMode::Ansi16 => foreground(c, shown, ANSI_MIN, mode),
         }
     });
     let sel_rgb = over(
@@ -284,6 +295,15 @@ pub fn pane_palette(look: &Look, scheme: Scheme, mode: ColorMode) -> PanePalette
         bg,
         ansi,
         selection: (sel != bg).then_some(sel),
+    }
+}
+
+/// Which of the 16 colours a background stands in for: black (0) on a dark one, white (7) on a light one.
+pub fn twin_of(bg: Rgb) -> usize {
+    if contrast(bg, [255; 3]) > contrast(bg, [0; 3]) {
+        0
+    } else {
+        7
     }
 }
 
@@ -359,6 +379,16 @@ mod tests {
         out
     }
 
+    /// The 16 colours on the pane, but the one the background stands in for. With 24-bit colour they are the theme's own (the
+    /// parser warns about a hard one; the built-in palettes have none).
+    fn ansi_pairs(s: &Styles, mode: ColorMode) -> Vec<(usize, f64)> {
+        let bg = shown(s.pane.bg, mode);
+        (0..16)
+            .filter(|i| *i != twin_of(bg))
+            .map(|i| (i, contrast(shown(s.pane.ansi[i], mode), bg)))
+            .collect()
+    }
+
     /// ADR-0113 verification: a truecolor theme on a 16-colour (or 256-colour) terminal maps every colour to a readable one.
     #[test]
     fn every_drawn_pair_stays_readable_in_every_mode() {
@@ -375,6 +405,11 @@ mod tests {
                     for (what, fg, bg, min) in pairs(&shell.styles, mode) {
                         let r = contrast(fg, bg);
                         assert!(r >= min, "{id} {scheme:?} {mode:?} {what}: {r:.2}");
+                    }
+                    if mode != ColorMode::Full {
+                        for (i, r) in ansi_pairs(&shell.styles, mode) {
+                            assert!(r >= ANSI_MIN, "{id} {scheme:?} {mode:?} ansi {i}: {r:.2}");
+                        }
                     }
                 }
             }
@@ -407,7 +442,9 @@ mod tests {
             c.styles.base.fill.fg,
             Some(Color::Indexed(7 | 15))
         ));
+        // The terminal's own red where it can be seen; its blue is too dark on black, so the nearest blue that can be.
         assert_eq!(c.styles.pane.ansi[1], Color::Indexed(1));
+        assert_eq!(c.styles.pane.ansi[4], Color::Indexed(12));
         // No colour at all: no theme.
         assert_eq!(Shell::new(&slate, Scheme::Dark, ColorMode::Mono), None);
         // A scheme the theme does not have: no theme.

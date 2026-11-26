@@ -375,8 +375,10 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   background and text, the secondary text on it), the inspector in the panels' colours, the window and the welcome in the
   background, the selected row and the tab in front in the accent with the text on accent (instead of inverted), the dividers in
   the lines' colour. Terminal panes take the theme's terminal palette, or without it the pane's background, the theme's text and
-  the scheme's 16 colours: a program's default colours and its 16 colours (with 16 colours the terminal's own 16 stay), and the
-  selection at 40 % over the background (inverted where it would not stand out).
+  the scheme's 16 colours: a program's default colours and its 16 colours, and the selection at 40 % over the background (inverted
+  where it would not stand out). With 256 or 16 colours each of the 16 (but the one the background stands in for) is one that can
+  be seen on the mapped background at 3:1: with 16 colours the terminal's own red, green… where it can, else the nearest that can
+  (on a light theme's white, the palette's own white, yellow and green cannot).
 - **Chrome it draws.** `pane-borders` (auto: the dividers between panes; always: also a line under the tab bar and above the
   footer; off: blank dividers), `line-width` (0 none, 1 `│`, 2 `┃`), `pane-gap` (above 0 the divider column is a blank gap) and
   `density` (roomy: a column clear on each side of the agents list's and the inspector's text; compact and normal are how the
