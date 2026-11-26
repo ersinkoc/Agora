@@ -21,6 +21,9 @@ pub enum GitError {
     /// The branch has commits that exist on no other branch or remote.
     Unmerged(String),
     InvalidBranch(String),
+    /// A worktree's Git links (`commondir`) no longer name the Git folders the node pinned it to (T8b): refused, never answered from
+    /// whatever they name now.
+    LinksMoved(PathBuf),
     /// git itself failed; `stderr` is for logs, never for users.
     Command {
         args: String,
@@ -45,7 +48,7 @@ impl GitError {
             Self::InvalidBranch(_) => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "branch")
             }
-            Self::Command { .. } | Self::Io(_) => {
+            Self::LinksMoved(_) | Self::Command { .. } | Self::Io(_) => {
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
         }
@@ -111,7 +114,8 @@ enum Filters {
 
 impl Filters {
     fn of(dir: &Path) -> Self {
-        let out = plain_hardened(dir)
+        let mut command = plain_hardened(dir);
+        let out = command
             .args([
                 "config",
                 "--show-scope",
@@ -122,6 +126,7 @@ impl Filters {
             ])
             .output();
         match out {
+            Ok(_) if moved_links(&command).is_some() => Self::Refuse,
             Ok(o) => Self::from_answer(o.status.code(), &o.stdout),
             Err(_) => Self::Refuse,
         }
@@ -177,18 +182,28 @@ fn config_env_supported() -> bool {
     })
 }
 
-/// The Git folders of one worktree this node made, recorded by [`create_worktree`] as soon as `git worktree add` returns, before any
-/// agent runs there. Plain canonical spellings.
+/// One worktree this node made, recorded by [`create_worktree`] as soon as `git worktree add` returns, before any agent runs there:
+/// its Git folders (plain canonical spellings), what git wrote into the admin folder's `commondir` and `gitdir`, and the project of
+/// the checkout it was made from.
+#[derive(Clone)]
 struct Made {
     work: PathBuf,
     admin: PathBuf,
     common: PathBuf,
+    commondir: Vec<u8>,
+    gitdir: Vec<u8>,
+    project: Option<ProjectId>,
 }
 
 /// Every worktree this node made and has not removed. Its `.git` file and everything it names can be rewritten by the agent working
 /// there, which can also build a whole repository inside the worktree whose `worktrees/<name>/gitdir` points back at it, so a check
-/// of the file at the time of a command proves nothing; what git said when the node made the worktree does. A node that restarts
-/// starts with none of these and falls back to [`crate::sandbox::git_dirs`].
+/// of the file at the time of a command proves nothing; what git said when the node made the worktree does. The node's git there is
+/// pinned to these folders ([`plain_hardened`]), but git still reads branch refs through the admin folder's `commondir`, which the
+/// agent can also rewrite: every command checks that it still names the recorded shared folder ([`links_hold`]), and removal puts
+/// back the recorded `.git`, `commondir` and `gitdir` first. The project comes from here too, not from the worktree's HEAD, which
+/// the agent can move. A node that restarts starts with none of these and falls back to [`crate::sandbox::git_dirs`] (with the
+/// same `commondir` check) and the identity git computes; an agent the holder kept is taken up in the project its ledger entry
+/// recorded.
 static MADE: Mutex<Vec<Made>> = Mutex::new(Vec::new());
 
 fn made() -> std::sync::MutexGuard<'static, Vec<Made>> {
@@ -196,39 +211,164 @@ fn made() -> std::sync::MutexGuard<'static, Vec<Made>> {
     MADE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Records `work`'s Git folders (see [`MADE`]); nothing when they do not check out.
-fn record_made(work: &Path) {
+/// Records `work`'s Git folders, links and project (see [`MADE`]); nothing when they do not check out.
+fn record_made(work: &Path, project: Option<ProjectId>) {
     let plain = agora_platform::canonicalize_plain;
     let Some((Ok(work), Ok(admin), Ok(common))) = crate::sandbox::git_dirs(work)
         .map(|(admin, common)| (plain(work), plain(&admin), plain(&common)))
     else {
         return;
     };
+    let (Ok(commondir), Ok(gitdir)) = (
+        read_link_file(&admin.join("commondir")),
+        read_link_file(&admin.join("gitdir")),
+    ) else {
+        return;
+    };
+    if !links_hold(&admin, &common) {
+        return;
+    }
     let mut list = made();
     list.retain(|m| m.work != work);
     list.push(Made {
         work,
         admin,
         common,
+        commondir,
+        gitdir,
+        project,
     });
 }
 
-/// `(GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE)` for `dir` when it is, or is inside, a worktree this node made.
-fn made_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+/// Test hook: forgets the record of the worktree at `work`, as a node that restarts has none ([`MADE`]).
+#[doc(hidden)]
+pub fn forget_made_worktree(work: &Path) {
+    if let Ok(work) = agora_platform::canonicalize_plain(work) {
+        made().retain(|m| m.work != work);
+    }
+}
+
+/// The record of the worktree this node made that `dir` is, or is inside.
+fn made_dirs(dir: &Path) -> Option<Made> {
     let dir = agora_platform::canonicalize_plain(dir).ok()?;
     made()
         .iter()
         .filter(|m| dir.starts_with(&m.work))
         // The innermost one, should one worktree have been made inside another.
         .max_by_key(|m| m.work.components().count())
-        .map(|m| (m.admin.clone(), m.common.clone(), m.work.clone()))
+        .cloned()
 }
 
-/// `git -C dir` with [`HARDENED`] and the node's environment. In a worktree this node made (or a folder below it) the Git folders are
-/// pinned (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`) to the ones recorded when it was made ([`MADE`]), so nothing the agent
-/// writes into its `.git` file or admin folder's `commondir` points the node's git at a config the agent wrote. In any other linked
-/// worktree they are pinned to the ones [`crate::sandbox::git_dirs`] verifies, and a `.git` that is a link is refused. Any other
-/// `.git` file (a submodule's, a separate git dir) is followed as git does.
+/// Where the node's git for one folder looks for its repository.
+enum Pin {
+    /// Not a linked worktree's root: git finds the repository as it always does.
+    Unpinned,
+    /// A `.git` that is a link: nothing runs.
+    Refused,
+    /// `(GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE)`.
+    Dirs(PathBuf, PathBuf, PathBuf),
+}
+
+/// In a worktree this node made (or a folder below it) the folders recorded when it was made ([`MADE`]). In any other linked worktree
+/// the ones [`crate::sandbox::git_dirs`] verifies, and a `.git` that is a link is refused. Any other `.git` file (a submodule's, a
+/// separate git dir) is followed as git does.
+fn pin(dir: &Path) -> Pin {
+    if let Some(m) = made_dirs(dir) {
+        return Pin::Dirs(m.admin, m.common, m.work);
+    }
+    let Ok(meta) = std::fs::symlink_metadata(dir.join(".git")) else {
+        return Pin::Unpinned;
+    };
+    if meta.is_symlink() {
+        return Pin::Refused;
+    }
+    if !meta.is_file() {
+        return Pin::Unpinned;
+    }
+    // Plain spellings, as for any path a process is given (no verbatim `\\?\` prefix on Windows).
+    let plain = agora_platform::canonicalize_plain;
+    match crate::sandbox::git_dirs(dir)
+        .map(|(admin, common)| (plain(&admin), plain(&common), plain(dir)))
+    {
+        Some((Ok(admin), Ok(common), Ok(work))) => Pin::Dirs(admin, common, work),
+        _ => Pin::Unpinned,
+    }
+}
+
+/// Whether the admin folder's `commondir` (a plain file, as git writes it) still names `common`. git's ref store reads it even when
+/// `GIT_COMMON_DIR` is set (measured with git 2.53, unlike what `git help repository-layout` says): config and objects stay pinned, but HEAD's
+/// branch and every other shared ref would come from the repository it names, and a git process the node's git starts without the
+/// pinning (`git worktree remove` runs a `status` in the worktree) would read that repository's config. Read as git reads it:
+/// trailing line ends dropped, a relative path taken from the admin folder. Read once with [`read_link_file`]: a link, a FIFO or a
+/// long file there is a refusal, never followed, waited on or read whole.
+fn links_hold(admin: &Path, common: &Path) -> bool {
+    let Some(text) = read_link_file(&admin.join("commondir"))
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    else {
+        return false;
+    };
+    let named = text.trim_end_matches(['\n', '\r']);
+    if named.is_empty() {
+        return false;
+    }
+    let canonical = agora_platform::canonicalize_plain;
+    match (canonical(&admin.join(named)), canonical(common)) {
+        (Ok(named), Ok(common)) => named == common,
+        _ => false,
+    }
+}
+
+/// The most a git link file (`.git`, `commondir`, `gitdir`) is read: a path (at most 4096 bytes on Linux) and `gitdir: `. An agent may
+/// write these files; anything longer is not one git wrote.
+pub(crate) const LINK_FILE_MAX: u64 = 4096 + 64;
+
+/// A git link file an agent may have rewritten, read as [`agora_platform::read_small_regular_file_no_follow`] reads it: only a plain
+/// file of at most [`LINK_FILE_MAX`] bytes, opened once without following a link or waiting on a FIFO.
+pub(crate) fn read_link_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    agora_platform::read_small_regular_file_no_follow(path, LINK_FILE_MAX)
+}
+
+/// `Err` when `dir` is pinned to Git folders whose `commondir` no longer names the shared one ([`links_hold`]).
+fn check_links(dir: &Path) -> Result<(), GitError> {
+    match pin(dir) {
+        Pin::Dirs(admin, common, _) if !links_hold(&admin, &common) => {
+            Err(GitError::LinksMoved(dir.to_path_buf()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `f` between two [`check_links`]: an answer read while the links named another repository is a refusal, not data. A rewrite that
+/// is undone again within `f` is not seen (it can only change the refs read, never the config or objects).
+fn with_links<T>(dir: &Path, f: impl FnOnce() -> Result<T, GitError>) -> Result<T, GitError> {
+    check_links(dir)?;
+    let out = f();
+    check_links(dir)?;
+    out
+}
+
+/// [`GitError::LinksMoved`] when `command` was pinned ([`plain_hardened`]) to Git folders whose `commondir` no longer names the shared
+/// one: asked after it ran, so a rewrite made while it ran turns its answer into a refusal.
+fn moved_links(command: &Command) -> Option<GitError> {
+    let (mut admin, mut common, mut work) = (None, None, None);
+    for (key, value) in command.get_envs() {
+        match key.to_str() {
+            Some("GIT_DIR") => admin = value,
+            Some("GIT_COMMON_DIR") => common = value,
+            Some("GIT_WORK_TREE") => work = value,
+            _ => {}
+        }
+    }
+    let (admin, common) = (Path::new(admin?), Path::new(common?));
+    (!links_hold(admin, common))
+        .then(|| GitError::LinksMoved(PathBuf::from(work.unwrap_or(admin.as_os_str()))))
+}
+
+/// `git -C dir` with [`HARDENED`] and the node's environment, its Git folders pinned (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`)
+/// as [`pin`] says, so nothing the agent writes into its `.git` file points the node's git at a config the agent wrote. git still
+/// reads the branch refs through the admin folder's `commondir` (see [`links_hold`]): a pinned command whose `commondir` does not
+/// name the pinned shared folder is refused here, and [`run`] refuses its answer when it no longer does once it ran.
 fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
     // The node has no console: on Windows each git would otherwise open a window and take the focus (a diff runs several).
@@ -243,23 +383,15 @@ fn plain_hardened(dir: &Path) -> Command {
         .env_remove("GIT_DIR")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_WORK_TREE");
-    if let Some((admin, common, work)) = made_dirs(dir) {
-        c.env("GIT_DIR", admin)
-            .env("GIT_COMMON_DIR", common)
-            .env("GIT_WORK_TREE", work);
-        return c;
-    }
-    let Ok(meta) = std::fs::symlink_metadata(dir.join(".git")) else {
-        return c;
-    };
-    if meta.is_symlink() {
-        c.args(REFUSED);
-    } else if meta.is_file() {
-        // Plain spellings, as for any path a process is given (no verbatim `\\?\` prefix on Windows).
-        let plain = agora_platform::canonicalize_plain;
-        if let Some((Ok(admin), Ok(common), Ok(work))) = crate::sandbox::git_dirs(dir)
-            .map(|(admin, common)| (plain(&admin), plain(&common), plain(dir)))
-        {
+    match pin(dir) {
+        Pin::Unpinned => {}
+        Pin::Refused => {
+            c.args(REFUSED);
+        }
+        Pin::Dirs(admin, common, work) => {
+            if !links_hold(&admin, &common) {
+                c.args(REFUSED);
+            }
             c.env("GIT_DIR", admin)
                 .env("GIT_COMMON_DIR", common)
                 .env("GIT_WORK_TREE", work);
@@ -306,6 +438,9 @@ fn run(mut command: Command, args: &[&str]) -> Result<String, GitError> {
         .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
+    if let Some(moved) = moved_links(&command) {
+        return Err(moved);
+    }
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -316,8 +451,25 @@ fn run(mut command: Command, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// Find the checkout containing `path` and compute its machine-independent project identity.
+/// Find the checkout containing `path` and compute its machine-independent project identity. In a worktree this node made, the root is
+/// that worktree and the project the one of the checkout it was made from, recorded before its agent ran ([`MADE`]): its agent can
+/// move its branch to a root commit of its own or change the remote, and neither makes it another project.
 pub fn discover_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
+    if let Some(Made {
+        work,
+        project: Some(project),
+        ..
+    }) = made_dirs(path)
+    {
+        return Ok(CheckoutInfo {
+            root: work,
+            project,
+        });
+    }
+    with_links(path, || compute_checkout(path))
+}
+
+fn compute_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
     let root = git_refs(path, &["rev-parse", "--show-toplevel"])
         .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
     // Rebuilt from its parts so it uses this system's separator: git for Windows answers `C:/...`.
@@ -379,7 +531,9 @@ pub fn create_worktree(
         args.push(base);
     }
     git(checkout, &args)?;
-    record_made(Path::new(path.as_ref()));
+    // The checkout's project, asked once the worktree exists and before any agent runs in it: what a start records for its agent.
+    let project = discover_checkout(checkout).ok().map(|c| c.project);
+    record_made(Path::new(path.as_ref()), project);
     Ok(())
 }
 
@@ -471,8 +625,8 @@ fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
 
 /// Passed to every `status` and `diff` the node runs: git looks inside a submodule with that submodule's own config, whose filter
 /// drivers [`hardened`] does not see (measured: a clean filter planted in `.git/modules/<name>/config` ran on the node's `status`).
-/// A submodule moved to another commit still shows; edits inside it do not. Removing such a worktree is refused by git itself
-/// unless forced, so [`remove_worktree`] loses nothing.
+/// A submodule moved to another commit still shows; edits inside it do not. [`remove_worktree`] refuses a worktree with a checked-out
+/// submodule unless forced ([`has_submodules`], what git itself refuses without `--force`), so it loses nothing.
 const SUBMODULE_COMMITS_ONLY: &str = "--ignore-submodules=dirty";
 
 fn is_dirty(worktree: &Path) -> Result<bool, GitError> {
@@ -525,41 +679,64 @@ fn detached_commits(worktree: &Path) -> Result<u32, GitError> {
     Ok(n.trim().parse().unwrap_or(u32::MAX))
 }
 
-/// Remove a worktree. Refuses to discard uncommitted changes or unmerged commits unless `force` is set.
+/// Whether removing `worktree` without `--force` would be refused by git for its submodules (`validate_no_submodules`): its admin
+/// folder holds a `modules` folder, or a submodule in its index is checked out (has a `.git`).
+fn has_submodules(worktree: &Path) -> Result<bool, GitError> {
+    let modules = git_refs(worktree, &["rev-parse", "--git-path", "modules"])?;
+    let modules = Path::new(modules.trim());
+    if worktree.join(modules).is_dir() {
+        return Ok(true);
+    }
+    // `-z` entries are `mode oid stage<TAB>name`; a submodule's mode is 160000.
+    let listed = git(worktree, &["ls-files", "--stage", "-z"])?;
+    Ok(listed
+        .split('\0')
+        .filter_map(|entry| entry.strip_prefix("160000 "))
+        .filter_map(|rest| rest.split_once('\t').map(|(_, name)| name))
+        .any(|name| std::fs::symlink_metadata(worktree.join(name).join(".git")).is_ok()))
+}
+
+/// Remove a worktree. Refuses to discard uncommitted changes, unmerged commits or a checked-out submodule unless `force` is set.
 /// The branch itself is never deleted.
+///
+/// Those checks are the node's own, pinned and link-checked like every read ([`with_links`]), and git is then always told `--force`:
+/// without it git runs its own `status` in the worktree, a process the node cannot pin, which follows the admin folder's links to
+/// whatever config they name (T8b). In a worktree this node made, its `.git` file and admin `commondir` and `gitdir` are put back
+/// first as recorded ([`MADE`]); in any other, links that moved make the checks, and so the removal, refuse.
 pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<(), GitError> {
-    if !force {
-        if is_dirty(worktree)? {
-            return Err(GitError::Dirty(worktree.to_path_buf()));
-        }
-        match current_branch(worktree)? {
-            Some(branch) => {
-                if unmerged_commits(checkout, &branch)? > 0 {
-                    return Err(GitError::Unmerged(branch));
-                }
-            }
-            // A detached HEAD: commits made there are on no branch, and removing the worktree drops the only HEAD that has them.
-            None => {
-                if detached_commits(worktree)? > 0 {
-                    return Err(GitError::Unmerged("HEAD".into()));
-                }
-            }
-        }
-    }
-    let path = worktree.to_string_lossy();
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    args.extend(["--", path.as_ref()]);
     // Before git removes it: the folder must still exist to be spelled canonically.
     let removing = agora_platform::canonicalize_plain(worktree);
-    if let Some((admin, _, work)) =
-        made_dirs(worktree).filter(|(.., w)| removing.as_ref().is_ok_and(|r| r == w))
-    {
-        restore_git_file(&work, &admin);
+    if let Some(m) = made_dirs(worktree).filter(|m| removing.as_ref().is_ok_and(|r| *r == m.work)) {
+        restore_git_file(&m.work, &m.admin);
+        put_back(&m.admin.join("commondir"), &m.commondir);
+        put_back(&m.admin.join("gitdir"), &m.gitdir);
     }
-    git(checkout, &args)?;
+    if !force {
+        with_links(worktree, || {
+            if is_dirty(worktree)? || has_submodules(worktree)? {
+                return Err(GitError::Dirty(worktree.to_path_buf()));
+            }
+            match current_branch(worktree)? {
+                Some(branch) => {
+                    if unmerged_commits(checkout, &branch)? > 0 {
+                        return Err(GitError::Unmerged(branch));
+                    }
+                }
+                // A detached HEAD: commits made there are on no branch, and removing the worktree drops the only HEAD that has them.
+                None => {
+                    if detached_commits(worktree)? > 0 {
+                        return Err(GitError::Unmerged("HEAD".into()));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+    let path = worktree.to_string_lossy();
+    git(
+        checkout,
+        &["worktree", "remove", "--force", "--", path.as_ref()],
+    )?;
     if let Ok(work) = removing {
         made().retain(|m| m.work != work);
     }
@@ -567,20 +744,27 @@ pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<
 }
 
 /// Puts back the `.git` file of a worktree this node made, which its agent may have rewritten: git refuses to remove a worktree whose
-/// `.git` does not point back at its admin folder. The old entry is unlinked, not written through (it may be a link to anywhere), and
-/// the new file is created only if nothing took its place; a folder there is left for git to refuse.
+/// `.git` does not point back at its admin folder.
 fn restore_git_file(work: &Path, admin: &Path) {
+    put_back(
+        &work.join(".git"),
+        format!("gitdir: {}\n", admin.display()).as_bytes(),
+    );
+}
+
+/// Writes `contents` as a new file at `file`, which an agent may have rewritten. The old entry is unlinked, not written through (it
+/// may be a link to anywhere), and the new file is created only if nothing took its place; a folder there is left for git to refuse.
+fn put_back(file: &Path, contents: &[u8]) {
     use std::io::Write;
-    let dot_git = work.join(".git");
-    if std::fs::symlink_metadata(&dot_git).is_ok_and(|m| !m.is_dir()) {
-        let _ = std::fs::remove_file(&dot_git);
+    if std::fs::symlink_metadata(file).is_ok_and(|m| !m.is_dir()) {
+        let _ = std::fs::remove_file(file);
     }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&dot_git)
+        .open(file)
     {
-        let _ = writeln!(f, "gitdir: {}", admin.display());
+        let _ = f.write_all(contents);
     }
 }
 
@@ -598,6 +782,10 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
+    with_links(worktree, || status_unchecked(worktree))
+}
+
+fn status_unchecked(worktree: &Path) -> Result<GitStatus, GitError> {
     // A git process costs about a second on a busy Windows machine. The filter question is asked once for both commands that read
     // files, right before the first; the commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a
     // `rev-parse` of its own.
@@ -684,7 +872,8 @@ const MAX_DIFF_READ: u64 = 1024 * 1024;
 /// Like [`git`], keeping at most `cap` bytes of stdout (the process is stopped when it has produced that much).
 fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
     use std::io::Read;
-    let mut child = hardened(dir)
+    let mut command = hardened(dir);
+    let mut child = command
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -697,6 +886,9 @@ fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
     // Past the cap git may still be writing; closing its pipe and killing it is how it stops.
     let _ = child.kill();
     let status = child.wait().map_err(|e| GitError::Io(e.to_string()))?;
+    if let Some(moved) = moved_links(&command) {
+        return Err(moved);
+    }
     if buf.len() as u64 >= cap || status.success() {
         Ok(String::from_utf8_lossy(&buf).into_owned())
     } else {
@@ -727,6 +919,14 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
 /// ADR-0080: unless `show_secret` (the owner's policy), a file whose name is secret appears as its `diff --git` header (and its
 /// mode and rename lines, which hold names only) without hunks or blob ids; its line counts are returned beside the text.
 pub fn diff_with(
+    worktree: &Path,
+    path: Option<&str>,
+    show_secret: bool,
+) -> Result<(String, Vec<SecretChange>), GitError> {
+    with_links(worktree, || diff_unchecked(worktree, path, show_secret))
+}
+
+fn diff_unchecked(
     worktree: &Path,
     path: Option<&str>,
     show_secret: bool,
@@ -1095,6 +1295,10 @@ pub struct Commit {
 
 /// The newest `limit` commits reachable from HEAD. A workspace with no commit yet has an empty log.
 pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
+    with_links(worktree, || log_unchecked(worktree, limit))
+}
+
+fn log_unchecked(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
     if git_refs(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
         return Ok(Vec::new());
     }
@@ -1129,16 +1333,10 @@ pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
 /// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
 /// file shows up as untracked.
 pub fn exclude_locally(worktree: &Path, rel: &Path) {
-    let Ok(out) = refs_only(worktree)
-        .args(["rev-parse", "--git-path", "info/exclude"])
-        .output()
-    else {
+    let Ok(p) = git_refs(worktree, &["rev-parse", "--git-path", "info/exclude"]) else {
         return;
     };
-    if !out.status.success() {
-        return;
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p = p.trim().to_string();
     let exclude = if Path::new(&p).is_absolute() {
         PathBuf::from(p)
     } else {
@@ -2304,16 +2502,7 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             .expect("config")
             .success();
         assert!(set);
-        fs::write(admin.join("commondir"), format!("{}\n", fake.display())).expect("commondir");
-        fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
-        // file modified without hashing it, and the clean filter would never run.
-        let checked_out = fs::read_to_string(wt.join("a.txt")).expect("read");
-        fs::write(wt.join("a.txt"), checked_out.replace("one", "uno")).expect("edit");
-
-        // Pinned: the node's git uses the real shared folder, not the one `commondir` names. The filter blanking alone would also
-        // stop this plant, but not one added between its question and the command.
+        // Pinned: the node's git uses the real shared folder.
         let used = hardened(&wt)
             .args(["rev-parse", "--git-common-dir"])
             .output()
@@ -2324,8 +2513,24 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             agora_platform::canonicalize_plain(&used).expect("used"),
             agora_platform::canonicalize_plain(&common).expect("common")
         );
-        status(&wt).expect("pinned status");
-        diff(&wt, None).expect("pinned diff");
+        fs::write(admin.join("commondir"), format!("{}\n", fake.display())).expect("commondir");
+        fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
+        // file modified without hashing it, and the clean filter would never run.
+        let checked_out = fs::read_to_string(wt.join("a.txt")).expect("read");
+        fs::write(wt.join("a.txt"), checked_out.replace("one", "uno")).expect("edit");
+
+        // Once `commondir` moved it refuses: git would read the branch refs through `commondir` even when pinned, so nothing is answered from the
+        // repository it names. The filter blanking alone would also stop this plant, but not one added between its question and
+        // the command.
+        let refused = hardened(&wt)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("rev-parse");
+        assert!(!refused.status.success(), "the node's git ran");
+        assert!(matches!(status(&wt), Err(GitError::LinksMoved(_))));
+        assert!(matches!(diff(&wt, None), Err(GitError::LinksMoved(_))));
         assert!(
             !mark.exists(),
             "the node's git followed the agent's commondir"
@@ -2362,10 +2567,13 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             work: work.to_path_buf(),
             admin: work.join(format!("{tag}-admin")),
             common: work.join(format!("{tag}-common")),
+            commondir: Vec::new(),
+            gitdir: Vec::new(),
+            project: None,
         };
         made().extend([entry(&outer, "outer"), entry(&inner, "inner")]);
-        let found = made_dirs(&inner.join("deep")).map(|(admin, ..)| admin);
-        let at_outer = made_dirs(&outer).map(|(admin, ..)| admin);
+        let found = made_dirs(&inner.join("deep")).map(|m| m.admin);
+        let at_outer = made_dirs(&outer).map(|m| m.admin);
         made().retain(|m| !m.work.starts_with(&outer));
         assert_eq!(found, Some(inner.join("inner-admin")));
         assert_eq!(at_outer, Some(outer.join("outer-admin")));
@@ -2559,5 +2767,366 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         }
         let _ = fs::remove_dir_all(wt);
         let _ = fs::remove_dir_all(r.dir.with_file_name("plain-wt-probe"));
+    }
+
+    /// The agent's own git in `dir` (plain, unconfined, following whatever the worktree's links say), with an identity; its output.
+    fn agent_git(dir: &Path, args: &[&str]) -> String {
+        let out = raw_git()
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "protocol.file.allow=always",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A worktree whose admin folder's `commondir` names another bare repository (T8b: the agent may write its admin folder and the
+    /// shared object store). That repository sits inside the admin folder and shares the real objects. Its branches are `refs`, and with
+    /// `mark` its config defines a clean filter `probe` that touches `mark`. Returns its path.
+    fn common_dir_elsewhere(
+        admin: &Path,
+        common: &Path,
+        refs: &[(&str, &str)],
+        mark: Option<&Path>,
+    ) -> PathBuf {
+        // `git_dirs` answers canonical paths, verbatim (`\\?\C:\...`) on Windows, which git cannot use.
+        let (admin, common) = (plain(admin.to_path_buf()), plain(common.to_path_buf()));
+        let other = admin.join("other.git");
+        let ok = raw_git()
+            .args(["init", "-q", "--bare"])
+            .arg(&other)
+            .status()
+            .expect("init")
+            .success();
+        assert!(ok);
+        let objects = common
+            .join("objects")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        fs::write(
+            other.join("objects/info/alternates"),
+            format!("{objects}\n"),
+        )
+        .expect("alternates");
+        for (branch, oid) in refs {
+            fs::write(other.join("refs/heads").join(branch), format!("{oid}\n")).expect("ref");
+        }
+        if let Some(mark) = mark {
+            let set = raw_git()
+                .arg("--git-dir")
+                .arg(&other)
+                .args(["config", "filter.probe.clean"])
+                .arg(format!("sh -c 'touch \"{}\"; cat'", mark.display()))
+                .status()
+                .expect("config")
+                .success();
+            assert!(set);
+        }
+        fs::write(admin.join("commondir"), format!("{}\n", other.display())).expect("commondir");
+        other
+    }
+
+    /// The same contents with a newer modification time, so the next `status` hashes the file again (through its clean filter).
+    fn restat(file: &Path) {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let text = fs::read(file).expect("read");
+        fs::write(file, text).expect("write");
+    }
+
+    /// T8b: removing a worktree runs no filter driver from a config its admin folder's `commondir` was pointed at; the node's own
+    /// checks decide, on the links it recorded.
+    #[test]
+    fn removing_a_worktree_runs_no_filter_from_a_common_dir_its_agent_named() {
+        removal_with_a_moved_common_dir("links-rm", true);
+    }
+
+    /// The same with no record of the worktree (a restarted node): the moved link makes the node's checks refuse.
+    #[test]
+    fn removing_an_unrecorded_worktree_runs_no_filter_from_a_common_dir_its_agent_named() {
+        removal_with_a_moved_common_dir("links-rm-unrec", false);
+    }
+
+    fn removal_with_a_moved_common_dir(name: &str, recorded: bool) {
+        let r = Repo::new(None);
+        let wt = r.wt(name);
+        create_worktree(&r.dir, &wt, name, None).expect("worktree");
+        if !recorded {
+            forget_made_worktree(&wt);
+        }
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        // The agent's own commit, kept on a second branch too, so nothing on its branch is unmerged.
+        fs::write(wt.join(".gitattributes"), "a.txt filter=probe\n").expect("attributes");
+        agent_git(&wt, &["add", "-A"]);
+        agent_git(&wt, &["commit", "-q", "-m", "attributes"]);
+        agent_git(&wt, &["branch", &format!("{name}-kept")]);
+        let tip = agent_git(&wt, &["rev-parse", "HEAD"]);
+        let mark = r.wt(&format!("{name}-ran"));
+        common_dir_elsewhere(&admin, &common, &[(name, &tip)], Some(&mark));
+        restat(&wt.join("a.txt"));
+        // Control: git that follows the admin folder's links runs the filter.
+        let _ = raw_git()
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .arg("-C")
+            .arg(&wt)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+        fs::remove_file(&mark).expect("reset");
+        restat(&wt.join("a.txt"));
+
+        let removed = remove_worktree(&r.dir, &wt, false);
+        assert!(!mark.exists(), "the node's removal ran the filter");
+        if recorded {
+            assert_eq!(removed, Ok(()));
+            assert!(!wt.exists(), "not removed");
+        } else {
+            assert!(
+                matches!(removed, Err(GitError::LinksMoved(_))),
+                "{removed:?}"
+            );
+        }
+        let _ = fs::remove_file(&mark);
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// T8b: once a worktree's `commondir` names another repository, the node's reads there are refused rather than answered from
+    /// refs it did not record; a worktree the node made keeps the identity it was made with, and one it has no record of is refused.
+    #[test]
+    fn the_nodes_reads_refuse_a_worktree_whose_common_dir_link_moved() {
+        let r = Repo::new(Some("https://example.com/links.git"));
+        let checkout = discover_checkout(&r.dir).expect("checkout").project;
+        let wt = r.wt("links-read");
+        create_worktree(&r.dir, &wt, "links-read", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        status(&wt).expect("status before");
+        // A root commit of the agent's own, in the shared object store it may write, named by the other repository's branch.
+        let tree = agent_git(&wt, &["rev-parse", "HEAD^{tree}"]);
+        let other = agent_git(&wt, &["commit-tree", &tree, "-m", "another root"]);
+        common_dir_elsewhere(&admin, &common, &[("links-read", &other)], None);
+        // Control: plain git now reads the other branch.
+        assert_eq!(agent_git(&wt, &["rev-parse", "HEAD"]), other);
+
+        assert!(status(&wt).is_err(), "status answered: {:?}", status(&wt));
+        assert!(log(&wt, 5).is_err(), "log answered");
+        assert!(diff(&wt, None).is_err(), "diff answered");
+        assert_eq!(
+            discover_checkout(&wt).map(|c| c.project),
+            Ok(checkout.clone())
+        );
+        // With no record of it (a restarted node), the identity is not read from the other repository either.
+        let work = agora_platform::canonicalize_plain(&wt).expect("wt");
+        made().retain(|m| m.work != work);
+        assert!(
+            discover_checkout(&wt).is_err(),
+            "identity answered: {:?}",
+            discover_checkout(&wt)
+        );
+        assert!(status(&wt).is_err(), "status answered with no record");
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// The project of a worktree the node made is the one of the checkout it was made from, not one its agent gives it by moving its
+    /// branch to a root commit of its own or changing the shared remote.
+    #[test]
+    fn a_node_made_worktree_keeps_the_identity_of_its_checkout() {
+        let r = Repo::new(Some("https://example.com/identity.git"));
+        let checkout = discover_checkout(&r.dir).expect("checkout").project;
+        let wt = r.wt("identity");
+        create_worktree(&r.dir, &wt, "identity", None).expect("worktree");
+        let tree = agent_git(&wt, &["rev-parse", "HEAD^{tree}"]);
+        let other = agent_git(&wt, &["commit-tree", &tree, "-m", "another root"]);
+        agent_git(&wt, &["update-ref", "refs/heads/identity", &other]);
+        agent_git(
+            &wt,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.com/other.git",
+            ],
+        );
+        // Control: read from the worktree's HEAD, the root is now the agent's.
+        assert_eq!(
+            agent_git(&wt, &["rev-list", "--max-parents=0", "HEAD"]),
+            other
+        );
+
+        let found = discover_checkout(&wt).expect("worktree");
+        assert_eq!(found.project, checkout);
+        assert_eq!(
+            found.root,
+            agora_platform::canonicalize_plain(&wt).expect("wt")
+        );
+        fs::create_dir_all(wt.join("inner")).expect("inner");
+        assert_eq!(
+            discover_checkout(&wt.join("inner")).map(|c| c.project),
+            Ok(checkout)
+        );
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// The node removes a worktree with `--force` after its own checks, so it refuses one with a checked-out submodule itself, as git
+    /// would without `--force`: edits inside the submodule are not seen by its `status` (`SUBMODULE_COMMITS_ONLY`).
+    #[test]
+    fn a_worktree_with_a_checked_out_submodule_is_removed_only_when_forced() {
+        let sub = Repo::new(None);
+        let r = Repo::new(None);
+        agent_git(
+            &r.dir,
+            &[
+                "submodule",
+                "-q",
+                "add",
+                "--",
+                &sub.dir.display().to_string(),
+                "sub",
+            ],
+        );
+        agent_git(&r.dir, &["commit", "-q", "-m", "submodule"]);
+        let wt = r.wt("with-sub");
+        create_worktree(&r.dir, &wt, "with-sub", None).expect("worktree");
+        agent_git(&wt, &["submodule", "-q", "update", "--init"]);
+        assert_eq!(
+            remove_worktree(&r.dir, &wt, false),
+            Err(GitError::Dirty(wt.clone()))
+        );
+        assert!(wt.join("sub").join("a.txt").exists(), "removed");
+        remove_worktree(&r.dir, &wt, true).expect("forced");
+        assert!(!wt.exists());
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// A `commondir` longer than a git link file can be is refused unread, even when its first line names the real shared folder.
+    #[test]
+    fn a_commondir_longer_than_a_link_file_is_refused_unread() {
+        let r = Repo::new(None);
+        let wt = r.wt("links-long");
+        create_worktree(&r.dir, &wt, "links-long", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
+        let mut padded = orig.clone();
+        padded.extend(std::iter::repeat_n(b'\n', 8192));
+        fs::write(&cd, &padded).expect("padded");
+        assert!(!links_hold(&admin, &common), "a padded commondir held");
+        assert!(matches!(status(&wt), Err(GitError::LinksMoved(_))));
+        fs::write(&cd, &orig).expect("reset");
+        status(&wt).expect("status once put back");
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// A huge sparse `commondir` (no disk used) is refused without being read. Unix only: NTFS does not make a file sparse unless
+    /// asked, so the same length would be allocated there.
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_sparse_commondir_is_refused_unread() {
+        let r = Repo::new(None);
+        let wt = r.wt("links-sparse");
+        create_worktree(&r.dir, &wt, "links-sparse", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&cd)
+            .expect("open")
+            .set_len(1 << 36)
+            .expect("sparse");
+        let started = std::time::Instant::now();
+        assert!(!links_hold(&admin, &common), "a sparse commondir held");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        fs::remove_file(&cd).expect("unlink");
+        fs::write(&cd, &orig).expect("reset");
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// The link check never waits on a FIFO put where `commondir` was, however the swap and the check interleave.
+    #[test]
+    fn the_link_check_never_waits_on_a_fifo_swapped_in() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let r = Repo::new(None);
+        let wt = r.wt("links-fifo");
+        create_worktree(&r.dir, &wt, "links-fifo", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
+        let fifo = admin.join("fifo-probe");
+        if !Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return; // no FIFOs on this system
+        }
+        let _ = fs::remove_file(&fifo);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (a, o, s) = (admin.clone(), orig.clone(), stop.clone());
+        // Swaps `commondir` between the plain file and a FIFO until told to stop.
+        let swapper = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let f = a.join("plain-probe");
+                fs::write(&f, &o).expect("plain");
+                fs::rename(&f, a.join("commondir")).expect("rename");
+                let p = a.join("fifo-probe");
+                let _ = fs::remove_file(&p);
+                if Command::new("mkfifo")
+                    .arg(&p)
+                    .status()
+                    .is_ok_and(|s| s.success())
+                {
+                    fs::rename(&p, a.join("commondir")).expect("rename");
+                }
+            }
+        });
+        let done = Arc::new(AtomicU32::new(0));
+        let (a, c, d, s) = (admin.clone(), common.clone(), done.clone(), stop.clone());
+        let checker = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let _ = links_hold(&a, &c);
+                d.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let mut last = 0;
+        let mut stuck = false;
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let now = done.load(Ordering::Relaxed);
+            if now == last {
+                stuck = true;
+                break;
+            }
+            last = now;
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper");
+        // A check that waits on the FIFO is let go: opened for reading and writing, which never waits, it has a writer, which closes.
+        let _ = fs::OpenOptions::new().read(true).write(true).open(&cd);
+        // One stuck on a FIFO that was renamed away cannot be reached: left behind, the test fails below.
+        if !stuck {
+            checker.join().expect("checker");
+        }
+        let _ = fs::remove_file(&cd);
+        fs::write(&cd, &orig).expect("reset");
+        assert!(!stuck, "the link check waited on a FIFO");
+        assert!(last > 0);
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
     }
 }

@@ -195,7 +195,13 @@ pub fn git_dirs(worktree: &Path) -> Option<(PathBuf, PathBuf)> {
     }
     // This worktree's `.git` by its real folder, never by following a link at `.git` itself.
     let own = real(worktree)?.join(".git");
-    let text = std::fs::read_to_string(&own).ok()?;
+    // Read once, bounded, without following a link or waiting on a FIFO swapped in after the look above.
+    let read = |p: &Path| {
+        crate::git::read_link_file(p)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
+    let text = read(&own)?;
     let named = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
     let admin = real(&if named.is_absolute() {
         named
@@ -213,7 +219,7 @@ pub fn git_dirs(worktree: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     // The back-pointer git keeps in the admin folder: it must name this worktree's `.git`.
-    let back = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let back = read(&admin.join("gitdir"))?;
     let back = PathBuf::from(back.trim());
     let back = if back.is_absolute() {
         back
