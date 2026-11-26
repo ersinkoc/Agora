@@ -366,6 +366,11 @@ pub struct App {
     pub tiled: Option<Tiled>,
     /// The saved layouts' names, as the caller last read them from the layouts folder (the commands offer them).
     pub saved_layouts: Vec<String>,
+    /// ADR-0068 decision 6: the keys in force, the defaults unless the caller read the person's keybindings file
+    /// ([`crate::keys::file::load`], then [`crate::keys::Keymap::new`]).
+    pub keys: crate::keys::Keymap,
+    /// The first key of a chord, waiting for its second since then.
+    chord: Option<(crate::keys::strokes::Stroke, std::time::Instant)>,
 }
 
 impl Default for App {
@@ -392,6 +397,8 @@ impl Default for App {
             look: None,
             tiled: None,
             saved_layouts: Vec::new(),
+            keys: crate::keys::Keymap::default(),
+            chord: None,
         }
     }
 }
@@ -708,6 +715,16 @@ impl App {
 
     /// Handles one event and returns what the caller must do, in order.
     pub fn handle(&mut self, event: Event, cx: &Ctx<'_>) -> Vec<Action> {
+        self.handle_at(event, cx, std::time::Instant::now())
+    }
+
+    /// [`App::handle`] at the time `now` (a chord's second key counts only within [`crate::keys::map::CHORD_WAIT`] of its first).
+    pub fn handle_at(
+        &mut self,
+        event: Event,
+        cx: &Ctx<'_>,
+        now: std::time::Instant,
+    ) -> Vec<Action> {
         let mut out = Vec::new();
         let tab_before = self.active_agent().map(str::to_string);
         // The rows may have changed since the last event (agents come and go): never act on a heading.
@@ -738,7 +755,7 @@ impl App {
                     out.push(Action::Input(paste_bytes(&text, cx.modes.bracketed_paste)));
                 }
             }
-            Event::Key(k) => self.key(k, cx, &mut out),
+            Event::Key(k) => self.key(k, cx, &mut out, now),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
         }
         self.settle_layout(cx.rows);
@@ -790,46 +807,34 @@ impl App {
             .find(|r| r.id == id && r.request && !r.approval.is_empty())
     }
 
-    fn key(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>) {
+    fn key(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>, now: std::time::Instant) {
         if self.selection.is_some() {
             self.selection = None;
         }
         if self.palette.is_some() {
+            self.chord = None;
             self.palette_key(k, cx, out);
             return;
         }
-        // Alt+1..9 picks a tab wherever the keyboard is, as in the web window.
-        if let Key::Alt(c @ '1'..='9') = k {
-            let n = c as usize - '1' as usize;
-            match &self.tiled {
-                // In a tiled layout: the tabs of the pane in focus.
-                Some(t) => {
-                    let tab =
-                        t.ws.focus
-                            .as_deref()
-                            .and_then(|f| layout_engine::tabs_of(&t.ws.layout, f))
-                            .and_then(|tabs| tabs.get(n))
-                            .map(|p| p.id.clone());
-                    if let Some(pane) = tab {
-                        self.layout_act(layout_engine::Action::Activate { pane });
-                    }
-                }
-                None if n < self.tabs.len() => self.active = n,
-                None => {}
+        // ADR-0068 decision 6: the commands' keys, as the keybindings file leaves them (by default Alt+1..9 pick a tab, Alt+K opens
+        // the commands and Alt+M takes or releases the mouse wherever the keyboard is; inside a tab every other key is the agent's).
+        let tab = self.focus == Focus::Terminal;
+        let stroke = crate::keys::strokes::stroke_of(&k);
+        match self.keys.press(
+            stroke.as_ref(),
+            self.focus == Focus::Tree,
+            tab,
+            now,
+            &mut self.chord,
+        ) {
+            crate::keys::Press::Run(act) => {
+                self.run_act(act, cx, out);
+                return;
             }
-            return;
+            crate::keys::Press::Wait | crate::keys::Press::Taken => return,
+            crate::keys::Press::Pass => {}
         }
-        // Inside a tab every plain key is the agent's; Alt+K opens the commands and Alt+M takes or releases the mouse there too
-        // (anywhere, so the footer can say them once).
         match k {
-            Key::Alt('k' | 'K') => {
-                self.palette = Some(Palette::default());
-                return;
-            }
-            Key::Alt('m' | 'M') => {
-                self.common(Key::Char('m'), cx, out);
-                return;
-            }
             // ADR-0101: Alt+A asks to allow the request of the agent in front always (the request box confirms it with one key), only
             // while that request offers it; otherwise it is the agent's key, as Alt+Y and Alt+N are without a request.
             Key::Alt('a' | 'A') if self.focus == Focus::Terminal => {
@@ -884,9 +889,8 @@ impl App {
                         self.enter(&row.clone(), out);
                     }
                 }
-                // N (as in the web window); a lowercase n stays the caller's ("no" to a request).
-                Key::Char('N') => self.next_needs_you(cx.rows, out),
-                Key::Char('w') => self.close_tab(out),
+                // N (the next that needs you, as in the web window) and w (close the tab) are commands ([`crate::keys`]); a
+                // lowercase n stays the caller's ("no" to a request).
                 Key::Char('<') => self.tree_width = self.tree_width.saturating_sub(2).max(MIN_TREE),
                 Key::Char('>') => self.tree_width = self.tree_width.saturating_add(2),
                 k => self.common(k, cx, out),
@@ -898,45 +902,76 @@ impl App {
         }
     }
 
-    /// Keys shared by the tree and the inspector.
+    /// Keys shared by the tree and the inspector. The commands' keys (the layout presets 1-6, z, h, l, Ctrl+K, m, i, q and the
+    /// caller's letters) were looked up before ([`crate::keys`]); what is left moves the keyboard, answers, or goes to the caller.
     fn common(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>) {
         let area = cx.area;
         match k {
-            // ADR-0068: the layout presets, one key each (1x1, 2x1, 1x2, 2x2, focus + strip, 3x2: the digit is the number of panes
-            // where it is one of a kind), maximize / restore, and the pane before / after.
-            Key::Char(c @ '1'..='6') => {
-                let preset = match c {
-                    '1' => Preset::One,
-                    '2' => Preset::TwoByOne,
-                    '3' => Preset::OneByTwo,
-                    '4' => Preset::TwoByTwo,
-                    '5' => Preset::Focus,
-                    _ => Preset::ThreeByTwo,
-                };
-                self.apply_preset(preset, cx.rows);
-            }
-            Key::Char('z') => self.toggle_maximize(),
-            Key::Char('h') => self.step_pane(false, area),
-            Key::Char('l') => self.step_pane(true, area),
             Key::Tab => self.focus = self.next_focus(true, area),
             Key::BackTab => self.focus = self.next_focus(false, area),
-            Key::Ctrl('k') => self.palette = Some(Palette::default()),
-            Key::Char('m') => {
-                self.mouse = !self.mouse;
-                self.drag = None;
-                out.push(Action::MouseCapture(self.mouse));
-            }
-            Key::Char('i') => self.toggle_inspector(area),
             // Alt+Y / Alt+N answer in the list as y / n do (the same keys as inside a tab).
             Key::Alt(c @ ('y' | 'Y' | 'n' | 'N')) => {
                 out.push(Action::Command(c.to_ascii_lowercase()))
             }
-            Key::Char('q') | Key::Ctrl('c') => out.push(Action::Quit),
+            Key::Ctrl('c') => out.push(Action::Quit),
             // ADR-0101: never "always" from the list, where `a` is Ask: a one-letter case difference must not be the gap between a single
             // and a remembered answer. Enter opens the request (its tab, where Alt+A answers so), or the commands name it.
             Key::Char(ALLOW_ALWAYS) => {}
             Key::Char(c) if c.is_alphanumeric() => out.push(Action::Command(c)),
             _ => {}
+        }
+    }
+
+    /// Takes or releases the mouse (`m`, Alt+M).
+    fn toggle_mouse(&mut self, out: &mut Vec<Action>) {
+        self.mouse = !self.mouse;
+        self.drag = None;
+        out.push(Action::MouseCapture(self.mouse));
+    }
+
+    /// The tab at place `n` (from 0): in a tiled layout, of the pane group in focus.
+    fn pick_tab(&mut self, n: usize) {
+        match &self.tiled {
+            Some(t) => {
+                let tab =
+                    t.ws.focus
+                        .as_deref()
+                        .and_then(|f| layout_engine::tabs_of(&t.ws.layout, f))
+                        .and_then(|tabs| tabs.get(n))
+                        .map(|p| p.id.clone());
+                if let Some(pane) = tab {
+                    self.layout_act(layout_engine::Action::Activate { pane });
+                }
+            }
+            None if n < self.tabs.len() => self.active = n,
+            None => {}
+        }
+    }
+
+    /// Runs a command its key named ([`crate::keys::commands`]).
+    fn run_act(&mut self, act: crate::keys::commands::Act, cx: &Ctx<'_>, out: &mut Vec<Action>) {
+        use crate::keys::commands::Act;
+        match act {
+            Act::Palette => self.palette = Some(Palette::default()),
+            Act::NextNeedsYou => self.next_needs_you(cx.rows, out),
+            Act::Tab(n) => self.pick_tab(n),
+            Act::Mouse => self.toggle_mouse(out),
+            Act::Inspector => self.toggle_inspector(cx.area),
+            Act::CloseTab => self.close_tab(out),
+            Act::CleanUpOld => out.push(Action::CleanUpOld),
+            Act::Quit => out.push(Action::Quit),
+            Act::Letter(c) => out.push(Action::Command(c)),
+            Act::Preset(p) => self.apply_preset(p, cx.rows),
+            Act::Maximize => self.toggle_maximize(),
+            Act::StepPane(forward) => self.step_pane(forward, cx.area),
+            Act::Split(d) => self.layout_command(Command::Split(d), cx, out),
+            Act::ClosePane => self.layout_command(Command::ClosePane, cx, out),
+            Act::SwapNext => self.layout_command(Command::SwapNext, cx, out),
+            Act::MoveToNext => self.layout_command(Command::MoveToNext, cx, out),
+            Act::TakeOut => self.layout_command(Command::TakeOut, cx, out),
+            Act::Grow(d, more) => self.layout_command(Command::Grow(d, more), cx, out),
+            Act::SaveLayoutAs => self.layout_command(Command::NameLayout, cx, out),
+            Act::ResetLayout => self.layout_command(Command::ResetLayout, cx, out),
         }
     }
 
@@ -1443,7 +1478,7 @@ impl App {
                     }
                     Some(Command::NextNeedsYou) => self.next_needs_you(cx.rows, out),
                     Some(Command::Letter(c)) => out.push(Action::Command(c)),
-                    Some(Command::ToggleMouse) => self.common(Key::Char('m'), cx, out),
+                    Some(Command::ToggleMouse) => self.toggle_mouse(out),
                     Some(Command::ToggleInspector) => self.toggle_inspector(cx.area),
                     Some(Command::CloseTab) => self.close_tab(out),
                     Some(Command::CleanUpOld) => out.push(Action::CleanUpOld),
@@ -2673,6 +2708,15 @@ pub fn dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
     }
 }
 
+/// [`dialog_key`] for a box with a line typed into (the start's typed setting): the arrows are no key there, so they never stand for
+/// the letters (k, j) or the Backspace and Enter they are in a list.
+pub fn text_dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
+    match event {
+        Event::Key(Key::Up | Key::Down | Key::Left | Key::Right) => None,
+        e => dialog_key(e, area, lines),
+    }
+}
+
 fn dialog(area: Rect, buf: &mut ratatui::buffer::Buffer, lines: &[String]) {
     let (r, wrapped) = dialog_layout(area, lines);
     Clear.render(r, buf);
@@ -3282,6 +3326,80 @@ mod tests {
         assert!(app.palette.is_none());
     }
 
+    /// ADR-0068 decision 6: a keybindings file moves a command's keys in the shell; the key it took no longer does what it did, a
+    /// chord waits for its second key, and a key the client keeps for answering is left out.
+    #[test]
+    fn a_keybindings_file_moves_keys_in_the_shell() {
+        let rows = rows();
+        let file = crate::keys::file::read(
+            r#"{"version":1,"bindings":[
+                {"command":"agent.stop","keys":["ctrl+s"]},
+                {"command":"palette.open","keys":["ctrl+p","alt+p"]},
+                {"command":"layout.preset-2x2","keys":["ctrl+g 4"]},
+                {"command":"app.quit","keys":["y"]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut app = App {
+            keys: crate::keys::Keymap::new(&file),
+            ..App::default()
+        };
+        assert_eq!(
+            key(&mut app, &rows, Key::Ctrl('s')),
+            vec![Action::Command('x')]
+        );
+        assert_eq!(key(&mut app, &rows, Key::Char('x')), vec![]);
+        // `y` stays the answer: the file's binding of it is left out (and said, `keys::notes`).
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('y')),
+            vec![Action::Command('y')]
+        );
+        assert_eq!(key(&mut app, &rows, Key::Char('q')), vec![]);
+        assert_eq!(crate::keys::notes(&app.keys, &text).len(), 1);
+        key(&mut app, &rows, Key::Ctrl('k'));
+        assert!(
+            app.palette.is_none(),
+            "Ctrl+K was the palette's default, moved to Ctrl+P"
+        );
+        key(&mut app, &rows, Key::Ctrl('p'));
+        assert!(app.palette.is_some());
+        key(&mut app, &rows, Key::Esc);
+        let t0 = std::time::Instant::now();
+        app.handle_at(Event::Key(Key::Ctrl('g')), &cx(&rows), t0);
+        assert!(app.tiled.is_none());
+        app.handle_at(
+            Event::Key(Key::Char('4')),
+            &cx(&rows),
+            t0 + std::time::Duration::from_millis(300),
+        );
+        assert!(app.tiled.is_some(), "the chord applied the 2 x 2 layout");
+    }
+
+    /// Inside an agent's tab only the Alt keys of commands that act anywhere are the window's; the palette's moved Alt key is the agent's
+    /// again.
+    #[test]
+    fn inside_a_tab_a_moved_alt_key_is_the_agents() {
+        let rows = rows();
+        let file = crate::keys::file::read(
+            r#"{"version":1,"bindings":[{"command":"palette.open","keys":["alt+p"]}]}"#,
+        )
+        .unwrap();
+        let mut app = App {
+            keys: crate::keys::Keymap::new(&file),
+            ..App::default()
+        };
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.focus, Focus::Terminal);
+        let acts = key(&mut app, &rows, Key::Alt('k'));
+        assert!(app.palette.is_none());
+        assert!(
+            acts.iter().any(|a| matches!(a, Action::Input(_))),
+            "{acts:?}"
+        );
+        key(&mut app, &rows, Key::Alt('p'));
+        assert!(app.palette.is_some());
+    }
+
     /// #829: the grant key is in the command list (Ctrl-K) and runs as the letter `g`.
     #[test]
     fn the_palette_lists_the_grant_key() {
@@ -3788,6 +3906,24 @@ mod tests {
         assert_eq!(wrap("", 4), [""]);
         let (low, _) = dialog_layout(Rect::new(0, 0, 30, 5), &long);
         assert_eq!(low.height, 3);
+    }
+
+    /// Review of #1242: in a box with a typed line the arrows type nothing; letters, Enter, Backspace and Esc are as in any box.
+    #[test]
+    fn arrows_type_nothing_into_a_typed_line() {
+        let lines = vec!["Model".to_string()];
+        for k in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            assert_eq!(text_dialog_key(&Event::Key(k.clone()), AREA, &lines), None);
+            assert!(dialog_key(&Event::Key(k), AREA, &lines).is_some());
+        }
+        for (k, b) in [
+            (Key::Char('k'), b'k'),
+            (Key::Enter, b'\r'),
+            (Key::Backspace, 0x7f),
+            (Key::Esc, 0x1b),
+        ] {
+            assert_eq!(text_dialog_key(&Event::Key(k), AREA, &lines), Some(b));
+        }
     }
 
     #[test]

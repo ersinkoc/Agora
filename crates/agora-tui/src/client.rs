@@ -195,6 +195,9 @@ pub struct Seen {
     snapshot_pos: Option<u64>,
     /// A report changed an agent's options since [`Session::take_configs_changed`] (a view that shows them draws again).
     pub configs_changed: bool,
+    /// ADR-0090: each agent's state as the last `AgentStateChanged` after the snapshot said it, by hub-wide id (a full-screen chat
+    /// that reads no snapshot of its own knows from it when a turn is over).
+    states: std::collections::HashMap<String, i32>,
 }
 
 /// What the events after the snapshot said about the agents' sessions, by hub-wide agent id: their config options (ADR-0090) and, from
@@ -233,6 +236,14 @@ impl Seen {
                 }
                 if options.get(&id) != before.as_ref() {
                     self.configs_changed = true;
+                }
+            }
+            Some((producer, Some(agora_protocol::v1::event::Body::AgentStateChanged(a))))
+                if newer =>
+            {
+                let id = format!("{producer}/{}", a.agent_id);
+                if self.states.len() < MAX_CONFIG_AGENTS || self.states.contains_key(&id) {
+                    self.states.insert(id, a.state);
                 }
             }
             // A mode change after the snapshot (an older one is in the snapshot already).
@@ -594,6 +605,11 @@ impl Session {
     /// ADR-0090: each agent's config options as its machine last reported them in this session, by hub-wide agent id.
     pub fn configs(&self) -> &Configs {
         &self.seen.configs
+    }
+
+    /// ADR-0090: the agent's state (`AgentState`) as the last change after the snapshot said it; `None` when none came since.
+    pub fn agent_state(&self, agent: &str) -> Option<i32> {
+        self.seen.states.get(agent).copied()
     }
 
     /// Whether a report changed an agent's config options since the last call (then cleared).
@@ -994,6 +1010,51 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
+    /// ADR-0090: ends the agent's current turn (`AgentCancelTurn`); the agent itself keeps running. `drop_queue` also throws away the
+    /// prompts waiting behind the turn. Not sent for a viewer, as [`Session::prompt`] is not.
+    pub fn cancel_turn(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        drop_queue: bool,
+    ) -> Result<(), String> {
+        self.viewer_refused()?;
+        self.command(
+            node,
+            command_request::Command::AgentCancelTurn(agora_protocol::v1::AgentCancelTurn {
+                agent_id: agent_id.to_string(),
+                drop_queue,
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0090: sets one of the agent's own settings (`AgentSetConfig`: an option of its last `AgentSessionConfig`, the effort being
+    /// the one of category thought level). The error keeps its parameters: a switch to a value that skips permissions is answered
+    /// `agent.approval_needed { approval_id }` (Amendment A), and the request then waits like any other. Not sent for a viewer.
+    pub fn set_config(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), ErrorInfo> {
+        self.viewer_refused().map_err(|code| ErrorInfo {
+            code,
+            ..Default::default()
+        })?;
+        self.command_info(
+            node,
+            command_request::Command::AgentSetConfig(agora_protocol::v1::AgentSetConfig {
+                agent_id: agent_id.to_string(),
+                config_id: config_id.to_string(),
+                value: value.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
     /// ADR-0106: `auth.forbidden` for a viewer's session, whose window only watches; nothing is sent.
     fn viewer_refused(&self) -> Result<(), String> {
         if self.person_role == PersonRole::Viewer {
@@ -1252,6 +1313,30 @@ impl Session {
                 .into_iter()
                 .find(|k| k.kind == kind)
                 .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// ADR-0066: the settings a start of `kind` on `node` may give (its manifest's `[[launch.setting]]`s, in order: model, effort, ...),
+    /// as [`crate::launch::usable_specs`] keeps them. An older node sends none, and then a start asks nothing about them.
+    pub fn kind_settings(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchSettingSpec>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::launch::usable_specs(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.settings)
                 .unwrap_or_default(),
         ))
     }
@@ -3040,5 +3125,50 @@ mod runtime_tests {
         assert!(matches!(got, Err(ClientError::Unreachable)));
         let took = start.elapsed();
         assert!(took < Duration::from_secs(3), "took {took:?}");
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{kinds, Seen, STREAM_EVENTS};
+    use agora_protocol::v1::{event::Body, AgentState, AgentStateChanged, Event, PositionedEvent};
+    use agora_protocol::Frame;
+    use prost::Message;
+
+    /// ADR-0090: an agent's state after the snapshot is kept by hub-wide id (the plain full-screen chat knows from it when a turn is
+    /// over); a change at or before the snapshot says nothing new.
+    #[test]
+    fn an_agents_state_after_the_snapshot_is_kept() {
+        let mut seen = Seen {
+            snapshot_pos: Some(5),
+            ..Seen::default()
+        };
+        let change = |pos: u64, state: AgentState| Frame {
+            stream_id: STREAM_EVENTS,
+            kind: kinds::POSITIONED_EVENT,
+            seq: None,
+            payload: PositionedEvent {
+                pos,
+                event: Some(Event {
+                    producer_id: "mac".into(),
+                    body: Some(Body::AgentStateChanged(AgentStateChanged {
+                        agent_id: "agent-1".into(),
+                        state: state as i32,
+                        reported: true,
+                    })),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec(),
+        };
+        seen.note(&change(4, AgentState::Idle));
+        assert_eq!(seen.states.get("mac/agent-1"), None);
+        seen.note(&change(6, AgentState::Blocked));
+        seen.note(&change(7, AgentState::Idle));
+        assert_eq!(
+            seen.states.get("mac/agent-1"),
+            Some(&(AgentState::Idle as i32))
+        );
     }
 }
