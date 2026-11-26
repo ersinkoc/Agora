@@ -1370,7 +1370,7 @@ palette-open-machine = Makine: { $name }
 palette-open-project = Proje: { $name }
 palette-settings = Ayarlar
 device-appearance = Görünüm
-device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor. Temalar yalnızca bu tarayıcıda saklanır.
+device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor.
 
 ## ADR-0067 2. basamak: telefon boyutunda pencere ve terminal tuş çubuğu.
 phone-nav = Git

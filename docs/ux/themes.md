@@ -7,9 +7,10 @@
 A **theme** is a small file of **design tokens** (the variables in `apps/web/src/design/tokens.css`). Every colour, font, size,
 corner and spacing a component draws comes from a token (`visual-language.md` §3), so a theme restyles the whole window without
 code. This page is the file format's specification and the web window's behaviour. Rung 2 covers the web window; the terminal
-client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). Themes and the choice are kept in the browser (syncing them
-per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6). The hub is
-involved only for the [community catalog](#the-community-catalog), which it fetches on its owner's command (build step 5).
+client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). Themes and the choice are kept in the browser and,
+through the hub, the same on all the person's devices ([below](#keeping-themes-the-same-on-your-devices), build step 4): the hub keeps them
+as the person's own opaque value and never reads them. The hub also keeps the [community catalog](#the-community-catalog), which it
+fetches on its owner's command (build step 5).
 
 **Format 2** ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md), below) goes deeper where the look comes from:
 both schemes in one file, the terminal's palette, the colours of the window's parts, and the window's chrome (pane borders and
@@ -280,7 +281,7 @@ on its own background), and refusing would drop such a stored theme on the next 
 
 Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.css` and every built-in theme readable.
 
-## Choosing (per person, in this browser)
+## Choosing (per person)
 
 - The title bar's three buttons are unchanged: **Follow the system**, **Dark**, **Light**.
 - Each scheme has **its theme**: "Light theme" and "Dark theme" in the editor. Following the system switches between the two
@@ -292,6 +293,79 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
   themes) and `agora.themes.v1` (the person's own themes, at most 20). Storage that is missing, full or blocked costs only the
   memory: every choice still holds for the visit. Another tab of the same browser applies a change at once (live reload).
 - **Reset to defaults** goes back to following the system with Light and Dark; the person's themes are kept.
+- The two themes chosen (not the scheme) and the person's own themes are kept the same on their devices
+  ([below](#keeping-themes-the-same-on-your-devices)); whether this browser follows the system or is forced dark or light stays its own,
+  since a phone and a laptop often differ.
+
+## Keeping themes the same on your devices
+
+ADR-0113 decision 6, build step 4. The person's **own themes**, the **packs** they imported and the **theme choice** follow them to
+every device they sign in to on the same hub, so the phone and the laptop agree.
+
+![Settings, This device, Appearance: "Keep my themes the same on my devices" (dark)](../screenshots/adr113-theme-sync-setting-dark.png)
+![The same in light](../screenshots/adr113-theme-sync-setting-light.png)
+
+**On the hub.** The hub keeps one value per person under the key `themes` (`UserSettingsGet` and `UserSettingsSet`,
+[protocol.md](../specs/protocol.md#per-person-settings-adr-0113)): opaque bytes it never parses, checks or shows, at most **256 KiB**
+(`settings.too_large` over that), keyed by the session's person, so nobody reads or writes another person's. Each write raises the
+value's **version**; a write based on an older version is refused (`settings.stale`), so two windows never overwrite each other unseen.
+Writes are rows of the person's Activity ("Kept their themes the same on their devices") with the outcome and nothing of the value; a
+read writes none. Removing a person forgets their value. The hub's database moves to schema 17 for it.
+
+**In the window.**
+
+![The theme editor's "Your packs and devices": a pack imported on another device, to open or forget (dark)](../screenshots/adr113-theme-synced-packs-dark.png)
+![The same in light](../screenshots/adr113-theme-synced-packs-light.png)
+
+- **Settings > This device > Appearance**, "**Keep my themes the same on my devices**": on by default (a switch per browser,
+  `agora.themes.sync.v1`). Under it, where it stands: kept the same; off; this browser only, because the window has no hub (the demo)
+  or an **older hub** that does not know the messages (it refuses them, and the window asks no more on that connection); too large;
+  saved by a newer version; or the hub could not be reached (tried again at the next change). The switch is off and disabled without a
+  hub, with an older hub, and in **safe mode**, which never syncs: nothing is read from the hub and nothing is written.
+- **When.** On sign-in (once the window has its first view), the window reads the value, checks it, merges it with this browser and
+  writes the result when it differs. A change here (a theme made, edited, imported, installed, added from a pack or deleted; a pack
+  kept or forgotten; a theme chosen) is written **1.5 seconds** after the last one. The window reads again whenever it **comes back
+  into view**, which is when another device's change shows. A write refused as stale reads again, merges and writes again (three times
+  at most).
+- **Checked on load.** Every theme in the value goes through the theme file's reader (`readTheme`, the rules on this page), every pack
+  through the pack reader (`readPack`). **Something the window cannot read is not applied**: the theme editor's **Your packs and
+  devices** section names it with its problems and offers **Remove from my devices**; until then it is written back as it was, so a
+  theme from a newer window survives an older one. A value written by a newer version of the format is not read and never written over.
+- **Merging** is the union by a **lasting id** each theme and pack gets where it is first made (24 hex characters, kept beside the theme
+  in `agora.themes.v1` with the time of its last edit; never in the theme's file, so an export is the theme alone):
+  - A theme on both sides takes the **newer edit**; on a tie, this browser's.
+  - **No theme of this browser is dropped silently.** A theme deleted on another device leaves a dated mark (`agora.themes.removed.v1`,
+    the newest 200); the mark removes the theme here only when it is newer than the theme's last edit here, so a theme edited here
+    since stays (and comes back on the other device). A theme deleted here does not come back from another device.
+  - A theme that does not fit this browser's **20** waits: it is listed in Your packs and devices ("doesn't fit here"), stays in the
+    value for the devices that have room, and arrives here once one of yours is deleted.
+  - **The choice** (each scheme's theme, a built-in by its id or one of yours by its lasting id) takes the newer one
+    (`agora.theme.choice.at.v1`). A newer choice naming a theme this browser cannot show keeps this browser's choice on screen and stays
+    the newer one for the devices that can.
+  - Times are each device's clock; a clock far off can make an older edit look newer.
+- **Packs.** A pack imported with **Import pack…** is kept as the file it was (`agora.packs.v1`, the 8 most recent; a ninth replaces the
+  oldest), and is synced like a theme. **Your packs and devices** lists them with what each holds: **Open…** shows the same Import pack
+  preview with nothing ticked (nothing of a pack is applied on another device until the person picks its parts there), and **Forget**
+  removes it from every device (what was added from it stays). The pack's themes the person added are already among their themes.
+- **Too large.** Before writing, the window measures the value; over 256 KiB it writes nothing, changes nothing here and says so.
+
+**The value**, format 1 (JSON, written in one order, by lasting id, so the same themes give the same bytes on every device and a value
+read and written back unchanged is not written):
+
+```json
+{
+  "agora-theme-sync": 1,
+  "themes": [{ "uid": "3fa1…", "edited": 1795600000000, "file": { "agora-theme": 2, "name": "Harbour", "…": "…" }, "catalog": { "id": "harbour", "version": 1 } }],
+  "themesRemoved": [{ "uid": "77c0…", "at": 1795600100000 }],
+  "packs": [{ "uid": "a01b…", "added": 1795600000000, "file": { "agora-pack": 1, "name": "Harbour set", "…": "…" } }],
+  "packsRemoved": [],
+  "choice": { "dark": "u:3fa1…", "light": "sand", "at": 1795600000000 }
+}
+```
+
+`apps/web/src/themes/sync.ts` (the value, the merge and when it reads and writes), `kept.ts` (kept packs), `SyncPanels.tsx` (the switch
+and the section). `scripts/e2e-theme-sync.mjs` runs it in two real browsers signed in as the same person on a real hub: a theme
+imported in one and a choice made in the other reach the other, and nothing is asked of any origin but the hub's.
 
 ## The theme editor
 
@@ -429,8 +503,8 @@ reader's normal form) and the same keys.
 
 ### Where packs are read
 
-- **The web and desktop window:** the theme editor's Import pack… (above). Syncing packs per person through the hub is ADR-0113
-  step 4.
+- **The web and desktop window:** the theme editor's Import pack… (above). A pack imported there is kept and offered on the person's
+  other devices ([above](#keeping-themes-the-same-on-your-devices)), never applied there until they pick its parts.
 - **The terminal client:** a pack in its themes folder gives its themes ([below](#the-terminal-client)). Its layouts and keys are
   the window's and are listed as not used there.
 - **The community catalog** holds themes only: a catalog entry that is a pack would need a `kind` in the index and in
@@ -634,7 +708,9 @@ for example with `agora tui`'s reader or the web window's (`apps/web/src/themes/
 
 ## Not yet (later steps of ADR-0113)
 
-- **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
+- **Syncing** a pack's saved layouts and keybindings as the person's own (step 4 keeps the pack file and offers it on their other devices;
+  layouts and keys stay per browser), and a change on another device showing at once (the window reads again when it comes back into
+  view; the hub sends nothing by itself).
 - **The catalog repository itself** (step 5's hub side is built, [above](#the-community-catalog)): the maintainer creates it; the hub
   then fetches it with `--url`. **Packs in the catalog** are left out: an entry that is a pack needs a `kind` field in the index and in
   `ThemeCatalogEntry` (a schema change, which needs an ADR), the hub's check to read a pack's layouts and keys (it has only the theme

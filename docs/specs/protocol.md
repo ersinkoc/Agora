@@ -1431,6 +1431,32 @@ does not know these commands refuses them, which the window treats as "no catalo
   Refused with `theme.catalog_off` while the catalog is off and `theme.not_found` (`id`) for an id the catalog lacks.
 
 Golden fixtures of each case are in `schema/fixtures/theme-catalog/` (`crates/agora-protocol/tests/theme_catalog.rs`).
+
+### Per-person settings (ADR-0113)
+
+ADR-0113 decision 6, build step 4: the hub keeps each person's own settings value so their devices agree; today one key, `themes` (the
+person's themes, kept packs and theme choice, `docs/ux/themes.md` "Keeping themes the same on your devices"). New messages in
+`schema/agora/v1/settings.proto` and new arms of `CommandRequest` (`user_settings_get` 118, `user_settings_set` 119) and `CommandOk`
+(`user_settings` 38); nothing published changed. No capability: a window sends them to any hub, and an older hub refuses them (it cannot
+name the command: `auth.forbidden` with no `action`), which the window takes as "this hub keeps nothing; themes stay in this browser".
+Answered by the hub itself, for any signed-in person (owner, member or viewer alike, ahead of the routing that limits a viewer or a
+member's projects); one that names a node (`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node
+never receives them (refused as unsupported).
+
+- **`UserSettingsGet { key }`** → `UserSettingsValue { key, value, version, updated_ms }`: the caller's own value. One never written is
+  version 0 with an empty value (an answer, not a refusal).
+- **`UserSettingsSet { key, value, base_version }`** → `UserSettingsValue` with the new version: replaces the caller's own value when
+  `base_version` is the current version (0 for none yet), and raises the version by one. Otherwise `settings.stale` (`version`, the current
+  one) and nothing changes: another window wrote first, so the client reads again, merges and writes again. A value over 262144 bytes is
+  `settings.too_large` (`max`), refused whole before anything is read or written.
+- **Opaque and per person.** `value` is bytes the hub never parses, checks or shows; every client checks what it reads. The value is
+  keyed by the session's person (`owner` on a hub with one person) and the key, never by anything the request names, so nobody reads or
+  writes another person's. `key` is a closed set (`themes`); any other is `protocol.invalid_message` (`key`). Removing a person forgets
+  their values. The hub keeps them in its database (schema 17, table `user_settings`).
+- **Audit.** A write is a row of the person (`settings.set`, its `node` the key, `themes`) with the outcome (`ok`, `settings.stale`,
+  `settings.too_large`, ...) and nothing of the value; a read writes no row.
+- Golden fixtures: `schema/fixtures/v1/agora.v1.UserSettings*` and `schema/fixtures/user-settings/`
+  (`crates/agora-protocol/tests/user_settings.rs`).
 ### Plugins (ADR-0114)
 
 Schema step of ADR-0114 decision 6 (Accepted). New messages in `schema/agora/v1/plugins.proto` and new arms of `CommandRequest`

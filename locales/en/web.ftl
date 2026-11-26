@@ -1409,7 +1409,7 @@ palette-open-machine = Machine: { $name }
 palette-open-project = Project: { $name }
 palette-settings = Settings
 device-appearance = Appearance
-device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
+device-appearance-intro = This browser shows the { $name } theme.
 
 ## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
 phone-nav = Go to

@@ -132,6 +132,9 @@ jobs:
       - name: A plugin installed on the hub is offered, shown with the grant the hub keeps, and gone once removed (ADR-0114)
         run: node scripts/e2e-plugin-hub.mjs
         timeout-minutes: 5
+      - name: Two browsers of the same person see the same themes and theme choice through the hub (ADR-0113 step 4)
+        run: node scripts/e2e-theme-sync.mjs
+        timeout-minutes: 5
 
   schema-breaking:
     # A published message never changes (ADR-0006): compare schema/ with the target branch.
