@@ -25,6 +25,8 @@ use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
 use serde_json::{json, Value};
 
+use crate::lease_renewal::{self, Outcome as RenewOutcome, Renewals};
+
 /// How long an agent's board call waits for the hub before it is treated as unreachable.
 const BOARD_WAIT: Duration = Duration::from_secs(10);
 /// How long "this project is not shared" is believed before the hub is asked again.
@@ -256,6 +258,155 @@ impl Shares {
     }
 }
 
+/// ADR-0039: the shared-board leases this node renews for its running agents ([`crate::lease_renewal`]), and the signal an agent's
+/// own lease call waits on until a renewal of its leases that is on its way has been answered. A leaf lock: nothing else is taken
+/// while it is held, and no link is called under it (a link may answer inline).
+#[derive(Default)]
+pub(crate) struct LeaseRenewals {
+    table: Mutex<Renewals>,
+    settled: Condvar,
+}
+
+impl LeaseRenewals {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Renewals> {
+        self.table.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `agent` starts a lease call of its own on the board: waits (at most `wait`) for a renewal of its leases that is on its way
+    /// to be answered, so the two never cross at the hub (a release overtaken by a renewal would take the paths back), and none
+    /// is started until the returned guard is dropped.
+    fn begin_call(&self, agent: &AgentId, wait: Duration) -> LeaseCall<'_> {
+        let until = Instant::now() + wait;
+        let mut t = self.lock();
+        while t.in_flight(agent) {
+            let rest = until.saturating_duration_since(Instant::now());
+            if rest.is_zero() {
+                break;
+            }
+            t = self
+                .settled
+                .wait_timeout(t, rest)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        t.begin_call(agent);
+        LeaseCall {
+            slot: self,
+            agent: agent.clone(),
+        }
+    }
+
+    fn answered(&self, key: u64, outcome: RenewOutcome, sent_at_ms: u64) {
+        self.lock().answered(key, outcome, sent_at_ms, now_ms());
+        self.settled.notify_all();
+    }
+}
+
+/// An agent's own lease call under way (see [`LeaseRenewals::begin_call`]).
+struct LeaseCall<'a> {
+    slot: &'a LeaseRenewals,
+    agent: AgentId,
+}
+
+impl Drop for LeaseCall<'_> {
+    fn drop(&mut self) {
+        self.slot.lock().end_call(&self.agent);
+    }
+}
+
+/// The answer to one renewal. A link that drops the call without answering (the uplink does while the hub is not connected) counts
+/// as "not decided", so the grant is tried again until its end and never stays marked as on its way.
+struct RenewalReply {
+    slot: Arc<LeaseRenewals>,
+    key: u64,
+    sent_at_ms: u64,
+    done: bool,
+}
+
+impl RenewalReply {
+    fn finish(mut self, reply: Result<BoardReply, String>) {
+        self.done = true;
+        let outcome = lease_renewal::classify(
+            reply
+                .as_ref()
+                .map(|r| (r.shared, r.result_json.as_str()))
+                .map_err(String::as_str),
+        );
+        self.slot.answered(self.key, outcome, self.sent_at_ms);
+    }
+}
+
+impl Drop for RenewalReply {
+    fn drop(&mut self) {
+        if !self.done {
+            self.slot
+                .answered(self.key, RenewOutcome::Retry, self.sent_at_ms);
+        }
+    }
+}
+
+/// Sends the renewals that are due, each as its agent's own `lease_acquire` on the project's board. Called from the ticker; never
+/// waits for an answer.
+fn renew_due(slot: &Arc<LeaseRenewals>, remote: &RemoteSlot) {
+    let due = slot.lock().due(now_ms());
+    if due.is_empty() {
+        return;
+    }
+    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for r in due {
+        let reply = RenewalReply {
+            slot: Arc::clone(slot),
+            key: r.key,
+            sent_at_ms: r.sent_at_ms,
+            done: false,
+        };
+        // No link (`mesh.remote` is off, or the hub never connected): dropping the reply says "not decided".
+        if let Some(link) = &link {
+            link.board(
+                r.agent.as_str(),
+                &r.project,
+                "lease_acquire",
+                &r.arguments.to_string(),
+                Box::new(move |res| reply.finish(res)),
+            );
+        }
+    }
+}
+
+/// The board granted the agent's own `lease_acquire` (its MCP tool result): the lease is renewed from now on.
+fn note_granted(
+    renewals: &LeaseRenewals,
+    agent: &AgentId,
+    project: &str,
+    args: &Value,
+    result: &Value,
+    sent_at_ms: u64,
+) {
+    let Some((text, false)) = tool_text(result) else {
+        return;
+    };
+    let Ok(answer) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    let (Some(id), Some(paths), Some(ttl_s)) = (
+        answer.get("lease_id").and_then(Value::as_str),
+        args.get("paths").and_then(Value::as_array),
+        args.get("ttl_s"),
+    ) else {
+        return;
+    };
+    let Some(paths) = paths
+        .iter()
+        .map(|p| p.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    renewals
+        .lock()
+        .granted(agent, project, id, &paths, ttl_s, sent_at_ms);
+}
+
 /// A call to one of the board tools: on a shared project the hub's board answers; `None` means "use the local broker".
 fn board_reply(
     conn: &McpConnection,
@@ -263,6 +414,7 @@ fn board_reply(
     mesh: &Arc<Mutex<Mesh>>,
     remote: &RemoteSlot,
     shares: &Shares,
+    renewals: &LeaseRenewals,
 ) -> Option<Message> {
     if !conn.initialized() {
         return None;
@@ -328,21 +480,45 @@ fn board_reply(
     if matches!(known, Some((false, at)) if at.elapsed() < LOCAL_FOR) {
         return None;
     }
+    // ADR-0039: the agent's own lease calls and the node's renewals of its leases go to the board one at a time, and a release
+    // names the id the board has now for a lease the node renewed (the agent keeps the one it was given).
+    let _call = matches!(name, "lease_acquire" | "lease_release")
+        .then(|| renewals.begin_call(conn.agent(), BOARD_WAIT));
+    let released = (name == "lease_release")
+        .then(|| args.get("lease_id").and_then(Value::as_str))
+        .flatten();
+    let mut sent = args.clone();
+    if let Some(current) = released.and_then(|id| renewals.lock().release_target(conn.agent(), id))
+    {
+        sent["lease_id"] = json!(current);
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let asked = Instant::now();
+    let sent_at_ms = now_ms();
     link.board(
         conn.agent().as_str(),
         &project,
         name,
-        &args.to_string(),
+        &sent.to_string(),
         Box::new(move |r| {
             let _ = tx.send(r);
         }),
     );
-    match rx.recv_timeout(BOARD_WAIT) {
+    let answer = rx.recv_timeout(BOARD_WAIT);
+    // A release that went to the board ends the renewal whatever came back: the agent wants the lease gone, so at worst it ends at
+    // its TTL. Only "not shared" leaves it (the call then runs on the node's own broker, where nothing is renewed).
+    if let Some(id) = released {
+        if !matches!(&answer, Ok(Ok(r)) if !r.shared) {
+            renewals.lock().released(conn.agent(), id);
+        }
+    }
+    match answer {
         Ok(Ok(r)) if r.shared => {
             shares.set(&project, true);
             let result = serde_json::from_str(&r.result_json).ok();
+            if let (Some(result), "lease_acquire") = (&result, name) {
+                note_granted(renewals, conn.agent(), &project, &args, result, sent_at_ms);
+            }
             Some(match result {
                 Some(result) => Message::Response {
                     id: id.clone(),
@@ -702,6 +878,8 @@ pub struct MeshServer {
     /// ADR-0112: node policy `mesh.fleet` and whether the hub offers `fleet_status`.
     fleet: Arc<Fleet>,
     shares: Arc<Shares>,
+    /// ADR-0039: the shared-board leases renewed for running agents (a leaf lock).
+    renewals: Arc<LeaseRenewals>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
     // When both locks are needed, take the broker before the handoff store. This orders
@@ -783,10 +961,18 @@ impl MeshServer {
         let mesh = Arc::new(Mutex::new(Mesh::new(limits)));
         let stop = Arc::new(AtomicBool::new(false));
         let ids_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
-        // Leases expire on a clock, not on a call: sweep so a path frees up even if nobody asks about it.
+        let remote: Arc<RemoteSlot> = Arc::new(Mutex::new(None));
+        let renewals = Arc::new(LeaseRenewals::default());
+        // Leases expire on a clock, not on a call: sweep so a path frees up even if nobody asks about it. The same pass renews the
+        // shared-board leases of running agents that are due (ADR-0039), without waiting for the hub.
         let ticker = {
-            let (mesh, stop, ids_file) =
-                (Arc::clone(&mesh), Arc::clone(&stop), Arc::clone(&ids_file));
+            let (mesh, stop, ids_file, remote, renewals) = (
+                Arc::clone(&mesh),
+                Arc::clone(&stop),
+                Arc::clone(&ids_file),
+                Arc::clone(&remote),
+                Arc::clone(&renewals),
+            );
             std::thread::Builder::new()
                 .name("agora-mesh-tick".into())
                 .spawn(move || {
@@ -796,6 +982,7 @@ impl MeshServer {
                             m.expire_leases(now_ms());
                             m.message_ids_left()
                         };
+                        renew_due(&renewals, &remote);
                         // Off the message path: a range near its end, or none had, is reserved here (file I/O, not under the lock).
                         if left.is_some_and(|n| n < IDS_PER_RESERVATION / 2) {
                             let file = ids_file.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -810,12 +997,13 @@ impl MeshServer {
         Ok(Self {
             helpers: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
-            remote: Arc::new(Mutex::new(None)),
+            remote,
             fleet: Arc::new(Fleet {
                 allowed: AtomicBool::new(true),
                 hub: AtomicBool::new(false),
             }),
             shares: Arc::new(Shares::default()),
+            renewals,
             mesh,
             dir: dir.to_path_buf(),
             handoffs: Mutex::new(None),
@@ -850,6 +1038,8 @@ impl MeshServer {
         self.remote_allowed.store(allowed, Ordering::Release);
         if !allowed {
             *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            // Its mesh no longer reaches the hub, so no shared board either: nothing is renewed, the board's leases end at their TTL.
+            self.renewals.lock().clear();
         }
     }
 
@@ -1377,7 +1567,7 @@ impl MeshServer {
             .join(info, now_ms());
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent, remote, allowed, shares, helpers, fleet) = (
+            let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
                 id.clone(),
@@ -1386,6 +1576,7 @@ impl MeshServer {
                 Arc::clone(&self.shares),
                 Arc::clone(&self.helpers),
                 Arc::clone(&self.fleet),
+                Arc::clone(&self.renewals),
             );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
@@ -1406,7 +1597,7 @@ impl MeshServer {
                                     std::thread::sleep(POLL);
                                     continue;
                                 };
-                                let (mesh, stop, agent, remote, allowed, shares, fleet) = (
+                                let (mesh, stop, agent, remote, allowed, shares, fleet, renewals) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
                                     agent.clone(),
@@ -1414,6 +1605,7 @@ impl MeshServer {
                                     Arc::clone(&allowed),
                                     Arc::clone(&shares),
                                     Arc::clone(&fleet),
+                                    Arc::clone(&renewals),
                                 );
                                 let helpers =
                                     helpers.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1428,6 +1620,7 @@ impl MeshServer {
                                                 remote: &remote,
                                                 allowed: &allowed,
                                                 shares: &shares,
+                                                renewals: &renewals,
                                                 fleet: &fleet,
                                                 helpers,
                                             },
@@ -1510,6 +1703,10 @@ impl MeshServer {
                 handoffs.runs.remove(agent);
             }
         }
+        // ADR-0039: an agent that ended no longer has its shared-board leases renewed; the hub gives them back when it sees the
+        // agent end, and at the latest they end at their TTL.
+        self.renewals.lock().agent_left(agent);
+        self.renewals.settled.notify_all();
         let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
         match leaving.get_mut(agent) {
             Some(n) if *n > 1 => *n -= 1,
@@ -1642,6 +1839,7 @@ struct Links<'a> {
     remote: &'a RemoteSlot,
     allowed: &'a AtomicBool,
     shares: &'a Shares,
+    renewals: &'a LeaseRenewals,
     fleet: &'a Fleet,
     helpers: Option<Arc<dyn Helpers>>,
 }
@@ -2034,7 +2232,7 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
         return Step::Reply(msg);
     }
     // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
-    if let Some(msg) = board_reply(&s.conn, text, mesh, remote, shares) {
+    if let Some(msg) = board_reply(&s.conn, text, mesh, remote, shares, links.renewals) {
         return Step::Reply(msg);
     }
     let outcome = {
@@ -2864,6 +3062,167 @@ mod tests {
         );
     }
 
+    /// Answers every board call as granted (`lease_id` "l-9") and records each call's tool and arguments.
+    #[derive(Default)]
+    struct RecordingLink(Mutex<Vec<(String, Value)>>);
+
+    impl RemoteLink for RecordingLink {
+        fn post(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            done: Box<dyn FnOnce(Result<(), String>) + Send>,
+        ) {
+            done(Err("node.offline".into()));
+        }
+        fn board(
+            &self,
+            _: &str,
+            _: &str,
+            tool: &str,
+            arguments_json: &str,
+            done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+        ) {
+            let args: Value = serde_json::from_str(arguments_json).unwrap();
+            self.0.lock().unwrap().push((tool.to_string(), args));
+            let text = if tool == "lease_release" {
+                json!({"ok": true})
+            } else {
+                json!({"lease_id": "l-9", "expires_at": 1})
+            };
+            done(Ok(BoardReply {
+                shared: true,
+                result_json: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": false})
+                    .to_string(),
+            }));
+        }
+    }
+
+    /// ADR-0039: an agent's release waits for a renewal of its lease that is on its way, then names the id the renewal got, so the
+    /// renewal can neither take back a released path nor make the release miss.
+    #[test]
+    fn a_release_waits_for_a_renewal_on_its_way_and_names_the_id_it_got() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(RecordingLink::default());
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let renewals = Arc::new(LeaseRenewals::default());
+        let mut conn = McpConnection::new(a.clone());
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let line = |name: &str, args: Value| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": args}})
+                .to_string()
+        };
+        // The agent's own grant is recorded for renewal.
+        let granted = board_reply(
+            &conn,
+            &line("lease_acquire", json!({"paths": ["src/a.rs"], "ttl_s": 10})),
+            &mesh,
+            &remote,
+            &shares,
+            &renewals,
+        );
+        assert!(granted.is_some());
+        assert_eq!(renewals.lock().len(), 1);
+        // A renewal is on its way (taken as due later on the grant's own clock), not answered yet.
+        let due = renewals.lock().due(now_ms() + 5_000);
+        assert_eq!(due.len(), 1);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let release = {
+            let (mesh, renewals, link, line) = (
+                Arc::clone(&mesh),
+                Arc::clone(&renewals),
+                link.clone(),
+                // The id the board gave the agent.
+                line("lease_release", json!({"lease_id": "l-9"})),
+            );
+            std::thread::spawn(move || {
+                let remote: RemoteSlot = Mutex::new(Some(link as Arc<dyn RemoteLink>));
+                let shares = Shares::default();
+                shares.set("p", true);
+                let r = board_reply(&conn, &line, &mesh, &remote, &shares, &renewals);
+                let _ = tx.send(r);
+            })
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the release did not wait"
+        );
+        assert_eq!(
+            link.0.lock().unwrap().len(),
+            1,
+            "only the grant reached the board"
+        );
+        renewals.answered(
+            due[0].key,
+            RenewOutcome::Renewed {
+                lease_id: "l-10".into(),
+            },
+            due[0].sent_at_ms,
+        );
+        let reply = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(reply.is_some());
+        release.join().unwrap();
+        let calls = link.0.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, "lease_release");
+        assert_eq!(calls[1].1, json!({"lease_id": "l-10"}));
+        assert!(
+            renewals.lock().is_empty(),
+            "a released lease is not renewed again"
+        );
+    }
+
+    /// A renewal the link drops without answering (the uplink does while the hub is not connected), or that has no link at all, is
+    /// "not decided": the grant is free to be tried again, never left marked as on its way.
+    #[test]
+    fn a_renewal_that_gets_no_answer_is_tried_again() {
+        struct Dropping;
+        impl RemoteLink for Dropping {
+            fn post(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[String],
+                done: Box<dyn FnOnce(Result<(), String>) + Send>,
+            ) {
+                done(Err("node.offline".into()));
+            }
+            fn board(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+            ) {
+                drop(done);
+            }
+        }
+        let a = AgentId::new("a");
+        for link in [Some(Arc::new(Dropping) as Arc<dyn RemoteLink>), None] {
+            let slot = Arc::new(LeaseRenewals::default());
+            // Granted a minute ago for two minutes: due now.
+            let at = now_ms() - 60_000;
+            assert!(slot
+                .lock()
+                .granted(&a, "p", "l-1", &["x".into()], &json!(120), at));
+            let remote: RemoteSlot = Mutex::new(link);
+            renew_due(&slot, &remote);
+            assert!(!slot.lock().in_flight(&a));
+            assert_eq!(slot.lock().len(), 1, "kept until its end");
+            assert_eq!(slot.lock().due(now_ms() + lease_renewal::RETRY_MS).len(), 1);
+        }
+    }
+
     /// Counts the board calls that reach the hub and answers as a hub that refused the call (the link's error).
     struct CountingLink(std::sync::atomic::AtomicUsize);
 
@@ -2911,7 +3270,15 @@ mod tests {
             let line = format!(
                 r##"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"send_message","arguments":{{"to":"#dev","body":"hi"{extra}}}}}}}"##
             );
-            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+            board_reply(
+                conn,
+                &line,
+                &mesh,
+                &remote,
+                &shares,
+                &LeaseRenewals::default(),
+            )
+            .unwrap_or_else(|| {
                 match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
                     Outcome::Reply(msg) => msg,
                     _ => panic!("no reply"),
@@ -2961,7 +3328,14 @@ mod tests {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "send_message", "arguments": args}})
             .to_string();
-            board_reply(conn, &line, &mesh, &remote, &shares)
+            board_reply(
+                conn,
+                &line,
+                &mesh,
+                &remote,
+                &shares,
+                &LeaseRenewals::default(),
+            )
         };
         let code = |m: Option<Message>| match m {
             Some(Message::Response { result, .. }) => agora_mesh::mcp::tool_result_value(&result)
@@ -3021,7 +3395,15 @@ mod tests {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "handoff", "arguments": args}})
             .to_string();
-            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+            board_reply(
+                conn,
+                &line,
+                &mesh,
+                &remote,
+                &shares,
+                &LeaseRenewals::default(),
+            )
+            .unwrap_or_else(|| {
                 match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
                     Outcome::Reply(msg) => msg,
                     _ => panic!("no reply"),
