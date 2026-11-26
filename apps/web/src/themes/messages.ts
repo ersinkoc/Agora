@@ -2,7 +2,9 @@
 import { t } from '../i18n';
 import { MAX_USER_THEMES } from './store';
 import type { KitColour } from './tints';
-import type { AnsiName, ChromeName, FloorItem, RegionName, RegionPart, SyntaxKey, TerminalKey } from './look';
+import { MAX_FILE_BYTES } from './file';
+import type { ImportError, ImportFormat, ImportNote } from './import/convert';
+import { type AnsiName, type ChromeName, type FloorItem, type RegionName, type RegionPart, type SyntaxKey, type TerminalKey, isTerminalKey } from './look';
 import { MAX_NAME, type Theme, type ThemeIssue, type TokenName, isTokenName, kindOf, shownRatio } from './tokens';
 
 export const themeName = (theme: Pick<Theme, 'name' | 'nameKey'>) => (theme.nameKey ? t(theme.nameKey) : theme.name);
@@ -69,3 +71,22 @@ function issueSentence(i: ThemeIssue): string {
   }
 }
 export const fullText = () => t('theme-error-full', { max: MAX_USER_THEMES });
+
+// Theme import (import/convert.ts): its notes and refusals as sentences. Names from the file are shown as written (cleaned there);
+// terminal colours by their label.
+const listText = (keys: readonly string[], more: number) => (more > 0 ? t('theme-import-and-more', { list: keys.join(', '), count: more }) : keys.join(', '));
+const terminalKeys = (keys: readonly string[]) => keys.map((k) => (isTerminalKey(k) ? terminalLabel(k) : k));
+export const importFormatLabel = (f: ImportFormat) => t(`theme-import-format-${f}`);
+export function importNoteText(n: ImportNote): string {
+  switch (n.code) {
+    case 'scheme': return t('theme-import-note-scheme', { scheme: n.scheme });
+    case 'missing': case 'alpha': return t(`theme-import-note-${n.code}`, { keys: listText(terminalKeys(n.keys), n.more) });
+    case 'ignored': case 'unreadable': return t(`theme-import-note-${n.code}`, { keys: listText(n.keys, n.more) });
+    case 'colour-space': return t('theme-import-note-colour-space', { space: n.space });
+    case 'variant': return t('theme-import-note-variant', { used: n.used });
+    case 'first-scheme': case 'syntax': return t(`theme-import-note-${n.code}`, { count: n.count });
+    case 'fallback': return t('theme-import-note-fallback', { key: terminalLabel(n.key), from: n.from });
+    default: return t(`theme-import-note-${n.code}`);
+  }
+}
+export const importErrorText = (e: ImportError) => t(`theme-import-error-${e}`, { max: MAX_FILE_BYTES / 1024 });

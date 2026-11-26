@@ -1,0 +1,31 @@
+// Windows Terminal settings with two schemes (a test fixture of Agora's theme import)
+{
+  "$schema": "https://aka.ms/terminal-profiles-schema",
+  "schemes": [
+    {
+      "name": "Harbour",
+      "background": "#0B1016",
+      "foreground": "#D8E1EA",
+      "cursorColor": "#5CC8C2",
+      "selectionBackground": "#2B4A5C",
+      "black": "#1B2430",
+      "red": "#F2777A",
+      "green": "#8FD18A",
+      "yellow": "#E8C46A",
+      "blue": "#6FB3F2",
+      "purple": "#C99CF0",
+      "cyan": "#5CC8C2",
+      "white": "#C8D3DE",
+      "brightBlack": "#637387",
+      "brightRed": "#FF9C9E",
+      "brightGreen": "#B4ECB0",
+      "brightYellow": "#F5DC98",
+      "brightBlue": "#9FD0FF",
+      "brightPurple": "#E0C4FF",
+      "brightCyan": "#93E3DE",
+      "brightWhite": "#F3F7FB",
+      "approval-card": "#ff0000", /* not a colour scheme key: never copied */
+    },
+    { "name": "Second", "background": "#000000", "foreground": "#ffffff" },
+  ],
+}

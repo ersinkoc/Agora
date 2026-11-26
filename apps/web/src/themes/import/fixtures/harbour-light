@@ -1,0 +1,25 @@
+# Harbour Light, for Ghostty (a test fixture of Agora's theme import)
+palette = 0=#2a2f36
+palette = 1=#b3261e
+palette = 2=#2d6a2e
+palette = 3=#8a5a00
+palette = 4=#1d5fa8
+palette = 5=#7c3aa6
+palette = 6=#0b6e69
+palette = 7=#6b7280
+palette = 8=#4b5563
+palette = 9=#d0352c
+palette = 10=#3a8a3b
+palette = 11=#a56d00
+palette = 12=#2a74c9
+palette = 13=#9550c4
+palette = 14=#13857f
+palette = 15=#f3efe7
+palette = 17=#ff8800
+background = fbf7f0
+foreground = #2a2f36
+cursor-color = #0b6e69
+cursor-text = #ffffff
+selection-background = #c9dedc
+selection-foreground = #2a2f36
+font-family = "Harbour Mono"

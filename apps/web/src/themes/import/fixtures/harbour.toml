@@ -1,0 +1,36 @@
+# Harbour, for Alacritty (a test fixture of Agora's theme import)
+[font]
+size = 12.5
+
+[colors.primary]
+background = "#0b1016"
+foreground = '#d8e1ea'
+dim_foreground = "#9aa5b1"
+
+[colors]
+cursor = { text = "CellBackground", cursor = "#5cc8c2" }
+selection.background = "0x2b4a5c"
+selection.text = "CellForeground"
+indexed_colors = [
+  { index = 16, color = "#ff8800" },
+]
+
+[colors.normal]
+black = "#1b2430"
+red = "#f2777a"
+green = "#8fd18a"
+yellow = "#e8c46a"
+blue = "#6fb3f2"
+magenta = "#c99cf0"
+cyan = "#5cc8c2"
+white = "#c8d3de"
+
+[colors.bright]
+black = '0x637387' # bright black
+red = '0xff9c9e' # bright red
+green = '0xb4ecb0' # bright green
+yellow = '0xf5dc98' # bright yellow
+blue = '0x9fd0ff' # bright blue
+magenta = '0xe0c4ff' # bright magenta
+cyan = '0x93e3de' # bright cyan
+white = '0xf3f7fb' # bright white

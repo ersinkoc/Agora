@@ -327,8 +327,53 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
   All of these are taken by `scripts/screenshots-themes.mjs` from the demo window (it turns the "Needs you" card off for
   the shot, `agora.attention.mode`).
 - **Import…** reads a theme file of either format (refused with its reasons, or added and selected for every scheme it has),
-  **Export** saves the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back
-  to Light and Dark), **Reset to defaults** as above.
+  **Import from another app…** reads another terminal's or editor's colours ([below](#import-from-another-app)), **Export** saves
+  the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back to Light and Dark),
+  **Reset to defaults** as above.
+
+## Import from another app
+
+![A VS Code colour theme, shown with what changed on the way, before it is added (Dark)](../screenshots/theme-import-dark.png)
+![A Ghostty theme with a light background, with the theme check's warnings (Light)](../screenshots/theme-import-light.png)
+![The VS Code theme added: the window and the terminal in its colours, the request card as always](../screenshots/theme-import-added-dark.png)
+
+**Import from another app…** in the editor reads the colours of another app's colour file and makes a format-2 theme of them
+(roadmap M5.1; web and desktop window only: no CLI, no hub, no schema). Nothing is added until **Add theme**: first a dialog shows
+the terminal's colours, every note on what was left out or guessed, and what the theme check says.
+
+| App | File | Read |
+| --- | --- | --- |
+| iTerm2 | `.itermcolors` (an XML property list) | `Ansi 0 Color` … `Ansi 15 Color`, `Background`, `Foreground`, `Cursor` and `Selection Color`: float components with `Alpha Component` and `Color Space` (sRGB; Display P3 converted to sRGB; anything else read as sRGB, with a note). A file with only `(Dark)` and `(Light)` sets uses the dark one. |
+| Alacritty | `.toml`, and the `.yml` of before 0.13 | `colors.primary` `background`/`foreground`, `colors.cursor.cursor`, `colors.selection.background`, `colors.normal.*`, `colors.bright.*`; `#rrggbb` or `0xrrggbb`; `CellForeground`/`CellBackground` as the text or background colour; YAML anchors on maps (`colors: *scheme`). |
+| Ghostty | a theme file (`key = value`, often no extension) | `palette = N=#rrggbb` for 0–15, `background`, `foreground`, `cursor-color`, `selection-background`; hex with or without `#`. |
+| Windows Terminal | one `schemes` entry, a list of them, or a whole `settings.json` (the first scheme) | `background`, `foreground`, `cursorColor`, `selectionBackground`, the eight colours (`purple` is magenta) and their `bright` forms. |
+| VS Code | a colour theme (`colors`, `tokenColors`) | `terminal.ansi*`, `terminal.background`/`foreground` (else `panel.background` or `editor.background`, and `editor.foreground`, with a note), `terminalCursor.foreground`, `terminal.selectionBackground`; code colours from `tokenColors` scopes (`keyword`, `string`, `comment`, `constant.numeric`, `entity.name.function`, `entity.name.type`, `entity.other.attribute-name`, `meta.preprocessor`, most specific first). |
+
+- **Which app** is told by the file's extension, else by its first lines. JSON files may have comments and trailing commas.
+- **One scheme.** The background decides it by the theme check's own rule (dark when white reads better on it). The theme fills that
+  scheme only, and the dialog says so; the other scheme's theme stays as it is.
+- **The window's colours.** Format 2 has no rule that makes the window's colours from a terminal palette (a scheme's colours left out
+  come from Dark or Light), so the import makes them, conservatively, and says so: the background is the window's, the panels and
+  raised surfaces a little of the text mixed into it, the lines a little more; the text is the terminal's, the secondary text the text
+  mixed toward the background; the accent and the states are the palette's blue, yellow and green. Each is held to the pair the
+  theme check asks of it (4.5:1, 3:1 for a state, on every surface), mixed toward the text until it is. Regions, chrome, text and
+  shape are left to their defaults. When the file's own text is not readable on its background, the window keeps Agora's colours and
+  the theme check refuses the terminal's pair, as it would in a hand-written file.
+- **Transparency.** Format 2 has none: a see-through colour is mixed over the background; the selection's transparency is dropped
+  (Agora draws the selection see-through itself); a see-through background is drawn solid. Each is a note.
+- **Notes**: the scheme, how the window's colours were made, colours the file does not give (Agora's own are used), colours that
+  could not be read, and what the file has that a theme has no place for (the first six names, then how many more). A name from a
+  file is shown as text, cleaned of control and direction characters.
+- **The same door as a theme file.** The converter builds the format-2 file key by key from closed lists, never copying a key or value
+  of the input through; then the file goes through the store's own import, so the size cap, unknown fields, the floor, unsafe pieces,
+  the readability pairs and the 20-theme limit hold exactly as for a theme file. A name from the file (the VS Code or Windows Terminal
+  `name`, else the file name) loses control and direction characters and the pieces a theme refuses (`;`, `<`, `url(` …).
+- **Bounded.** A file over 256 KiB is refused before it is read. The readers (`themes/import/read.ts`) are small hand-written subsets
+  (TOML, YAML, Ghostty's lines, JSON with comments) that read line by line, keep keys in a `Map`, and stop at 4096 keys; a property
+  list goes through the browser's own XML parser, which loads no external DTD or entity (the dialog's screenshot script checks that
+  importing an iTerm2 file makes no request), after the text is refused if it declares an entity or a DTD of its own, nests deeper
+  than eight, or has more than 20 000 elements. A fuzz test throws random and mutated files at every converter.
+- Taken by `scripts/screenshots-theme-import.mjs` from the demo window.
 
 ## The terminal client
 

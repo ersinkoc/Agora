@@ -1,0 +1,67 @@
+{
+  "format": "ghostty",
+  "scheme": "light",
+  "name": "Harbour Light",
+  "file": {
+    "agora-theme": 2,
+    "name": "Harbour Light",
+    "light": {
+      "tokens": {
+        "surface-0": "#fbf7f0",
+        "surface-1": "#f1ede7",
+        "surface-2": "#e6e3dd",
+        "border": "#d5d3cf",
+        "text": "#2a2f36",
+        "text-muted": "#494d52",
+        "accent": "#1d5fa8",
+        "on-accent": "#ffffff",
+        "state-working": "#1d5fa8",
+        "state-needs-you": "#8a5a00",
+        "state-finished": "#2d6a2e",
+        "state-idle": "#494d52",
+        "state-unknown": "#494d52"
+      },
+      "terminal": {
+        "background": "#fbf7f0",
+        "foreground": "#2a2f36",
+        "cursor": "#0b6e69",
+        "selection": "#c9dedc",
+        "black": "#2a2f36",
+        "red": "#b3261e",
+        "green": "#2d6a2e",
+        "yellow": "#8a5a00",
+        "blue": "#1d5fa8",
+        "magenta": "#7c3aa6",
+        "cyan": "#0b6e69",
+        "white": "#6b7280",
+        "bright-black": "#4b5563",
+        "bright-red": "#d0352c",
+        "bright-green": "#3a8a3b",
+        "bright-yellow": "#a56d00",
+        "bright-blue": "#2a74c9",
+        "bright-magenta": "#9550c4",
+        "bright-cyan": "#13857f",
+        "bright-white": "#f3efe7"
+      }
+    }
+  },
+  "notes": [
+    {
+      "code": "scheme",
+      "scheme": "light"
+    },
+    {
+      "code": "derived"
+    },
+    {
+      "code": "ignored",
+      "keys": [
+        "palette = 17",
+        "cursor-text",
+        "selection-foreground",
+        "font-family"
+      ],
+      "more": 0
+    }
+  ]
+}
