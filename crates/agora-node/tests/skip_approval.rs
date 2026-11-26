@@ -64,6 +64,17 @@ struct Env {
 /// A repository, manifests for the adapter kinds `modal` and `cfgmode` (whose mode is a config option of category `mode`) and, when
 /// given, the node's policy file.
 fn env(name: &str, policy: Option<&str>) -> Env {
+    // Each test has a folder of its own: two tests of this run with one name would remove and share each other's (the Windows run saw
+    // `crash` used twice). A name used twice fails here, at once, instead of as a flake.
+    static USED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut used = USED.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !used.iter().any(|u| u == name),
+            "env name {name:?} is used by two tests"
+        );
+        used.push(name.to_string());
+    }
     let dir = std::env::temp_dir().join(format!("agora-skip-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = dir.join("myproject");
@@ -1294,7 +1305,7 @@ fn a_restart_after_a_crash_into_a_mode_that_skips_stops_the_agent() {
     if !local() {
         return;
     }
-    let e = env("crash", None);
+    let e = env("crash-restart", None);
     let n = node(&e, false);
     let mut c = Client::connect(n.socket().unwrap()).unwrap();
     let id = start_of(&mut c, "startskip");
