@@ -275,9 +275,9 @@ impl Widget for TerminalPane<'_> {
                     continue;
                 };
                 out.reset();
-                    if let Some(p) = self.palette {
-                        out.set_style(Style::default().fg(p.fg).bg(p.bg));
-                    }
+                if let Some(p) = self.palette {
+                    out.set_style(Style::default().fg(p.fg).bg(p.bg));
+                }
                 if row >= size.rows || x >= size.cols {
                     continue;
                 }
@@ -285,10 +285,10 @@ impl Widget for TerminalPane<'_> {
                     continue;
                 };
                 out.set_style(self.selected(
-                        themed_style(cell.style, self.colors, self.palette),
-                        y,
-                        x,
-                    ));
+                    themed_style(cell.style, self.colors, self.palette),
+                    y,
+                    x,
+                ));
                 if cell.spacer {
                     // The right half of a wide character: ratatui skips it when it draws the left half.
                     out.set_symbol(" ");

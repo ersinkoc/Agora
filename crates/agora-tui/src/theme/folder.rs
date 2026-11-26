@@ -269,7 +269,14 @@ mod tests {
         ] {
             assert_eq!(Choice::parse(&c.line()), c);
         }
-        for bad in ["", "built-in nope", "file dark ../x.json", "file blue x.json", "file dark x.txt", "slate"] {
+        for bad in [
+            "",
+            "built-in nope",
+            "file dark ../x.json",
+            "file blue x.json",
+            "file dark x.txt",
+            "slate",
+        ] {
             assert_eq!(Choice::parse(bad), Choice::Terminal, "{bad}");
         }
     }
@@ -285,13 +292,24 @@ mod tests {
         // No theme, the six built-in themes, the broken file (one row), then Harbour's two schemes.
         assert_eq!(rows.len(), 1 + 6 + 1 + 2);
         assert_eq!(rows[0].choice(), Some(Choice::Terminal));
-        assert!(matches!(&rows[7].source, Source::File { name, read: Read::Refused(_) } if name == "a.json"));
+        assert!(
+            matches!(&rows[7].source, Source::File { name, read: Read::Refused(_) } if name == "a.json")
+        );
         assert_eq!(rows[7].choice(), None);
         assert_eq!(
-            rows[8..].iter().map(|r| r.choice().unwrap()).collect::<Vec<_>>(),
+            rows[8..]
+                .iter()
+                .map(|r| r.choice().unwrap())
+                .collect::<Vec<_>>(),
             [
-                Choice::File { name: "b.json".into(), scheme: Scheme::Dark },
-                Choice::File { name: "b.json".into(), scheme: Scheme::Light },
+                Choice::File {
+                    name: "b.json".into(),
+                    scheme: Scheme::Dark
+                },
+                Choice::File {
+                    name: "b.json".into(),
+                    scheme: Scheme::Light
+                },
             ]
         );
         assert_eq!(entries(&d.join("missing")).len(), 7);
@@ -305,7 +323,10 @@ mod tests {
         let f = std::fs::File::create(&big).unwrap();
         f.set_len(MAX_FILE_BYTES + 1).unwrap();
         assert_eq!(load_file(&big), Read::Refused(vec![Issue::TooLarge.into()]));
-        assert_eq!(load_file(&d.join("none.json")), Read::Refused(vec![Issue::Unreadable.into()]));
+        assert_eq!(
+            load_file(&d.join("none.json")),
+            Read::Refused(vec![Issue::Unreadable.into()])
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -322,7 +343,11 @@ mod tests {
         assert_eq!((theme.name.as_str(), scheme), ("Harbour", Scheme::Light));
         let before = stamp(&path);
         // A broken edit: the choice cannot be used, and says why.
-        std::fs::write(&path, r##"{"agora-theme": 2, "name": "Harbour", "dark": {"tokens": {"danger": "#ff0000"}}}"##).unwrap();
+        std::fs::write(
+            &path,
+            r##"{"agora-theme": 2, "name": "Harbour", "dark": {"tokens": {"danger": "#ff0000"}}}"##,
+        )
+        .unwrap();
         assert_ne!(stamp(&path), before);
         assert!(matches!(resolve(&choice, &d), Err(Read::Refused(_))));
         assert_eq!(resolve(&Choice::Terminal, &d), Ok(None));

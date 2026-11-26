@@ -3,6 +3,7 @@
 //! terminal through the hub (`Tab` picks the agent, `Enter` opens it, Ctrl-] comes back).
 
 use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -1945,6 +1946,15 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     } else {
         None
     };
+    // ADR-0113: the theme kept from the last run (none: the terminal's own colours).
+    if let Some(c) = console_state.as_mut() {
+        let choice = agora_tui::theme::folder::load_choice(
+            &home().join(agora_tui::theme::folder::CHOICE_FILE),
+        );
+        if let Some(n) = apply_theme(say, c, choice) {
+            c.notice = n;
+        }
+    }
     let _full = FullScreen(keys && console_state.is_none());
     if keys && console_state.is_none() {
         let _ = write!(std::io::stdout(), "\x1b[?1049h");
@@ -2627,6 +2637,104 @@ struct Console {
     /// agents are not offered again until the machine goes offline or comes back with another build, or the link to the hub is lost
     /// (as the web window does, #885).
     give_lacking: agora_tui::board::Lacking,
+    /// ADR-0113: the theme in use and how its file looked when it was last read.
+    theme: ThemeUse,
+}
+
+/// ADR-0113 step 3: the theme the console uses (`theme::folder::Choice`, kept in `tui-theme` in the Agora folder) and the stamp of its
+/// file, asked again every [`THEME_CHECK`] so an edited theme file shows without a restart (live reload).
+struct ThemeUse {
+    choice: agora_tui::theme::folder::Choice,
+    stamp: agora_tui::theme::folder::Stamp,
+    checked: Instant,
+}
+
+impl Default for ThemeUse {
+    fn default() -> Self {
+        ThemeUse {
+            choice: agora_tui::theme::folder::Choice::Terminal,
+            stamp: None,
+            checked: Instant::now(),
+        }
+    }
+}
+
+/// How often the theme file in use is asked whether it changed (its size and time only; it is read again only then).
+const THEME_CHECK: Duration = Duration::from_secs(1);
+
+/// The terminal client's themes folder: `themes` in the Agora folder.
+fn themes_folder() -> PathBuf {
+    home().join(agora_tui::theme::folder::FOLDER)
+}
+
+/// The themes folder as the theme list shows it: `~/.agora/themes` under the home folder.
+fn themes_folder_shown() -> String {
+    let folder = themes_folder();
+    let home_dir = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match home_dir.and_then(|h| {
+        folder
+            .strip_prefix(PathBuf::from(h))
+            .ok()
+            .map(Path::to_path_buf)
+    }) {
+        Some(rest) if std::env::var_os("AGORA_HOME").is_none() => {
+            format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+        }
+        _ => folder.display().to_string(),
+    }
+}
+
+/// Uses `choice` in the console: the shell's look, or the terminal's own colours with the reason when its file cannot be used now.
+/// The choice is kept either way, so a file fixed later is used again (live reload). Answers the notice to show, if any.
+fn apply_theme(
+    say: &Say,
+    c: &mut Console,
+    choice: agora_tui::theme::folder::Choice,
+) -> Option<String> {
+    use agora_tui::theme::folder;
+    let dir = themes_folder();
+    c.theme.stamp = folder::path_of(&choice, &dir).and_then(|p| folder::stamp(&p));
+    c.theme.checked = Instant::now();
+    let notice = match folder::resolve(&choice, &dir) {
+        Ok(Some((theme, scheme))) => {
+            c.app.look = agora_tui::theme::map::Shell::new(&theme, scheme, c.colors);
+            None
+        }
+        Ok(None) => {
+            c.app.look = None;
+            None
+        }
+        Err(_) => {
+            c.app.look = None;
+            let file = match &choice {
+                folder::Choice::File { name, .. } => name.clone(),
+                _ => String::new(),
+            };
+            Some(say.text(key!("tui-theme-fell-back"), &[("file", Arg::Str(file))]))
+        }
+    };
+    c.theme.choice = choice;
+    notice
+}
+
+/// Live reload: the theme file in use is used again when it changed since it was read. Answers whether the window must be drawn
+/// again, and the notice when the file cannot be used any more.
+fn reload_theme(say: &Say, c: &mut Console) -> (bool, Option<String>) {
+    use agora_tui::theme::folder;
+    if c.theme.checked.elapsed() < THEME_CHECK {
+        return (false, None);
+    }
+    c.theme.checked = Instant::now();
+    let Some(path) = folder::path_of(&c.theme.choice, &themes_folder()) else {
+        return (false, None);
+    };
+    if folder::stamp(&path) == c.theme.stamp {
+        return (false, None);
+    }
+    let choice = c.theme.choice.clone();
+    let before = c.app.look;
+    let notice = apply_theme(say, c, choice);
+    (c.app.look != before || notice.is_some(), notice)
 }
 
 impl Console {
@@ -2658,6 +2766,7 @@ impl Console {
             asked: false,
             typing_taken: std::collections::HashMap::new(),
             give_lacking: agora_tui::board::Lacking::default(),
+            theme: ThemeUse::default(),
         }
     }
 }
@@ -2823,6 +2932,12 @@ fn console(
                 return Next::Reconnect;
             }
         }
+        // ADR-0113: an edited theme file shows at once.
+        let (changed, theme_notice) = reload_theme(say, c);
+        if let Some(n) = theme_notice {
+            c.notice = n;
+        }
+        redraw |= changed;
         // ADR-0065: the cards the hub sent an owner's window, and what became of the ones it ended.
         for note in session.take_pair_notes() {
             c.pair.apply(note);
@@ -4702,6 +4817,14 @@ fn command(
             let _ = c.window.invalidate();
             false
         }
+        // ADR-0113: the theme list, whole-screen; what was chosen is used at once and kept for the next run.
+        't' => {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
+                theme_view(say, session, ask)
+            });
+            let _ = c.window.invalidate();
+            false
+        }
         // ADR-0041: the grant the footer asked for when typing into the agent in front was refused. Only this key opens the question
         // (from the list, Ctrl-] then g): what follows is meant for it. Without such a refusal it does nothing.
         'g' => {
@@ -4738,6 +4861,77 @@ fn command(
             false
         }
         _ => false,
+    }
+}
+
+/// ADR-0113 step 3: the theme list, whole-screen, drawn in the theme the keyboard is on, until q or Esc. Enter on a theme uses it and
+/// keeps the choice (`tui-theme`); a file that cannot be used says why below the list and is not offered. The folder is read when the
+/// list opens. Answers the line the console shows after it.
+fn theme_view(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
+    use agora_tui::theme::{folder, list};
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let entries = folder::entries(&themes_folder());
+    let shown_folder = themes_folder_shown();
+    let current = ask.c.theme.choice.clone();
+    let mut at = entries
+        .iter()
+        .position(|e| e.choice().as_ref() == Some(&current))
+        .unwrap_or(0);
+    let mut notice = String::new();
+    let mut view = ViewWait::new(say, ask);
+    loop {
+        let colors = ask.c.colors;
+        let banner = view.banner.clone();
+        let _ = ask.c.window.draw(|f| {
+            list::draw(
+                f,
+                &list::ListView {
+                    entries: &entries,
+                    selected: at,
+                    current: &current,
+                    folder: &shown_folder,
+                    notice: &notice,
+                    banner: &banner,
+                    colors,
+                    t: &text,
+                },
+            );
+        });
+        let wake = view.wait(say, ask, session);
+        if matches!(wake, Wake::Key(_)) {
+            notice.clear();
+        }
+        match wake {
+            Wake::Key(b'j') => at = (at + 1).min(entries.len().saturating_sub(1)),
+            Wake::Key(b'k') => at = at.saturating_sub(1),
+            Wake::Key(b'\r' | b'\n') => {
+                let Some(choice) = entries.get(at).and_then(folder::Entry::choice) else {
+                    notice = say.text(key!("tui-theme-cannot-use"), &[]);
+                    continue;
+                };
+                let name = entries
+                    .get(at)
+                    .map(|e| list::entry_label(e, &text))
+                    .unwrap_or_default();
+                let fell_back = apply_theme(say, ask.c, choice.clone());
+                let saved = folder::save_choice(&home().join(folder::CHOICE_FILE), &choice);
+                return match (fell_back, saved) {
+                    (Some(n), _) => n,
+                    (None, Err(e)) => say.text(
+                        key!("tui-theme-not-kept"),
+                        &[
+                            ("name", Arg::Str(name)),
+                            ("code", Arg::Str(format!("{:?}", e.kind()))),
+                        ],
+                    ),
+                    (None, Ok(())) => {
+                        say.text(key!("tui-theme-chosen"), &[("name", Arg::Str(name))])
+                    }
+                };
+            }
+            Wake::Gone | Wake::Key(b'q' | 0x1b | 3) => return String::new(),
+            Wake::Key(_) | Wake::Redraw => {}
+        }
     }
 }
 

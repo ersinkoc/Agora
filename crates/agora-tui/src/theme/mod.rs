@@ -457,13 +457,14 @@ impl Theme {
         if self.shape.iter().zip(DEFAULT_SHAPE).any(|(a, b)| a != b) {
             out.push(Unused::Sizes);
         }
-        if self.fonts.iter().zip(DEFAULT_FONTS).any(|(a, b)| a != b) || self.text != DEFAULT_TEXT
-        {
+        if self.fonts.iter().zip(DEFAULT_FONTS).any(|(a, b)| a != b) || self.text != DEFAULT_TEXT {
             out.push(Unused::Text);
         }
         let looks = || self.looks.iter().flatten();
         for (r, _) in REGIONS.iter().enumerate() {
-            if !DRAWN_REGIONS.contains(&r) && looks().any(|l| l.regions[r].iter().any(Option::is_some)) {
+            if !DRAWN_REGIONS.contains(&r)
+                && looks().any(|l| l.regions[r].iter().any(Option::is_some))
+            {
                 out.push(Unused::Region(r));
             }
         }
@@ -668,7 +669,10 @@ mod tests {
             let end = at + css[at..].find('}').unwrap();
             css[at..end].to_string()
         };
-        for (scheme, start) in [(Scheme::Dark, "[data-theme='dark'] {"), (Scheme::Light, "[data-theme='light'] {")] {
+        for (scheme, start) in [
+            (Scheme::Dark, "[data-theme='dark'] {"),
+            (Scheme::Light, "[data-theme='light'] {"),
+        ] {
             let block = block(start);
             for (i, name) in COLOUR_TOKENS.iter().enumerate() {
                 let line = block
@@ -676,7 +680,11 @@ mod tests {
                     .find(|l| l.trim_start().starts_with(&format!("--{name}:")))
                     .unwrap_or_else(|| panic!("{name}"));
                 let value = line.split(':').nth(1).unwrap().trim().trim_end_matches(';');
-                assert_eq!(colour::parse_hex(value), Some(base_colours(scheme)[i]), "{name} {scheme:?}");
+                assert_eq!(
+                    colour::parse_hex(value),
+                    Some(base_colours(scheme)[i]),
+                    "{name} {scheme:?}"
+                );
             }
         }
     }
@@ -686,7 +694,17 @@ mod tests {
     fn built_ins_are_the_web_themes() {
         let ts = include_str!("../../../../apps/web/src/themes/tokens.ts");
         let ids: Vec<&str> = built_ins().iter().map(|b| b.id).collect();
-        assert_eq!(ids, ["dark", "light", "high-contrast", "large-text", "slate", "sand"]);
+        assert_eq!(
+            ids,
+            [
+                "dark",
+                "light",
+                "high-contrast",
+                "large-text",
+                "slate",
+                "sand"
+            ]
+        );
         for b in built_ins() {
             let at = ts.find(&format!("builtIn('{}'", b.id)).unwrap();
             let rest = &ts[at + 1..];
@@ -700,14 +718,27 @@ mod tests {
             let look = b.theme.look(b.scheme).unwrap();
             for (i, name) in COLOUR_TOKENS.iter().enumerate() {
                 if def.contains(&format!("'{name}': '")) || def.contains(&format!(" {name}: '")) {
-                    assert!(def.contains(&colour::hex(look.colours[i])), "{} {name}", b.id);
+                    assert!(
+                        def.contains(&colour::hex(look.colours[i])),
+                        "{} {name}",
+                        b.id
+                    );
                 } else {
-                    assert_eq!(look.colours[i], base_colours(b.scheme)[i], "{} {name}", b.id);
+                    assert_eq!(
+                        look.colours[i],
+                        base_colours(b.scheme)[i],
+                        "{} {name}",
+                        b.id
+                    );
                 }
             }
             for (i, (name, _, _)) in SHAPE_TOKENS.iter().enumerate() {
                 if def.contains(&format!("'{name}'")) {
-                    assert!(def.contains(&format!("'{name}': '{}'", b.theme.shape[i])), "{} {name}", b.id);
+                    assert!(
+                        def.contains(&format!("'{name}': '{}'", b.theme.shape[i])),
+                        "{} {name}",
+                        b.id
+                    );
                 }
             }
         }
@@ -718,6 +749,11 @@ mod tests {
         assert_eq!(floor_of("approval"), Some(FloorItem::ApprovalCard));
         assert_eq!(floor_of("state-needs-you"), None);
         assert_eq!(floor_of("accent"), None);
-        assert!(is_unsafe("x URL(y)") && is_unsafe("a;b") && is_unsafe("<") && !is_unsafe("Inter, sans-serif"));
+        assert!(
+            is_unsafe("x URL(y)")
+                && is_unsafe("a;b")
+                && is_unsafe("<")
+                && !is_unsafe("Inter, sans-serif")
+        );
     }
 }

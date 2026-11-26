@@ -7,7 +7,7 @@
 A **theme** is a small file of **design tokens** (the variables in `apps/web/src/design/tokens.css`). Every colour, font, size,
 corner and spacing a component draws comes from a token (`visual-language.md` §3), so a theme restyles the whole window without
 code. This page is the file format's specification and the web window's behaviour. Rung 2 covers the web window; the terminal
-client maps the same tokens in rung 5. The hub is not involved: themes and the choice are kept in the browser (syncing them
+client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). The hub is not involved: themes and the choice are kept in the browser (syncing them
 per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6).
 
 **Format 2** ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md), below) goes deeper where the look comes from:
@@ -330,14 +330,67 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
   **Export** saves the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back
   to Light and Dark), **Reset to defaults** as above.
 
+## The terminal client
+
+`agora tui` reads the same theme files, format 1 and 2, with the same rules (ADR-0113 decision 4, build step 3;
+`crates/agora-tui/src/theme/`).
+
+- **Where themes come from.** The six built-in themes above, and every `*.json` file directly in the **themes folder**:
+  `themes` in the Agora folder, so `~/.agora/themes` (or `$AGORA_HOME/themes`), beside the client's device key. The theme in use
+  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>` or `file <dark|light> <file name>`). The first entry,
+  **Your terminal's colours**, is no theme: the client draws exactly as it did before themes (the default).
+- **Choosing.** `t` in the agents list, or **Theme…** in the commands (Ctrl K), opens the theme list: whole-screen, drawn in the
+  theme the keyboard is on, so a theme shows before it is chosen. Enter uses it at once and keeps it for the next start; q or Esc
+  goes back. A theme with both schemes is two rows ("Harbour · dark", "Harbour · light"): a terminal has no light or dark setting
+  to follow, so the person picks one. A viewer may choose a theme too: it changes nothing on the hub.
+- **Live reload.** The file in use is asked for its size and time once a second (nothing is read unless they changed) and read
+  again when it changed. A file that can no longer be used leaves the terminal's own colours with a notice ("press t to see why");
+  the choice is kept, so the theme comes back when the file is fixed. The folder itself is read when the list opens. No file-watch
+  dependency is used.
+- **Reading.** One function that never panics reads a file and reports every problem at once, in the web's words
+  (`locales/<lang>/tui.ftl`, `tui-theme-error-*`): the size cap (asked of the file system before anything is read), unknown fields
+  at every level, closed value kinds, the floor, unsafe pieces, and the readability pairs of items 1–4 and 7, so **a file is
+  accepted or refused alike in both clients**, including for a region this client does not draw. The warnings are the ones about
+  what this client draws: the 16 colours and the selection on the terminal's background. The web's warnings about its widget kit
+  (items 5 and 6), the cursor and code colours are not repeated. The list shows a refused file as "can't be used", with every
+  reason below it, and never offers it.
+- **Colours.** The client detects what the terminal shows as it always has (`COLORTERM`, `TERM`, the Windows host; `NO_COLOR`
+  turns colour off, and with it every theme: the list says so). With 24-bit colour every value is used as it is. With the
+  256-colour palette each colour is the nearest entry of the cube or grey ramp (never the first 16, which the user's own terminal
+  theme decides); with 16 colours, the nearest of the 16 by xterm's values. Colours are mapped **in pairs**: each text colour is
+  the nearest entry that still reads at 4.5:1 on its mapped background (a line at 1.2:1), so a truecolor theme stays readable on
+  a 16-colour terminal; the mapping is computed once per theme, never per frame. A test holds every built-in theme and a sample
+  file to this in all three modes.
+- **What it draws.** The agents list in `sidebar`, the tab row in `tab-bar`, the footer in `status-line` (each region's
+  background and text, the secondary text on it), the inspector in the panels' colours, the window and the welcome in the
+  background, the selected row and the tab in front in the accent with the text on accent (instead of inverted), the dividers in
+  the lines' colour. Terminal panes take the theme's terminal palette, or without it the pane's background, the theme's text and
+  the scheme's 16 colours: a program's default colours and its 16 colours (with 16 colours the terminal's own 16 stay), and the
+  selection at 40 % over the background (inverted where it would not stand out).
+- **Chrome it draws.** `pane-borders` (auto: the dividers between panes; always: also a line under the tab bar and above the
+  footer; off: blank dividers), `line-width` (0 none, 1 `│`, 2 `┃`), `pane-gap` (above 0 the divider column is a blank gap) and
+  `density` (roomy: a column clear on each side of the agents list's and the inspector's text; compact and normal are how the
+  client always draws).
+- **Not used here, and listed as such.** Under the selected theme the list says "Not used in the terminal client: …" for what that
+  theme sets that this client cannot draw: text size, spacing and corners (the terminal's cells), fonts and text style (the
+  terminal's font), the other regions' colours, the cursor colour (the user's terminal's own), code colours, and the tab bar's
+  position, the tab style, the state display, icons, shadows and motion. Large text, for example, is Dark's colours here.
+- **The floor.** The request box (the box that asks for an answer, `app::dialog`) is cleared to the terminal's own colours and
+  drawn as before, whatever the theme; every "needs you" mark (the `!` and the words in the agents list, a waiting tab's label,
+  the tab row's count, the welcome's list, the theme list's banner) keeps its fixed colour and bold and sits on the terminal's own
+  background, so no theme's surface can hide it. A test compares those cells, character, colours and attributes, with and
+  without each built-in theme and the sample file, in all three colour modes. The other screens (the board, files, review, the
+  folder picker and the plain list when the output is piped) still draw in the terminal's own colours.
+
 ## Not yet (later steps of ADR-0113)
 
 - **Theme packs** and "Export as pack": a theme with its layouts (and keys, once ADR-0068 rung 4 exists); build step 2.
-- **The terminal client** reading format 2 (colours mapped to what the terminal supports, the chrome it can draw); step 3.
 - **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
 - **The community catalog** and `agora hub themes update`; step 5.
 - More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
   ADR-0113, whose answer is: not in format 2).
 - The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.
-- A themes folder watched on disk (the desktop app, the terminal client): the browser has no folder, so "live reload" here is
-  the editor and other tabs.
+- A themes folder watched on disk for the desktop app: the browser has no folder, so "live reload" there is the editor and other
+  tabs (the terminal client has its folder, [above](#the-terminal-client)).
+- In the terminal client: the board, files, review and folder-picker screens in the theme's colours, and following a light or
+  dark terminal by itself.

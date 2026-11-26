@@ -241,9 +241,12 @@ pub fn styles(look: &Look, scheme: Scheme, mode: ColorMode) -> Styles {
         tabs: region(look, scheme, TAB_BAR, mode),
         inspector: part(look, c[SURFACE_1], c[TEXT], mode),
         footer: region(look, scheme, STATUS_LINE, mode),
-        chosen: Style::default()
-            .bg(accent)
-            .fg(foreground(c[ON_ACCENT], accent_shown, TEXT_MIN, mode)),
+        chosen: Style::default().bg(accent).fg(foreground(
+            c[ON_ACCENT],
+            accent_shown,
+            TEXT_MIN,
+            mode,
+        )),
         line: Style::default()
             .bg(base.fill.bg.unwrap_or(Color::Reset))
             .fg(foreground(line_colour, base_shown, LINE_MIN, mode)),
@@ -255,7 +258,12 @@ pub fn styles(look: &Look, scheme: Scheme, mode: ColorMode) -> Styles {
 pub fn pane_palette(look: &Look, scheme: Scheme, mode: ColorMode) -> PanePalette {
     let bg_rgb = terminal_colour(look, scheme, T_BACKGROUND);
     let (bg, shown) = background(bg_rgb, mode);
-    let fg = foreground(terminal_colour(look, scheme, T_FOREGROUND), shown, TEXT_MIN, mode);
+    let fg = foreground(
+        terminal_colour(look, scheme, T_FOREGROUND),
+        shown,
+        TEXT_MIN,
+        mode,
+    );
     let ansi = std::array::from_fn(|i| {
         let c = terminal_colour(look, scheme, T_ANSI + i);
         match mode {
@@ -265,7 +273,11 @@ pub fn pane_palette(look: &Look, scheme: Scheme, mode: ColorMode) -> PanePalette
             ColorMode::Full | ColorMode::Mono => Color::Rgb(c[0], c[1], c[2]),
         }
     });
-    let sel_rgb = over(terminal_colour(look, scheme, T_SELECTION), SELECTION_ALPHA, bg_rgb);
+    let sel_rgb = over(
+        terminal_colour(look, scheme, T_SELECTION),
+        SELECTION_ALPHA,
+        bg_rgb,
+    );
     let (sel, _) = background(sel_rgb, mode);
     PanePalette {
         fg,
@@ -326,9 +338,24 @@ mod tests {
             out.push((name, shown(p.fill.fg.unwrap(), mode), bg, TEXT_MIN));
             out.push((name, shown(p.dim.fg.unwrap(), mode), bg, TEXT_MIN));
         }
-        out.push(("chosen", shown(s.chosen.fg.unwrap(), mode), shown(s.chosen.bg.unwrap(), mode), TEXT_MIN));
-        out.push(("line", shown(s.line.fg.unwrap(), mode), shown(s.line.bg.unwrap(), mode), LINE_MIN));
-        out.push(("pane", shown(s.pane.fg, mode), shown(s.pane.bg, mode), TEXT_MIN));
+        out.push((
+            "chosen",
+            shown(s.chosen.fg.unwrap(), mode),
+            shown(s.chosen.bg.unwrap(), mode),
+            TEXT_MIN,
+        ));
+        out.push((
+            "line",
+            shown(s.line.fg.unwrap(), mode),
+            shown(s.line.bg.unwrap(), mode),
+            LINE_MIN,
+        ));
+        out.push((
+            "pane",
+            shown(s.pane.fg, mode),
+            shown(s.pane.bg, mode),
+            TEXT_MIN,
+        ));
         out
     }
 
@@ -336,8 +363,10 @@ mod tests {
     #[test]
     fn every_drawn_pair_stays_readable_in_every_mode() {
         let harbour = read_text(include_str!("testdata/harbour.json"));
-        let mut themes: Vec<(String, Theme)> =
-            built_ins().into_iter().map(|b| (b.id.to_string(), b.theme)).collect();
+        let mut themes: Vec<(String, Theme)> = built_ins()
+            .into_iter()
+            .map(|b| (b.id.to_string(), b.theme))
+            .collect();
         themes.push(("harbour".into(), harbour.theme().unwrap().clone()));
         for (id, theme) in &themes {
             for scheme in theme.schemes() {
@@ -354,7 +383,11 @@ mod tests {
 
     #[test]
     fn mapping_is_deterministic_and_follows_the_mode() {
-        let slate = built_ins().into_iter().find(|b| b.id == "slate").unwrap().theme;
+        let slate = built_ins()
+            .into_iter()
+            .find(|b| b.id == "slate")
+            .unwrap()
+            .theme;
         let full = Shell::new(&slate, Scheme::Dark, ColorMode::Full).unwrap();
         assert_eq!(full.styles.base.fill.bg, Some(Color::Rgb(0x0f, 0x14, 0x19)));
         assert_eq!(full.styles.base.fill.fg, Some(Color::Rgb(0xe6, 0xed, 0xf3)));
@@ -363,11 +396,17 @@ mod tests {
         assert_eq!(a, b);
         // 256 colours: the cube and the grey ramp only, never the user's own 16.
         assert!(matches!(a.styles.base.fill.bg, Some(Color::Indexed(i)) if i >= 16));
-        assert_eq!(a.styles.base.fill.bg, Some(Color::Indexed(nearest256(0x0f, 0x14, 0x19))));
+        assert_eq!(
+            a.styles.base.fill.bg,
+            Some(Color::Indexed(nearest256(0x0f, 0x14, 0x19)))
+        );
         // 16 colours: a dark surface is black, its text white; the pane keeps the terminal's own 16.
         let c = Shell::new(&slate, Scheme::Dark, ColorMode::Ansi16).unwrap();
         assert_eq!(c.styles.base.fill.bg, Some(Color::Indexed(0)));
-        assert!(matches!(c.styles.base.fill.fg, Some(Color::Indexed(7 | 15))));
+        assert!(matches!(
+            c.styles.base.fill.fg,
+            Some(Color::Indexed(7 | 15))
+        ));
         assert_eq!(c.styles.pane.ansi[1], Color::Indexed(1));
         // No colour at all: no theme.
         assert_eq!(Shell::new(&slate, Scheme::Dark, ColorMode::Mono), None);
@@ -381,7 +420,10 @@ mod tests {
         let on = rgb_of(xterm_rgb(0));
         let fg = foreground([0x30, 0x30, 0x30], on, TEXT_MIN, ColorMode::Ansi16);
         assert!(contrast(shown(fg, ColorMode::Ansi16), on) >= TEXT_MIN);
-        assert_eq!(fg, foreground([0x30, 0x30, 0x30], on, TEXT_MIN, ColorMode::Ansi16));
+        assert_eq!(
+            fg,
+            foreground([0x30, 0x30, 0x30], on, TEXT_MIN, ColorMode::Ansi16)
+        );
         assert_eq!(
             foreground([1, 2, 3], on, TEXT_MIN, ColorMode::Full),
             Color::Rgb(1, 2, 3)
@@ -391,7 +433,9 @@ mod tests {
     #[test]
     fn chrome_maps_to_what_the_shell_draws() {
         let read = |chrome: &str| {
-            let text = format!(r#"{{"agora-theme": 2, "name": "x", "inherits": "dark", "chrome": {chrome}}}"#);
+            let text = format!(
+                r#"{{"agora-theme": 2, "name": "x", "inherits": "dark", "chrome": {chrome}}}"#
+            );
             ShellChrome::of(read_text(&text).theme().unwrap())
         };
         assert_eq!(read("{}"), ShellChrome::default());
@@ -401,7 +445,10 @@ mod tests {
         assert_eq!(read(r#"{"line-width": 2}"#).divider(), "\u{2503}");
         assert_eq!(read(r#"{"pane-gap": 8}"#).divider(), " ");
         let always = read(r#"{"pane-borders": "always", "pane-gap": 8}"#);
-        assert_eq!((always.borders, always.divider(), always.rule()), (Borders::Always, "\u{2502}", "\u{2500}"));
+        assert_eq!(
+            (always.borders, always.divider(), always.rule()),
+            (Borders::Always, "\u{2502}", "\u{2500}")
+        );
         assert!(read(r#"{"density": "roomy"}"#).roomy);
         assert!(!read(r#"{"density": "compact"}"#).roomy);
     }
@@ -414,13 +461,23 @@ mod tests {
             ansi: [Color::Reset; 16],
             selection: Some(Color::Rgb(9, 9, 9)),
         };
-        let plain = Style::default().fg(Color::Rgb(5, 5, 5)).bg(Color::Rgb(0, 0, 0));
+        let plain = Style::default()
+            .fg(Color::Rgb(5, 5, 5))
+            .bg(Color::Rgb(0, 0, 0));
         assert_eq!(selected(plain, &p).bg, Some(Color::Rgb(9, 9, 9)));
         assert_eq!(selected(plain, &p).fg, Some(Color::Rgb(5, 5, 5)));
         let inverse = plain.add_modifier(Modifier::REVERSED);
         let s = selected(inverse, &p);
-        assert_eq!((s.fg, s.add_modifier.contains(Modifier::REVERSED)), (Some(Color::Rgb(0, 0, 0)), false));
-        let none = PanePalette { selection: None, ..p };
-        assert!(selected(plain, &none).add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(
+            (s.fg, s.add_modifier.contains(Modifier::REVERSED)),
+            (Some(Color::Rgb(0, 0, 0)), false)
+        );
+        let none = PanePalette {
+            selection: None,
+            ..p
+        };
+        assert!(selected(plain, &none)
+            .add_modifier
+            .contains(Modifier::REVERSED));
     }
 }

@@ -789,6 +789,7 @@ impl App {
             ('v', key!("tui-app-cmd-devices")),
             ('g', key!("tui-app-cmd-grant")),
             ('p', key!("tui-app-cmd-pair")),
+            ('t', key!("tui-app-cmd-theme")),
         ] {
             all.push((Command::Letter(c), t(label, &[])));
         }
@@ -1178,7 +1179,16 @@ impl App {
         let (base, tree, tabs, inspector, footer, chosen, line, title_style) = match &self.look {
             Some(l) => {
                 let st = &l.styles;
-                (st.base, st.tree, st.tabs, st.inspector, st.footer, st.chosen, st.line, st.tabs.dim)
+                (
+                    st.base,
+                    st.tree,
+                    st.tabs,
+                    st.inspector,
+                    st.footer,
+                    st.chosen,
+                    st.line,
+                    st.tabs.dim,
+                )
             }
             None => (
                 plain,
@@ -1224,7 +1234,10 @@ impl App {
                 let label = clip_to(&row.label, usize::from(a.tree.width));
                 let room = usize::from(a.tree.width).saturating_sub(text_width(&label) + 2);
                 // A machine in bold; a project under it (its folder) dim, as the web's tree.
-                let mut line = vec![Span::styled(label, if row.group { tree.dim } else { strong })];
+                let mut line = vec![Span::styled(
+                    label,
+                    if row.group { tree.dim } else { strong },
+                )];
                 // What the machine says (its memory, or when it was last seen) is cut with an ellipsis, never mid-word silently.
                 if !row.state.is_empty() && room > 1 {
                     line.push(Span::styled(
@@ -1558,7 +1571,10 @@ impl App {
             block.render(r, buf);
             let mut lines = vec![Line::raw(format!("> {}", p.query))];
             if items.is_empty() {
-                lines.push(Line::styled((s.t)(key!("tui-app-palette-none"), &[]), base.dim));
+                lines.push(Line::styled(
+                    (s.t)(key!("tui-app-palette-none"), &[]),
+                    base.dim,
+                ));
             }
             // The rows under the query line; the list scrolls so the chosen command stays in view.
             let shown = usize::from(inner.height.saturating_sub(1)).max(1);
@@ -1641,7 +1657,9 @@ const FOOTER_KEYS: usize = 40;
 /// It is the floor of ADR-0113 (decision 3): never a theme's colour, and on the user's terminal's own background (`Color::Reset`)
 /// whatever background a theme gives the part of the window it is in, so no theme can hide it.
 pub fn attention_style(colors: ColorMode) -> Style {
-    let bold = Style::default().add_modifier(Modifier::BOLD).bg(Color::Reset);
+    let bold = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .bg(Color::Reset);
     match colors {
         ColorMode::Mono => bold,
         ColorMode::Ansi16 => bold.fg(Color::Red),
@@ -4588,7 +4606,11 @@ mod theme_tests {
             .map(|(i, name)| Row {
                 id: format!("mac/agent-{}", i + 1),
                 label: (*name).to_string(),
-                state: if i == 2 { "needs you".into() } else { "idle".into() },
+                state: if i == 2 {
+                    "needs you".into()
+                } else {
+                    "idle".into()
+                },
                 needs_you: i == 2,
                 terminal: true,
                 header: false,
@@ -4615,7 +4637,8 @@ mod theme_tests {
             look,
             ..App::default()
         };
-        let mut tui = Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
+        let mut tui =
+            Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
         let details = vec!["Machine: mac".to_string()];
         tui.draw(|f| {
             app.draw(
@@ -4640,15 +4663,21 @@ mod theme_tests {
     }
 
     fn row_text(buf: &Buffer, y: u16) -> String {
-        (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
     }
 
     /// The cells of `needle` on row `y` (by display column: these are ASCII).
     fn cells_of(buf: &Buffer, y: u16, needle: &str) -> Vec<(u16, u16)> {
         let row = row_text(buf, y);
-        let at = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+        let at = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
         let x0 = u16::try_from(row[..at].chars().count()).unwrap();
-        (0..u16::try_from(needle.chars().count()).unwrap()).map(|i| (x0 + i, y)).collect()
+        (0..u16::try_from(needle.chars().count()).unwrap())
+            .map(|i| (x0 + i, y))
+            .collect()
     }
 
     /// ADR-0113 decision 3 and its verification: under any theme, the request's box and every "needs you" mark are drawn exactly as
@@ -4676,11 +4705,21 @@ mod theme_tests {
                 let (_, themed) = frame(Some(shell(b.id, colors)), colors, Some(&question));
                 for y in box_rect.y..box_rect.bottom() {
                     for x in box_rect.x..box_rect.right() {
-                        assert_eq!(themed[(x, y)], plain[(x, y)], "{} {colors:?}: the box at {x},{y}", b.id);
+                        assert_eq!(
+                            themed[(x, y)],
+                            plain[(x, y)],
+                            "{} {colors:?}: the box at {x},{y}",
+                            b.id
+                        );
                     }
                 }
                 for &(x, y) in &marks {
-                    assert_eq!(themed[(x, y)], plain[(x, y)], "{} {colors:?}: needs you at {x},{y}", b.id);
+                    assert_eq!(
+                        themed[(x, y)],
+                        plain[(x, y)],
+                        "{} {colors:?}: needs you at {x},{y}",
+                        b.id
+                    );
                 }
             }
             // The same holds for a theme file with its own terminal palette, regions and chrome.
@@ -4692,7 +4731,11 @@ mod theme_tests {
                 let (_, themed_plain) = frame(None, colors, Some(&question));
                 for y in box_rect.y..box_rect.bottom() {
                     for x in box_rect.x..box_rect.right() {
-                        assert_eq!(themed[(x, y)], themed_plain[(x, y)], "harbour {scheme:?} {colors:?}: the box");
+                        assert_eq!(
+                            themed[(x, y)],
+                            themed_plain[(x, y)],
+                            "harbour {scheme:?} {colors:?}: the box"
+                        );
                     }
                 }
             }
@@ -4705,9 +4748,18 @@ mod theme_tests {
         let (app, buf) = frame(Some(look), ColorMode::Full, None);
         let a = app.areas(AREA);
         let bg = |x: u16, y: u16| buf[(x, y)].bg;
-        assert_eq!(bg(a.terminal.x + 5, a.terminal.y + 5), look.styles.base.fill.bg.unwrap());
-        assert_eq!(bg(a.tree.x + 20, a.tree.bottom() - 1), look.styles.tree.fill.bg.unwrap());
-        assert_eq!(bg(a.footer.right() - 1, a.footer.y), look.styles.footer.fill.bg.unwrap());
+        assert_eq!(
+            bg(a.terminal.x + 5, a.terminal.y + 5),
+            look.styles.base.fill.bg.unwrap()
+        );
+        assert_eq!(
+            bg(a.tree.x + 20, a.tree.bottom() - 1),
+            look.styles.tree.fill.bg.unwrap()
+        );
+        assert_eq!(
+            bg(a.footer.right() - 1, a.footer.y),
+            look.styles.footer.fill.bg.unwrap()
+        );
         // The selected row is in the accent, not inverted.
         let sel = &buf[(a.tree.x + 3, a.tree.y + 1)];
         assert_eq!(sel.bg, look.styles.chosen.bg.unwrap());
@@ -4720,12 +4772,17 @@ mod theme_tests {
     #[test]
     fn the_chrome_moves_through_the_areas() {
         let read = |chrome: &str| {
-            let t = format!(r#"{{"agora-theme": 2, "name": "x", "inherits": "dark", "chrome": {chrome}}}"#);
+            let t = format!(
+                r#"{{"agora-theme": 2, "name": "x", "inherits": "dark", "chrome": {chrome}}}"#
+            );
             let r = read_text(&t);
             Shell::new(r.theme().unwrap(), Scheme::Dark, ColorMode::Full).unwrap()
         };
         let plain = App::default().areas(AREA);
-        let with = |look: Shell| App { look: Some(look), ..App::default() };
+        let with = |look: Shell| App {
+            look: Some(look),
+            ..App::default()
+        };
         // A theme with today's chrome leaves every area where it was.
         assert_eq!(with(read("{}")).areas(AREA), plain);
         // Always: a line under the tab bar and above the footer; the terminal is a row shorter at each.
@@ -4733,15 +4790,27 @@ mod theme_tests {
         let a = always.areas(AREA);
         assert_eq!(a.tab_rule.map(|r| r.y), Some(plain.tabs.y + 1));
         assert_eq!(a.footer_rule.map(|r| r.y), Some(plain.footer.y - 1));
-        assert_eq!((a.terminal.y, a.terminal.height), (plain.terminal.y + 1, plain.terminal.height - 2));
+        assert_eq!(
+            (a.terminal.y, a.terminal.height),
+            (plain.terminal.y + 1, plain.terminal.height - 2)
+        );
         assert_eq!(always.look.unwrap().chrome.borders, Borders::Always);
         let (_, buf) = frame(always.look, ColorMode::Full, None);
-        assert_eq!(buf[(a.terminal.x + 1, a.tab_rule.unwrap().y)].symbol(), "\u{2500}");
+        assert_eq!(
+            buf[(a.terminal.x + 1, a.tab_rule.unwrap().y)].symbol(),
+            "\u{2500}"
+        );
         // Roomy: a column clear on each side of the tree's and the inspector's text; the dividers stay where they were.
         let roomy = with(read(r#"{"density": "roomy"}"#)).areas(AREA);
-        assert_eq!((roomy.tree.x, roomy.tree.width), (plain.tree.x + 1, plain.tree.width - 2));
+        assert_eq!(
+            (roomy.tree.x, roomy.tree.width),
+            (plain.tree.x + 1, plain.tree.width - 2)
+        );
         assert_eq!(roomy.tree_box, plain.tree);
-        assert_eq!((roomy.tree_divider, roomy.terminal), (plain.tree_divider, plain.terminal));
+        assert_eq!(
+            (roomy.tree_divider, roomy.terminal),
+            (plain.tree_divider, plain.terminal)
+        );
         // Off, or a gap: the divider column is blank; a heavy line is drawn heavy.
         for (chrome, glyph) in [
             (r#"{"pane-borders": "off"}"#, " "),
@@ -4750,7 +4819,11 @@ mod theme_tests {
             ("{}", "\u{2502}"),
         ] {
             let (_, buf) = frame(Some(read(chrome)), ColorMode::Full, None);
-            assert_eq!(buf[(plain.tree_divider.unwrap(), 3)].symbol(), glyph, "{chrome}");
+            assert_eq!(
+                buf[(plain.tree_divider.unwrap(), 3)].symbol(),
+                glyph,
+                "{chrome}"
+            );
         }
     }
 }

@@ -110,7 +110,16 @@ mod tests {
     fn reads_short_and_long_hex_and_nothing_else() {
         assert_eq!(parse_hex("#FfF"), Some([255, 255, 255]));
         assert_eq!(parse_hex(" #0a0B0c "), Some([10, 11, 12]));
-        for bad in ["fff", "#ffff", "#gggggg", "red", "#ff00001", "#ééé", "rgb(0,0,0)", ""] {
+        for bad in [
+            "fff",
+            "#ffff",
+            "#gggggg",
+            "red",
+            "#ff00001",
+            "#ééé",
+            "rgb(0,0,0)",
+            "",
+        ] {
             assert_eq!(parse_hex(bad), None, "{bad}");
         }
         assert_eq!(hex([10, 11, 12]), "#0a0b0c");

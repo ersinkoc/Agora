@@ -83,7 +83,10 @@ pub fn entry_label(e: &Entry, t: Text<'_>) -> String {
                 shown
             }
         }
-        Source::File { name, .. } => t(key!("tui-theme-refused-row"), &[("file", Arg::Str(name.clone()))]),
+        Source::File { name, .. } => t(
+            key!("tui-theme-refused-row"),
+            &[("file", Arg::Str(name.clone()))],
+        ),
     }
 }
 
@@ -186,7 +189,10 @@ pub fn issue_text(p: &Problem, t: Text<'_>) -> String {
     match p.scheme {
         Some(s) => t(
             key!("tui-theme-issue-in-scheme"),
-            &[("scheme", Arg::Str(scheme_text(s, t))), ("text", Arg::Str(text))],
+            &[
+                ("scheme", Arg::Str(scheme_text(s, t))),
+                ("text", Arg::Str(text)),
+            ],
         ),
         None => text,
     }
@@ -258,15 +264,24 @@ fn issue_sentence(i: &Issue, t: Text<'_>) -> String {
         Issue::Unsafe(f) => t(key!("tui-theme-error-unsafe"), &[("field", s(f))]),
         Issue::Floor { field, item } => t(
             key!("tui-theme-error-floor"),
-            &[("field", s(field)), ("reason", Arg::Str(floor_reason(*item, t)))],
+            &[
+                ("field", s(field)),
+                ("reason", Arg::Str(floor_reason(*item, t))),
+            ],
         ),
         Issue::TextFloor { field } => t(
             key!("tui-theme-error-text-floor"),
-            &[("field", s(field)), ("min", Arg::Str(format!("{MIN_BASE_TEXT}")))],
+            &[
+                ("field", s(field)),
+                ("min", Arg::Str(format!("{MIN_BASE_TEXT}"))),
+            ],
         ),
         Issue::TextLifted { from } => t(
             key!("tui-theme-warning-text-lifted"),
-            &[("from", s(from)), ("to", Arg::Str(format!("{MIN_BASE_TEXT}px")))],
+            &[
+                ("from", s(from)),
+                ("to", Arg::Str(format!("{MIN_BASE_TEXT}px"))),
+            ],
         ),
         Issue::Inherits(id) => t(key!("tui-theme-error-inherits"), &[("id", s(id))]),
         Issue::Contrast { fg, bg, ratio, min } => pair(
@@ -285,10 +300,16 @@ fn issue_sentence(i: &Issue, t: Text<'_>) -> String {
         } => {
             let region_name = Arg::Str(region_label(*region, t));
             let fg = match fg {
-                RegionFg::Text => t(key!("tui-theme-region-part-text"), &[("region", region_name.clone())]),
+                RegionFg::Text => t(
+                    key!("tui-theme-region-part-text"),
+                    &[("region", region_name.clone())],
+                ),
                 RegionFg::Token(i) => token_label(super::COLOUR_TOKENS[*i], t),
             };
-            let bg = t(key!("tui-theme-region-part-surface"), &[("region", region_name)]);
+            let bg = t(
+                key!("tui-theme-region-part-surface"),
+                &[("region", region_name)],
+            );
             pair(fg, bg, *ratio, *min, *min < 4.5, t)
         }
         Issue::TerminalContrast { ratio } => pair(
@@ -312,7 +333,10 @@ fn issue_sentence(i: &Issue, t: Text<'_>) -> String {
         ),
         Issue::TooLarge => t(
             key!("tui-theme-error-too-large"),
-            &[("max", n(usize::try_from(super::file::MAX_FILE_BYTES / 1024).unwrap_or(256)))],
+            &[(
+                "max",
+                n(usize::try_from(super::file::MAX_FILE_BYTES / 1024).unwrap_or(256)),
+            )],
         ),
         Issue::Unreadable => t(key!("tui-theme-error-unreadable"), &[]),
         Issue::More(count) => t(key!("tui-theme-error-more"), &[("count", n(*count))]),
@@ -352,7 +376,10 @@ pub fn details(v: &ListView<'_>) -> Vec<String> {
         return out;
     };
     if let Source::File { name, .. } = &e.source {
-        out.push(t(key!("tui-theme-in-file"), &[("file", Arg::Str(name.clone()))]));
+        out.push(t(
+            key!("tui-theme-in-file"),
+            &[("file", Arg::Str(name.clone()))],
+        ));
     }
     match &e.source {
         Source::Terminal => out.push(t(key!("tui-theme-terminal-hint"), &[])),
@@ -369,9 +396,16 @@ pub fn details(v: &ListView<'_>) -> Vec<String> {
                 &[("scheme", Arg::Str(scheme_text(e.scheme, t)))],
             ));
             if let Some(theme) = e.theme() {
-                let unused: Vec<String> = theme.unused().into_iter().map(|u| unused_text(u, t)).collect();
+                let unused: Vec<String> = theme
+                    .unused()
+                    .into_iter()
+                    .map(|u| unused_text(u, t))
+                    .collect();
                 if !unused.is_empty() {
-                    out.push(t(key!("tui-theme-unused"), &[("list", Arg::Str(unused.join(", ")))]));
+                    out.push(t(
+                        key!("tui-theme-unused"),
+                        &[("list", Arg::Str(unused.join("; ")))],
+                    ));
                 }
             }
             if let Source::File {
@@ -426,7 +460,10 @@ pub fn draw(f: &mut Frame<'_>, v: &ListView<'_>) {
     let head = vec![
         Line::styled(t(key!("tui-theme-title"), &[]), strong),
         Line::styled(
-            t(key!("tui-theme-folder"), &[("folder", Arg::Str(v.folder.to_string()))]),
+            t(
+                key!("tui-theme-folder"),
+                &[("folder", Arg::Str(v.folder.to_string()))],
+            ),
             dim,
         ),
     ];
@@ -435,7 +472,13 @@ pub fn draw(f: &mut Frame<'_>, v: &ListView<'_>) {
     let body = area.height.saturating_sub(2 + 1);
     let about_h = wrapped(&about).min(body / 2);
     let list_h = body.saturating_sub(about_h + u16::from(about_h > 0));
-    Paragraph::new(head).render(Rect { height: area.height.min(2), ..area }, buf);
+    Paragraph::new(head).render(
+        Rect {
+            height: area.height.min(2),
+            ..area
+        },
+        buf,
+    );
     let room = usize::from(list_h).max(1);
     let top = v.selected.saturating_sub(room - 1);
     let rows: Vec<Line<'_>> = v
@@ -499,4 +542,257 @@ pub fn draw(f: &mut Frame<'_>, v: &ListView<'_>) {
         },
         buf,
     );
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::theme::built_ins;
+    use crate::theme::file::read_text;
+    use crate::theme::folder::entries;
+    use agora_i18n::Catalog;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal as Tui;
+
+    fn every_issue() -> Vec<Problem> {
+        let mut out: Vec<Problem> = vec![
+            Issue::Json,
+            Issue::Invalid,
+            Issue::Newer,
+            Issue::Name,
+            Issue::Scheme,
+            Issue::NoLook,
+            Issue::UnknownField("x".into()),
+            Issue::UnknownToken("x".into()),
+            Issue::DerivedToken {
+                token: "text-12".into(),
+                base: "text-16",
+            },
+            Issue::MovedToken {
+                field: "shape.font-ui".into(),
+                token: "font-ui".into(),
+                to: "text",
+            },
+            Issue::BadValue("accent"),
+            Issue::BadValue("font-ui"),
+            Issue::BadValue("space-1"),
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::Group,
+            },
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::Colour,
+            },
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::Size { min: 0, max: 16 },
+            },
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::List("a, b".into()),
+            },
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::LineHeight,
+            },
+            Issue::BadField {
+                field: "f".into(),
+                expect: Expect::Switch,
+            },
+            Issue::Unsafe("name".into()),
+            Issue::TextFloor {
+                field: "shape.text-16".into(),
+            },
+            Issue::TextLifted {
+                from: "12px".into(),
+            },
+            Issue::Inherits("nope".into()),
+            Issue::Contrast {
+                fg: 4,
+                bg: 0,
+                ratio: 1.6,
+                min: 4.5,
+            },
+            Issue::RegionContrast {
+                region: 3,
+                fg: RegionFg::Text,
+                ratio: 1.2,
+                min: 4.5,
+            },
+            Issue::RegionContrast {
+                region: 0,
+                fg: RegionFg::Token(8),
+                ratio: 1.2,
+                min: 3.0,
+            },
+            Issue::TerminalContrast { ratio: 2.0 },
+            Issue::AnsiContrast {
+                colour: 4,
+                ratio: 1.1,
+            },
+            Issue::SelectionContrast { ratio: 1.0 },
+            Issue::TooLarge,
+            Issue::Unreadable,
+            Issue::More(3),
+            Issue::More(1),
+        ]
+        .into_iter()
+        .map(Problem::from)
+        .collect();
+        for item in [
+            FloorItem::Danger,
+            FloorItem::DiffRemoved,
+            FloorItem::ApprovalCard,
+            FloorItem::FocusRing,
+            FloorItem::NeedsYou,
+            FloorItem::PluginMarker,
+        ] {
+            out.push(
+                Issue::Floor {
+                    field: "x".into(),
+                    item,
+                }
+                .into(),
+            );
+        }
+        out.push(Problem {
+            issue: Issue::Name,
+            scheme: Some(Scheme::Light),
+        });
+        out
+    }
+
+    /// Every problem, every name of what is not used, and every built-in theme reads as a whole sentence in English and Turkish.
+    #[test]
+    fn every_message_is_a_whole_sentence_in_every_language() {
+        for cat in [Catalog::english(), Catalog::turkish()] {
+            let t = |id: &str, args: &[(&str, Arg)]| {
+                cat.render(id, args)
+                    .unwrap_or_else(|| panic!("missing {id}"))
+            };
+            let mut all: Vec<String> = every_issue().iter().map(|p| issue_text(p, &t)).collect();
+            let unused = [Unused::Sizes, Unused::Text, Unused::Cursor, Unused::Syntax]
+                .into_iter()
+                .chain((0..10).map(Unused::Region))
+                .chain((0..10).map(Unused::Chrome));
+            all.extend(unused.map(|u| unused_text(u, &t)));
+            all.extend(built_ins().iter().map(|b| built_in_name(b.id, &t)));
+            for s in all {
+                assert!(
+                    !s.is_empty() && !s.contains("{ $") && !s.contains("tui-theme-"),
+                    "{s}"
+                );
+            }
+        }
+    }
+
+    fn screen(v: &ListView<'_>) -> (Vec<String>, ratatui::buffer::Buffer) {
+        let mut tui = Tui::new(TestBackend::new(110, 30)).unwrap();
+        tui.draw(|f| draw(f, v)).unwrap();
+        let buf = tui.backend().buffer().clone();
+        let lines = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        (lines, buf)
+    }
+
+    #[test]
+    fn the_list_shows_every_theme_what_it_does_not_use_and_why_a_file_cannot_be_used() {
+        let d = std::env::temp_dir().join(format!("agora-tui-theme-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("harbour.json"),
+            include_str!("testdata/harbour.json"),
+        )
+        .unwrap();
+        std::fs::write(d.join("broken.json"), r#"{"agora-theme": 2, "name": "B", "inherits": "dark", "chrome": {"needs-you": "off"}}"#).unwrap();
+        let rows = entries(&d);
+        let cat = Catalog::english();
+        let t =
+            |id: &str, args: &[(&str, Arg)]| cat.render(id, args).unwrap_or_else(|| id.to_string());
+        let current = Choice::BuiltIn("slate".into());
+        let at = |pred: &dyn Fn(&Entry) -> bool| rows.iter().position(pred).unwrap();
+        let view = |selected: usize, colors: ColorMode| ListView {
+            entries: &rows,
+            selected,
+            current: &current,
+            folder: "~/.agora/themes",
+            notice: "",
+            banner: "",
+            colors,
+            t: &t,
+        };
+        // The list: no theme, the six built-in themes, the broken file, and both schemes of Harbour; the one in use is marked.
+        let (lines, _) = screen(&view(0, ColorMode::Full));
+        let all = lines.join("\n");
+        for want in [
+            "Your terminal's colours",
+            "High contrast",
+            "\u{2022} Slate",
+            "broken.json · can't be used",
+            "Harbour · dark",
+            "Harbour · light",
+            "~/.agora/themes",
+        ] {
+            assert!(all.contains(want), "{want} in\n{all}");
+        }
+        // Large text: its sizes are the terminal's own here, and the list says so.
+        let large = at(&|e| matches!(e.source, Source::BuiltIn("large-text")));
+        let all = screen(&view(large, ColorMode::Full)).0.join("\n");
+        assert!(
+            all.contains("Not used in the terminal client: text size, spacing and corners."),
+            "{all}"
+        );
+        // Harbour: what it sets that the terminal client does not draw, by name.
+        let harbour = at(&|e| {
+            e.choice()
+                == Some(Choice::File {
+                    name: "harbour.json".into(),
+                    scheme: Scheme::Dark,
+                })
+        });
+        let all = screen(&view(harbour, ColorMode::Full)).0.join("\n");
+        for want in [
+            "corners",
+            "fonts and text style",
+            "colours of your",
+            "code colours",
+            "tab style",
+        ] {
+            assert!(all.contains(want), "{want} in\n{all}");
+        }
+        assert!(
+            !all.contains("density") && !all.contains("Space between"),
+            "{all}"
+        );
+        // The broken file: every reason, in words.
+        let broken = at(&|e| {
+            e.choice().is_none() && !matches!(e.source, Source::Terminal | Source::BuiltIn(_))
+        });
+        let all = screen(&view(broken, ColorMode::Full)).0.join("\n");
+        assert!(
+            all.contains("This file can't be used:")
+                && all.contains("\"chrome.needs-you\" can't be set."),
+            "{all}"
+        );
+        // The list is drawn in the theme the keyboard is on.
+        let slate = at(&|e| matches!(e.source, Source::BuiltIn("slate")));
+        let (_, buf) = screen(&view(slate, ColorMode::Full));
+        assert_eq!(
+            buf[(100, 5)].bg,
+            ratatui::style::Color::Rgb(0x0f, 0x14, 0x19)
+        );
+        // Without colour it says why nothing changes.
+        let all = screen(&view(slate, ColorMode::Mono)).0.join("\n");
+        assert!(all.contains("NO_COLOR"), "{all}");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = read_text;
+    }
 }

@@ -11,8 +11,8 @@ use super::colour::{contrast, mix, over, parse_hex, Rgb};
 use super::{
     base_colours, built_ins, floor_of, is_unsafe, BuiltIn, Chrome, ChromeKind, FloorItem, Look,
     RegionDefault, Scheme, TextStyle, Theme, ACCENT, ANSI, CHROME, COLOUR_TOKENS, DEFAULT_FONTS,
-    DEFAULT_SHAPE, DEFAULT_TEXT, DERIVED, FONT_TOKENS, MAX_NAME, MIN_BASE_TEXT, ON_ACCENT,
-    REGIONS, REGION_DEFAULT, REGION_PARTS, SHAPE_TOKENS, STATES, SURFACE_0, SURFACE_1, SURFACE_2,
+    DEFAULT_SHAPE, DEFAULT_TEXT, DERIVED, FONT_TOKENS, MAX_NAME, MIN_BASE_TEXT, ON_ACCENT, REGIONS,
+    REGION_DEFAULT, REGION_PARTS, SHAPE_TOKENS, STATES, SURFACE_0, SURFACE_1, SURFACE_2,
     SYNTAX_KEYS, TERMINAL_KEYS, TEXT, TEXT_MUTED, T_ANSI, T_BACKGROUND, T_FOREGROUND, T_SELECTION,
     WEIGHTS,
 };
@@ -296,9 +296,9 @@ fn read_colour(v: &Value) -> Option<Rgb> {
 /// A font list: family names, quoted or not, separated by commas; nothing that could end a CSS declaration.
 fn read_font(v: &Value) -> Option<String> {
     let f = v.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
-    let ok_chars = f
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | ',' | '\'' | '"' | '-'));
+    let ok_chars = f.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | ',' | '\'' | '"' | '-')
+    });
     let quotes = f.chars().filter(|c| matches!(c, '\'' | '"')).count();
     (!f.is_empty() && f.len() <= MAX_FONT && ok_chars && quotes % 2 == 0).then_some(f)
 }
@@ -639,8 +639,9 @@ fn read_format2(value: &Map<String, Value>) -> Read {
             .as_str()
             .and_then(|id| built_ins().into_iter().find(|b| b.id == id));
         if base.is_none() && r.ok("inherits") {
-            r.issues
-                .push(Issue::Inherits(v.as_str().map(short_key).unwrap_or_default()));
+            r.issues.push(Issue::Inherits(
+                v.as_str().map(short_key).unwrap_or_default(),
+            ));
         }
     }
 
@@ -732,9 +733,9 @@ fn read_format2(value: &Map<String, Value>) -> Read {
             "line-height" => match v {
                 Value::String(s) if s == "normal" => text.line_height = None,
                 Value::Number(n)
-                    if n
-                        .as_f64()
-                        .is_some_and(|x| x.is_finite() && x >= LINE_HEIGHT.0 && x <= LINE_HEIGHT.1) =>
+                    if n.as_f64().is_some_and(|x| {
+                        x.is_finite() && x >= LINE_HEIGHT.0 && x <= LINE_HEIGHT.1
+                    }) =>
                 {
                     let x = n.as_f64().unwrap_or(LINE_HEIGHT.0);
                     // 1.2..=1.8 as hundredths: always 120..=180.
@@ -796,7 +797,8 @@ fn read_format2(value: &Map<String, Value>) -> Read {
     for (si, scheme) in Scheme::BOTH.into_iter().enumerate() {
         let word = scheme.word();
         let section = r.group(value.get(word), word);
-        let inherited = base.as_ref().is_some_and(|b| b.scheme == scheme) && value.get(word).is_none();
+        let inherited =
+            base.as_ref().is_some_and(|b| b.scheme == scheme) && value.get(word).is_none();
         if section.is_none() && !inherited {
             continue;
         }
@@ -811,7 +813,10 @@ fn read_format2(value: &Map<String, Value>) -> Read {
                 r.unknown(&format!("{word}.{k}"));
             }
         }
-        let tokens = r.group(section.and_then(|s| s.get("tokens")), &format!("{word}.tokens"));
+        let tokens = r.group(
+            section.and_then(|s| s.get("tokens")),
+            &format!("{word}.tokens"),
+        );
         for (k, v) in tokens.into_iter().flatten() {
             let field = format!("{word}.tokens.{k}");
             if r.floor_key(k, &field) {
@@ -848,7 +853,10 @@ fn read_format2(value: &Map<String, Value>) -> Read {
                 None => r.issues.push(Issue::BadValue(tname)),
             }
         }
-        let regions = r.group(section.and_then(|s| s.get("regions")), &format!("{word}.regions"));
+        let regions = r.group(
+            section.and_then(|s| s.get("regions")),
+            &format!("{word}.regions"),
+        );
         for (rk, v) in regions.into_iter().flatten() {
             let field = format!("{word}.regions.{rk}");
             if r.floor_key(rk, &field) {
@@ -876,7 +884,10 @@ fn read_format2(value: &Map<String, Value>) -> Read {
                 }
             }
         }
-        let terminal = r.group(section.and_then(|s| s.get("terminal")), &format!("{word}.terminal"));
+        let terminal = r.group(
+            section.and_then(|s| s.get("terminal")),
+            &format!("{word}.terminal"),
+        );
         for (k, c) in terminal.into_iter().flatten() {
             let field = format!("{word}.terminal.{k}");
             if r.floor_key(k, &field) {
@@ -893,7 +904,10 @@ fn read_format2(value: &Map<String, Value>) -> Read {
                 out.terminal[ti] = Some(c);
             }
         }
-        let syntax = r.group(section.and_then(|s| s.get("syntax")), &format!("{word}.syntax"));
+        let syntax = r.group(
+            section.and_then(|s| s.get("syntax")),
+            &format!("{word}.syntax"),
+        );
         for (k, c) in syntax.into_iter().flatten() {
             let field = format!("{word}.syntax.{k}");
             if r.floor_key(k, &field) {
@@ -1007,7 +1021,9 @@ pub fn region_colour(look: &Look, scheme: Scheme, region: usize, part: usize) ->
     match REGION_DEFAULT[region][part] {
         RegionDefault::Token(i) => look.colours[i],
         RegionDefault::TintAccent => mix(look.colours[ACCENT], tint, look.colours[SURFACE_1]),
-        RegionDefault::LineAccent => mix(look.colours[ACCENT], LINE_STRENGTH, look.colours[SURFACE_1]),
+        RegionDefault::LineAccent => {
+            mix(look.colours[ACCENT], LINE_STRENGTH, look.colours[SURFACE_1])
+        }
     }
 }
 
@@ -1068,7 +1084,9 @@ fn look_issues(look: &Look, scheme: Scheme) -> (Vec<Issue>, Vec<Issue>) {
         7
     };
     for n in 0..16 {
-        if n == twin || (look.terminal[T_ANSI + n].is_none() && look.terminal[T_BACKGROUND].is_none()) {
+        if n == twin
+            || (look.terminal[T_ANSI + n].is_none() && look.terminal[T_BACKGROUND].is_none())
+        {
             continue;
         }
         let ratio = contrast(terminal_colour(look, scheme, T_ANSI + n), bg);
@@ -1077,7 +1095,11 @@ fn look_issues(look: &Look, scheme: Scheme) -> (Vec<Issue>, Vec<Issue>) {
         }
     }
     if look.terminal[T_SELECTION].is_some() || look.terminal[T_BACKGROUND].is_some() {
-        let sel = over(terminal_colour(look, scheme, T_SELECTION), SELECTION_ALPHA, bg);
+        let sel = over(
+            terminal_colour(look, scheme, T_SELECTION),
+            SELECTION_ALPHA,
+            bg,
+        );
         let ratio = contrast(sel, bg);
         if ratio < MIN_SELECTION {
             warnings.push(Issue::SelectionContrast { ratio });

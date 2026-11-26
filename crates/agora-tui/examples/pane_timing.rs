@@ -56,6 +56,38 @@ fn main() -> std::io::Result<()> {
         frames.iter().max().copied().unwrap_or_default()
     );
 
+    // The same frames under a theme's palette (ADR-0113): the default colours and the 16 colours come from a precomputed table.
+    let slate = agora_tui::theme::built_ins()
+        .into_iter()
+        .find(|b| b.id == "slate")
+        .map(|b| b.theme)
+        .ok_or_else(|| std::io::Error::other("slate"))?;
+    let shell = agora_tui::theme::map::Shell::new(
+        &slate,
+        agora_tui::theme::Scheme::Dark,
+        agora_tui::pane::ColorMode::Full,
+    )
+    .ok_or_else(|| std::io::Error::other("shell"))?;
+    let mut themed = Vec::new();
+    for i in 0..500 {
+        vt.feed(&coloured_line(2000 + i));
+        vt.feed(b"\x1b[31mred\x1b[0m plain text in the default colours\r\n");
+        let t = Instant::now();
+        screen.draw(|f| {
+            f.render_widget(
+                TerminalPane::new(&vt).palette(Some(&shell.styles.pane)),
+                f.area(),
+            )
+        })?;
+        themed.push(t.elapsed());
+    }
+    println!(
+        "frame 200x60 full colour, themed: p50 {:?}  p95 {:?}  max {:?}",
+        p(&mut themed.clone(), 0.5),
+        p(&mut themed.clone(), 0.95),
+        themed.iter().max().copied().unwrap_or_default()
+    );
+
     // Echo: one character typed at a prompt, then the frame.
     vt.feed(b"\x1b[2J\x1b[H$ ");
     let mut echo = Vec::new();
