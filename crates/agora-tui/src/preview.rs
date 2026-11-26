@@ -13,6 +13,9 @@ use crate::termio::{ModeScanner, ProgramModes};
 const GUESS_COLS: u16 = 120;
 /// Most stream items handled per call, so a flood of output never holds up the keyboard.
 const BATCH: usize = 256;
+/// Most stream items a pane not in focus takes per turn (ADR-0068): with the node's 16 KiB chunks, 512 KiB, about 5 ms of feeding at
+/// the pane's measured 100 MB/s (`examples/pane_timing.rs`).
+pub const TILE_BATCH: usize = 32;
 
 pub struct Preview {
     /// The hub-wide id of the agent being watched.
@@ -265,6 +268,12 @@ impl Preview {
 
     /// Applies what arrived for this terminal, without waiting.
     pub fn pump(&mut self, session: &mut Session) -> Pumped {
+        self.pump_up_to(session, BATCH)
+    }
+
+    /// [`Preview::pump`] taking at most `most` stream items: the other panes of a tiled layout take fewer per turn than the pane in
+    /// focus ([`TILE_BATCH`]), so several flooding panes never hold up the keyboard or the pane being typed in (ADR-0068 decision 7).
+    pub fn pump_up_to(&mut self, session: &mut Session, most: usize) -> Pumped {
         let mut seen = Pumped::Nothing;
         if self.behind
             || self
@@ -285,7 +294,7 @@ impl Preview {
         if self.feed.tick() {
             seen = Pumped::Changed;
         }
-        for _ in 0..BATCH {
+        for _ in 0..most {
             match session.terminal_next(self.stream, Duration::ZERO) {
                 TermEvent::Quiet => break,
                 TermEvent::Behind => {
