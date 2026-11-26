@@ -204,7 +204,11 @@ impl Env {
         std::fs::read_dir(&self.root)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("probe-"))
+            // A report still being placed (`.json.tmp`, renamed when whole) is not one yet (#1150).
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("probe-") && name.ends_with(".json")
+            })
             .filter_map(|e| {
                 serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok()
             })
