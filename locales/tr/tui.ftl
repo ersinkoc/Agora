@@ -413,7 +413,7 @@ tui-theme-pack-keys = { $count ->
    *[other] { $count } komutun tuşları
 }
 tui-theme-error-pack-field = "{ $field }" bir tema paketinin parçası değil.
-tui-theme-error-pack-name = Tema paketinin 1 ile { $max } karakter arasında bir adı olmalı.
+tui-theme-error-pack-name = Tema paketinin 1 ile { $max } karakter arasında, ";", "<" ya da "url(" içermeyen bir adı olmalı.
 tui-theme-error-pack-part = "{ $part }", tema paketinin onu tuttuğu biçimde değil.
 tui-theme-error-pack-too-many-themes = Bir tema paketinde en çok { $max } tema olabilir.
 tui-theme-error-pack-too-many-layouts = Bir tema paketinde en çok { $max } yerleşim olabilir.

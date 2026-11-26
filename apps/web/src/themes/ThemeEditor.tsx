@@ -21,6 +21,7 @@ import {
 import { type Saved, themeStore } from './store';
 import { ThemeCatalog } from './ThemeCatalog';
 import { ExportPack, ImportPack } from './PackDialogs';
+import { isPack } from './pack';
 import { TerminalSample } from './TerminalSample';
 import {
   COLOR_TOKENS, type Look, MAX_NAME, type Scheme, type Theme, type ThemeIssue, type TokenName, chromeOf, hasScheme, kindOf, looksOf, pxOf,
@@ -77,7 +78,12 @@ export function ThemeEditor() {
             const f = e.target.files?.[0];
             e.target.value = '';
             // A file over the cap is refused before it is read at all.
-            if (f) report(f.size > MAX_FILE_BYTES ? { ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] } : themeStore.import(await f.text()));
+            if (!f) return;
+            if (f.size > MAX_FILE_BYTES) { report({ ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] }); return; }
+            const text = await f.text();
+            // A pack is not a theme: say where it goes rather than "not a theme file".
+            if (isPack(parsed(text))) { setProblems([t('theme-import-is-pack')]); return; }
+            report(themeStore.import(text));
           }} />
       </div>
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
@@ -393,6 +399,10 @@ function Preview({ look, scheme }: { look: Look; scheme: Scheme }) {
       </div>
     </div>
   );
+}
+
+function parsed(text: string): unknown {
+  try { return JSON.parse(text); } catch { return undefined; }
 }
 
 function download(text: string) {

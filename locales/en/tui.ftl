@@ -446,7 +446,7 @@ tui-theme-pack-keys = { $count ->
    *[other] keys for { $count } commands
 }
 tui-theme-error-pack-field = "{ $field }" is not part of a theme pack.
-tui-theme-error-pack-name = A theme pack needs a name of 1 to { $max } characters.
+tui-theme-error-pack-name = A theme pack needs a name of 1 to { $max } characters, without ";", "<" or "url(".
 tui-theme-error-pack-part = "{ $part }" is not in the form a theme pack keeps it in.
 tui-theme-error-pack-too-many-themes = A theme pack holds at most { $max } themes.
 tui-theme-error-pack-too-many-layouts = A theme pack holds at most { $max } layouts.

@@ -17,7 +17,8 @@ import {
   MAX_PACK_BYTES, type PackIssue, deserialisePack, missingPanels, packLayout, readPack, serialisePack, writePack,
 } from './pack';
 import { ExportPack, ImportPack, packIssueText } from './PackDialogs';
-import { MAX_USER_THEMES, createThemeStore, type ThemeStore } from './store';
+import { MAX_USER_THEMES, createThemeStore, themeStore, type ThemeStore } from './store';
+import { ThemeEditor } from './ThemeEditor';
 import { BUILT_IN } from './tokens';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -347,5 +348,21 @@ describe('exporting a pack in the window', () => {
     expect(back.pack.themes.map((x) => x.theme.name)).toEqual(['Harbour']);
     expect(back.pack.layouts.map((l) => l.name)).toEqual(['Review']);
     expect(writeKeys(back.pack.keys!.file)).toBe(writeKeys(keys.state().file));
+  });
+});
+
+describe('the theme editor and packs', () => {
+  it('has Import pack and Export as pack, and a pack given to Import… (a theme) says where it goes and adds nothing', async () => {
+    themeStore.reload();
+    act(() => root.render(<ThemeEditor />));
+    const buttons = [...host.querySelectorAll('button')].map((b) => b.textContent);
+    expect(buttons).toContain(t('pack-import'));
+    expect(buttons).toContain(t('pack-export'));
+    const input = host.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([serialisePack(PACK)], 'set.json', { type: 'application/json' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })); await new Promise((r) => setTimeout(r, 10)); });
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(t('theme-import-is-pack'));
+    expect(themeStore.state().user).toEqual([]);
   });
 });
