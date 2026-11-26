@@ -173,6 +173,7 @@ mod frontdoor;
 mod hold;
 mod hubcli;
 mod joincmd;
+mod manualcmd;
 mod meshbridge;
 mod orchestrate;
 mod paircmd;
@@ -506,6 +507,21 @@ fn main() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
+    let Some((words, opts)) = split(&args) else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    let Some(run) = route(&words, &opts) else {
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    run(&say, &opts)
+}
+
+/// The command words of a command line (at most two, before any flag) and its options; `None` for an unknown flag or a flag
+/// without its value. `agora manual`'s test reads its command lines with this and [`route`], as `main` does.
+pub(crate) fn split(args: &[String]) -> Option<(Vec<&str>, Opts)> {
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -513,95 +529,111 @@ fn main() -> ExitCode {
         .take_while(|w| !w.starts_with("--"))
         .collect();
     let rest = args.get(words.len()..).unwrap_or(&[]);
-    let Some(opts) = parse(rest) else {
-        say.err(key!("cli-bad-arguments"), &[]);
-        say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
-    };
-    match words.as_slice() {
+    parse(rest).map(|opts| (words, opts))
+}
+
+/// What a command runs, given how to say things and its options.
+pub(crate) type Run<'a> = Box<dyn FnOnce(&Say, &Opts) -> ExitCode + 'a>;
+
+/// The command the words name, or `None` when they name none (the usage page). Nothing runs here.
+pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
+    let run: Run<'a> = match *words {
         // ADR-0062: plain `agora` brings this machine's Agora up and opens it.
-        [] => frontdoor::front_door(&say, &opts),
-        ["web"] => frontdoor::web(&say),
-        ["status"] => frontdoor::status(&say, &opts.data),
-        ["down"] => frontdoor::down(&say, opts.agents),
-        ["service", op @ ("install" | "remove" | "status")] => servicecmd::service(&say, op),
-        ["node", "run"] => node_run(&say, &opts),
-        // ADR-0065: the owner's switch for new machines, and a new machine asking to join.
-        ["pair", op @ ("open" | "close" | "status")] => paircmd::pair(&say, &opts, op),
-        ["join"] => joincmd::join(&say, &opts, opts.positional.first().map(String::as_str)),
-        ["join", address] => joincmd::join(&say, &opts, Some(address)),
-        // Started by the front door, not by people: not in the usage page.
-        ["supervise", role] => supervise::supervise(
-            &say,
-            role,
-            &supervise::Start {
-                handoff: opts.handoff.as_deref(),
-                home: opts.home.clone(),
-                log: opts.log,
-                resume: opts.resume.as_deref(),
-            },
-        ),
-        // ADR-0079: the terminal holder, started by the node (not by people, so not in the usage page).
-        ["hold"] => hold::hold(&say, &opts),
-        ["agent", "start"] => agent_start(&say, &opts),
-        ["project", "init"] => project_init(&say, &opts),
-        ["agent", "stop"] => agent_stop(&say, &opts),
-        ["agent", "prompt"] => orchestrate::agent_prompt(&say, &opts),
-        ["agent", "wait"] => orchestrate::agent_wait(&say, &opts),
-        ["events"] => orchestrate::events(&say, &opts),
-        ["agent", "resume"] => agent_resume(&say, &opts),
-        ["agent", "list"] => agent_list(&say, &opts),
-        ["agent", "kinds"] => agent_kinds(&say, &opts),
-        ["agent", "explain"] => explaincmd::explain(&say, &opts),
-        ["agent", "install"] => agentcmd::install(&say, &opts),
-        ["terminal", "attach"] => terminal_attach(&say, &opts),
-        ["panel"] => panelcmd::panel(&say),
-        ["doctor"] => doctor(&say, &opts),
-        ["tui"] => tuicmd::tui(&say, &opts),
-        ["update"] => update::update(&say, &opts),
-        ["adapter", "install"] => adaptercmd::install(&say, &opts),
-        ["adapter", "list"] => adaptercmd::list(&say, &opts),
-        ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
-        ["adapter", "update"] => adaptercmd::update(&say, &opts),
-        ["remote", op @ ("tailscale" | "proxy" | "status" | "off")] => {
-            remotecmd::remote(&say, &opts, op)
+        [] => Box::new(frontdoor::front_door),
+        ["web"] => Box::new(|say, _| frontdoor::web(say)),
+        ["status"] => Box::new(|say, o| frontdoor::status(say, &o.data)),
+        ["down"] => Box::new(|say, o| frontdoor::down(say, o.agents)),
+        ["service", op @ ("install" | "remove" | "status")] => {
+            Box::new(move |say, _| servicecmd::service(say, op))
         }
-        ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
-        ["hub", "run"] => hubcli::hub_run(&say, &opts),
+        ["node", "run"] => Box::new(node_run),
+        // ADR-0065: the owner's switch for new machines, and a new machine asking to join.
+        ["pair", op @ ("open" | "close" | "status")] => {
+            Box::new(move |say, o| paircmd::pair(say, o, op))
+        }
+        ["join"] => {
+            Box::new(|say, o| joincmd::join(say, o, o.positional.first().map(String::as_str)))
+        }
+        ["join", address] => Box::new(move |say, o| joincmd::join(say, o, Some(address))),
+        // Started by the front door, not by people: not in the usage page.
+        ["supervise", role] => Box::new(move |say, o| {
+            supervise::supervise(
+                say,
+                role,
+                &supervise::Start {
+                    handoff: o.handoff.as_deref(),
+                    home: o.home.clone(),
+                    log: o.log,
+                    resume: o.resume.as_deref(),
+                },
+            )
+        }),
+        // ADR-0079: the terminal holder, started by the node (not by people, so not in the usage page).
+        ["hold"] => Box::new(hold::hold),
+        ["agent", "start"] => Box::new(agent_start),
+        ["project", "init"] => Box::new(project_init),
+        ["agent", "stop"] => Box::new(agent_stop),
+        ["agent", "prompt"] => Box::new(orchestrate::agent_prompt),
+        ["agent", "wait"] => Box::new(orchestrate::agent_wait),
+        ["events"] => Box::new(orchestrate::events),
+        ["agent", "resume"] => Box::new(agent_resume),
+        ["agent", "list"] => Box::new(agent_list),
+        ["agent", "kinds"] => Box::new(agent_kinds),
+        ["agent", "explain"] => Box::new(explaincmd::explain),
+        ["agent", "install"] => Box::new(agentcmd::install),
+        ["terminal", "attach"] => Box::new(terminal_attach),
+        ["panel"] => Box::new(|say, _| panelcmd::panel(say)),
+        ["doctor"] => Box::new(doctor),
+        ["tui"] => Box::new(tuicmd::tui),
+        ["update"] => Box::new(update::update),
+        // G10: how to drive and customize Agora, written for coding agents.
+        ["manual"] => Box::new(|say, o| manualcmd::manual(say, o, None)),
+        ["manual", topic] => Box::new(move |say, o| manualcmd::manual(say, o, Some(topic))),
+        ["adapter", "install"] => Box::new(adaptercmd::install),
+        ["adapter", "list"] => Box::new(adaptercmd::list),
+        ["adapter", "remove"] => Box::new(adaptercmd::remove),
+        ["adapter", "update"] => Box::new(adaptercmd::update),
+        ["remote", op @ ("tailscale" | "proxy" | "status" | "off")] => {
+            Box::new(move |say, o| remotecmd::remote(say, o, op))
+        }
+        ["password", op @ ("set" | "clear" | "status")] => {
+            Box::new(move |say, o| hubcli::password(say, o, op))
+        }
+        ["hub", "run"] => Box::new(hubcli::hub_run),
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
         ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet"]
-            if !hubcli::hub_dir(&opts).is_dir() =>
+            if !hubcli::hub_dir(opts).is_dir() =>
         {
-            hubcli::not_here(&say, &opts)
+            Box::new(hubcli::not_here)
         }
-        ["hub", "code"] => hubcli::hub_code(&say, &opts),
-        ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
-        ["hub", "login"] => hubcli::hub_login(&say, &opts),
-        ["hub", "user"] => hubcli::hub_user(&say, &opts),
-        ["hub", "fleet"] => hubcli::hub_fleet(&say, &opts),
-        ["hub", "metrics-token"] => hubcli::hub_metrics_token(&say, &opts),
-        ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
-        ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
-        ["hub", "machines"] => hubcli::hub_machines(&say, &opts),
-        ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
-        ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
-        ["hub", "notify"] => hubcli::hub_notify(&say, &opts),
-        ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
-        ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
-        ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
-        ["node", "trust"] => trustcli::node_trust(&say, &opts),
-        ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
-        ["node", "secret"] => secretcmd::secret(&say, &opts),
-        ["history", "purge"] => history_purge(&say, &opts),
-        ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
-        ["mesh", "stdio"] => match &opts.socket {
+        ["hub", "code"] => Box::new(hubcli::hub_code),
+        ["hub", "fingerprint"] => Box::new(hubcli::hub_fingerprint),
+        ["hub", "login"] => Box::new(hubcli::hub_login),
+        ["hub", "user"] => Box::new(hubcli::hub_user),
+        ["hub", "fleet"] => Box::new(hubcli::hub_fleet),
+        ["hub", "metrics-token"] => Box::new(hubcli::hub_metrics_token),
+        ["hub", "audit"] => Box::new(hubcli::hub_audit),
+        ["hub", "devices"] => Box::new(hubcli::hub_devices),
+        ["hub", "machines"] => Box::new(hubcli::hub_machines),
+        ["hub", "ssh"] => Box::new(hubcli::hub_ssh),
+        ["hub", "prices"] => Box::new(hubcli::hub_prices),
+        ["hub", "notify"] => Box::new(hubcli::hub_notify),
+        ["hub", "backup"] => Box::new(hubcli::hub_backup),
+        ["hub", "restore"] => Box::new(hubcli::hub_restore),
+        ["node", "enroll"] => Box::new(hubcli::node_enroll),
+        ["node", "trust"] => Box::new(trustcli::node_trust),
+        ["node", "untrust"] => Box::new(trustcli::node_untrust),
+        ["node", "secret"] => Box::new(secretcmd::secret),
+        ["history", "purge"] => Box::new(history_purge),
+        ["node", "stdio"] => Box::new(|say, o| bridge_stdio(say, &socket_path(o))),
+        ["mesh", "stdio"] => Box::new(|say, o| match &o.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
             Some(path) => match meshbridge::mesh_stdio(path) {
                 Ok(code) => code,
                 Err(e) => {
-                    say_unreachable(&say, path, &e);
+                    say_unreachable(say, path, &e);
                     ExitCode::from(1)
                 }
             },
@@ -609,12 +641,10 @@ fn main() -> ExitCode {
                 say.err(key!("cli-bad-arguments"), &[]);
                 ExitCode::from(2)
             }
-        },
-        _ => {
-            say.err(key!("cli-usage"), &[]);
-            ExitCode::from(2)
-        }
-    }
+        }),
+        _ => return None,
+    };
+    Some(run)
 }
 
 /// ADR-0089 decision 3: `agora history purge` removes every chat transcript this machine's node keeps (`<data>/transcripts`). Files only:

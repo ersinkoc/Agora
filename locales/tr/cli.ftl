@@ -53,6 +53,7 @@ cli-usage =
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
       agora agent install AD --list DOSYA [--root-key HEX|DOSYA] [--go-back]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
+      agora manual [KONU] [--json]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ $old_id } adıyla) kaydedilen olaylar bir kenara ayrıldı ve hub'a gönderilmeyecek: { $path }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
@@ -84,6 +85,15 @@ cli-unknown-project = Bu düğümde { $project } adında kayıtlı proje yok.
 cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçin.
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
+cli-manual-heading = Kılavuzun konuları bunlar. "agora manual KONU" birini yazdırır; "agora manual --json" konuları JSON olarak listeler.
+cli-manual-unknown = Kılavuzda "{ $topic }" adlı bir konu yok. Konuları: { $topics }.
+cli-manual-topic-scripting = Ajanları kabuktan başlat, istem gönder, bekle ve durdur; çıkış kodları ve olaylar.
+cli-manual-topic-themes = Web penceresi ve terminal istemcisi için bir tema dosyası yaz.
+cli-manual-topic-layouts = Bir yerleşim dosyası yaz: bölünmeler, sekme grupları ve bölmeler.
+cli-manual-topic-keys = Web penceresi için bir tuş atamaları dosyası yaz.
+cli-manual-topic-plugins = Bir eklenti yaz: web penceresi için korumalı bir panel.
+cli-manual-topic-mesh = Agora içindeki bir ajanın çağırabileceği mesh araçları.
+cli-manual-topic-files = Agora klasöründe her dosyanın yeri ve nasıl okunduğu.
 cli-error = Hata { $code }: { $message }
 cli-invalid-directory-identity_changed = Bu klasörün proje kimliği, burada son kez ajan başlatıldığından beri değişti. Yine de başlatmak için --accept-project-id-change ekleyin.
 

@@ -25,7 +25,7 @@ const DEFAULT_PORT: u16 = 7443;
 /// How long a started hub or node has to answer before the front door gives up and points at its log.
 const WAIT: Duration = Duration::from_secs(20);
 /// A log larger than this at start is renamed to `<name>.1` (replacing the previous one) and a new one begun.
-const LOG_LIMIT: u64 = 5 * 1024 * 1024;
+pub(crate) const LOG_LIMIT: u64 = 5 * 1024 * 1024;
 
 /// The interface `agora` opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

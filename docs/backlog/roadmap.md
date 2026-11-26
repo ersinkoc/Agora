@@ -170,8 +170,10 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   table runs
 - [ ] **M6.3 A plain terminal shows its agent** (G3): M3.4
 - [ ] **M6.4 A pushed event stream and a published API description** (G9, **decision**): `agora events` polls every 200 ms today
-- [ ] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
+- [x] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
   agent can write a theme, a layout or a plugin for its person
+  - [x] `agora manual [TOPIC] [--json]`: `scripting`, `themes`, `layouts`, `keys`, `plugins`, `mesh`, `files` (`docs/manual/`); every
+    command line, example and limit in it is checked against the product by tests
 - [ ] **M6.6 Images in terminals** (G11, **decision**): kitty graphics and sixel
 - [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications
 
