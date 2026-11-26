@@ -1,4 +1,5 @@
-// End-to-end check of sandboxed plugin panels (ADR-0114 build step 2, its Verification list, and Amendment A) in a real Chromium, under
+// End-to-end check of sandboxed plugin panels (ADR-0114 build step 2, its Verification list, and Amendment A) in a real Chromium or
+// WebKit (the engine of the desktop app's webview on macOS and Linux), under
 // the headers the hub really sends per path (scripts/hub-headers.mjs reads them from crates/agora-hub/src/web.rs): the window's own
 // policy for every page, and the plugin frame page's own for `/plugin-frame.html`. Each probe is a plugin of its own, loaded in a fresh
 // window, and each must fail: storage (IndexedDB, localStorage, cookies), the network (fetch to the hub, to a hub endpoint and to an
@@ -10,9 +11,13 @@
 // safe-mode key load no plugin and the built-in theme, and a package is loaded through the window's own dialog with the person's grant.
 //
 //   (cd apps/web && npm ci && npm run gen && npm run build)
-//   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-plugin-sandbox.mjs
+//   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-plugin-sandbox.mjs [--engine chromium|webkit]
 //
-// Needs a Chromium (CHROME=<path>, default: Playwright's cache). Starts two local servers on 127.0.0.1; changes nothing else.
+// Needs a Chromium (CHROME=<path>, default: Playwright's cache) or Playwright's WebKit (WEBKIT=<path>, default: Playwright's cache;
+// `playwright-core install --with-deps webkit`). Both hosts and, for WebRTC, a STUN and a TURN listener are first shown reachable from a
+// plain page, so a refusal inside a frame is the frame's limits. WebKit runs the frame on the window's own thread (T63): there the
+// flood budgets hold for the window's pause after the frame's own send loop has ended, and the whole pause is printed beside it.
+// Starts two local servers on 127.0.0.1; changes nothing else.
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -26,10 +31,17 @@ import { pack } from './pack-plugin.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const dist = join(root, 'apps/web/dist');
-const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
-const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
+// `--engine chromium` (the default) or `--engine webkit`, the engine of the desktop app's webview on macOS and Linux.
+const engineArg = process.argv.indexOf('--engine');
+const engine = engineArg > 0 ? process.argv[engineArg + 1] : 'chromium';
+if (!['chromium', 'webkit'].includes(engine)) throw new Error(`--engine chromium|webkit, not ${engine}`);
+const pw = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
+const launchOptions = engine === 'webkit'
+  ? (process.env.WEBKIT ? { executablePath: process.env.WEBKIT } : {})
+  : { executablePath: process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`, args: ['--no-sandbox'] };
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
+console.log(`engine: ${engine}`);
 console.log(`window policy: ${APP_CSP}`);
 console.log(`frame page policy: ${PLUGIN_FRAME_CSP}`);
 
@@ -69,7 +81,17 @@ const seeded = (id, text, caps, granted = caps, layout = workspace(`plugin.${id}
   'agora.workspace.v1': layout,
 });
 
-const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
+const browser = await pw[engine].launch(launchOptions);
+console.log(`browser: ${engine} ${browser.version()}`);
+// Both hosts are reachable from this engine outside a plugin frame, so a refusal inside one is the frame's limits, not the host.
+{
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.goto(`${OUT}/control/out`);
+  await page.goto(`${HUB}/api/control`);
+  await ctx.close();
+  if (!outLog.includes('/control/out') || !hubLog.includes('/api/control')) throw new Error(`${engine} reaches the hub or the outside host not even from a plain page`);
+}
 let failed = 0;
 const results = [];
 const check = (ok, what) => { results.push([ok, what]); console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
@@ -91,8 +113,11 @@ async function open(storage, path = '/#/demo', scheme = 'dark') {
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
+  // When a frame's own send loop ended and how long it ran, as the frame says on the console (not a message to the window).
+  const busy = [];
+  page.on('console', (m) => { const b = /^agora-e2e-busy (\d+) (\d+)$/.exec(m.text()); if (b) busy.push({ ms: Number(b[1]), end: Number(b[2]) }); });
   await page.goto(HUB + path);
-  return { ctx, page, requests, refused, pages, errors };
+  return { ctx, page, requests, refused, pages, errors, busy };
 }
 // A probe keeps its word in its own frame (`window.__probe`), and the test reads it from there: a probe never posts to the window (the
 // window stops a frame at its first malformed message). The test waits with plain timeouts and reads, never with a polling wait,
@@ -200,6 +225,16 @@ check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the fra
   const tcp = net.createServer((c) => { tcpLog.push('conn'); c.destroy(); }).listen(0, '127.0.0.1');
   await new Promise((r) => tcp.once('listening', r));
   const ice = `[{ urls: 'stun:127.0.0.1:${udp.address().port}' }, { urls: 'turn:127.0.0.1:${tcp.address().port}?transport=tcp', username: 'u', credential: 'p' }]`;
+  // The control: a plain page (no loader, no frame) does reach them in this engine, so none reaching them from a frame is the loader's.
+  const plain = await browser.newContext();
+  const pp = await plain.newPage();
+  await pp.goto(`${OUT}/control/webrtc`);
+  await pp.evaluate(`(function () { var pc = new RTCPeerConnection({ iceServers: ${ice} }); pc.createDataChannel('x'); pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }); window.__pc = pc; })()`);
+  for (let i = 0; i < 50 && (udpLog.length === 0 || tcpLog.length === 0); i++) await pp.waitForTimeout(100);
+  const control = { udp: udpLog.length, tcp: tcpLog.length };
+  await plain.close();
+  udpLog.length = 0;
+  tcpLog.length = 0;
   const entry = R('webrtc', `
     var out = {};
     var d = Object.getOwnPropertyDescriptor(window, 'RTCPeerConnection');
@@ -230,7 +265,7 @@ check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the fra
     `the RTC constructors are gone for good before the plugin runs (descriptor ${said.descriptor}; left ${said.left}; reassigned ${said.reassign})`);
   check([said.direct, said.webkit, said.blankFrame, said.indexedFrame].every((x) => /^blocked/.test(x ?? '')) && said.nested === 'did not run',
     `no fresh copy from a frame the plugin makes (direct ${said.direct}; webkit ${said.webkit}; blank frame ${said.blankFrame}; window[0] ${said.indexedFrame}; srcdoc script ${said.nested})`);
-  check(udpLog.length === 0 && tcpLog.length === 0, `WebRTC from inside a plugin frame reaches no STUN or TURN server (UDP ${udpLog.length}, TCP ${tcpLog.length})`);
+  check(control.udp + control.tcp > 0 && udpLog.length === 0 && tcpLog.length === 0, `WebRTC from inside a plugin frame reaches no STUN or TURN server (UDP ${udpLog.length}, TCP ${tcpLog.length}; from a plain page: UDP ${control.udp}, TCP ${control.tcp})`);
   await w.ctx.close();
   udp.close();
   tcp.close();
@@ -250,21 +285,28 @@ const stopCases = [
 ];
 for (const [name, code, budget] of stopCases) {
   const id = `stop-${stopCases.findIndex((c) => c[0] === name)}`;
-  const w = await open(seeded(id, makePackage(id, `(function () { ${code} })();`, ['agents.read']), ['agents.read']));
-  await w.page.evaluate(() => { window.__gaps = []; let last = performance.now(); setInterval(() => { const n = performance.now(); window.__gaps.push(n - last); last = n; }, 50); });
+  const w = await open(seeded(id, makePackage(id, `(function () { var t0 = performance.now(); ${code} console.log('agora-e2e-busy ' + Math.round(performance.now() - t0) + ' ' + Date.now()); })();`, ['agents.read']), ['agents.read']));
+  await w.page.evaluate(() => { window.__gaps = []; let last = Date.now(); setInterval(() => { const n = Date.now(); window.__gaps.push([last, n]); last = n; }, 50); });
   // The frame may be gone before it is ever seen: wait for its pane, then for it to be stopped.
   await w.page.waitForSelector('[data-pane="p1"]');
   let stopped = false;
   for (let i = 0; i < 300 && !stopped; i++) { await w.page.waitForTimeout(100); stopped = (await w.page.locator('[data-plugin-stopped]').count()) > 0; }
   await w.page.waitForTimeout(1500);
   const frames = await w.page.locator('iframe[data-plugin-frame]').count();
-  const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
+  const gaps = await w.page.evaluate(() => window.__gaps);
+  const gap = Math.max(0, ...gaps.map(([a, b]) => b - a));
+  // Where the frame runs on the window's own thread (WebKit: no process of its own, T63), the window cannot run while the frame's
+  // send loop runs, so that much of the pause is the frame's, not the window's reading: the budget holds for what comes after the
+  // loop's end. Chromium runs the frame in a process of its own, and the budget holds for the whole pause.
+  const loop = w.busy.length ? w.busy[w.busy.length - 1] : undefined;
+  const own = engine === 'webkit' && loop ? Math.max(0, ...gaps.map(([a, b]) => b - Math.max(a, loop.end))) : gap;
   let back = true;
   if (name.startsWith('an unknown')) {
     await w.page.getByRole('button', { name: 'Start it again' }).click().catch(() => {});
     back = await w.page.waitForSelector('iframe[data-plugin-frame]', { timeout: 10000 }).then(() => true, () => false);
   }
-  check(stopped && frames === 0 && back && gap < budget, `${name}: the frame is stopped${name.startsWith('an unknown') ? ' and can be started again' : ''}, the window pauses at most ${gap.toFixed(0)} ms (budget ${budget})`);
+  const sharing = own === gap ? '' : `, ${own.toFixed(0)} ms of it after the frame's own send loop ended`;
+  check(stopped && frames === 0 && back && own < budget, `${name}: the frame is stopped${name.startsWith('an unknown') ? ' and can be started again' : ''}, the window pauses at most ${gap.toFixed(0)} ms${sharing} (budget ${budget}; the frame's send loop ran ${loop ? `${loop.ms} ms` : 'unseen'})`);
   await w.ctx.close();
 }
 

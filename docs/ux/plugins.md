@@ -134,6 +134,15 @@ message costs the window as much as the frame put in it, bounded per message onl
 such a message, so a working plugin is never stopped. Well-formed messages over the rate are dropped unread, and after 40 of them the
 frame is stopped too. The pane says so, with **Start it again**.
 
+**In WebKit the frame shares the window's thread.** Chromium runs the frame in a process of its own, so a busy plugin slows only its own
+pane: a frame spending 3.1 s sending 300 arrays of 16 MB paused the window 0.14–0.2 s. WebKit, the desktop app's webview on macOS and
+Linux, runs the frame in the window's own process and thread, so the window cannot run while the frame's script does: the same loop
+paused the window 3.2–3.3 s (Playwright's WPE WebKit 27.2), of which only 50–140 ms was the window reading after the loop, within the
+same budgets as Chromium; a 200,000-field object sent 20 times paused it 1.3–1.5 s (Chromium 0.5–0.7 s). Nothing the window does can
+bound this: a loop that never ends freezes the window, the safe-mode key and the pane's menu included, until it is closed. In a browser,
+`?safe` in the address then opens it without plugins. The desktop app shows no address and reopens its hub as it was, so a plugin that
+freezes the window as it starts does so at every start there; it has no way into safe mode before the page runs yet (threat model T63).
+
 In the frame the loader gives the plugin `agora`: `agora.read(cap)` (a Promise, rejected with an `Error` whose message is the code),
 `agora.watch(cap, onData, onError)` (returns a function that stops it), `agora.file(name)`, `agora.granted`, `agora.plugin`,
 `agora.panel` and `agora.scheme`.
@@ -207,12 +216,14 @@ runs.
 - Unit (`apps/web/src/plugins/*.test.ts*`): the package checks, the message filter by source, type, size and rate, grants, the store,
   the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode.
 - Hub (`web.rs`): the exact headers of each path; only `/plugin-frame.html` has the frame page's.
-- Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's headers per path, read from `web.rs` by
-  `scripts/hub-headers.mjs`): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
+- Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium, and WebKit with `--engine webkit`, both in CI, under the hub's
+  headers per path, read from `web.rs` by `scripts/hub-headers.mjs`; both hosts and the STUN and TURN listeners are first shown reachable
+  from a plain page, so a refusal inside a frame is the frame's own): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
   and the frame going to a blob page it made, judged by the servers' request logs; WebRTC to a STUN and a TURN server reaches neither
   (judged by a UDP and a TCP listener), the `RTC…` constructors are gone for good and no frame the plugin makes hands one back; four
   malformed or oversized message (an unknown type, a long name, a 16 MB array, a 200,000-field object) stops the frame at once, as do
-  40 well-formed messages over the rate, without stalling the window; a plugin taking the focus cannot keep it, and the
+  40 well-formed messages over the rate, without stalling the window (in WebKit, without stalling it after the frame's own send loop,
+  which it cannot preempt); a plugin taking the focus cannot keep it, and the
   pane's menu opens safe mode, whose plugins dialog removes a kept plugin; the marker stays whole in a narrow pane; the frame page
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
