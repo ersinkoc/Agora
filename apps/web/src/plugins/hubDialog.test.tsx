@@ -26,6 +26,7 @@ const bytes = bundle(files, { manifest: baseManifest(files, { id: 'agents', name
 const sha = createHash('sha256').update(bytes).digest('hex');
 const sent: CommandBody[] = [];
 let grant: agora.v1.IPluginGrant | undefined;
+let catalog: agora.v1.IPluginCatalogListResult = {};
 const hub = {
   async command(body: CommandBody): Promise<agora.v1.CommandOk.$Properties> {
     sent.push(body);
@@ -34,6 +35,7 @@ const hub = {
     if (body.pluginGrantList) return { pluginGrantList: { grants: grant ? [grant] : [] } };
     if (body.pluginGrantSet) { grant = { pluginId: 'agents', version: '1.0.0', seen: ['agents.read', 'theme.read'], granted: body.pluginGrantSet.granted ?? [] }; return { empty: {} }; }
     if (body.pluginGrantRemove) { grant = undefined; return { empty: {} }; }
+    if (body.pluginCatalogList) return { pluginCatalogList: catalog };
     throw new Error('protocol.invalid_message');
   },
 };
@@ -84,5 +86,43 @@ describe('a plugin installed on the hub in the plugins dialog', () => {
     expect(document.querySelector('[data-plugin-replaces]')?.textContent).toContain("Replaces the hub's Agent list in this browser");
     act(() => button('Cancel')?.click());
     pluginStore.remove('agents');
+  });
+
+  it('lists the catalog read only while it is on: what is not installed, a newer version, the owner\'s command, text as text', async () => {
+    grant = undefined;
+    const e = (pluginId: string, version: string, over: agora.v1.IPluginCatalogEntry = {}): agora.v1.IPluginCatalogEntry => ({
+      pluginId, version, name: `Name ${pluginId}`, author: 'Someone', licence: 'MIT', capabilities: ['agents.read', 'chat.read'], sha256: 'a'.repeat(64), size: 10, ...over,
+    });
+    catalog = {};
+    await pluginStore.attachHub(hub);
+    act(() => root.render(<PluginsDialog onClose={() => {}} />));
+    expect(document.querySelector('[data-plugin-catalog]')).toBeNull();
+    act(() => root.unmount());
+    root = createRoot(host);
+    catalog = { on: true, entries: [
+      e('agents', '1.0.0'),
+      e('newer', '2.0.0', { name: '<img src=x onerror=alert(1)>', description: 'Shows <b>bold</b>' }),
+      e('agents-two', '0.1.0', { capabilities: [] }),
+    ] };
+    await pluginStore.attachHub(hub);
+    act(() => root.render(<PluginsDialog onClose={() => {}} />));
+    // The installed version of `agents` is not offered again.
+    expect(document.querySelector('[data-catalog-row="agents"]')).toBeNull();
+    const row = document.querySelector('[data-catalog-row="newer"]');
+    expect(row?.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect(row?.querySelector('img, b')).toBeNull();
+    expect(row?.textContent).toContain('The conversation of the agent its pane shows');
+    expect(row?.querySelector('[data-catalog-command]')?.textContent).toBe('agora hub plugins install newer');
+    expect(row?.querySelector('button')).toBeNull();
+    expect(document.querySelector('[data-catalog-row="agents-two"]')?.textContent).toContain('It asks to see nothing of yours.');
+    act(() => root.unmount());
+    root = createRoot(host);
+    // A newer version of an installed plugin shows the owner's upgrade command.
+    catalog = { on: true, entries: [e('agents', '1.1.0')] };
+    await pluginStore.attachHub(hub);
+    act(() => root.render(<PluginsDialog onClose={() => {}} />));
+    expect(document.querySelector('[data-catalog-row="agents"] [data-catalog-command]')?.textContent).toBe('agora hub plugins upgrade agents');
+    expect(document.querySelector('[data-catalog-row="agents"]')?.textContent).toContain('A newer version');
+    catalog = {};
   });
 });

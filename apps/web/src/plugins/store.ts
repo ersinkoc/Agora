@@ -7,10 +7,13 @@
 // Build step 3 adds the plugins installed on the hub (`attachHub`, plugins/hub.ts): listed and fetched from the hub at each load, checked
 // here again exactly as a file, with each person's grants kept by the hub. A plugin the owner removed is gone at the window's next load.
 // A development plugin with the id of a hub plugin stands in for it in this browser (its own grants, in this browser's storage). The
-// two never share a grant. In safe mode nothing is asked of the hub. The catalog is step 4.
+// two never share a grant. In safe mode nothing is asked of the hub.
+//
+// Build step 4 adds the hub's community catalog (`catalog`): what the hub's owner can install, listed read only while the owner has it
+// on. Nothing is installed from a window.
 import type { Capability } from './capabilities';
 import { type GrantRecord, type GrantState, grant, grantState, granted, readGrants } from './grants';
-import { type HubLink, loadHubGrants, loadHubPlugins } from './hub';
+import { type Catalog, type HubLink, loadHubCatalog, loadHubGrants, loadHubPlugins } from './hub';
 import { type CheckedPlugin, type PackageResult, MANIFEST, MAX_PACKAGE_BYTES, checkPackage, readManifest } from './package';
 import { SAFE } from './safe';
 
@@ -37,6 +40,8 @@ export interface PluginState {
   readonly ready: boolean;
   /** Hub plugins a development plugin of the same id stands in for in this browser: listed as replaced, never run. */
   readonly replaced: readonly LoadedPlugin[];
+  /** The hub's community catalog (read only); undefined without a hub, from an older hub, and in safe mode. */
+  readonly catalog?: Catalog;
 }
 
 function read(kv: KV | undefined, key: string): unknown {
@@ -62,9 +67,10 @@ export function createPluginStore(env: PluginStoreEnv) {
   const cache = new Map<string, CheckedPlugin>();
   // Each hub plugin's package hash: a grant names the package the person was shown.
   let hubSha = new Map<string, string>();
+  let catalog: Catalog | undefined;
   const show = () => {
     const shadowed = (h: LoadedPlugin) => devs.some((d) => d.plugin.manifest.id === h.plugin.manifest.id);
-    state = Object.freeze({ plugins: Object.freeze([...devs, ...hubs.filter((h) => !shadowed(h))]), safe, ready: started, replaced: Object.freeze(hubs.filter(shadowed)) });
+    state = Object.freeze({ plugins: Object.freeze([...devs, ...hubs.filter((h) => !shadowed(h))]), safe, ready: started, replaced: Object.freeze(hubs.filter(shadowed)), catalog });
     listeners.forEach((l) => l());
   };
   const set = (plugins: readonly LoadedPlugin[]) => { devs = Object.freeze([...plugins]); show(); };
@@ -147,15 +153,16 @@ export function createPluginStore(env: PluginStoreEnv) {
       return true;
     },
     /** Follows the hub this window is connected to: the plugins installed there and this person's grants, read and checked now (each
-     *  connection, so a plugin the owner removed is gone and one added is offered). `undefined` (signed out) leaves only the
-     *  development plugins. Nothing is asked in safe mode. */
+     *  connection, so a plugin the owner removed is gone and one added is offered), and the catalog's entries. `undefined` (signed
+     *  out) leaves only the development plugins. Nothing is asked in safe mode. */
     async attachHub(link: HubLink | undefined): Promise<void> {
       if (safe) return;
       const turn = ++hubTurn;
       hub = link;
-      if (!link) { hubs = []; hubSha = new Map(); show(); return; }
-      const [found, given] = await Promise.all([loadHubPlugins(link, env.version, cache), loadHubGrants(link)]);
+      if (!link) { hubs = []; hubSha = new Map(); catalog = undefined; show(); return; }
+      const [found, given, listed] = await Promise.all([loadHubPlugins(link, env.version, cache), loadHubGrants(link), loadHubCatalog(link)]);
       if (turn !== hubTurn) return;
+      catalog = listed;
       hubs = found.map(({ plugin }) => entry(plugin, '', given[plugin.manifest.id], false));
       hubSha = new Map(found.map(({ plugin, info }) => [plugin.manifest.id, info.sha256]));
       show();

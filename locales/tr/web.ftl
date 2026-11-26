@@ -1983,6 +1983,16 @@ plugin-show = Göster
 plugin-grant-failed = Hub seçiminizi saklamadı. Pencereyi yeniden açıp bir kez daha deneyin.
 plugin-replaces-hub = Bu tarayıcıda hub'ın { $name } eklentisinin yerini, burada izin verdiklerinizle alır. Hub'ınkini yeniden kullanmak için bunu kaldırın.
 plugin-replaced = Bu tarayıcıda aynı kimlikli bir geliştirme eklentisi bunun yerini aldı. Bunu yeniden kullanmak için o eklentiyi kaldırın.
+plugin-catalog-title = Hub'ın kataloğundan
+plugin-catalog-intro = Hub'ın sahibinin bu hub'daki herkes için kurabileceği, incelenmiş topluluk eklentileri. Hub her birini kataloğun imzasına karşı denetledi.
+plugin-catalog-none = Hub'ın kataloğundaki her şey zaten kurulu.
+plugin-catalog-asks = Görmek istedikleri: { $what }
+plugin-catalog-unknown = { $count ->
+    [one] bu pencerenin bilmediği bir şey
+   *[other] bu pencerenin bilmediği { $count } şey
+}
+plugin-catalog-install-how = Onu yalnızca hub'ın sahibi, hub'ın makinesinde kurar:
+plugin-catalog-upgrade-how = Kurulu olandan daha yeni bir sürüm. Onu yalnızca hub'ın sahibi, hub'ın makinesinde yükseltir:
 plugin-cap-agents-read = Ajanlarınızın adları, türleri ve durumları, makineleri ve projeleriyle birlikte
 plugin-cap-usage-read = Ajanlarınızın kullandığı token, bağlam ve süre
 plugin-cap-tasks-read = Projelerinizin ortak görevleri

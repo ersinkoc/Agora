@@ -6,7 +6,7 @@
 import type { agora } from '../gen/agora.js';
 import type { CommandBody } from '../net/live';
 import { num } from '../net/view';
-import { isCapability } from './capabilities';
+import { type Capability, isCapability } from './capabilities';
 import type { GrantRecord } from './grants';
 import { type CheckedPlugin, MAX_PACKAGE_BYTES, checkPackage, sha256Hex } from './package';
 
@@ -74,4 +74,52 @@ export async function loadHubGrants(hub: HubLink): Promise<Record<string, GrantR
     out[g.pluginId] = Object.freeze({ version: g.version, seen: Object.freeze(seen), granted: Object.freeze((g.granted ?? []).filter(isCapability).filter((c) => seen.includes(c))) });
   }
   return out;
+}
+
+// ---- The community catalog (ADR-0114 decision 7, build step 4) ------------------------------------------------------------------
+// The hub's owner pins the catalog's key, fetches its signed index and installs from it on the hub's machine; the window only lists
+// what the hub kept (`PluginCatalogList`), read only, so the person sees what is available and the command the owner would run.
+// Everything in an entry is the index's text: shown as text, never as the window's words.
+
+/** One plugin of the catalog as the window shows it. */
+export interface CatalogPlugin {
+  readonly id: string; readonly name: string; readonly version: string; readonly author: string; readonly licence: string;
+  readonly description: string;
+  /** What it asks to see, as this window knows the names (an unknown one is counted in `unknown`). */
+  readonly capabilities: readonly Capability[];
+  readonly unknown: number;
+}
+/** Off (the owner has not turned it on), or its entries. */
+export type Catalog = { readonly on: false } | { readonly on: true; readonly entries: readonly CatalogPlugin[] };
+
+/** The most catalog entries a window lists (the hub keeps at most as many). */
+export const MAX_CATALOG = 200;
+const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const VERSION = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;
+const text = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+
+/** Orders two `x.y.z` versions by their numbers (as the hub's `compare_versions`). */
+export function compareVersions(a: string, b: string): number {
+  const p = (s: string) => s.split('.').map((x) => Number(x) || 0);
+  const [x, y] = [p(a), p(b)];
+  for (let i = 0; i < 3; i++) { const d = (x[i] ?? 0) - (y[i] ?? 0); if (d !== 0) return Math.sign(d); }
+  return 0;
+}
+
+/** The catalog as the hub keeps it; undefined when the hub cannot say (an older hub refuses the message, or the link is down). */
+export async function loadHubCatalog(hub: HubLink): Promise<Catalog | undefined> {
+  let r: agora.v1.IPluginCatalogListResult | null | undefined;
+  try { r = (await hub.command({ pluginCatalogList: {} })).pluginCatalogList; } catch { return undefined; }
+  if (!r?.on) return Object.freeze({ on: false as const });
+  const entries: CatalogPlugin[] = [];
+  for (const e of (r.entries ?? []).slice(0, MAX_CATALOG)) {
+    const id = text(e.pluginId, 40), version = text(e.version, 20);
+    if (!ID.test(id) || !VERSION.test(version) || entries.some((x) => x.id === id)) continue;
+    const caps = (e.capabilities ?? []).slice(0, 16);
+    entries.push(Object.freeze({
+      id, version, name: text(e.name, 60) || id, author: text(e.author, 100), licence: text(e.licence, 60), description: text(e.description, 300),
+      capabilities: Object.freeze(caps.filter(isCapability)), unknown: caps.filter((c) => !isCapability(c)).length,
+    }));
+  }
+  return Object.freeze({ on: true as const, entries: Object.freeze(entries) });
 }

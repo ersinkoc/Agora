@@ -2078,6 +2078,16 @@ plugin-show = Show it
 plugin-grant-failed = The hub did not keep your choice. Open the window again and try once more.
 plugin-replaces-hub = Replaces the hub's { $name } in this browser, with what you allow here. Remove it to use the hub's again.
 plugin-replaced = Replaced in this browser by a development plugin with the same id. Remove that one to use this again.
+plugin-catalog-title = From the hub's catalog
+plugin-catalog-intro = Reviewed community plugins the hub's owner can install for everyone on this hub. The hub checked each against the catalog's signature.
+plugin-catalog-none = Everything in the hub's catalog is installed already.
+plugin-catalog-asks = Asks to see: { $what }
+plugin-catalog-unknown = { $count ->
+    [one] one thing this window does not know
+   *[other] { $count } things this window does not know
+}
+plugin-catalog-install-how = Only the hub's owner installs it, on the hub's machine:
+plugin-catalog-upgrade-how = A newer version than the one installed. Only the hub's owner upgrades it, on the hub's machine:
 plugin-cap-agents-read = The names, kinds and states of your agents, with their machines and projects
 plugin-cap-usage-read = How many tokens, how much context and how much time your agents have used
 plugin-cap-tasks-read = The shared tasks of your projects
