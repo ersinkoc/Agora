@@ -49,6 +49,8 @@ import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
+import { setCatalogSource } from './themes/catalog';
+import { demoCatalog } from './themes/catalogDemo';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -341,6 +343,9 @@ export function App() {
   const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
   // What the agents cost so far, asked for by the owner's window only (#1044).
   const usage = useUsageReport(api, live !== undefined, pairing.owner);
+  // ADR-0113 decision 6: the theme editor asks this hub for its community theme catalog while the window is connected (the demo window
+  // has a sample one).
+  useEffect(() => { setCatalogSource(api ? (body) => api.command('', body) : hub ? undefined : demoCatalog); }, [api, hub]);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.

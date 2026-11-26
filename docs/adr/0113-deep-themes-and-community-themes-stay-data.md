@@ -121,7 +121,9 @@ and exported as files and kept in the browser. The terminal palette follows the 
 2. Packs (themes and layouts; keybindings when rung 4 lands).
 3. The terminal client reads format 2 (ADR-0068 rung 5). Done: `docs/ux/themes.md`, "The terminal client".
 4. Per-person sync through the hub (schema message, fixtures).
-5. The catalog repository and `agora hub themes update`.
+5. The catalog repository and `agora hub themes update`. Hub side done: `agora hub themes on|off|status|update`, `ThemeCatalogList` and
+   `ThemeCatalogGet`, and the Catalog section of the theme editor (`docs/ux/themes.md`, "The community catalog", which also gives the
+   repository layout the hub expects). The catalog repository itself is the maintainer's to create.
 
 ## Verification
 

@@ -1408,6 +1408,30 @@ node sets. The window's button and the terminal client's key come with the next 
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
 
+### The community theme catalog (ADR-0113)
+
+ADR-0113 decision 6. The hub keeps a catalog of community themes that it fetched on its owner's command (`agora hub themes update`) and
+checked (`docs/ux/themes.md`, "The community catalog"); a window asks the hub for it and never fetches from another origin. Added to the
+schema append-only, no capability (a window sends no `Hello`; a window normally talks to the hub that served it, and an older hub that
+does not know these commands refuses them, which the window treats as "no catalog"):
+
+- `CommandRequest.theme_catalog_list` (111, `ThemeCatalogList {}`) and `CommandRequest.theme_catalog_get` (112,
+  `ThemeCatalogGet { id }`): commands the hub answers itself, with no `target_node` (one that names a machine is refused,
+  `protocol.invalid_message`, `field: target_node`) and never forwarded. Every signed-in person may ask, whatever their role and
+  projects (viewers included); a node refuses them as unsupported.
+- `CommandOk.theme_catalog_list` (33, `ThemeCatalogListResult { on, entries, updated_at_ms }`): `on` is false while the owner has not
+  turned the catalog on (`agora hub themes on`), and then `entries` is empty; it is an answer, not a refusal, so a window that opens its
+  theme editor writes no refused row in the owner's Activity. `updated_at_ms` is when the hub last fetched the catalog (0: never).
+  `entries` are sorted by name, each a `ThemeCatalogEntry { id, name, version, author, licence, sha256, size }`: the index's id
+  (lowercase letters, digits, `-`, at most 40), name, a version that only grows (a higher number is newer), author, SPDX licence, the
+  SHA-256 of the file as fetched (64 lowercase hex) and its size in bytes. Every text is from the catalog's index: clients show it as
+  text, never as markup.
+- `CommandOk.theme_catalog_theme` (34, `ThemeCatalogTheme { entry, data }`): one theme's file exactly as the hub fetched and checked it
+  (JSON text, theme format 1 or 2, at most 256 KiB). A client checks it again with its own theme rules before showing or installing it.
+  Refused with `theme.catalog_off` while the catalog is off and `theme.not_found` (`id`) for an id the catalog lacks.
+
+Golden fixtures of each case are in `schema/fixtures/theme-catalog/` (`crates/agora-protocol/tests/theme_catalog.rs`).
+
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub
