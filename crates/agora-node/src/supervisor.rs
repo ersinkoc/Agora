@@ -4297,7 +4297,11 @@ impl Supervisor {
                     .iter()
                     .find(|(kind, k)| {
                         kind.as_str() != crate::manifests::SHELL_KIND
-                            && k.manifest.process.names.iter().any(|n| n == name)
+                            && k.manifest
+                                .process
+                                .names
+                                .iter()
+                                .any(|n| agora_platform::same_program_name(name, n))
                     })
                     .map(|(kind, _)| kind.clone())
             });

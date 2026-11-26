@@ -2019,6 +2019,17 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     }
 }
 
+/// ADR-0094: whether a process's short name (from [`process_name`]) is the program name a manifest lists. Windows file names keep
+/// their case but do not tell it apart (`CLAUDE.EXE` is `claude.exe`), so there the names are compared ignoring ASCII case; elsewhere
+/// they are compared exactly, as the system does.
+pub fn same_program_name(process: &str, listed: &str) -> bool {
+    if cfg!(windows) {
+        process.eq_ignore_ascii_case(listed)
+    } else {
+        process == listed
+    }
+}
+
 /// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group, its start time in a
 /// unit of the system's own (compared, never shown), the boot it started in (Linux `boot_id`; empty where the start time already
 /// tells boots apart) and its program's name.
@@ -4115,5 +4126,20 @@ mod small_file_tests {
         std::thread::spawn(move || tx.send(read(&q, 4096).is_err()).unwrap());
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod program_name_tests {
+    use super::same_program_name;
+
+    /// ADR-0094: Windows names are compared ignoring ASCII case, every other system's exactly.
+    #[test]
+    fn a_program_name_is_compared_as_the_system_compares_file_names() {
+        assert!(same_program_name("claude", "claude"));
+        assert!(!same_program_name("claude", "codex"));
+        assert!(!same_program_name("claude-x", "claude"));
+        assert_eq!(same_program_name("CLAUDE", "claude"), cfg!(windows));
+        assert_eq!(same_program_name("Codex", "codex"), cfg!(windows));
     }
 }
