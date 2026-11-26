@@ -92,6 +92,7 @@ fn the_typed_messages_read_each_case() {
         none,
         v1::UserSettingsValue {
             key: "themes".into(),
+            tag: "3fa1c09d7b2e4a6f8c5d1e0b9a7f6c42".into(),
             ..Default::default()
         }
     );
@@ -105,6 +106,7 @@ fn the_typed_messages_read_each_case() {
         (4, s.value.as_slice())
     );
     assert!(kept.updated_ms > 0);
+    assert_eq!(kept.tag, none.tag, "the same person's tag on every value");
 
     for (name, code, param, value) in [
         (

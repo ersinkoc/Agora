@@ -36,4 +36,9 @@ message UserSettingsValue {
   uint64 version = 3;
   // When it was last written, in milliseconds since the Unix epoch, hub clock; 0 for a value never written.
   uint64 updated_ms = 4;
+  // The person's tag: 32 lowercase hex characters the hub makes at random once per person (a person removed and added again gets a new
+  // one) and sends with every value, never naming the person. A browser keeps the tag of the value it last synced with: a value with
+  // another tag is someone else's (two people signed in to one browser in turn), and the browser takes it as it is, merging nothing of
+  // its own into it.
+  string tag = 5;
 }

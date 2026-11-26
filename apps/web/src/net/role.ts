@@ -13,6 +13,18 @@ const ROLES: Record<number, PersonRole> = {
 };
 
 /** The role a `Welcome` names; `unspecified` for one that names none (a node's) or that cannot be read. */
+/** The hub's clock in its `Welcome` (milliseconds; 0 when it says none or the frame cannot be read). */
+export function welcomeTime(payload: Uint8Array): number {
+  try {
+    const t: unknown = agora.v1.Welcome.decode(payload).serverTimeMs;
+    if (typeof t === 'number') return t;
+    if (t && typeof t === 'object' && 'toNumber' in t) return (t as { toNumber: () => number }).toNumber();
+    return Number(t) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function welcomeRole(payload: Uint8Array): PersonRole {
   try {
     return ROLES[agora.v1.Welcome.decode(payload).personRole ?? 0] ?? 'unspecified';

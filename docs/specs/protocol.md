@@ -1443,12 +1443,17 @@ Answered by the hub itself, for any signed-in person (owner, member or viewer al
 member's projects); one that names a node (`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node
 never receives them (refused as unsupported).
 
-- **`UserSettingsGet { key }`** → `UserSettingsValue { key, value, version, updated_ms }`: the caller's own value. One never written is
+- **`UserSettingsGet { key }`** → `UserSettingsValue { key, value, version, updated_ms, tag }`: the caller's own value. One never written is
   version 0 with an empty value (an answer, not a refusal).
 - **`UserSettingsSet { key, value, base_version }`** → `UserSettingsValue` with the new version: replaces the caller's own value when
   `base_version` is the current version (0 for none yet), and raises the version by one. Otherwise `settings.stale` (`version`, the current
   one) and nothing changes: another window wrote first, so the client reads again, merges and writes again. A value over 262144 bytes is
   `settings.too_large` (`max`), refused whole before anything is read or written.
+- **The tag** (`UserSettingsValue.tag`, 32 lowercase hex): random, made by the hub once per person and sent with every value; it names
+  nobody. A person removed and added again gets a new one. A client keeps the tag it last synced with and takes a value with another tag
+  (or none) as someone else's: it merges nothing of its own into it.
+- **Limited.** At most 60 `UserSettingsSet` per person a minute, across all their windows: past that `rate.limited` (`limit`) and nothing
+  changes; only the first refusal in a minute is an audit row.
 - **Opaque and per person.** `value` is bytes the hub never parses, checks or shows; every client checks what it reads. The value is
   keyed by the session's person (`owner` on a hub with one person) and the key, never by anything the request names, so nobody reads or
   writes another person's. `key` is a closed set (`themes`); any other is `protocol.invalid_message` (`key`). Removing a person forgets
@@ -1484,7 +1489,9 @@ remove ID`, docs/ux/plugins.md).
   `seen` from the installed manifest and `granted` in the manifest's order.
 - **`PluginGrantRemove { plugin_id }`** → `Empty`: forgets the caller's grant (stop showing it); none is not an error.
 - **Kept per person.** Grants are keyed by the person (`owner` on a hub with one person) and plugin id. Removing a plugin forgets everyone's
-  grant for it; removing a person forgets theirs. Setting and removing a grant are audit rows of the person (`plugin.grant`,
+  grant for it; removing a person forgets theirs. At most 30 grant changes (`PluginGrantSet` and `PluginGrantRemove`) per person a minute:
+  past that `rate.limited` (`limit`), nothing changes, and only the first refusal in a minute is an audit row (ADR-0113 step 4 review).
+  Setting and removing a grant are audit rows of the person (`plugin.grant`,
   `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`). The row's `node` names the plugin
   (`<id>` or `<id>@<version>`), as a `user.*` row names the person.
 - Golden fixtures: `schema/fixtures/v1/agora.v1.Plugin*` and `schema/fixtures/plugins/` (`crates/agora-protocol/tests/plugins.rs`).

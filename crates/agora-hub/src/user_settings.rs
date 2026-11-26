@@ -6,13 +6,16 @@
 //! - **Per person.** Values are keyed by the session's person (`Access::user`, `owner` on a hub with one person), never by anything a
 //!   request names, so nobody reads or writes another person's. Removing a person forgets their values (`users.rs`).
 //! - **A closed set of keys.** Only [`KEYS`]; anything else is `protocol.invalid_message` (`key`), so the hub is no general store.
+//! - **Tagged.** Each person has a random tag ([`UserSettingsValue::tag`]) the hub makes once and sends with every value. A browser keeps
+//!   the tag it last synced with, so it can tell another person's value (two people signing in to one browser in turn) and never
+//!   merges one person's local themes into another's. Removing a person forgets their tag; added again, they get a new one.
 //! - **Versioned.** Each write raises the value's version by one. A write names the version it was based on; one based on any other
 //!   version is refused with `settings.stale` naming the current one, and nothing changes. The check and the write are one transaction
 //!   under the write lock, so two writes based on the same version never both land.
 
 use agora_protocol::v1::{UserSettingsSet, UserSettingsValue};
 use agora_protocol::{Error, ErrorCode};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::store::{write_tx, SqliteStore};
 
@@ -42,6 +45,35 @@ fn check_key(key: &str) -> Result<&'static str, Error> {
     known_key(key).ok_or_else(|| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "key"))
 }
 
+/// `user`'s tag, made at random the first time it is asked for.
+fn tag_of(conn: &Connection, user: &str) -> Result<String, Error> {
+    let have: Option<String> = conn
+        .query_row(
+            "SELECT tag FROM user_settings_tags WHERE user_id = ?1",
+            [user],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| internal())?;
+    if let Some(tag) = have {
+        return Ok(tag);
+    }
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).map_err(|_| internal())?;
+    let tag: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    conn.execute(
+        "INSERT OR IGNORE INTO user_settings_tags (user_id, tag) VALUES (?1, ?2)",
+        params![user, tag],
+    )
+    .map_err(|_| internal())?;
+    conn.query_row(
+        "SELECT tag FROM user_settings_tags WHERE user_id = ?1",
+        [user],
+        |r| r.get(0),
+    )
+    .map_err(|_| internal())
+}
+
 pub struct UserSettings<'a> {
     store: &'a SqliteStore,
 }
@@ -64,11 +96,13 @@ impl<'a> UserSettings<'a> {
             .optional()
             .map_err(|_| internal())?;
         let (version, value, updated_ms) = row.unwrap_or((0, Vec::new(), 0));
+        let tag = tag_of(&conn, user)?;
         Ok(UserSettingsValue {
             key: key.to_string(),
             value,
             version: to_u64(version),
             updated_ms: to_u64(updated_ms),
+            tag,
         })
     }
 
@@ -106,12 +140,14 @@ impl<'a> UserSettings<'a> {
             params![user, key, version, set.value, to_i64(now_ms)],
         )
         .map_err(|_| internal())?;
+        let tag = tag_of(&tx, user)?;
         tx.commit().map_err(|_| internal())?;
         Ok(UserSettingsValue {
             key: key.to_string(),
             value: set.value.clone(),
             version: to_u64(version),
             updated_ms: now_ms,
+            tag,
         })
     }
 }
@@ -138,14 +174,10 @@ mod tests {
         let s = store();
         let v = UserSettings::new(&s).get("eda", "themes").unwrap();
         assert_eq!(
-            v,
-            UserSettingsValue {
-                key: "themes".into(),
-                value: vec![],
-                version: 0,
-                updated_ms: 0
-            }
+            (v.key.as_str(), v.value.len(), v.version, v.updated_ms),
+            ("themes", 0, 0, 0)
         );
+        assert_eq!(v.tag.len(), 32);
     }
 
     #[test]
@@ -207,6 +239,28 @@ mod tests {
         assert_eq!(u.get("bo", "themes").unwrap().value, b"bo's");
     }
 
+    /// Each person has their own tag, the same on every read and write, never another's; removed and added again, a new one.
+    #[test]
+    fn each_person_has_a_lasting_random_tag() {
+        use crate::users::{Role, Users};
+        let s = store();
+        let u = UserSettings::new(&s);
+        let users = Users::new(&s);
+        let eda = users.add("Eda", Role::Member, 1).unwrap();
+        let first = u.get(&eda.id, "themes").unwrap().tag;
+        assert!(first.len() == 32 && first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            u.set(&eda.id, &set("themes", b"x", 0), 2).unwrap().tag,
+            first
+        );
+        assert_eq!(u.get(&eda.id, "themes").unwrap().tag, first);
+        assert_ne!(u.get("bo", "themes").unwrap().tag, first);
+        assert!(users.remove(&eda.id).unwrap());
+        let again = users.add("Eda", Role::Member, 3).unwrap();
+        assert_eq!(again.id, eda.id);
+        assert_ne!(u.get(&again.id, "themes").unwrap().tag, first);
+    }
+
     #[test]
     fn only_known_keys_are_kept() {
         let s = store();
@@ -236,5 +290,27 @@ mod tests {
         assert!(users.remove(&eda.id).unwrap());
         assert_eq!(u.get(&eda.id, "themes").unwrap().version, 0);
         assert_eq!(u.get(&bo.id, "themes").unwrap().value, b"b");
+    }
+
+    /// F5: a person's rows left behind with no person (a database from another build, or edited by hand) are never inherited: a new
+    /// person whose name would give that id gets another.
+    #[test]
+    fn a_new_person_never_takes_an_id_with_settings_or_grants_left_behind() {
+        use crate::users::{Role, Users};
+        let s = store();
+        {
+            let conn = s.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO user_settings (user_id, key, version, value, updated_ms) VALUES ('eda', 'themes', 3, x'7b7d', 1);
+                 INSERT INTO plugin_grants (user_id, plugin_id, version, seen, granted, set_ms) VALUES ('bo', 'p', '1.0.0', '', '', 1);
+                 INSERT INTO user_settings_tags (user_id, tag) VALUES ('cem', '00000000000000000000000000000000');",
+            )
+            .unwrap();
+        }
+        let users = Users::new(&s);
+        assert_eq!(users.add("Eda", Role::Member, 1).unwrap().id, "eda-2");
+        assert_eq!(users.add("Bo", Role::Member, 1).unwrap().id, "bo-2");
+        assert_eq!(users.add("Cem", Role::Member, 1).unwrap().id, "cem-2");
+        assert_eq!(users.add("Dee", Role::Member, 1).unwrap().id, "dee");
     }
 }

@@ -309,7 +309,8 @@ every device they sign in to on the same hub, so the phone and the laptop agree.
 [protocol.md](../specs/protocol.md#per-person-settings-adr-0113)): opaque bytes it never parses, checks or shows, at most **256 KiB**
 (`settings.too_large` over that), keyed by the session's person, so nobody reads or writes another person's. Each write raises the
 value's **version**; a write based on an older version is refused (`settings.stale`), so two windows never overwrite each other unseen.
-Writes are rows of the person's Activity ("Kept their themes the same on their devices") with the outcome and nothing of the value; a
+A person's writes are limited to **60 a minute** across their windows (`rate.limited` past that, with one Activity row however many
+are refused). Writes are rows of the person's Activity ("Kept their themes the same on their devices") with the outcome and nothing of the value; a
 read writes none, and neither does a stale write (it changed nothing). Removing a person forgets their value. The hub's database moves to schema 17 for it.
 
 **In the window.**
@@ -344,7 +345,15 @@ read writes none, and neither does a stale write (it changed nothing). Removing 
     (`agora.theme.choice.at.v1`), and the hub's on a tie, so two devices never keep writing their own over each other's. A choice made
     before this version counts as made at time 1, the defaults (never chosen) as 0, so a new device takes an existing one's choice. A newer choice naming a theme this browser cannot show keeps this browser's choice on screen and stays
     the newer one for the devices that can.
-  - Times are each device's clock; a clock far off can make an older edit look newer.
+  - Times are each device's clock, believed only up to the hub's now (from its `Welcome`) plus **5 minutes**: a later edit time, removal
+    or choice time (a device whose clock is far ahead) is cut back to that and written back cut back, so it cannot stay "the newer one"
+    for long. A clock that is behind still makes its edits look older than they are.
+- **One browser, two people.** The hub sends each person's random **tag** with their value, and the browser keeps the tag it last
+  synced with (`agora.themes.sync.tag.v1`). When someone else signs in to the same browser and their value has another tag (or none),
+  the browser merges **nothing** of its own into it: their themes, removals, choice and packs replace what this browser held (the
+  previous person's are in their own value already) and nothing goes up. **What remains:** the first time a browser syncs at all (no
+  tag kept yet, for example the first sign-in after updating), what it held is merged into the value of whoever signs in, as when one
+  person turns this on; a browser two people used before this version merges into whoever signs in first.
 - **Packs.** A pack imported with **Import pack…** is kept as the file it was (`agora.packs.v1`, the 8 most recent; a ninth replaces the
   oldest), and is synced like a theme. **Your packs and devices** lists them with what each holds: **Open…** shows the same Import pack
   preview with nothing ticked (nothing of a pack is applied on another device until the person picks its parts there), and **Forget**

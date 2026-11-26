@@ -105,6 +105,71 @@ pub const MAX_DISPATCHES: usize = 8;
 /// ADR-0095: the span [`MAX_DISPATCHES`] is counted over.
 pub const DISPATCH_WINDOW: Duration = Duration::from_secs(60);
 
+/// How a write was counted against its person's limit ([`WriteRates`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    Yes,
+    /// Over the limit, and the first refusal in this span: worth one audit row.
+    First,
+    /// Over the limit again in the same span: refused without a row, so a loop of refused writes cannot fill the audit trail.
+    Again,
+}
+
+/// ADR-0113 step 4 (and the plugin grants of ADR-0114): each person's recent writes of one kind (their settings value, their plugin
+/// grants), kept across all their windows, at most `max` in `window`. Only people who wrote in the last span are kept.
+#[derive(Debug)]
+pub struct WriteRates {
+    max: usize,
+    window: Duration,
+    seen: std::sync::Mutex<HashMap<String, (VecDeque<Instant>, bool)>>,
+}
+
+impl WriteRates {
+    pub fn new(max: usize, window: Duration) -> Self {
+        Self {
+            max,
+            window,
+            seen: std::sync::Mutex::default(),
+        }
+    }
+
+    pub fn max(&self) -> usize {
+        self.max
+    }
+
+    /// Counts one write of `user` at `now`, when it fits.
+    pub fn admit(&self, user: &str, now: Instant) -> Admit {
+        let mut g = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let window = self.window;
+        g.retain(|_, (recent, _)| {
+            while recent
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+            {
+                recent.pop_front();
+            }
+            !recent.is_empty()
+        });
+        let (recent, refused) = g.entry(user.to_string()).or_default();
+        if recent.len() >= self.max {
+            if std::mem::replace(refused, true) {
+                return Admit::Again;
+            }
+            return Admit::First;
+        }
+        *refused = false;
+        recent.push_back(now);
+        Admit::Yes
+    }
+}
+
+/// ADR-0113 step 4: the most writes of their own settings value one person may make in [`WRITE_WINDOW`] (a window writes once per
+/// change after 1.5 s, and again after a stale refusal).
+pub const MAX_SETTINGS_WRITES: usize = 60;
+/// ADR-0114: the most plugin grant changes (set or remove) one person may make in [`WRITE_WINDOW`].
+pub const MAX_GRANT_WRITES: usize = 30;
+pub const WRITE_WINDOW: Duration = Duration::from_secs(60);
+
 /// ADR-0095: the times of each person's recent dispatches, kept by the hub across all of that person's windows and connections (so
 /// reconnecting or opening another window does not reset the count). Only people who dispatched in the last minute are kept.
 #[derive(Debug, Default)]
@@ -164,6 +229,27 @@ mod tests {
             projects: None,
             session: String::new(),
         }
+    }
+
+    /// A person's writes past the limit are refused until the span has passed; only the first refusal of a span is worth a row; other
+    /// people are counted apart.
+    #[test]
+    fn writes_are_limited_per_person_and_refusals_coalesce() {
+        let rates = WriteRates::new(3, Duration::from_secs(60));
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(rates.admit("eda", t0), Admit::Yes);
+        }
+        assert_eq!(rates.admit("eda", t0), Admit::First);
+        assert_eq!(rates.admit("eda", t0), Admit::Again);
+        assert_eq!(
+            rates.admit("eda", t0 + Duration::from_secs(30)),
+            Admit::Again
+        );
+        assert_eq!(rates.admit("bo", t0), Admit::Yes);
+        let later = t0 + Duration::from_secs(61);
+        assert_eq!(rates.admit("eda", later), Admit::Yes);
+        assert_eq!(rates.max(), 3);
     }
 
     fn req(target: &str, command: C) -> CommandRequest {

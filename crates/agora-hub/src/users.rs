@@ -97,13 +97,18 @@ impl<'a> Users<'a> {
         let reserved = |id: &str| matches!(id, "owner" | "hub");
         // The devices a removed person registered stay listed under their id (the owner may still revoke them, ADR-0061), so that id
         // is never given to someone else: the new person would get them as theirs, and machines would be offered them (audit F910).
+        // Nor is one with rows a person's settings or plugin grants left behind (removing a person deletes them; a database from
+        // another build, or one edited by hand, may still hold some): a new person never inherits another's themes or grants.
         let mut id = base.clone();
         let mut n = 1;
         while reserved(&id)
             || conn
                 .query_row(
                     "SELECT 1 FROM users WHERE id = ?1
-                     UNION ALL SELECT 1 FROM user_devices WHERE user_id = ?1 LIMIT 1",
+                     UNION ALL SELECT 1 FROM user_devices WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM user_settings WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM user_settings_tags WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM plugin_grants WHERE user_id = ?1 LIMIT 1",
                     [&id],
                     |_| Ok(()),
                 )
@@ -207,6 +212,8 @@ impl<'a> Users<'a> {
             .map_err(db)?;
         // ADR-0113 decision 6: and their own settings values (their themes, packs and theme choice).
         conn.execute("DELETE FROM user_settings WHERE user_id = ?1", [id])
+            .map_err(db)?;
+        conn.execute("DELETE FROM user_settings_tags WHERE user_id = ?1", [id])
             .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])

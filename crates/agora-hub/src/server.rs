@@ -2076,6 +2076,7 @@ pub(crate) fn plugin_command(
     let plugins = crate::plugins::Plugins::new(hub.store());
     let internal = |_| Error::new(ErrorCode::Internal).with("incident_id", "plugins");
     let empty = || command_ok::Result::Empty(v1::Empty {});
+    let mut admit = crate::dispatch::Admit::Yes;
     let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
         Some(
             C::PluginList(_)
@@ -2109,6 +2110,29 @@ pub(crate) fn plugin_command(
                 })
                 .map_err(internal),
         ),
+        // Each person's grant changes are limited (one refusal row per span, `crate::dispatch::Admit`); nothing changes when refused.
+        Some(C::PluginGrantSet(_) | C::PluginGrantRemove(_))
+            if {
+                admit = hub
+                    .grant_writes()
+                    .admit(&who.user, std::time::Instant::now());
+                admit != crate::dispatch::Admit::Yes
+            } =>
+        {
+            (
+                if admit == crate::dispatch::Admit::First {
+                    if matches!(req.command, Some(C::PluginGrantSet(_))) {
+                        "plugin.grant"
+                    } else {
+                        "plugin.ungrant"
+                    }
+                } else {
+                    ""
+                },
+                Err(Error::new(ErrorCode::RateLimited)
+                    .with("limit", hub.grant_writes().max() as i64)),
+            )
+        }
         Some(C::PluginGrantSet(g)) => (
             "plugin.grant",
             plugins.set_grant(&who.user, g, now_ms()).map(|()| empty()),
@@ -2170,9 +2194,18 @@ pub(crate) fn settings_command(
         }
         Some(C::UserSettingsGet(g)) => settings.get(&who.user, &g.key),
         Some(C::UserSettingsSet(s)) => {
-            let r = settings.set(&who.user, s, now_ms());
             // The key when it is one the hub keeps (anything else a window sent is not written into the trail).
             let key = crate::user_settings::known_key(&s.key).unwrap_or("");
+            // Each person's writes are limited; past the limit nothing changes, and only the first refusal of a span is a row.
+            let admit = hub
+                .settings_writes()
+                .admit(&who.user, std::time::Instant::now());
+            let r = if admit == crate::dispatch::Admit::Yes {
+                settings.set(&who.user, s, now_ms())
+            } else {
+                Err(Error::new(ErrorCode::RateLimited)
+                    .with("limit", hub.settings_writes().max() as i64))
+            };
             // A stale write is routine (two windows of one person writing after the same edit, the second reads, merges and writes
             // again) and changed nothing: it writes no row, so the person's Activity holds one row per change.
             match &r {
@@ -2180,6 +2213,7 @@ pub(crate) fn settings_command(
                     audit(hub, who, "settings.set", key, "ok");
                 }
                 Err(e) if e.code == ErrorCode::SettingsStale => {}
+                Err(_) if admit == crate::dispatch::Admit::Again => {}
                 Err(e) => {
                     audit(hub, who, "settings.set", key, e.code.as_str());
                 }

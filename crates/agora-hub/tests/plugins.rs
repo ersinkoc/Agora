@@ -385,3 +385,32 @@ async fn a_large_package_is_fetched_in_pieces_and_a_replaced_one_by_its_new_hash
     let new = list(&mut c).await[0].sha256.clone();
     assert_eq!(fetch(&mut c, "big", &new).await.unwrap(), two);
 }
+
+/// F3: one person's grant changes are limited (30 a minute); past that nothing changes and a loop of refusals leaves one audit row.
+#[tokio::test]
+async fn grant_changes_past_the_limit_are_refused_with_one_row() {
+    let (st, addr) = start().await;
+    let mut member = window(addr, "member-token").await;
+    let remove = || {
+        cr::Command::PluginGrantRemove(v1::PluginGrantRemove {
+            plugin_id: "demo".into(),
+        })
+    };
+    for _ in 0..30 {
+        ok(ask(&mut member, "", remove()).await);
+    }
+    for _ in 0..4 {
+        assert_eq!(err(&ask(&mut member, "", remove()).await), "rate.limited");
+    }
+    // Another person is counted apart.
+    let mut viewer = window(addr, "viewer-token").await;
+    ok(ask(&mut viewer, "", remove()).await);
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 1000)
+        .unwrap();
+    let limited = rows
+        .iter()
+        .filter(|r| r.who == "eda" && r.outcome == "rate.limited")
+        .count();
+    assert_eq!(limited, 1);
+}

@@ -324,3 +324,39 @@ async fn a_request_with_no_command_is_refused_as_an_older_hub_refuses_an_unknown
         );
     }
 }
+
+/// F3: one person's writes are limited (60 a minute); past that nothing changes, and a loop of refused writes leaves one audit row, not
+/// one per try. Another person is counted apart. Every value names its person's own tag, never another's.
+#[tokio::test]
+async fn writes_past_the_limit_are_refused_with_one_row_and_tags_are_per_person() {
+    let (st, addr) = start().await;
+    let mut eda = window(addr, "member-token").await;
+    let mut bo = window(addr, "viewer-token").await;
+    let tag = value(&mut eda).await.tag;
+    assert_eq!(tag.len(), 32);
+    assert_ne!(value(&mut bo).await.tag, tag);
+    for base in 0..60 {
+        let v = write(&mut eda, format!("v{base}").as_bytes(), base).await;
+        assert_eq!(v.tag, tag);
+    }
+    for _ in 0..5 {
+        let r = ask(&mut eda, "", set("themes", b"too many", 60)).await;
+        assert_eq!(err(&r), "rate.limited");
+        assert_eq!(
+            param(&r, "limit"),
+            Some(v1::ParamValue {
+                value: Some(v1::param_value::Value::Int(60))
+            })
+        );
+    }
+    assert_eq!(value(&mut eda).await.value, b"v59");
+    assert_eq!(write(&mut bo, b"bo", 0).await.version, 1);
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 1000)
+        .unwrap();
+    let limited = rows
+        .iter()
+        .filter(|r| r.who == "eda" && r.outcome == "rate.limited")
+        .count();
+    assert_eq!(limited, 1);
+}

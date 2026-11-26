@@ -73,6 +73,8 @@ export interface SyncApply {
   removed: Removed[];
   choice?: Record<Scheme, string>;
   choiceAt: number;
+  /** Another person's value replacing this browser's: the choice and its time are taken as given (the defaults when there is none). */
+  exact?: boolean;
 }
 interface Meta { uid: string; edited: number }
 // The lasting ids and edit times of the stored themes, by local id; a theme stored before this step gets a new lasting id.
@@ -372,10 +374,11 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       };
       const keep = (s: Scheme) => (all.some((t) => t.id === state.choice[s] && hasScheme(t, s)) ? state.choice[s] : DEFAULT_THEME[s]);
       let choice = { dark: keep('dark'), light: keep('light') };
+      if (next.exact) choice = { ...DEFAULT_THEME };
       if (next.choice) choice = { dark: local(next.choice.dark, 'dark', choice.dark), light: local(next.choice.light, 'light', choice.light) };
       // A newer choice naming a theme this browser cannot show (one that waits, or that it cannot read) keeps its time out of here, so it
       // stays the newer one and this browser never writes its own over it.
-      const at = resolved ? Math.max(choiceAt, next.choiceAt) : choiceAt;
+      const at = next.exact ? next.choiceAt : resolved ? Math.max(choiceAt, next.choiceAt) : choiceAt;
       if (choice.dark !== state.choice.dark || choice.light !== state.choice.light || at !== choiceAt) persistChoice(choice, at);
       set({ ...state, user, choice });
     },

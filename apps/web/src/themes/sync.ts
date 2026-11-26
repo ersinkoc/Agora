@@ -18,11 +18,12 @@
 // hub's on a tie; a choice made before this step counts as made at time 1, one never made (the defaults) as 0.
 import type { agora } from '../gen/agora';
 import { type ThemeData, readTheme, writeTheme } from './file';
+import { hubNow } from '../net/hubClock';
 import { SAFE } from '../plugins/safe';
 import { type KeptPack, type PackStore, MAX_KEPT_PACKS, packStore } from './kept';
 import { type PackIssue, readPack } from './pack';
 import { type Removed, type SyncApply, type SyncSnapshot, type ThemeStore, MAX_USER_THEMES, UID, catalogOrigin, removedOf, themeStore, timeOf } from './store';
-import { type CatalogOrigin, type Scheme, type Theme, type ThemeIssue, chromeOf, looksOf, textOf } from './tokens';
+import { type CatalogOrigin, DEFAULT_THEME, type Scheme, type Theme, type ThemeIssue, chromeOf, looksOf, textOf } from './tokens';
 
 export const SYNC_KEY = 'agora-theme-sync';
 export const SYNC_FORMAT = 1;
@@ -33,6 +34,8 @@ export const MAX_SYNC_THEMES = 64;
 export const MAX_SYNC_PACKS = 16;
 /** This device's switch, "Keep my themes the same on my devices": absent means on. */
 export const SETTING_KEY = 'agora.themes.sync.v1';
+/** The tag of the person whose value this browser last synced with (`UserSettingsValue.tag`). */
+export const TAG_KEY = 'agora.themes.sync.tag.v1';
 /** How long after the last change the window writes to the hub. */
 export const DEBOUNCE_MS = 1500;
 
@@ -52,12 +55,41 @@ export interface Remote {
   themesRemoved: Removed[];
   packsRemoved: Removed[];
   choice?: { dark: string; light: string; at: number };
+  /** Top-level fields of the value this window does not know (a newer window's), written back as they were. */
+  extra?: Raw;
 }
 export type ReadSync = { ok: true; remote: Remote } | { ok: false; newer: true };
 export const EMPTY: Remote = { themes: [], packs: [], invalid: [], themesRemoved: [], packsRemoved: [] };
 
 const nameOf = (file: unknown) => (isObject(file) && typeof file.name === 'string' ? file.name.slice(0, 60) : undefined);
 const REF = /^(u:[0-9a-f]{24}|[a-z0-9][a-z0-9-]{0,39})$/;
+const KNOWN = new Set([SYNC_KEY, 'themes', 'themesRemoved', 'packs', 'packsRemoved', 'choice']);
+/** How far past the hub's now a time from a device is believed (a device clock a little fast); later ones are taken as this. */
+export const CLOCK_SLACK_MS = 5 * 60 * 1000;
+
+type Local = { themes: SyncSnapshot; packs: { packs: KeptPack[]; removed: Removed[] } };
+// Every time in both sides no later than `limit` (the hub's now plus the slack): a device with a clock far ahead would otherwise keep its
+// edit or choice the newer one until that date. A time cut back is written back cut back (in a copy of the entry, the rest as it was).
+function clamped(local: Local, remote: Remote, limit: number): { local: Local; remote: Remote } {
+  const t = (v: number) => Math.min(v, limit);
+  const marks = (list: readonly Removed[]) => list.map((m) => (m.at > limit ? { uid: m.uid, at: limit } : m));
+  const raw = (r: Raw, field: string, v: number) => (v > limit ? { ...r, [field]: limit } : r);
+  return {
+    local: {
+      themes: { ...local.themes, themes: local.themes.themes.map((x) => ({ ...x, edited: t(x.edited) })), removed: marks(local.themes.removed), choiceAt: t(local.themes.choiceAt) },
+      packs: { packs: local.packs.packs.map((p) => (p.added > limit ? { ...p, added: limit } : p)), removed: marks(local.packs.removed) },
+    },
+    remote: {
+      ...remote,
+      themes: remote.themes.map((r) => ({ ...r, edited: t(r.edited), raw: raw(r.raw, 'edited', r.edited) })),
+      packs: remote.packs.map((r) => (r.added > limit ? { ...r, added: limit, kept: { ...r.kept, added: limit }, raw: raw(r.raw, 'added', r.added) } : r)),
+      invalid: remote.invalid.map((i) => (i.edited > limit ? { ...i, edited: limit, raw: raw(i.raw, i.kind === 'theme' ? 'edited' : 'added', i.edited) } : i)),
+      themesRemoved: marks(remote.themesRemoved),
+      packsRemoved: marks(remote.packsRemoved),
+      choice: remote.choice && { ...remote.choice, at: t(remote.choice.at) },
+    },
+  };
+}
 
 /** Reads the hub's value. An empty value, or one that is not this format at all, reads as nothing kept yet; one made by a newer window
  *  is not read (and never written over). Every theme and pack is checked with the readers a file goes through. Never throws. */
@@ -92,6 +124,8 @@ export function readSync(text: string): ReadSync {
   if (isObject(c) && typeof c.dark === 'string' && typeof c.light === 'string' && REF.test(c.dark) && REF.test(c.light)) {
     remote.choice = { dark: c.dark, light: c.light, at: timeOf(c.at) };
   }
+  const extra = Object.keys(value).filter((k) => !KNOWN.has(k)).sort();
+  if (extra.length > 0) remote.extra = Object.fromEntries(extra.map((k) => [k, value[k]]));
   return { ok: true, remote };
 }
 
@@ -111,8 +145,9 @@ const dataOf = (t: Theme): ThemeData => ({ name: t.name, scheme: t.scheme, token
 const byUid = <T extends { uid: string }>(a: T, b: T) => (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0);
 const markOf = (marks: readonly Removed[]) => new Map(marks.map((m) => [m.uid, m.at]));
 
-/** The union of this browser's themes and packs and the hub's (see the top of this file). Pure. */
-export function merge(local: { themes: SyncSnapshot; packs: { packs: KeptPack[]; removed: Removed[] } }, remote: Remote): Merged {
+/** The union of this browser's themes and packs and the hub's (see the top of this file), every time cut back to `limit` at most. Pure. */
+export function merge(localIn: Local, remoteIn: Remote, limit = Number.MAX_SAFE_INTEGER): Merged {
+  const { local, remote } = clamped(localIn, remoteIn, limit);
   const waiting: Merged['waiting'] = [];
   // ---- Themes ----
   const themesRemoved = removedOf([...local.themes.removed, ...remote.themesRemoved]);
@@ -170,7 +205,7 @@ export function merge(local: { themes: SyncSnapshot; packs: { packs: KeptPack[];
     ...waitingPacks.map((r) => ({ uid: r.uid, entry: r.raw })),
     ...invalid.filter((i) => i.kind === 'pack').map((i) => ({ uid: i.uid, entry: i.raw })),
   ].sort(byUid).map((x) => x.entry);
-  const value: Raw = { [SYNC_KEY]: SYNC_FORMAT, themes, themesRemoved, packs, packsRemoved, choice: { dark: choice.dark, light: choice.light, at: choice.at } };
+  const value: Raw = { [SYNC_KEY]: SYNC_FORMAT, themes, themesRemoved, packs, packsRemoved, choice: { dark: choice.dark, light: choice.light, at: choice.at }, ...remote.extra };
 
   return {
     themes: {
@@ -188,6 +223,8 @@ export function merge(local: { themes: SyncSnapshot; packs: { packs: KeptPack[];
 
 export const serialiseSync = (value: Raw) => JSON.stringify(value);
 const bytes = (text: string) => new TextEncoder().encode(text);
+// This browser as if it held nothing: what another person's value is merged with.
+const NOTHING_HERE: Local = { themes: { themes: [], removed: [], choice: { ...DEFAULT_THEME }, choiceAt: 0 }, packs: { packs: [], removed: [] } };
 
 // Whether applying a merge would change this browser: the same themes (by id, edit and order), packs, marks and choice change nothing.
 function changesLocal(local: { themes: SyncSnapshot; packs: { packs: KeptPack[]; removed: Removed[] } }, m: Merged): boolean {
@@ -230,6 +267,8 @@ export interface SyncEnv {
   /** The cap (the hub's, `MAX_SYNC_BYTES`, unless a test says less). */
   maxBytes?: number;
   debounceMs?: number;
+  /** Now by the hub's clock (net/hubClock.ts), for cutting back times from a device whose clock is ahead. */
+  now?: () => number;
   setTimer?: (f: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
 }
@@ -250,6 +289,11 @@ export function createThemeSync(env: SyncEnv) {
   const setTimer = env.setTimer ?? ((f, ms) => setTimeout(f, ms));
   const clearTimer = env.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>));
   const debounceMs = env.debounceMs ?? DEBOUNCE_MS;
+  const now = env.now ?? hubNow;
+  const readTag = () => { try { return env.kv?.getItem(TAG_KEY) ?? undefined; } catch { return undefined; } };
+  const writeTag = (tag: string) => { try { env.kv?.setItem(TAG_KEY, tag); } catch { /* holds for this visit */ } };
+  // Set by a read whose value is another person's: the next write takes the hub's value as it is and merges nothing of this browser's.
+  let foreign = false;
   const readSetting = () => { try { return env.kv?.getItem(SETTING_KEY) !== 'off'; } catch { return true; } };
   let enabled = readSetting();
   let ask: SyncAsk | undefined;
@@ -274,9 +318,14 @@ export function createThemeSync(env: SyncEnv) {
   // Merges with what the hub last said, keeps the result here when it changes anything, and writes the value when it differs.
   async function push(attempt: number): Promise<void> {
     if (!active() || !remote || !ask) return;
-    const here = local();
-    const m = merge(here, remote);
-    if (changesLocal(here, m)) {
+    // Another person's value (this browser last synced with someone else): their themes, marks, choice and packs replace this browser's,
+    // and nothing of the previous person's goes up (theirs is in their own value already).
+    const replace = foreign;
+    foreign = false;
+    const here = replace ? NOTHING_HERE : local();
+    const m = merge(here, remote, now() + CLOCK_SLACK_MS);
+    if (replace) m.themes = { ...m.themes, choice: m.themes.choice ?? { ...DEFAULT_THEME }, choiceAt: remote.choice ? m.themes.choiceAt : 0, exact: true };
+    if (replace || changesLocal(here, m)) {
       applying = true;
       try { env.themes.applySync(m.themes); env.packs.applySync(m.packs); } finally { applying = false; }
     }
@@ -315,6 +364,12 @@ export function createThemeSync(env: SyncEnv) {
     version = num(r?.version);
     remoteText = text;
     remote = read.remote;
+    // Whose value it is: a browser that synced with another person before (or a value with no tag after one with a tag) merges nothing of
+    // its own into this one. A browser's first sync (no tag kept yet) merges, as when the person first turns this on.
+    const tag = typeof r?.tag === 'string' ? r.tag : '';
+    const kept = readTag();
+    foreign = kept !== undefined && kept !== tag;
+    if (tag) writeTag(tag);
     await push(attempt);
   }
 

@@ -137,5 +137,6 @@ theme-catalog_off = Bu hub'da topluluk tema kataloğu kapalı. Sahibi agora hub 
 theme-not_found = Tema kataloğunda { $id } adlı bir tema yok. Son güncellemede kaldırılmış olabilir.
 plugin-not_found = { $plugin_id } eklentisi bu hub'da kurulu değil ya da bu sürümüyle kurulu değil.
 settings-too_large = Temalarınız Agora'nızda saklanamayacak kadar büyük (en fazla { $max } bayt). Bu tarayıcıda kalıyorlar.
+rate-limited = Bir dakikada çok fazla değişiklik (en fazla { $limit }). Hiçbir şey değişmedi; biraz bekleyip yeniden deneyin.
 settings-stale = Temalarınız az önce başka bir cihazda değişti (sürüm { $version }). Birleştirilip yeniden kaydedilecek.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

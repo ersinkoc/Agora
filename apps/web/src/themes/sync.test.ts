@@ -5,7 +5,7 @@ import { writeTheme } from './file';
 import { createPackStore } from './kept';
 import { writePack } from './pack';
 import { CHOICE_AT_KEY, CHOICE_KEY, MAX_USER_THEMES, createThemeStore } from './store';
-import { EMPTY, MAX_SYNC_BYTES, SETTING_KEY, type SyncAsk, createThemeSync, merge, readSync, serialiseSync } from './sync';
+import { CLOCK_SLACK_MS, EMPTY, MAX_SYNC_BYTES, SETTING_KEY, type SyncAsk, createThemeSync, merge, readSync, serialiseSync } from './sync';
 import { BUILT_IN, serialiseTheme } from './tokens';
 
 function memory(init: Record<string, string> = {}) {
@@ -18,28 +18,29 @@ const uid = (n: number) => n.toString(16).padStart(24, '0');
 const file = (name: string) => writeTheme(sand, name);
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
-// A hub that keeps one value per person with its version, as `user_settings.rs` does.
-function fakeHub(init?: Record<string, unknown>) {
+// A hub that keeps one person's value with its version and the person's tag, as `user_settings.rs` does.
+let people = 0;
+function fakeHub(init?: Record<string, unknown>, tag = (++people).toString(16).padStart(32, '0')) {
   const h: { value: Uint8Array; version: number; calls: string[] } = { value: init ? new TextEncoder().encode(JSON.stringify(init)) : new Uint8Array(), version: init ? 1 : 0, calls: [] as string[] };
   const ask: SyncAsk = async (body) => {
-    if ('userSettingsGet' in body) { h.calls.push('get'); return { userSettings: { key: 'themes', value: h.value, version: h.version } }; }
+    if ('userSettingsGet' in body) { h.calls.push('get'); return { userSettings: { key: 'themes', value: h.value, version: h.version, tag } }; }
     h.calls.push('set');
     const s = body.userSettingsSet;
     if (s.value.length > MAX_SYNC_BYTES) throw new CommandError('settings.too_large', { max: String(MAX_SYNC_BYTES) });
     if (s.baseVersion !== h.version) throw new CommandError('settings.stale', { version: String(h.version) });
     h.value = s.value;
     h.version += 1;
-    return { userSettings: { key: 'themes', value: s.value, version: h.version } };
+    return { userSettings: { key: 'themes', value: s.value, version: h.version, tag } };
   };
   return { h, ask, json: () => JSON.parse(decode(h.value)) as Record<string, unknown> };
 }
 // A device: its own browser storage, theme store, pack store and sync engine, with timers it runs by hand.
-function device(opts: { kv?: ReturnType<typeof memory>; safe?: boolean; maxBytes?: number } = {}) {
+function device(opts: { kv?: ReturnType<typeof memory>; safe?: boolean; maxBytes?: number; now?: () => number } = {}) {
   const kv = opts.kv ?? memory();
   const themes = createThemeStore({ kv });
   const packs = createPackStore(kv);
   const pending: (() => void)[] = [];
-  const sync = createThemeSync({ themes, packs, kv, safe: opts.safe, maxBytes: opts.maxBytes, debounceMs: 1000, setTimer: (f) => { pending.push(f); return f; }, clearTimer: (t) => { const i = pending.indexOf(t as () => void); if (i >= 0) pending.splice(i, 1); } });
+  const sync = createThemeSync({ themes, packs, kv, safe: opts.safe, maxBytes: opts.maxBytes, now: opts.now, debounceMs: 1000, setTimer: (f) => { pending.push(f); return f; }, clearTimer: (t) => { const i = pending.indexOf(t as () => void); if (i >= 0) pending.splice(i, 1); } });
   const tick = async () => { while (pending.length) pending.shift()?.(); await sync.settled(); await sync.settled(); };
   return { kv, themes, packs, sync, pending, tick };
 }
@@ -345,5 +346,122 @@ describe('the engine', () => {
     await b.tick();
     await a.sync.refresh();
     expect(a.packs.list()).toEqual([]);
+  });
+});
+
+describe('one browser, two people (security review F1)', () => {
+  const names = (hub: ReturnType<typeof fakeHub>) => (hub.h.value.length ? (hub.json().themes as { file: { name: string } }[]).map((t) => t.file.name) : []);
+  // One browser: the same storage for whoever signs in.
+  function browser() {
+    const d = device();
+    const signIn = async (hub: ReturnType<typeof fakeHub>) => { d.sync.attach(undefined, false); d.sync.attach(hub.ask); await d.tick(); };
+    return { ...d, signIn };
+  }
+
+  it('the second person does not get the first person\'s themes, nor the first the second\'s', async () => {
+    const a = fakeHub();
+    const b = fakeHub();
+    const br = browser();
+    await br.signIn(a);
+    br.themes.import(night('Eda - job interview at Rival Corp'));
+    await br.tick();
+    expect(names(a)).toEqual(['Eda - job interview at Rival Corp']);
+    await br.signIn(b);
+    expect(names(b)).toEqual([]);
+    expect(br.themes.state().user).toEqual([]); // this browser now shows B's own themes (none)
+    br.themes.import(night('Bo private'));
+    await br.tick();
+    expect(names(b)).toEqual(['Bo private']);
+    await br.signIn(a);
+    expect(names(a)).toEqual(['Eda - job interview at Rival Corp']);
+    expect(br.themes.state().user.map((u) => u.name)).toEqual(['Eda - job interview at Rival Corp']);
+  });
+
+  it('keeps the second person\'s choice, and the first person\'s removal marks and packs out of the second\'s value', async () => {
+    const b = fakeHub({ 'agora-theme-sync': 1, themes: [], themesRemoved: [], packs: [], packsRemoved: [], choice: { dark: 'slate', light: 'light', at: Date.now() - 86_400_000 } });
+    const a = fakeHub();
+    const br = browser();
+    await br.signIn(a);
+    br.themes.import(night('A work theme'));
+    br.themes.remove(br.themes.state().user[0]!.id);
+    br.themes.import(night('A kept theme'));
+    br.packs.keep(writePack({ name: 'A pack', themes: [{ theme: sand, name: 'Harbour' }], layouts: [] }));
+    await br.tick();
+    await br.signIn(b);
+    const v = b.json();
+    expect(v.choice).toMatchObject({ dark: 'slate', light: 'light' });
+    expect(br.themes.state().choice.dark).toBe('slate');
+    expect(v.themes).toEqual([]);
+    expect(v.themesRemoved).toEqual([]);
+    expect(v.packs).toEqual([]);
+    expect(br.packs.list()).toEqual([]);
+  });
+
+  it('nothing the second person removes reaches the first person\'s value', async () => {
+    const a = fakeHub();
+    const b = fakeHub();
+    const br = browser();
+    await br.signIn(a);
+    br.themes.import(night('A work theme'));
+    await br.tick();
+    await br.signIn(b);
+    // B never sees A's theme, so nothing of it can be removed in B's name; B removes one of their own.
+    expect(br.themes.state().user).toEqual([]);
+    br.themes.import(night('B temp'));
+    br.themes.remove(br.themes.state().user[0]!.id);
+    await br.tick();
+    await br.signIn(a);
+    expect(names(a)).toEqual(['A work theme']);
+    expect(a.json().themesRemoved).toEqual([]);
+  });
+
+  it('a value with no tag after one with a tag is someone else\'s too; a browser\'s first sync still merges what it had', async () => {
+    const br = browser();
+    br.themes.import(night('Mine before syncing'));
+    const first = fakeHub();
+    await br.signIn(first);
+    expect(names(first)).toEqual(['Mine before syncing']); // the first sync of this browser
+    const untagged = fakeHub(undefined, '');
+    await br.signIn(untagged);
+    expect(names(untagged)).toEqual([]);
+    expect(br.themes.state().user).toEqual([]);
+  });
+});
+
+describe('times from a clock that is ahead (security review F2)', () => {
+  it('a choice or an edit dated in the future is cut back to the hub\'s now, so a later pick wins once the slack has passed', async () => {
+    let clock = 1_795_600_000_000;
+    const future = clock + 365 * 86_400_000;
+    const hub = fakeHub({ 'agora-theme-sync': 1, themes: [{ uid: uid(9), edited: future, file: file('From the future') }], themesRemoved: [], packs: [], packsRemoved: [], choice: { dark: 'large-text', light: 'light', at: future } });
+    const d = device({ now: () => clock });
+    d.sync.attach(hub.ask);
+    await d.tick();
+    const cut = clock + CLOCK_SLACK_MS;
+    expect(hub.json().choice).toMatchObject({ at: cut });
+    expect((hub.json().themes as { edited: number }[])[0]!.edited).toBe(cut);
+    clock += CLOCK_SLACK_MS + 1000;
+    // The device's own clock is the hub's here: a pick made now is newer than the cut-back one.
+    const realNow = Date.now;
+    Date.now = () => clock;
+    try {
+      d.themes.choose('slate');
+      await d.tick();
+      await d.sync.refresh();
+    } finally { Date.now = realNow; }
+    expect(d.themes.state().choice.dark).toBe('slate');
+    expect(hub.json().choice).toMatchObject({ dark: 'slate' });
+  });
+});
+
+describe('fields of a newer window (security review F4)', () => {
+  it('writes unknown top-level fields back as they were', async () => {
+    const hub = fakeHub({ 'agora-theme-sync': 1, themes: [], layouts: [{ name: 'a newer window\'s' }], zz: 7 });
+    const d = device();
+    d.themes.import(night('Mine'));
+    d.sync.attach(hub.ask);
+    await d.tick();
+    expect(hub.json().layouts).toEqual([{ name: 'a newer window\'s' }]);
+    expect(hub.json().zz).toBe(7);
+    expect((hub.json().themes as unknown[]).length).toBe(1);
   });
 });

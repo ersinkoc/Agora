@@ -460,7 +460,8 @@ impl SqliteStore {
         }
         if version < 17 {
             // ADR-0113 decision 6 (step 4): each person's own settings values, opaque bytes the hub never reads (`user_settings.rs`), with
-            // a version raised on every write so two windows never overwrite each other unseen.
+            // a version raised on every write so two windows never overwrite each other unseen, and each person's random tag (a browser
+            // tells by it whose value it last synced with).
             conn.execute_batch(
                 "BEGIN;
                  CREATE TABLE IF NOT EXISTS user_settings (
@@ -470,6 +471,10 @@ impl SqliteStore {
                      value      BLOB NOT NULL,
                      updated_ms INTEGER NOT NULL,
                      PRIMARY KEY (user_id, key)
+                 );
+                 CREATE TABLE IF NOT EXISTS user_settings_tags (
+                     user_id TEXT PRIMARY KEY,
+                     tag     TEXT NOT NULL
                  );
                  PRAGMA user_version = 17;
                  COMMIT;",
@@ -1210,11 +1215,17 @@ mod tests {
     /// its plugins too, and both gain what came after. Its events stay.
     #[test]
     fn databases_at_14_15_and_16_upgrade_to_the_settings_table() {
-        let all = ["plugin_grants", "plugins", "theme_catalog", "user_settings"];
+        let all = [
+            "plugin_grants",
+            "plugins",
+            "theme_catalog",
+            "user_settings",
+            "user_settings_tags",
+        ];
         let tables = |s: &SqliteStore| -> Vec<String> {
             let conn = s.lock().unwrap();
             let mut st = conn
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants', 'user_settings') ORDER BY name")
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants', 'user_settings', 'user_settings_tags') ORDER BY name")
                 .unwrap();
             let names = st.query_map([], |r| r.get(0)).unwrap();
             names.collect::<Result<_, _>>().unwrap()
@@ -1235,9 +1246,9 @@ mod tests {
         assert_eq!(version(&fresh), 17);
         assert_eq!(tables(&fresh), all);
         for (from, undo) in [
-            (14, "DROP TABLE user_settings; DROP TABLE plugins; DROP TABLE plugin_grants; DROP TABLE theme_catalog; PRAGMA user_version = 14;"),
-            (15, "DROP TABLE user_settings; DROP TABLE plugins; DROP TABLE plugin_grants; PRAGMA user_version = 15;"),
-            (16, "DROP TABLE user_settings; PRAGMA user_version = 16;"),
+            (14, "DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; DROP TABLE theme_catalog; PRAGMA user_version = 14;"),
+            (15, "DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; PRAGMA user_version = 15;"),
+            (16, "DROP TABLE user_settings; DROP TABLE user_settings_tags; PRAGMA user_version = 16;"),
         ] {
             let d = tmpdir(&format!("upgrade{from}"));
             let path = d.join("hub.db");
