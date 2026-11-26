@@ -37,8 +37,9 @@ it this task" is the next request agents make, and today it needs the person.
 ## Decision
 
 1. **The asking machine checks first, then asks the hub.** `agent_start` with `node` set to another machine:
-   - is offered only when this node, the hub and the target all have the capability `mesh.spawn.remote` (the name the refusal
-     already uses), and this node's `mesh.remote` is `true`;
+   - takes another machine only when this node and the hub have the capability `mesh.spawn.remote` (the name the refusal
+     already uses) and this node's `mesh.remote` is `true`. The asking node cannot know the target's capabilities; the hub
+     checks them (decision 2);
    - needs `folder`, a full path on the target. The asker's folder means nothing on another machine, so there is no default;
    - is allowed only to an agent the person started (depth 0). A helper never asks for a helper on another machine;
    - counts against the asker's existing limits on its own node: one start in progress, 3 running helpers (local and remote
@@ -57,14 +58,22 @@ it this task" is the next request agents make, and today it needs the person.
      `from_run_id` stay the asking node's word: a node can vouch only for its own agents.
    - It refuses `node.unknown`, `node.offline`, a target that is the asker itself (`protocol.invalid_message`, `field =
      target_node`) and a target without the capability (`protocol.capability_missing`, `mesh.spawn.remote`).
-   - It rate-limits per asking machine, across all targets: 12 starts a minute and 8 open at once (`mesh.rate_limited`).
-   - As for the fleet view (ADR-0112), it carries starts only on a solo hub, or when the owner turned the switch on
-     (`board.not_allowed` otherwise).
+   - It rate-limits per asking machine, across all targets: 12 starts a minute, and 8 whose first answer (decision 5) has not
+     come back (`mesh.rate_limited`). That count covers only the first leg, which lasts at most 30 s; the hub keeps nothing
+     after it.
+   - The four new requests (`HelperStart`, `HelperStartResult`, `HelperFollow`, `HelperRelease`) count against the existing
+     limit of 64 open forwards per node (`MAX_NODE_POSTS`). `HelperStartResult` and `HelperRelease` are also limited to 60 a
+     minute per node.
+   - Like the fleet view (ADR-0112), it carries starts on a solo hub. On a hub with members it carries them only when the owner
+     turned on a new hub setting, `remote_helpers` (off by default there), because a member's agent could otherwise ask a machine
+     it has no grant for. Otherwise it refuses with a new error code `mesh.remote_helpers_off` (no parameters; English and
+     Turkish Fluent text). ADR-0112's fleet switch and `board.not_allowed` keep their meaning.
    - It writes an audit row (`agent.start.remote.asked`) and forwards the request to the target. It never approves anything.
 
 3. **The target decides from its own policy.** ADR-0020: the hub cannot widen what a node allows.
    - Node policy key `mesh.remote_helpers = true|false` (default `true`, like `mesh.remote`). With `false`, or `mesh.remote =
-     false`, the node does not offer the capability and refuses with `node.policy_denied` (`rule = mesh.remote_helpers`).
+     false`, the node does not offer the capability, so the hub refuses first. A request that still arrives (the policy changed
+     while the link was up) is refused with `node.policy_denied` (`rule = mesh.remote_helpers`).
    - The folder: refused unless it is a full path that exists. Folder identity rules (ADR-0052) and the hidden-character rules
      apply. The target's confinement (ADR-0047) and its `skip_permissions` policy (ADR-0059) apply to the helper as to any agent
      there.
@@ -101,6 +110,10 @@ it this task" is the next request agents make, and today it needs the person.
    error itself. The hub relays either answer to the asking node as the answer to its `HelperStart`. The person's decision does
    not have to fit in 30 seconds.
 
+   When the first leg fails after it was sent (`node.timeout`, or the link drops), the target may already have raised a card.
+   The asking node then sends `HelperRelease { start_id }` (decision 8), so no card is left that would start a helper nobody
+   tracks. The agent's call answers with the first leg's error.
+
 6. **The outcome is a separate message.** When the person decides, or the card expires, or the helper fails to launch, the target
    sends a new node → hub request **`HelperStartResult { start_id, to_node, agent_id, terminal_id, error }`**.
    - The hub forwards it to `to_node` and writes the sender's certificate name as its `from_node`.
@@ -116,7 +129,7 @@ it this task" is the next request agents make, and today it needs the person.
    - `node.offline` and `node.unknown` come from decision 2.
 
    A link that drops never stops a helper. Nodes are autonomous: a started helper runs whether or not its result arrives. The
-   tree (decision 9) still shows whose it is.
+   tree (decision 10) still shows whose it is.
 
 7. **Following across machines.** A new request **`HelperFollow { agent_id, from_agent, from_run_id, origin, wait_state,
    wait_ms, lines }`** carries `agent_wait` and `agent_output` to the target. The answer is a new result **`HelperFollowResult {
@@ -141,7 +154,15 @@ it this task" is the next request agents make, and today it needs the person.
    message again after the target reconnects, for 15 minutes. After that, the person stops the helper from the window, where it
    shows on its own machine.
 
-9. **The tree names the other machine, without changing `parent_agent_id`.** `AgentStarted`, `AgentInterrupted` and the client
+9. **Restarts.** The records of decisions 6–8 live in memory, for the node process's life, as the local spawner's do.
+   - **The target restarts:** its waiting cards are gone, as local ones are. `HelperFollow` and `HelperRelease` for helpers
+     started before answer `agent.not_found`. A helper kept by the terminal holder (ADR-0079) or offered again
+     (`AgentInterrupted`) keeps its parent fields (decision 10), so the tree still shows whose it is.
+   - **The asking node restarts:** its agents' calls end with their connections. It no longer knows which targets it asked, so
+     it sends no `HelperRelease`. Cards on the target expire by their own TTL, and started helpers keep running. The person
+     stops them from the window.
+
+10. **The tree names the other machine, without changing `parent_agent_id`.** `AgentStarted`, `AgentInterrupted` and the client
    `AgentSnapshot` gain two optional fields:
    - `parent_node_id`: the asking machine, from the hub-written `origin`;
    - `parent_node_agent_id`: the asking agent on that machine.
@@ -149,7 +170,7 @@ it this task" is the next request agents make, and today it needs the person.
    For a helper from another machine, `parent_agent_id` stays empty, so an older hub or window shows it as a top-level agent and
    never under a wrong local one. A same-node helper keeps `parent_agent_id` and leaves both new fields empty.
 
-10. **Records.**
+11. **Records.**
     - The asking node records its agent's ask and outcome (`AgentStartRefused` for its own agent, as today).
     - The target records the card, the decision and the start (`ApprovalRequested`, `ApprovalResolved`, `AgentStarted`).
     - The target records the first prompt as a cross-machine message from `origin_node`/`origin_agent`, as it records a
@@ -166,8 +187,8 @@ it this task" is the next request agents make, and today it needs the person.
 - **The tree.** The helper shows under its parent with a machine tag ("on blackview"). In blackview's own list it shows with
   "started by Claude Code on mac". A parent that has ended keeps the helper under it, as for a local helper. New Fluent keys go in
   English and Turkish.
-- **Older clients** show the helper at the top level. They show the `agent.start.remote` card as an unknown request, which cannot
-  be approved, because the target accepts only v4.
+- **Older clients** show the helper at the top level. They do not read `agent.start.remote` as a start request (the web window
+  reads only `agent.start` as one). Whatever they show for it cannot approve it: the target accepts only a v4 signature.
 
 ## Security
 
@@ -177,7 +198,7 @@ New threat-model rows (numbers are the next free ones when built):
   - every start needs a v4 decision signed by a device the target trusts and verified on the target;
   - no grant, depth 1, and the target's own policy and its off switch;
   - the hub limits per asking machine (12 a minute, 8 open), and the target limits per asking machine (2 cards, 6 helpers);
-  - solo hub or the owner's switch.
+  - a solo hub, or a hub whose owner turned on `remote_helpers`.
 
   Residual: the person can be worn down by cards; `origin_agent` is the asking machine's word (only `origin_node` is vouched by the
   hub), and the card says so.
@@ -194,9 +215,9 @@ New threat-model rows (numbers are the next free ones when built):
 ## Build order
 
 1. **Schema (this ADR is its ADR).** The four new `CommandRequest` arms (`HelperStart`, `HelperStartResult`, `HelperFollow`,
-   `HelperRelease`), the two new `CommandOk` results, the new fields of decision 9, the capability, the approval action, the v4
+   `HelperRelease`), the two new `CommandOk` results, the new fields of decision 10, the capability, the approval action, the v4
    string and its vectors, and golden fixtures. Update `protocol.md`, `mesh-tools.md` (replacing the "not supported yet"
-   sentence) and the threat model.
+   sentence), `error-codes.md` (`mesh.remote_helpers_off`) and the threat model.
 2. **The target node:** take `HelperStart`, check, raise the card, verify v4, launch, send the result, answer `HelperFollow`
    and `HelperRelease`. Tests use two nodes and `agora-fake-agent`.
 3. **The hub:** route the four requests, write `origin`/`from_node`, apply the limits and the solo-hub rule, and audit.
@@ -210,8 +231,8 @@ New threat-model rows (numbers are the next free ones when built):
 
 - Agents can start a helper on another machine, with the person's signed approval on that machine, and follow and stop it as
   they do locally.
-- Four new requests, two new results, two new event fields, one capability, one approval action, one signing string, one node
-  policy key. No published message changes meaning. ADR-0057's local behaviour is unchanged.
+- Four new requests, two new results, two new fields on three messages, one capability, one approval action, one signing string,
+  one node policy key, one hub setting, one error code. No published message changes meaning. ADR-0057's local behaviour is unchanged.
 - The hub learns more about the ask than for a local start (kind, folder, prompt hash in its audit). It still cannot approve,
   widen or change a start.
 - A cross-machine helper is shallower than a local one (depth 1, no grant), by design.
@@ -225,6 +246,11 @@ New threat-model rows (numbers are the next free ones when built):
 - **One long-lived forward** (raise `COMMAND_DEADLINE` for this command): it holds an open forward for up to 12 minutes against
   the per-node limit of 64, it is lost when the hub restarts, and every other command's deadline stops meaning one thing.
 - **A `BoardCall` tool value:** the hub answers those itself. The target would never see the request or raise its own card.
+- **Keep the action `agent.start` and add keys to its detail:** an older window would read it as a local start. It would show
+  the asking agent as one on the target machine and offer grant choices the target must refuse.
+- **Set `parent_agent_id` to the remote parent and add only `parent_node_id`:** the hub and the window qualify
+  `parent_agent_id` with the helper's own node, and ids are `agent-N` per node. An older hub or window would hang the helper
+  under an unrelated local agent. That changes the field's published meaning.
 - **A standing grant across machines:** it would let one signature start agents on another machine later, out of the person's
   sight. Every cross-machine start is asked.
 
@@ -242,5 +268,5 @@ New threat-model rows (numbers are the next free ones when built):
    (proposed). Other numbers?
 6. Folder: a full path on the target (proposed). Should an agent also be able to say "this project's checkout on that machine",
    for the target to find?
-7. Undelivered results and releases are re-sent for 15 minutes after reconnection, then dropped (proposed). Keep them longer, or
-   durably like ADR-0109?
+7. Undelivered results and releases are re-sent for 15 minutes after reconnection, then dropped, and the records live only for
+   the node process's life (proposed). Keep them longer, or durably like ADR-0109?
