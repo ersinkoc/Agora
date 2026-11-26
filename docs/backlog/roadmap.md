@@ -1,8 +1,9 @@
 # Roadmap (from 2026-11-21, updated 2026-11-26)
 
 The order the work is done in. One milestone at a time, top to bottom; inside a milestone, the tasks in their order unless a task waits
-on a gate. Each task is one or more PRs; each PR is reviewed independently (and by Codex) before it merges. `docs/capabilities.md` stays
-the record of what is built; this file is the plan, and a task is ticked here in the PR that finishes it.
+on a gate. From 2026-11-26 work lands straight on `main` after local tests (fmt, clippy, the affected tests, the web checks, docs
+checks); CI runs once on `main` and a break is fixed forward. Risky changes still get an independent review first. `docs/capabilities.md`
+stays the record of what is built; this file is the plan, and a task is ticked here in the commit that finishes it.
 
 Gates, written in the task:
 - **schema**: adds protocol messages or fields; the maintainer approves the schema step before it is built (AGENTS.md).
@@ -12,10 +13,11 @@ Gates, written in the task:
 
 Owner: the merger session (Claude, Linux) builds unless the task says otherwise.
 
-Where things stand (2026-11-26): 0.3.39 is the latest release; about 40 pull requests merged since it (sandboxed plugin panels,
-theme format 2 and the terminal client's themes and layouts, keybindings and the full command palette, sounds and a lasting "finished"
-mark, CLI scripting, the fleet view, shutdown-safe node state). The order from here: land the open stack (M0), then the community
-milestone (M5), agent coverage (M6), and the half-built and Accepted work (M2, M3), with real-machine proof (M1) alongside.
+Where things stand (2026-11-26, evening): 0.3.40 is released (the theme catalog, hub-stored plugins with grants, theme packs, themes
+that follow a person, the signed plugin catalog, sandboxed plugin panels, theme format 2, the terminal client's themes, layouts and
+keybindings, CLI scripting, the fleet view, shutdown-safe node state, lease renewal, the skip-permissions stop). blackview and `win` run
+it. What is left of M0 is decisions. The order from here: the community milestone (M5), agent coverage (M6), and the half-built and
+Accepted work (M2, M3, M7), with real-machine proof (M1) alongside.
 The [architecture gap review](../reviews/2026-11-26-architecture-gap-review.md) is the source of M5 and M6; its gap numbers (G1 to G15)
 are cited in the tasks.
 
@@ -25,27 +27,28 @@ are cited in the tasks.
 
 The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3, release 0.3.33) is done; see git history of this file.
 
-- [ ] **M0.1 The schema stack** (**schema**: the maintainer approves; merge in this order; the hub database moves to version 18)
-  - [ ] #1225 the theme catalog the hub fetches (ADR-0113 step 5; migration 15)
-  - [ ] #1226 plugins stored on the hub, with per-person grants (ADR-0114 step 3; migration 16; **decision**: viewers set their own
+- [x] **M0.1 The schema stack** (**schema**: the maintainer approves; merge in this order; the hub database moves to version 18)
+  - [x] #1225 the theme catalog the hub fetches (ADR-0113 step 5; migration 15)
+  - [x] #1226 plugins stored on the hub, with per-person grants (ADR-0114 step 3; migration 16; **decision**: viewers set their own
     plugin grants, which narrows ADR-0049's "viewers have no commands")
-  - [ ] #1228 theme packs (ADR-0113 step 2; data only, stacked on #1225)
-  - [ ] #1233 my themes, packs and theme choice follow me across devices (ADR-0113 step 4; migration 17)
-  - [ ] #1237 the signed community plugin catalog (ADR-0114 step 4; migration 18); **human**: create the catalog repositories and the
+  - [x] #1228 theme packs (ADR-0113 step 2; data only, stacked on #1225)
+  - [x] #1233 my themes, packs and theme choice follow me across devices (ADR-0113 step 4; migration 17)
+  - [x] #1237 the signed community plugin catalog (ADR-0114 step 4; migration 18); **human**: create the catalog repositories and the
     catalog signing key
-- [ ] **M0.2 Reviewed, merge on green**
-  - [ ] #1242 the terminal client: Stop turn, effort and settings in the chat, the start picker, a keybindings file (ADR-0090 step 7,
+- [x] **M0.2 Reviewed, merged**
+  - [x] #1242 the terminal client: Stop turn, effort and settings in the chat, the start picker, a keybindings file (ADR-0090 step 7,
     ADR-0066, ADR-0068 decision 6; in independent review)
-  - [ ] #1243 the node renews an agent's file leases while it runs (ADR-0039; review fixes in progress)
-  - [ ] #1244 a refusing skip-permissions policy stops an agent that starts in, or switches to, a mode that skips (P2-16; needs an
+  - [x] #1243 the node renews an agent's file leases while it runs (ADR-0039; review fixes in progress)
+  - [x] #1244 a refusing skip-permissions policy stops an agent that starts in, or switches to, a mode that skips (P2-16; needs an
     independent review; **decision**: what `allow` does)
 - [ ] **M0.3 Proposed ADRs** (**decision**)
-  - [ ] #1219 ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2
-  - [ ] #1241 ADR-0119 (a helper started on another machine): settles ADR-0057's open route, seven open questions in the PR
+  - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
+  - [ ] ADR-0119 (a helper started on another machine): settles ADR-0057's open route; on `main` as Proposed, seven open questions
+  - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
 - [ ] **M0.4 Other open PRs**: #1204 (title rules, **human**: real captures), #1188 (input validation, Codex's; the shared checkout's
   uncommitted edits)
-- [ ] **M0.5 Release 0.3.40**, then the hub (blackview), win and mac updated (**win**: a real `shutdown /r` check of #1231's Windows
-  part, after the maintainer's go)
+- [x] **M0.5 Release 0.3.40** (2026-11-26), blackview and `win` updated; mac asked. Left: **win**, a real `shutdown /r` check of #1231's
+  Windows part, on hold until the maintainer's go
 
 ## M1. Prove it on real machines
 
@@ -195,7 +198,7 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 Items already in M2 and M3 are not repeated here.
 
 - [ ] **M7.1 A helper on another machine** (ADR-0057): needs ADR-0119 (M0.3), then several **schema** steps
-- [ ] **M7.2 Leases across a node restart** (ADR-0039): in #1243's review round
+- [x] **M7.2 Leases across a node restart** (ADR-0039): #1243, in 0.3.40
 - [ ] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead; the
   "needs to join again" card (**schema** for the card)
 - [ ] **M7.4 Where am I signed in** (ADR-0067 rung 5): the session list with revoke; the rung-4 banner
