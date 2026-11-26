@@ -837,6 +837,20 @@
   .set-os { @apply grid size-8 flex-none place-items-center rounded-s bg-surface-2 text-ink; }
   .set-fp { @apply font-mono tracking-wide; overflow-wrap: anywhere; }
   .set-dot { @apply inline-block size-1.5 flex-none rounded-full; background: currentColor; }
+  /* Settings > Keyboard (keybindings.md): a search and the file's actions, every command in a list that scrolls in the card, the fixed keys. */
+  .keys-bar { @apply flex flex-wrap items-center gap-2 px-4 py-2.5; }
+  .keys-search { @apply flex min-w-0 flex-1 items-center gap-2 rounded-s border border-line bg-surface-0 px-2.5; flex-basis: 12rem; }
+  .keys-search input { @apply min-w-0 flex-1 border-0 bg-transparent py-1.5 outline-none; }
+  .keys-list { @apply overflow-y-auto; max-height: 26rem; }
+  .keys-row code, .keys-unknown code { @apply font-mono; font-size: var(--text-caption); }
+  .keys-caps { @apply inline-flex flex-wrap items-center gap-1; }
+  .keys-live { @apply font-medium text-accent; font-size: var(--text-caption); }
+  .keys-clash { @apply m-0 flex basis-full items-start gap-1.5 text-danger; font-size: var(--text-caption); }
+  .keys-unknown { @apply flex flex-wrap gap-x-2 gap-y-1; }
+  .keys-fixed { @apply m-0 grid items-center gap-x-4 gap-y-1.5; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); }
+  .keys-fixed dt { @apply text-muted; }
+  .keys-fixed dd { @apply m-0; }
+  .keys-import { grid-template-columns: minmax(0, 1fr); width: min(32rem, calc(100vw - 2rem)); }
   /* Agents: a grid of kind cards; one that is not installed is dashed and quieter (its words stay readable). */
   .set-kinds-wrap { @apply grid gap-3 px-4 pb-4 pt-3; }
   .set-kinds { @apply m-0 grid list-none items-start gap-2 p-0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); }

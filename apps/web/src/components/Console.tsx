@@ -31,7 +31,9 @@ import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 import type { StartChoice } from './StartApproval';
 import type { HelperGrant } from './HelperGrants';
-import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
+import { type Action, PRESETS, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
+import { useCommands } from '../keys/registry';
+import { shownKey, useKeymap } from '../keys/view';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
@@ -50,8 +52,6 @@ import { GiveContext } from './GiveTask';
 const MAX_AUTO_PINNED = 4;
 // The icon rail of the right panel (rem, so it grows with the text size like the rail itself, `w-11`), always there; the panel's own width comes on top when it is open.
 const RAIL_WIDTH = '2.75rem';
-// The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
-const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
 const homeWorkspace = () => workspaceOf({ version: LAYOUT_VERSION, root: { type: 'pane', id: 'p1', panel: 'fleet' } });
 const wide = () => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(min-width: 1024px)').matches;
 // Below this width the panes are tabs of one group (no tiling on a phone; ADR-0068).
@@ -256,18 +256,26 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr) ${showDetails ? `calc(${rightWidth}px + ${RAIL_WIDTH})` : RAIL_WIDTH}`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
-  // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
-        const group = !narrow && !ws.zoom ? tabsOf(ws.layout, ws.focus) : undefined;
-        const target = (group ?? (narrow ? panesOf(ws.layout.root) : visiblePanes(ws, narrow)))[Number(e.key) - 1];
-        if (target) { e.preventDefault(); dispatch({ type: 'activate', pane: target.id }); }
-      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); setShowAgents((v) => !v); }
-    };
-    window.addEventListener('keydown', on);
-    return () => window.removeEventListener('keydown', on);
-  }, [ws, narrow, dispatch]);
+  // The window's commands (docs/ux/keybindings.md). Editor habits by default: Alt+1…9 picks a tab of the group in focus (or a pane, when
+  // it has no tabs), Ctrl/⌘+B hides or shows the agent list; the layout menu's and the pane bar's actions have no keys until the person
+  // gives them some in Settings > Keyboard.
+  const tabTargets = (!narrow && !ws.zoom ? tabsOf(ws.layout, ws.focus) : undefined) ?? (narrow ? panesOf(ws.layout.root) : visiblePanes(ws, narrow));
+  const paneCount = panesOf(ws.layout.root).length;
+  useCommands({
+    'window.agents': { run: () => setShowAgents((v) => !v) },
+    ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
+      const target = tabTargets[i];
+      return [`pane.tab-${i + 1}`, { run: () => { if (target) dispatch({ type: 'activate', pane: target.id }); }, available: !!target }];
+    })),
+    ...Object.fromEntries(PRESETS.map((p) => [`layout.preset-${p}`, { run: () => dispatch({ type: 'preset', preset: p, agents: presetAgents() }), available: !narrow || p === '1x1' }])),
+    'layout.maximize': { run: () => { if (ws.zoom) dispatch({ type: 'restore' }); else if (ws.focus) dispatch({ type: 'maximize', pane: ws.focus }); }, available: !!ws.zoom || (!!ws.focus && paneCount > 1) },
+    'layout.split-right': { run: () => { if (ws.focus) dispatch({ type: 'split', pane: ws.focus, direction: 'row' }); }, available: !!ws.focus && !narrow },
+    'layout.split-down': { run: () => { if (ws.focus) dispatch({ type: 'split', pane: ws.focus, direction: 'column' }); }, available: !!ws.focus && !narrow },
+    'layout.close-pane': { run: () => { if (ws.focus) dispatch({ type: 'close', pane: ws.focus }); }, available: !!ws.focus },
+    'layout.reset': { run: () => resetLayout() },
+  });
+  const keymap = useKeymap();
+  const paletteKey = shownKey(keymap, 'palette.open', ' ');
 
   // Removing closed agents from the list: for every client when the hub can forget them. A hub that does not know the command can only
   // hide them here; any other refusal (permission, the agent running again) is shown with its reason and nothing is hidden.
@@ -325,7 +333,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <h1 className="m-0 me-2 hidden text-[0.8125rem] font-semibold tracking-normal sm:block">{t('home-title')}</h1>
         {!showAgents && <button type="button" className="ide-iconbtn" onClick={() => setShowAgents(true)} aria-label={t('ide-show-agents')} title={t('ide-show-agents')}><Icon name="panelLeft" /></button>}
         <button type="button" onClick={onCommand} disabled={!onCommand} className="mx-auto flex h-7 min-w-0 max-w-md flex-1 items-center gap-2 rounded-xs border border-line bg-surface-0 px-2.5 text-start text-muted transition-colors duration-150 hover:border-accent hover:text-ink">
-          <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
+          <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span>{paletteKey && <kbd className="ide-kbd hidden sm:inline">{paletteKey}</kbd>}
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
         {link === 'offline' && onRetry && <button type="button" className="ide-chip whitespace-nowrap hover:border-accent hover:text-ink" onClick={onRetry}>{t('link-retry')}</button>}
