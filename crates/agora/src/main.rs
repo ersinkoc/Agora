@@ -178,6 +178,7 @@ mod meshbridge;
 mod orchestrate;
 mod paircmd;
 mod panelcmd;
+mod pluginkit;
 mod remotecmd;
 mod secretcmd;
 mod servicecmd;
@@ -369,6 +370,10 @@ pub(crate) struct Opts {
     until: Option<String>,
     agent: Option<String>,
     json: bool,
+    /// M5.7: `agora plugin pack FOLDER [--out FILE] [--write-hashes] [--watch]` ([`pluginkit`]).
+    out: Option<PathBuf>,
+    write_hashes: bool,
+    watch: bool,
     positional: Vec<String>,
 }
 
@@ -447,6 +452,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--until" => o.until = Some(it.next()?.clone()),
             "--agent" => o.agent = Some(it.next()?.clone()),
             "--json" => o.json = true,
+            "--out" => o.out = Some(it.next()?.into()),
+            "--write-hashes" => o.write_hashes = true,
+            "--watch" => o.watch = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -589,6 +597,10 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         // G10: how to drive and customize Agora, written for coding agents.
         ["manual"] => Box::new(|say, o| manualcmd::manual(say, o, None)),
         ["manual", topic] => Box::new(move |say, o| manualcmd::manual(say, o, Some(topic))),
+        // M5.7: the plugin author's kit, on the author's own machine (the hub owner's are `agora hub plugin …`).
+        ["plugin", op @ ("new" | "check" | "pack")] => {
+            Box::new(move |say, o| pluginkit::plugin(say, op, o))
+        }
         ["adapter", "install"] => Box::new(adaptercmd::install),
         ["adapter", "list"] => Box::new(adaptercmd::list),
         ["adapter", "remove"] => Box::new(adaptercmd::remove),

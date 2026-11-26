@@ -1,0 +1,23 @@
+{
+  "id": "starter",
+  "name": "starter",
+  "version": "0.1.0",
+  "author": "Your name",
+  "licence": "MIT",
+  "min_agora": "0.3.0",
+  "panels": [
+    {
+      "id": "main",
+      "kind": "global"
+    }
+  ],
+  "capabilities": [
+    "agents.read",
+    "theme.read"
+  ],
+  "entry": "panel.js",
+  "files": {
+    "panel.css": "48515e64d98ea05f4c00e9df100a26e5adce14970cefed77613be56ce3fec997",
+    "panel.js": "76193c8a5e8734af833e8bf4f4695fbd0f1b06ebe23f121e8434cb3a1e7b72f7"
+  }
+}

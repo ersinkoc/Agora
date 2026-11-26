@@ -52,6 +52,7 @@ cli-usage =
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
       agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]
+      agora plugin new ID [FOLDER] | check FOLDER|FILE | pack FOLDER [--out FILE] [--write-hashes] [--watch]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
       agora manual [TOPIC] [--json]
 cli-node-listening = Node is running. Control socket: { $socket }
@@ -84,6 +85,37 @@ cli-node-needs-token = The node asks for its control token, which only the user 
 cli-unknown-project = No project named { $project } is registered on this node.
 cli-ambiguous-project = More than one project is registered; choose one with --project.
 cli-no-projects = This node has no projects. Start it with --project PATH.
+cli-plugin-usage = Usage: agora plugin new ID [FOLDER] | check FOLDER|FILE | pack FOLDER [--out FILE] [--write-hashes] [--watch]
+cli-plugin-new-done = Made the plugin { $id } in { $folder }. Next: "agora plugin pack { $folder } --out { $id }.json --write-hashes --watch", then in the window open Plugins, Load from a file…, and choose { $id }.json. { $folder }/README.md says more.
+cli-plugin-new-bad-id = "{ $id }" cannot be a plugin's id: use lower-case letters, digits and "-" (at most 40, not starting with "-").
+cli-plugin-new-exists = { $folder } already exists, so nothing was written. Choose another folder.
+cli-plugin-write-failed = Could not write { $path }: { $reason }
+cli-plugin-ok = { $path } passes the window's checks: { $name } { $version } ({ $id }), { $panels ->
+    [one] one panel
+   *[other] { $panels } panels
+    }, asks to see: { $capabilities }.
+cli-plugin-sees-nothing = nothing
+cli-plugin-refused = { $path } would be refused ({ $code }): { $reason }
+cli-plugin-error-too-large = it is larger than 2 MiB, the most a plugin can be.
+cli-plugin-error-format = it is not a plugin package.
+cli-plugin-error-newer-format = the package was made for a newer version of Agora.
+cli-plugin-error-too-many = it holds more files than a plugin may have (64 besides the manifest).
+cli-plugin-error-path = a file's name has a folder, a path or a leading dot in it ({ $detail }).
+cli-plugin-error-link = the package holds a link or something else that is not a file's bytes ({ $detail }).
+cli-plugin-error-type = a file is of a kind a plugin cannot use ({ $detail }); scripts, stylesheets, images, fonts, JSON and text only.
+cli-plugin-error-manifest = the manifest (agora-plugin.json) is missing or wrong at "{ $detail }".
+cli-plugin-error-capability = the manifest asks for a capability the window does not know ({ $detail }).
+cli-plugin-error-unlisted = a file is not listed in the manifest ({ $detail }).
+cli-plugin-error-missing = a file the manifest lists is not there ({ $detail }).
+cli-plugin-error-hash = a file is not the one the manifest lists ({ $detail }); pack with --write-hashes to write its hash.
+cli-plugin-error-newer = the plugin needs Agora { $detail } or newer, and this is { $version }.
+cli-plugin-error-not-a-file = the folder holds something that is not a plain file ({ $detail }): plugin folders are flat, and links are not followed.
+cli-plugin-error-unreadable = it could not be read ({ $detail }).
+cli-plugin-watch-needs-out = --watch needs --out FILE.
+cli-plugin-out-inside = The package would be written into { $folder } itself ({ $out }); write it beside the folder.
+cli-plugin-hashes-written = Wrote the files' hashes into { $folder }/agora-plugin.json.
+cli-plugin-packed = Packed { $folder } into { $out } ({ $bytes } bytes).
+cli-plugin-watching = Packing { $folder } again on every change. Ctrl+C stops.
 cli-bad-arguments = The arguments were not understood.
 # `agora manual` (G10): how to drive and customize Agora, written for coding agents. The topics themselves are in docs/manual/
 # (English; see crates/agora/src/manualcmd.rs for why they are not here).
