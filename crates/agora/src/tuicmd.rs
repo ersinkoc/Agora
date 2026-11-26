@@ -5087,23 +5087,12 @@ fn clean_up_old(
     c: &mut Console,
     rx: &mpsc::Receiver<u8>,
 ) -> String {
-    // ADR-0106: forgetting a machine is the owner's; the hub refuses `node.forget` to anyone else and writes it down. A viewer
-    // is told the window watches; a member gets the hub's own refusal, with nothing sent. An older hub (role not said) is asked.
+    // ADR-0106: forgetting a machine is the owner's; the hub refuses `node.forget` to anyone else and writes it down. A viewer or
+    // a member is told only the owner can, with nothing sent (not the viewer's line, which says a member's role is enough; review
+    // of #1221). An older hub (role not said) is asked.
     match session.person_role() {
-        agora_protocol::v1::PersonRole::Viewer => {
-            return say.text(key!("tui-viewer-watching"), &[]);
-        }
-        agora_protocol::v1::PersonRole::Member => {
-            return say.text(
-                key!("tui-cleanup-failed"),
-                &[
-                    (
-                        "code",
-                        Arg::Str(agora_protocol::ErrorCode::AuthForbidden.as_str().into()),
-                    ),
-                    ("count", Arg::Num(0)),
-                ],
-            );
+        agora_protocol::v1::PersonRole::Viewer | agora_protocol::v1::PersonRole::Member => {
+            return say.text(key!("tui-cleanup-role"), &[]);
         }
         agora_protocol::v1::PersonRole::Owner | agora_protocol::v1::PersonRole::Unspecified => {}
     }
@@ -8285,7 +8274,8 @@ mod viewer_console_tests {
             let (tx, rx) = mpsc::channel::<u8>();
             tx.send(b'y').unwrap();
             let line = clean_up_old(&say, &mut session, &mut c, &rx);
-            assert!(!line.is_empty(), "{role:?}");
+            assert_eq!(line, say.text(key!("tui-cleanup-role"), &[]), "{role:?}");
+            assert!(line.contains("owner"), "{role:?}: {line}");
             assert_eq!(rows(&h), Vec::<(String, String)>::new(), "{role:?}");
         }
     }
