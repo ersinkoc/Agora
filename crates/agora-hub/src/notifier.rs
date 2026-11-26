@@ -12,9 +12,11 @@ use crate::deliver::{self, Target};
 use crate::hub::Hub;
 use crate::notify::{Channel, Context, Notice, Outcome, Prefs, Router, Trigger};
 
-/// The notice an event is worth, with the name to show in its text.
-pub fn notice_for(e: &Event) -> Option<(Notice, String)> {
+/// The notice an event is worth, with the name to show in its text. `decided(producer, approval_id)`: whether that approval was
+/// already decided, so a request stated after its decision (a late re-announcement, #1150) is worth none.
+pub fn notice_for(e: &Event, decided: impl Fn(&str, &str) -> bool) -> Option<(Notice, String)> {
     let (trigger, subject, name) = match e.body.as_ref()? {
+        Body::ApprovalRequested(a) if decided(&e.producer_id, &a.approval_id) => return None,
         Body::ApprovalRequested(a) => (
             Trigger::ApprovalRequested,
             format!("{}/{}", e.producer_id, a.approval_id),
@@ -94,7 +96,9 @@ pub fn spawn(hub: Arc<Hub>, targets: Vec<Target>, catalog: Catalog, public_url: 
         let mut router = Router::new();
         let title = catalog.render("notify-title", &[]).unwrap_or_default();
         while let Ok(d) = sub.live.recv() {
-            let Some((notice, name)) = notice_for(&d.event) else {
+            // Asked of the hub's view now, which may be past this event: a request decided before its notice went out needs none.
+            let Some((notice, name)) = notice_for(&d.event, |p, id| hub.approval_decided(p, id))
+            else {
                 continue;
             };
             router.prune(notice.at_ms);
@@ -153,6 +157,28 @@ mod tests {
         );
     }
 
+    /// No approval was decided.
+    fn never(_: &str, _: &str) -> bool {
+        false
+    }
+
+    /// #1150 (review of #1234, F2): a request its machine states after its decision (a late re-announcement) sends no notice; the
+    /// same id of another machine, or one not decided, still does.
+    #[test]
+    fn a_request_stated_after_its_decision_is_no_notice() {
+        let approval = ev(Body::ApprovalRequested(ApprovalRequested {
+            approval_id: "p1".into(),
+            agent_id: "a1".into(),
+            ..Default::default()
+        }));
+        let decided = |node: &str, id: &str| node == "laptop" && id == "p1";
+        assert!(notice_for(&approval, decided).is_none());
+        let mut other = approval.clone();
+        other.producer_id = "desktop".into();
+        assert!(notice_for(&other, decided).is_some());
+        assert!(notice_for(&approval, never).is_some());
+    }
+
     #[test]
     fn only_events_that_need_a_person_become_notices() {
         let blocked = ev(Body::AgentStateChanged(AgentStateChanged {
@@ -160,7 +186,7 @@ mod tests {
             state: AgentState::Blocked as i32,
             reported: true,
         }));
-        let (n, name) = notice_for(&blocked).unwrap();
+        let (n, name) = notice_for(&blocked, never).unwrap();
         assert_eq!(
             (n.trigger, name.as_str()),
             (Trigger::AgentBlocked, "laptop/a1")
@@ -170,27 +196,33 @@ mod tests {
             state: AgentState::Working as i32,
             reported: true,
         }));
-        assert!(notice_for(&working).is_none());
+        assert!(notice_for(&working, never).is_none());
         let approval = ev(Body::ApprovalRequested(ApprovalRequested {
             approval_id: "p1".into(),
             agent_id: "a1".into(),
             ..Default::default()
         }));
         assert_eq!(
-            notice_for(&approval).unwrap().0.trigger,
+            notice_for(&approval, never).unwrap().0.trigger,
             Trigger::ApprovalRequested
         );
         let off = ev(Body::NodeOffline(NodeOffline {
             node_id: "laptop".into(),
         }));
-        assert_eq!(notice_for(&off).unwrap().0.trigger, Trigger::NodeOffline);
+        assert_eq!(
+            notice_for(&off, never).unwrap().0.trigger,
+            Trigger::NodeOffline
+        );
     }
 
     #[test]
     fn text_comes_from_the_catalog_in_the_chosen_language() {
-        let off = notice_for(&ev(Body::NodeOffline(NodeOffline {
-            node_id: "laptop".into(),
-        })))
+        let off = notice_for(
+            &ev(Body::NodeOffline(NodeOffline {
+                node_id: "laptop".into(),
+            })),
+            never,
+        )
         .unwrap();
         assert_eq!(
             render(&Catalog::english(), &off.0, &off.1),

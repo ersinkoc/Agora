@@ -369,7 +369,11 @@ marks the kind `installed: false` in `AgentKinds`. Older nodes answered `interna
 
 The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
-create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;
+create-new semantics and never commits or overwrites `.agent-project.json`; the file is written whole beside it
+(`.agent-project.json.<32 hex>.tmp`) and moved into place by a rename that never replaces, so it is never seen, or left by a killed
+node, empty, and never has two names (#1150). Where that rename is unsupported it is hard-linked into place, and where links are
+unsupported or not allowed it is created in place; a leftover of that form, a regular file at least a minute old, is removed by the
+next inspection. The metadata contains `{"project_id":"UUID"}`;
 portable domain IDs use `id:<uuid>`. Without metadata, Git discovery remains unchanged; standalone folders use
 `folder:<node>:<canonical path>` without a fabricated root commit. A folder whose canonical path is not valid UTF-8 is
 refused (`directory.path`): the path travels as text, and a lossy spelling would name another folder. Metadata must be a
@@ -483,6 +487,13 @@ says so with `auth.unauthenticated`).
 2. Client subscribes to events after `as_of_seq` with optional filters (project, node).
 3. Terminal output is not part of the snapshot; clients subscribe per terminal and receive a terminal
    snapshot first (format chosen by capability: `terminal.raw` or `terminal.cells`).
+4. An approval waits from its `ApprovalRequested` until its `ApprovalResolved`. A node can record a request after its decision (a
+   re-announcement that copied it before the decision was taken, or a request recorded after it was queued and decided), so an
+   `ApprovalRequested` whose id the same machine's `ApprovalResolved` already decided is ignored (#1150): the hub's view remembers
+   each machine's last 256 decided ids, folded from the log, so a rebuilt view agrees; the web window remembers the ones it saw
+   since its snapshot. Such a late request also sends no notification and writes no second `agent.start.asked` audit row. A
+   machine's decided ids are dropped when it is forgotten (`NodeForgotten`). The snapshot carries no decided ids, so a window whose
+   snapshot falls between a decision and its late request still shows that card until its next snapshot.
 
 ## 6. Flow control and priorities
 

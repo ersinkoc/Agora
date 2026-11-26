@@ -664,6 +664,28 @@ fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 }
 
+/// [`crate::rename_no_replace`] on macOS: `renamex_np(RENAME_EXCL)`. `ENOTSUP` and `EINVAL` (a file system without it) are
+/// `Unsupported`.
+pub(crate) fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &std::path::Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    };
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: two NUL-terminated paths that outlive the call.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::ENOTSUP) | Some(libc::EINVAL) => {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+        _ => Err(e),
+    }
+}
+
 #[cfg(test)]
 fn profile(sb: &crate::Sandbox) -> io::Result<String> {
     build_profile(sb, sb.git_config_file().as_deref())

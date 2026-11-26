@@ -71,20 +71,49 @@ struct Inner {
     /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
     /// machine is left out until it connects again.
     fleet_agreed: std::collections::BTreeSet<String>,
-    /// #1150: board notices for agents whose machine was not connected when they were made (a merge of an older hub's boards runs at
-    /// the first board call after a start, often before every machine is back), at most [`OWED_NOTICES`] per machine, sent when it
-    /// connects ([`Hub::take_owed_notices`]). Memory only: a hub that restarts first loses them.
-    owed_notices: std::collections::BTreeMap<String, Vec<crate::board::Notice>>,
 }
 
-/// The most board notices kept for one machine that is not connected (see `Inner::owed_notices`).
+/// #1150: board notices for agents whose machine was not connected when they were made (a merge of an older hub's boards runs at
+/// the first board call after a start, often before every machine is back) are kept in the hub's settings under this prefix and the
+/// machine's id (`board-notices.<node>`, a JSON list of `{"agent", "body"}`, oldest first), stored with the merge that made them, so a
+/// hub that restarts before the machine is back still has them. Given and removed when it connects ([`Hub::take_owed_notices`]);
+/// dropped when the machine is forgotten.
+const OWED_NOTICES_KEY: &str = "board-notices.";
+
+/// The most board notices kept for one machine that is not connected (see [`OWED_NOTICES_KEY`]).
 const OWED_NOTICES: usize = 1024;
 
-/// Whether `agent` (`<node>/<agent>`) runs in `project`, as the board's `sync` keeps an agent registered.
+/// What `board-notices.<node>` says is owed to `node`; a value the hub did not write reads as nothing.
+fn owed_from(node: &str, bytes: &[u8]) -> Vec<crate::board::Notice> {
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(bytes) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|v| {
+            Some(crate::board::Notice {
+                to_node: node.to_string(),
+                to_agent: v.get("agent")?.as_str()?.to_string(),
+                body: v.get("body")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn owed_bytes(owed: &[crate::board::Notice]) -> Vec<u8> {
+    let items: Vec<serde_json::Value> = owed
+        .iter()
+        .map(|n| serde_json::json!({"agent": n.to_agent, "body": n.body}))
+        .collect();
+    serde_json::Value::Array(items).to_string().into_bytes()
+}
+
+/// Whether `agent` (`<node>/<agent>`) runs in `project`, as the board's `sync` keeps an agent registered. An agent of a forgotten
+/// machine does not (ADR-0073: nothing is owed to it, #1150), until the machine connects again.
 fn runs_in(view: &View, agent: &str, project: &str) -> bool {
     view.agents
         .get(agent)
-        .is_some_and(|a| a.running && a.project_id == project)
+        .is_some_and(|a| a.running && !a.forgotten && a.project_id == project)
 }
 
 pub struct Hub {
@@ -126,7 +155,10 @@ fn spawn_audit(
         Some((who, action.to_string(), node.clone(), outcome, event.at_ms))
     };
     match event.body.as_ref()? {
-        Body::ApprovalRequested(a) if a.action == "agent.start" => {
+        // #1150: a request stated after its decision (a late re-announcement) asks nothing again.
+        Body::ApprovalRequested(a)
+            if a.action == "agent.start" && !view.approval_decided(&node, &a.approval_id) =>
+        {
             row(q(&a.agent_id), "agent.start.asked", a.approval_id.clone())
         }
         Body::ApprovalResolved(r) => {
@@ -210,7 +242,6 @@ impl Hub {
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
                 fleet_agreed: std::collections::BTreeSet::new(),
-                owed_notices: std::collections::BTreeMap::new(),
             }),
         };
         {
@@ -539,6 +570,14 @@ impl Hub {
             now_ms,
         )
         .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
+        // #1150: nor are its board notices.
+        if let Err(e) = self
+            .store
+            .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
+        {
+            // Operational log, not UI text.
+            eprintln!("node.forget: {node}: its board notices stay: {e}");
+        }
         drop(g);
         // ADR-0108: nothing is owed to a machine the owner forgot (its files go by retention, as before).
         if let Err(e) = self.forgets.drop_node(node) {
@@ -733,10 +772,35 @@ impl Hub {
         self.boards.membership(&g.view, now_ms)
     }
 
-    /// #1150: the board notices kept for `node` while it was not connected (see `Inner::owed_notices`), for the connection that
-    /// just opened to send; each is given once.
+    /// #1150: whether `producer`'s approval `approval_id` was already decided (see [`View::approval_decided`]).
+    pub fn approval_decided(&self, producer: &str, approval_id: &str) -> bool {
+        self.lock().view.approval_decided(producer, approval_id)
+    }
+
+    /// #1150: the board notices kept for `node` while it was not connected (see [`OWED_NOTICES_KEY`]), for the connection that
+    /// just opened to send; each is given once. If the store refuses to remove them they are still given (a notice given twice is
+    /// better than one never given), and may be given again at the next connection.
     pub fn take_owed_notices(&self, node: &str) -> Vec<crate::board::Notice> {
-        self.lock().owed_notices.remove(node).unwrap_or_default()
+        let _g = self.lock();
+        let owed = self.owed_notices(node);
+        if !owed.is_empty() {
+            if let Err(e) = self
+                .store
+                .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
+            {
+                // Operational log, not UI text.
+                eprintln!("board notices: {node}: given but still stored: {e}");
+            }
+        }
+        owed
+    }
+
+    /// The board notices stored for `node` (see [`OWED_NOTICES_KEY`]). Callers hold the hub lock, so no merge adds to them meanwhile.
+    fn owed_notices(&self, node: &str) -> Vec<crate::board::Notice> {
+        match self.store.setting(&format!("{OWED_NOTICES_KEY}{node}")) {
+            Ok(Some(bytes)) => owed_from(node, &bytes),
+            _ => Vec::new(),
+        }
     }
 
     /// A node will not answer its `BoardJoin`: board calls stop waiting for it.
@@ -931,25 +995,12 @@ impl Hub {
                 // markers would be merged again at the next start and its tasks added twice; so if the store refuses, the folded
                 // board is used alone, as it was stored, and the merge is tried again at the next start.
                 let changes = self.boards.task_changes(project, &m.restated);
-                let markers: Vec<(String, Vec<u8>)> = merged
-                    .into_iter()
-                    .map(|marker| (marker, project.as_bytes().to_vec()))
-                    .collect();
-                let stored = self.write_unrecorded(g).is_ok()
-                    && self
-                        .store_board(g, project, &key, changes, &markers, now_ms)
-                        .is_ok();
-                if !stored {
-                    self.boards.restore(project, none);
-                    if let Some(bytes) = own {
-                        self.boards.load(project, &bytes, now_ms);
-                    }
-                    return (key, Vec::new());
-                }
                 // As after a join, only an agent running in the project is told (a node that started again lost its agents). One
                 // whose machine is not connected now (after a hub start, before it is back) is told when it connects: the markers
-                // are stored, so this merge will not run again to tell it.
+                // are stored, so this merge will not run again to tell it, and its notices are stored with them (#1150).
                 let mut notices = Vec::new();
+                let mut owed =
+                    std::collections::BTreeMap::<String, Vec<crate::board::Notice>>::new();
                 for n in m.notices {
                     if !runs_in(&g.view, &format!("{}/{}", n.to_node, n.to_agent), project) {
                         continue;
@@ -957,11 +1008,34 @@ impl Hub {
                     if self.router.is_connected(&n.to_node) {
                         notices.push(n);
                     } else {
-                        let owed = g.owed_notices.entry(n.to_node.clone()).or_default();
-                        if owed.len() < OWED_NOTICES {
-                            owed.push(n);
+                        let list = match owed.entry(n.to_node.clone()) {
+                            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::btree_map::Entry::Vacant(e) => {
+                                e.insert(self.owed_notices(&n.to_node))
+                            }
+                        };
+                        if list.len() < OWED_NOTICES {
+                            list.push(n);
                         }
                     }
+                }
+                let settings: Vec<(String, Vec<u8>)> = merged
+                    .into_iter()
+                    .map(|marker| (marker, project.as_bytes().to_vec()))
+                    .chain(owed.iter().map(|(node, list)| {
+                        (format!("{OWED_NOTICES_KEY}{node}"), owed_bytes(list))
+                    }))
+                    .collect();
+                let stored = self.write_unrecorded(g).is_ok()
+                    && self
+                        .store_board(g, project, &key, changes, &settings, now_ms)
+                        .is_ok();
+                if !stored {
+                    self.boards.restore(project, none);
+                    if let Some(bytes) = own {
+                        self.boards.load(project, &bytes, now_ms);
+                    }
+                    return (key, Vec::new());
                 }
                 return (key, notices);
             }
@@ -1200,6 +1274,9 @@ mod tests {
             (row.0.as_str(), row.3.as_str()),
             ("n1/a", "approved:phone:grant=3:nested=false")
         );
+        // #1150 (review of #1234, F2): the request stated again after its decision (a late re-announcement) is no second "asked".
+        view.apply(&decided);
+        assert!(spawn_audit(&view, &asked).is_none());
         let refused = at(Body::AgentStartRefused(AgentStartRefused {
             agent_id: "a".into(),
             kind: "codex".into(),
@@ -2618,6 +2695,62 @@ mod tests {
         );
         assert!(owed[0].body.contains("task_moved"), "{}", owed[0].body);
         assert!(hub.take_owed_notices("old").is_empty(), "given once");
+        drop(links);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #1150: a notice owed to a machine that is not connected is stored with the merge that made it (the merge never runs again to
+    /// make it twice), so a hub that restarts before the machine is back still gives it, once. Forgetting the machine drops them.
+    #[test]
+    fn a_board_merge_notice_owed_to_a_machine_outlives_a_hub_restart() {
+        let (hub, path, folded, links) = merge_scenario("adr0115-merge-owed-restart", &["new"]);
+        let first = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        assert!(first.notices.is_empty(), "{:?}", first.notices);
+        drop(links);
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let link = hub.node_link_opened("old", Vec::new(), 7).unwrap().0;
+        let owed = hub.take_owed_notices("old");
+        assert_eq!(owed.len(), 1, "{owed:?}");
+        assert_eq!(
+            (owed[0].to_node.as_str(), owed[0].to_agent.as_str()),
+            ("old", "a")
+        );
+        assert!(owed[0].body.contains("task_moved"), "{}", owed[0].body);
+        assert!(hub.take_owed_notices("old").is_empty(), "given once");
+        assert_eq!(
+            hub.store().setting("board-notices.old").unwrap(),
+            None,
+            "given notices leave no row"
+        );
+        drop(link);
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert!(
+            hub.take_owed_notices("old").is_empty(),
+            "given once, across restarts too"
+        );
+        drop(hub);
+        remove_db(&path);
+
+        // A machine forgotten before it came back is owed nothing.
+        let (hub, path, folded, links) = merge_scenario("adr0115-merge-owed-forget", &["new"]);
+        hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        hub.forget_node("old", false, 7).unwrap();
+        drop(links);
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert!(hub.take_owed_notices("old").is_empty());
+        assert_eq!(hub.store().setting("board-notices.old").unwrap(), None);
+        drop(hub);
+        remove_db(&path);
+
+        // Review of #1234: a merge after the machine was forgotten owes its agents nothing (they are not counted as running).
+        let (hub, path, folded, links) = merge_scenario("adr0115-merge-forgot-first", &["new"]);
+        hub.forget_node("old", false, 6).unwrap();
+        hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 7);
+        assert_eq!(hub.store().setting("board-notices.old").unwrap(), None);
         drop(links);
         drop(hub);
         remove_db(&path);

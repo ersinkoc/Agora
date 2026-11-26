@@ -134,6 +134,10 @@ pub struct AgentView {
 /// ADR-0101: how many "always" answers the hub lists per agent (the newest are kept).
 pub const MAX_ALWAYS_ALLOWED: usize = 16;
 
+/// #1150: how many decided approvals of one machine the view remembers (see [`View::resolved_approvals`]); as many as a node's
+/// announcement restates (`agora_node::daemon::RESOLVED_KEPT`).
+pub const RESOLVED_APPROVALS_KEPT: usize = 256;
+
 /// ADR-0060: what `AgentInterrupted` said about an agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InterruptedView {
@@ -191,6 +195,11 @@ pub struct View {
     pub terminals: BTreeMap<String, TerminalView>,
     /// Approvals still waiting for an answer.
     pub approvals: BTreeMap<String, ApprovalView>,
+    /// #1150: producer → the local ids of its last [`RESOLVED_APPROVALS_KEPT`] decided approvals, oldest first. A request a node
+    /// records after its decision (a re-announcement that copied it before the decision was taken, or a request recorded after it
+    /// was queued and decided) brings no card back. Folded from the log like everything else, so a rebuilt view holds the same ids;
+    /// shared, so a clone of the view under the hub lock copies one pointer.
+    pub resolved_approvals: Arc<BTreeMap<String, VecDeque<String>>>,
     /// ADR-0061: node id → the devices it said it trusts (its last `NodeTrustedDevices`).
     pub trusted_devices: BTreeMap<String, Vec<String>>,
     /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
@@ -632,6 +641,14 @@ impl View {
         std::borrow::Cow::Owned(v)
     }
 
+    /// #1150: whether `producer`'s approval `approval_id` was decided (one of its last [`RESOLVED_APPROVALS_KEPT`] decisions): a
+    /// request for it stated now is late, and brings no card, notice or audit row.
+    pub fn approval_decided(&self, producer: &str, approval_id: &str) -> bool {
+        self.resolved_approvals
+            .get(producer)
+            .is_some_and(|ids| ids.iter().any(|id| id == approval_id))
+    }
+
     /// [`View::apply`] for an event at log position `pos`, which also keeps a `MessagePosted` for snapshots (ADR-0103). The hub's
     /// publish and its rebuild from the log both come here, so a rebuilt view has the same tail as the live one.
     pub fn apply_at(&mut self, pos: u64, ev: &Event) {
@@ -814,6 +831,10 @@ impl View {
                 }
                 for a in self.agents.values_mut().filter(|a| a.node_id == e.node_id) {
                     a.forgotten = true;
+                }
+                // #1150: its decisions are not remembered for it (a bounded aid against late requests, not history).
+                if self.resolved_approvals.contains_key(&e.node_id) {
+                    Arc::make_mut(&mut self.resolved_approvals).remove(&e.node_id);
                 }
             }
             Body::NodeForgotten(_) => {}
@@ -1114,6 +1135,7 @@ impl View {
             Body::TerminalClosed(e) => {
                 self.terminals.remove(&q(&e.terminal_id));
             }
+            Body::ApprovalRequested(e) if self.approval_decided(producer, &e.approval_id) => {}
             Body::ApprovalRequested(e) => {
                 self.approvals.insert(
                     q(&e.approval_id),
@@ -1131,6 +1153,17 @@ impl View {
             }
             Body::ApprovalResolved(e) => {
                 self.approvals.remove(&q(&e.approval_id));
+                let known = self.approval_decided(producer, &e.approval_id);
+                // A decision the node says again (an announcement restates recent ones) is kept once, where it first came.
+                if !known {
+                    let ids = Arc::make_mut(&mut self.resolved_approvals)
+                        .entry(producer.to_string())
+                        .or_default();
+                    if ids.len() == RESOLVED_APPROVALS_KEPT {
+                        ids.pop_front();
+                    }
+                    ids.push_back(e.approval_id.clone());
+                }
             }
             // Mesh and file events are not part of this view (the mesh broker and clients consume them).
             Body::TaskChanged(t) => {
@@ -2467,6 +2500,83 @@ mod tests {
             }),
         ));
         assert_eq!(v.needs_attention(), ["n1/a"]);
+    }
+
+    fn asked(id: &str) -> Body {
+        Body::ApprovalRequested(ApprovalRequested {
+            approval_id: id.into(),
+            agent_id: "a".into(),
+            action: "run_command".into(),
+            ..Default::default()
+        })
+    }
+
+    fn decided(id: &str) -> Body {
+        Body::ApprovalResolved(ApprovalResolved {
+            approval_id: id.into(),
+            approved: true,
+            signer_device_id: "d".into(),
+            ..Default::default()
+        })
+    }
+
+    /// #1150 (reviews of #1216 and #1223): a node can record a request after its decision (a re-announcement that copied it before
+    /// the decision, or a request recorded after it was queued and decided). Its card never comes back, live or rebuilt from the log;
+    /// the same id from another machine is another request, and the ids remembered are bounded per machine.
+    #[test]
+    fn a_request_stated_after_its_decision_brings_no_card_back() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut live = View::default();
+        let mut events = vec![
+            ev("n1", 1, started("a")),
+            ev("n1", 2, asked("x")),
+            ev("n1", 3, decided("x")),
+            ev("n1", 4, asked("x")),
+            ev("n2", 1, decided("y")),
+            ev("n1", 5, asked("y")),
+        ];
+        // A decision the node says again (an announcement restates recent ones) is remembered once.
+        let first = RESOLVED_APPROVALS_KEPT as u64;
+        for i in 0..first {
+            events.push(ev("n1", 6 + i, decided(&format!("r-{i}"))));
+        }
+        events.push(ev("n1", 6 + first, decided("r-0")));
+        events.push(ev("n1", 7 + first, asked("r-0")));
+        for e in &events {
+            store
+                .append(&e.producer_id, e.seq, e.at_ms, &e.encode_to_vec())
+                .unwrap();
+            live.apply(e);
+        }
+        assert_eq!(
+            live.approvals.keys().collect::<Vec<_>>(),
+            ["n1/y"],
+            "only the request no decision of its machine answered"
+        );
+        assert_eq!(live.resolved_approvals["n1"].len(), RESOLVED_APPROVALS_KEPT);
+        assert_eq!(live.resolved_approvals["n2"].len(), 1);
+        let (rebuilt, _) = View::rebuild(&store).unwrap();
+        assert_eq!(rebuilt, live);
+        // Past the bound, the oldest decision is forgotten first (`x` went when `r-0`..`r-{N-1}` came).
+        let mut v = live.clone();
+        v.apply(&ev("n1", 8 + first, decided("one-more")));
+        assert_eq!(v.resolved_approvals["n1"].len(), RESOLVED_APPROVALS_KEPT);
+        v.apply(&ev("n1", 9 + first, asked("r-0")));
+        assert!(v.approvals.contains_key("n1/r-0"), "r-0 was the oldest");
+        v.apply(&ev("n1", 10 + first, asked("r-1")));
+        assert!(!v.approvals.contains_key("n1/r-1"));
+        // Review of #1234: a forgotten machine's decisions are not kept for it; only the hub can forget one.
+        let forgot = |node: &str| {
+            Body::NodeForgotten(NodeForgotten {
+                node_id: node.into(),
+                refused_return: false,
+            })
+        };
+        v.apply(&ev("n1", 11 + first, forgot("n2")));
+        assert!(v.resolved_approvals.contains_key("n2"));
+        v.apply(&ev(RESERVED_HUB_ID, 1, forgot("n2")));
+        assert!(!v.resolved_approvals.contains_key("n2"));
+        assert!(v.resolved_approvals.contains_key("n1"));
     }
 
     #[test]
