@@ -103,8 +103,13 @@ export const mostUrgent = (evs: readonly SoundEvent[]): SoundEvent | undefined =
 
 // At most one sound in this long.
 export const SOUND_GAP_MS = 1000;
-// What waits for the end of the gap, bounded (only the most urgent of it plays).
+// What waits for the end of the gap, bounded for each kind (only the most urgent of it plays): many "finished" never push a "needs you"
+// out (audit F1803).
 const PENDING_MAX = 32;
+const bounded = (evs: readonly SoundEvent[]): SoundEvent[] => {
+  const keep = new Set(SOUND_KINDS.flatMap((k) => evs.filter((e) => e.kind === k).slice(-PENDING_MAX)));
+  return evs.filter((e) => keep.has(e));
+};
 
 // The burst rule's memory: when the last sound played, and what came during the gap since.
 export interface Gate { lastMs?: number; pending: readonly SoundEvent[] }
@@ -113,7 +118,7 @@ export const openGate = (): Gate => ({ pending: [] });
 // Events that may sound (already `audible`) at `nowMs`: play the most urgent now when the gap since the last sound is over; otherwise they
 // wait, and `waitMs` says when to look again (`flush`). Decided from the times alone, so a timer slowed in a hidden tab cannot add a sound.
 export function gate(g: Gate, evs: readonly SoundEvent[], nowMs: number): { play?: SoundEvent; waitMs?: number; next: Gate } {
-  const all = [...g.pending, ...evs].slice(-PENDING_MAX);
+  const all = bounded([...g.pending, ...evs]);
   if (all.length === 0) return { next: g };
   if (g.lastMs === undefined || nowMs - g.lastMs >= SOUND_GAP_MS) return { play: mostUrgent(all), next: { lastMs: nowMs, pending: [] } };
   return { waitMs: g.lastMs + SOUND_GAP_MS - nowMs, next: { lastMs: g.lastMs, pending: all } };
