@@ -36,7 +36,7 @@ describe('i18n', () => {
   it('has the audit trail\'s reasons and outcomes', () => {
     for (const k of ['owner-only', 'signed-out', 'failed']) expect(t(`audit-${k}`)).not.toBe(`audit-${k}`);
     for (const k of ['done', 'sent']) expect(t(`audit-outcome-${k}`)).not.toBe(`audit-outcome-${k}`);
-    for (const a of ['sign_in', 'user.add', 'AgentStop', 'ApprovalResolve', 'node.resynced']) expect(t(actionKey(a)), a).not.toBe(actionKey(a));
+    for (const a of ['sign_in', 'user.add', 'AgentStop', 'ApprovalResolve', 'node.resynced', 'plugin_catalog.on', 'plugin_catalog.off', 'plugin_catalog.key', 'plugin_catalog.update', 'plugin_catalog.install', 'plugin_catalog.upgrade']) expect(t(actionKey(a)), a).not.toBe(actionKey(a));
   });
   it('lays the page out right to left for the languages written that way', () => {
     for (const l of ['ar', 'he', 'fa-IR', 'ur']) expect(directionOf(l), l).toBe('rtl');
