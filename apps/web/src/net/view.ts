@@ -110,12 +110,16 @@ export interface View {
   trusted?: Map<string, string[]>;
   // ADR-0091: the newest plan-limit observation per machine, tool and window (node, then `<tool>\0<window>`); at most `MAX_QUOTA` windows per machine.
   quota?: Map<string, Map<string, QuotaV>>;
+  // #1150: machine -> the ids of its last `RESOLVED_KEPT` decided approvals seen since the snapshot, oldest first (a Set keeps insertion
+  // order). A request a machine records after its decision brings no card back, as in the hub's view (`View::resolved_approvals`).
+  resolved?: Map<string, Set<string>>;
 }
 export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
 const MAX_QUOTA = 64; // per machine, as the hub
 const QUOTA_SKEW_MS = 120_000;
 
 const MAX_MESSAGES = 50;
+const RESOLVED_KEPT = 256; // decided approvals remembered per machine, as the hub (`RESOLVED_APPROVALS_KEPT`)
 
 export function emptyView(): View {
   return { pos: 0, workspaces: new Map(), agentWorkspaces: new Map(), messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), leases: new Map(), withTerminal: new Set() };
@@ -470,12 +474,23 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       break;
     case 'approvalRequested': {
       const b = e.approvalRequested;
+      if (v.resolved?.get(producer)?.has(b.approvalId ?? '')) break;
       v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs), ...alwaysFields(b) });
       break;
     }
-    case 'approvalResolved':
-      v.approvals.delete(q(e.approvalResolved.approvalId));
+    case 'approvalResolved': {
+      const id = e.approvalResolved.approvalId ?? '';
+      v.approvals.delete(q(id));
+      v.resolved ??= new Map();
+      const ids = v.resolved.get(producer) ?? new Set<string>();
+      // A decision said again (an announcement restates recent ones) keeps its place.
+      if (!ids.has(id)) {
+        ids.add(id);
+        if (ids.size > RESOLVED_KEPT) ids.delete(ids.values().next().value as string);
+      }
+      v.resolved.set(producer, ids);
       break;
+    }
     case 'messagePosted':
       postMessage(v, producer, at, e.messagePosted);
       break;

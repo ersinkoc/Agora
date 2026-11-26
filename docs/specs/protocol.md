@@ -483,6 +483,12 @@ says so with `auth.unauthenticated`).
 2. Client subscribes to events after `as_of_seq` with optional filters (project, node).
 3. Terminal output is not part of the snapshot; clients subscribe per terminal and receive a terminal
    snapshot first (format chosen by capability: `terminal.raw` or `terminal.cells`).
+4. An approval waits from its `ApprovalRequested` until its `ApprovalResolved`. A node can record a request after its decision (a
+   re-announcement that copied it before the decision was taken, or a request recorded after it was queued and decided), so an
+   `ApprovalRequested` whose id the same machine's `ApprovalResolved` already decided is ignored (#1150): the hub's view remembers
+   each machine's last 256 decided ids, folded from the log, so a rebuilt view agrees; the web window remembers the ones it saw
+   since its snapshot. The snapshot carries no decided ids, so a window whose snapshot falls between a decision and its late
+   request still shows that card until its next snapshot.
 
 ## 6. Flow control and priorities
 
