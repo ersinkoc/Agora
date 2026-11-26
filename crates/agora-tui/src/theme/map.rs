@@ -397,6 +397,11 @@ mod tests {
             .into_iter()
             .map(|b| (b.id.to_string(), b.theme))
             .collect();
+        themes.extend(
+            crate::theme::starter::starters()
+                .into_iter()
+                .map(|s| (format!("starter-{}", s.id), s.theme)),
+        );
         themes.push(("harbour".into(), harbour.theme().unwrap().clone()));
         for (id, theme) in &themes {
             for scheme in theme.schemes() {

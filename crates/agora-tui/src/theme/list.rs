@@ -66,27 +66,31 @@ pub fn entry_label(e: &Entry, t: Text<'_>) -> String {
     match &e.source {
         Source::Terminal => t(key!("tui-theme-terminal"), &[]),
         Source::BuiltIn(id) => built_in_name(id, t),
+        Source::Starter(s) => theme_label(&s.theme, e.scheme, t),
         Source::File {
             read: Read::Ok { theme, .. },
             ..
-        } => {
-            let shown: String = theme.name.chars().take(MAX_NAME).collect();
-            if theme.schemes().len() > 1 {
-                t(
-                    key!("tui-theme-with-scheme"),
-                    &[
-                        ("name", Arg::Str(shown)),
-                        ("scheme", Arg::Str(scheme_text(e.scheme, t))),
-                    ],
-                )
-            } else {
-                shown
-            }
-        }
+        } => theme_label(theme, e.scheme, t),
         Source::File { name, .. } => t(
             key!("tui-theme-refused-row"),
             &[("file", Arg::Str(name.clone()))],
         ),
+    }
+}
+
+/// A theme's own name; one with both schemes names the scheme of its row.
+fn theme_label(theme: &super::Theme, scheme: Scheme, t: Text<'_>) -> String {
+    let shown: String = theme.name.chars().take(MAX_NAME).collect();
+    if theme.schemes().len() > 1 {
+        t(
+            key!("tui-theme-with-scheme"),
+            &[
+                ("name", Arg::Str(shown)),
+                ("scheme", Arg::Str(scheme_text(scheme, t))),
+            ],
+        )
+    } else {
+        shown
     }
 }
 
@@ -379,6 +383,15 @@ pub fn details(v: &ListView<'_>) -> Vec<String> {
         out.push(t(
             key!("tui-theme-in-file"),
             &[("file", Arg::Str(name.clone()))],
+        ));
+    }
+    if let Source::Starter(s) = &e.source {
+        out.push(t(
+            key!("tui-theme-starter"),
+            &[
+                ("project", Arg::Str(s.project.to_string())),
+                ("licence", Arg::Str(s.licence.to_string())),
+            ],
         ));
     }
     match &e.source {
@@ -679,6 +692,13 @@ mod tests {
                 .chain((0..10).map(Unused::Chrome));
             all.extend(unused.map(|u| unused_text(u, &t)));
             all.extend(built_ins().iter().map(|b| built_in_name(b.id, &t)));
+            all.push(t(
+                "tui-theme-starter",
+                &[
+                    ("project", Arg::Str("Gruvbox".into())),
+                    ("licence", Arg::Str("MIT".into())),
+                ],
+            ));
             for s in all {
                 assert!(
                     !s.is_empty() && !s.contains("{ $") && !s.contains("tui-theme-"),
@@ -740,9 +760,31 @@ mod tests {
             "Harbour · dark",
             "Harbour · light",
             "~/.agora/themes",
+            "Catppuccin Mocha",
+            "Gruvbox · dark",
+            "Gruvbox · light",
+            "Rosé Pine",
         ] {
             assert!(all.contains(want), "{want} in\n{all}");
         }
+        // A starter theme says where its colours come from, and is drawn in its own colours.
+        let gruvbox = at(&|e| {
+            e.choice()
+                == Some(Choice::Starter {
+                    id: "gruvbox".into(),
+                    scheme: Scheme::Light,
+                })
+        });
+        let (lines, buf) = screen(&view(gruvbox, ColorMode::Full));
+        let all = lines.join("\n");
+        assert!(
+            all.contains("A starter theme: the colours of Gruvbox, ported (MIT licence)."),
+            "{all}"
+        );
+        assert_eq!(
+            buf[(100, 5)].bg,
+            ratatui::style::Color::Rgb(0xfb, 0xf1, 0xc7)
+        );
         // Large text: its sizes are the terminal's own here, and the list says so.
         let large = at(&|e| matches!(e.source, Source::BuiltIn("large-text")));
         let all = screen(&view(large, ColorMode::Full)).0.join("\n");

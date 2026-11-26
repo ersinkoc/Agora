@@ -5452,7 +5452,7 @@ mod tests {
 mod theme_tests {
     use super::*;
     use crate::theme::map::{Borders, Shell};
-    use crate::theme::{built_ins, file::read_text, Scheme};
+    use crate::theme::{built_ins, every_look, file::read_text, Scheme};
     use ratatui::buffer::Buffer;
     use ratatui::Terminal as Tui;
 
@@ -5581,15 +5581,19 @@ mod theme_tests {
             marks.extend(cells_of(&plain, tree_y, "needs you"));
             marks.extend(cells_of(&plain, tab_y, "2 ! shell"));
             marks.extend(cells_of(&plain, tab_y, "! tui-app-tabs-waiting"));
-            for b in built_ins() {
-                let (_, themed) = frame(Some(shell(b.id, colors)), colors, Some(&question));
+            for (id, theme, scheme) in every_look() {
+                let (_, themed) = frame(
+                    Some(Shell::new(&theme, scheme, colors).unwrap()),
+                    colors,
+                    Some(&question),
+                );
                 for y in box_rect.y..box_rect.bottom() {
                     for x in box_rect.x..box_rect.right() {
                         assert_eq!(
                             themed[(x, y)],
                             plain[(x, y)],
                             "{} {colors:?}: the box at {x},{y}",
-                            b.id
+                            id
                         );
                     }
                 }
@@ -5598,7 +5602,7 @@ mod theme_tests {
                         themed[(x, y)],
                         plain[(x, y)],
                         "{} {colors:?}: needs you at {x},{y}",
-                        b.id
+                        id
                     );
                 }
             }
@@ -5633,21 +5637,21 @@ mod theme_tests {
             let cells = cells_of(&plain, tab_y, "2 ! shell");
             let (mark, name) = (cells[2], cells[4]);
             let attention = attention_style(colors);
-            for b in built_ins() {
-                let look = shell(b.id, colors);
+            for (id, theme, scheme) in every_look() {
+                let look = Shell::new(&theme, scheme, colors).unwrap();
                 let (_, themed) = frame_in_front(Some(look), colors, None, 1);
                 let c = &themed[mark];
                 assert_eq!(
                     (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
                     ("!", attention.fg.unwrap(), Color::Reset, true),
                     "{} {colors:?}: the mark of the tab in front",
-                    b.id
+                    id
                 );
                 assert_eq!(
                     themed[name].bg,
                     look.styles.chosen.bg.unwrap(),
                     "{} {colors:?}: the tab in front",
-                    b.id
+                    id
                 );
             }
             // Without a theme, the tab in front is inverted as before themes, its mark too.
@@ -5732,8 +5736,8 @@ mod theme_tests {
         };
         for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
             let attention = attention_style(colors);
-            for b in built_ins() {
-                let look = shell(b.id, colors);
+            for (id, theme, scheme) in every_look() {
+                let look = Shell::new(&theme, scheme, colors).unwrap();
                 // The last pane in focus, its tab in front being agent-5's (tabs of a group); then the first pane (its own name, which
                 // the bar starts with a space: the agents list has "! claude" too).
                 for (focus, needle, at) in [(4, "! 2:agent5", 0), (0, " ! claude", 1)] {
@@ -5745,13 +5749,13 @@ mod theme_tests {
                         (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
                         ("!", attention.fg.unwrap(), Color::Reset, true),
                         "{} {colors:?} {needle}: the mark in the bar in focus",
-                        b.id
+                        id
                     );
                     assert_eq!(
                         buf[(x + 3, y)].bg,
                         look.styles.chosen.bg.unwrap(),
                         "{} {colors:?} {needle}: the bar in focus",
-                        b.id
+                        id
                     );
                 }
             }

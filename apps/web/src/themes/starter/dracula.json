@@ -1,0 +1,52 @@
+{
+  "agora-theme": 2,
+  "name": "Dracula",
+  "dark": {
+    "tokens": {
+      "surface-0": "#282a36",
+      "surface-1": "#21222c",
+      "surface-2": "#282a36",
+      "border": "#44475a",
+      "text": "#f8f8f2",
+      "text-muted": "#f8f8f2",
+      "accent": "#bd93f9",
+      "on-accent": "#282a36",
+      "state-working": "#8be9fd",
+      "state-needs-you": "#f1fa8c",
+      "state-finished": "#50fa7b",
+      "state-idle": "#f8f8f2",
+      "state-unknown": "#6272a4"
+    },
+    "terminal": {
+      "background": "#282a36",
+      "foreground": "#f8f8f2",
+      "cursor": "#f8f8f2",
+      "selection": "#6272a4",
+      "black": "#21222c",
+      "red": "#ff5555",
+      "green": "#50fa7b",
+      "yellow": "#f1fa8c",
+      "blue": "#bd93f9",
+      "magenta": "#ff79c6",
+      "cyan": "#8be9fd",
+      "white": "#f8f8f2",
+      "bright-black": "#6272a4",
+      "bright-red": "#ff6e6e",
+      "bright-green": "#69ff94",
+      "bright-yellow": "#ffffa5",
+      "bright-blue": "#d6acff",
+      "bright-magenta": "#ff92df",
+      "bright-cyan": "#a4ffff",
+      "bright-white": "#ffffff"
+    },
+    "syntax": {
+      "keyword": "#ff79c6",
+      "string": "#f1fa8c",
+      "number": "#bd93f9",
+      "function": "#50fa7b",
+      "type": "#8be9fd",
+      "attr": "#50fa7b",
+      "meta": "#ffb86c"
+    }
+  }
+}
