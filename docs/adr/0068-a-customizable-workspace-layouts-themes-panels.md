@@ -18,6 +18,15 @@ The web window has a fixed editor-like layout (Explorer | tabs | Inspector) with
 7. **Terminals stay cheap when many are shown:** only visible panes subscribe to a terminal stream; hidden tabs unsubscribe (ADR-0022 budgets); a flood in one pane never slows another or the keyboard.
 8. **Build in rungs, web first** (it already has the pieces): (1) the layout model and presets in the web window with saved layouts, (2) themes as token files with live reload and a theme editor, (3) the panel registry and moving the existing screens onto it, (4) keybindings and the palette completeness, (5) the same model in the terminal client, (6) a native client only if the evaluation says it pays.
 
+## Build status
+Where decision 8's rungs stand on `main` (a status note; the decision is unchanged):
+1. Layout model, presets and saved layouts in the web window. Done: `docs/ux/layout.md`.
+2. Themes as token files with live reload and an editor. Done: `docs/ux/themes.md`.
+3. The panel registry. Done (#1214): `docs/ux/layout.md`, "The panel registry (rung 3)".
+4. Keybindings and the palette's completeness. Done (#1224): `docs/ux/keybindings.md`.
+5. The same model in the terminal client. Done (#1230): `docs/ux/layout.md`, "The terminal client (rung 5)".
+6. A native client. Not yet.
+
 ## Open questions (proposed answers stand)
 - Layout/theme sync through the hub per user (proposed, optional) or only local files?
 - High-contrast and large-text themes built in (proposed: yes).

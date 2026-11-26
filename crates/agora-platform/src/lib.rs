@@ -234,6 +234,30 @@ pub fn local_endpoint_name(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Renames `from` to `to` only when nothing has the name `to` (a file, a folder, or a link, which is never followed): never replaces.
+/// `AlreadyExists` when the name is taken; `Unsupported` where the system or the file system cannot (the caller falls back). Linux
+/// `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`. For a
+/// file written whole beside its place and moved there in one step, never with two names (#1150).
+pub fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::rename_no_replace(from, to)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::rename_no_replace(from, to)
+    }
+    #[cfg(windows)]
+    {
+        windows::rename_no_replace(from, to)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (from, to);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
 /// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first; when that name is
 /// still taken by a program an earlier update moved aside and that still runs (a node not restarted since), to `<target>.old-<pid>`.
@@ -3654,6 +3678,58 @@ mod process_group_tests {
     fn dead_now(pid: &str) -> bool {
         let s = state(pid);
         s.is_empty() || s.starts_with('Z')
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod rename_no_replace_tests {
+    use super::rename_no_replace;
+    use std::io::ErrorKind;
+
+    /// #1150: a name that is taken (a file, a folder, a link to nothing) is refused and left as it was, and the file stays under its
+    /// old name; a free name takes it in one step.
+    #[test]
+    fn a_taken_name_is_refused_and_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("agora-rename-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        let (from, taken) = (dir.join("new"), dir.join("taken"));
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&taken, b"old").unwrap();
+        match rename_no_replace(&from, &taken) {
+            // A file system without it: nothing was moved.
+            Err(e) if e.kind() == ErrorKind::Unsupported => {
+                assert_eq!(std::fs::read(&from).unwrap(), b"new");
+                assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(e) => assert_eq!(e.kind(), ErrorKind::AlreadyExists, "{e}"),
+            Ok(()) => panic!("replaced a file"),
+        }
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        assert_eq!(std::fs::read(&from).unwrap(), b"new");
+        let folder = rename_no_replace(&from, &dir.join("folder")).unwrap_err();
+        assert_eq!(folder.kind(), ErrorKind::AlreadyExists, "{folder}");
+        assert!(dir.join("folder").is_dir());
+        #[cfg(unix)]
+        {
+            let dangling = dir.join("dangling");
+            std::os::unix::fs::symlink(dir.join("nowhere"), &dangling).unwrap();
+            let e = rename_no_replace(&from, &dangling).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::AlreadyExists, "{e}");
+            assert!(!dir.join("nowhere").exists(), "the link is not followed");
+            assert!(std::fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        let free = dir.join("free");
+        rename_no_replace(&from, &free).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&free).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -1165,12 +1165,16 @@ fn an_adapter_agent_is_in_the_mesh_and_its_start_waits_for_the_user() {
     assert_eq!(servers[0]["args"][3], own.to_string_lossy().as_ref());
 }
 
-/// The command lines the probe agents reported, by the folder each ran in.
+/// The command lines the probe agents reported, by the folder each ran in. Only placed reports (`probe-<pid>.json`): one still being
+/// placed (`.json.tmp`) is renamed away between two reads.
 fn probe_args(root: &Path) -> Vec<Vec<String>> {
     std::fs::read_dir(root)
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("probe-"))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("probe-") && name.ends_with(".json")
+        })
         .filter_map(|e| serde_json::from_slice::<Value>(&std::fs::read(e.path()).ok()?).ok())
         .map(|v| {
             v["args"]
@@ -1181,6 +1185,25 @@ fn probe_args(root: &Path) -> Vec<Vec<String>> {
                 .collect()
         })
         .collect()
+}
+
+/// #1150 (a Windows flake): the fake agent writes its report as `probe-<pid>.json.tmp` and then renames it, so a report still being
+/// placed is a whole file under another name. Read as one, it was counted, then gone on the next read: a wait for two reports passed
+/// and the reports read after it were one ("only the helper runs with the flag": 0).
+#[test]
+fn a_probe_report_still_being_placed_is_not_read() {
+    let root = std::env::temp_dir().join(format!("spawn-{}-placing", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let report = |args: &[&str]| json!({"cwd": "/", "args": args}).to_string();
+    std::fs::write(root.join("probe-1.json"), report(&["probe"])).unwrap();
+    std::fs::write(
+        root.join("probe-2.json.tmp"),
+        report(&["probe", "--fake-skip-permissions"]),
+    )
+    .unwrap();
+    assert_eq!(probe_args(&root), [vec!["probe".to_string()]]);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// ADR-0059: an agent started with an option that skips permissions starts helpers without it. The helper is started from its plain

@@ -514,6 +514,14 @@ impl SqliteStore {
         self.append_batch_with_settings(producer, first_seq, events, setting.as_slice())
     }
 
+    /// Removes the setting `key`; one that is not there is not an error (#1150: a list of owed notices given or no longer owed
+    /// leaves no row behind).
+    pub fn remove_setting(&self, key: &str) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// [`append_batch_with_setting`](Self::append_batch_with_setting) with any number of settings (ADR-0115: a merged board and the
     /// markers of the boards merged into it, #1150), all in the one transaction.
     pub fn append_batch_with_settings(

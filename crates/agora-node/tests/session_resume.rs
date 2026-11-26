@@ -590,12 +590,16 @@ impl Env {
         })
     }
 
-    /// The probe reports (`<prefix>-<pid>.json`) written so far.
+    /// The probe reports (`<prefix>-<pid>.json`) written so far; one still being placed (`.json.tmp`, renamed when whole) is not one
+    /// yet (#1150).
     fn reports(&self, prefix: &str) -> Vec<serde_json::Value> {
         std::fs::read_dir(&self.root)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(prefix) && name.ends_with(".json")
+            })
             .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
             .collect()
     }

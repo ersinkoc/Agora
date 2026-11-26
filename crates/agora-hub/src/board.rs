@@ -451,8 +451,8 @@ impl Boards {
     /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
     /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
     /// its owner is told, as `task_moved` after a join, unless the task is done), and where several boards' live leases hold one
-    /// path, one holder keeps it, the others' leases are passed on as ended and both are told (see the lease rules below; `running`
-    /// says whether an agent runs in the project).
+    /// path, or paths one of which is inside the other (`src` and `src/a.rs`), one holder keeps it, the others' leases are passed on
+    /// as ended and both are told (see the lease rules below; `running` says whether an agent runs in the project).
     /// A dependency on a task its own board no longer has stays unmet: when another board's task has that id, it is given an id of
     /// its own that no task has or will have, instead of naming that task (#1150). A damaged one is left out.
     pub fn merge_snapshots(
@@ -554,9 +554,10 @@ impl Boards {
         }
         // Leases (#1150). A live lease whose holder runs keeps its path before one whose holder is gone (not running in the project,
         // or on a node that started again since this hub opened: `load` and the next `sync` free those), first board first. Every
-        // other live lease on that path is passed on as ended, so `load` says it released (a window still shows the older hub's
-        // grant) and both holders are told, as when a join finds the path held. An ended lease is passed on too, for the same
-        // reason, unless the holder that keeps the path is its own (its release would end the kept lease in the window's view).
+        // other holder's live lease on that path, or on a path above or below it, is passed on as ended, so `load` says it released
+        // (a window still shows the older hub's grant) and both holders are told, as when a join finds the path held. An ended lease
+        // is passed on too, for the same reason, unless its holder has a live lease on that path (its release would end that lease
+        // in the window's view).
         let restarted = self
             .restarted
             .lock()
@@ -576,11 +577,23 @@ impl Boards {
             ))
         };
         let live = |l: &&Value| fields(l).is_some_and(|(_, _, expires)| expires > now_ms);
-        let mut keeper = BTreeMap::<String, String>::new();
+        // Which live lease keeps its path is decided as `load` grants them: a lease conflicts with another holder's on the same path
+        // or one above or below it (`src` and `src/a.rs`), never with its own holder's. `refused` names, for each lease that loses,
+        // the holder that keeps the path it overlaps. A path the board cannot take is left to `load`, as before.
+        let mut table = agora_core::LeaseTable::new();
+        let mut refused = BTreeMap::<(String, String), String>::new();
         for pass_gone in [false, true] {
-            for (path, holder, _) in all_leases.iter().filter(live).filter_map(fields) {
-                if gone(&holder) == pass_gone {
-                    keeper.entry(path).or_insert(holder);
+            for (path, holder, expires) in all_leases.iter().filter(live).filter_map(fields) {
+                if gone(&holder) != pass_gone
+                    || refused.contains_key(&(path.clone(), holder.clone()))
+                {
+                    continue;
+                }
+                let by = AgentId::new(&holder);
+                if let Err(agora_core::LeaseError::Conflict { holder: kept, .. }) =
+                    table.acquire(&path, &by, now_ms, expires - now_ms)
+                {
+                    refused.insert((path, holder), kept.as_str().to_string());
                 }
             }
         }
@@ -592,20 +605,18 @@ impl Boards {
             let Some((path, holder, expires)) = fields(l) else {
                 continue;
             };
-            let kept = keeper.get(&path).cloned().unwrap_or_default();
             if !passed.insert((path.clone(), holder.clone())) {
                 continue;
             }
+            // An ended lease whose holder keeps a live one on that path was passed on above.
             if expires <= now_ms {
-                if kept != holder {
-                    leases.push(l.clone());
-                }
-                continue;
-            }
-            if kept == holder {
                 leases.push(l.clone());
                 continue;
             }
+            let Some(kept) = refused.get(&(path.clone(), holder.clone())).cloned() else {
+                leases.push(l.clone());
+                continue;
+            };
             let mut ended = l.clone();
             ended["expires_at_ms"] = json!(0);
             leases.push(ended);
@@ -1371,6 +1382,85 @@ mod tests {
             [
                 ("src/a".to_string(), "n2/y".to_string()),
                 ("src/b".into(), "n1/x".into())
+            ]
+        );
+    }
+
+    /// #1150: different paths that overlap (a folder and a file in it) are one path to a lease. When two boards' live leases hold
+    /// such paths for different holders, the rule for one path applies: the running holder keeps its lease, the other one's is passed
+    /// on as ended (loading says it was released, so the window stops showing it) and both are told. One holder's own overlapping
+    /// leases, and paths that only share a prefix (`lib/a.rs` and `lib/ab.rs`), stay.
+    #[test]
+    fn a_merged_lease_on_an_overlapping_path_tells_both_holders() {
+        let first = lease_board(json!([
+            merge_lease("src", "n1/gone", 500),
+            merge_lease("lib/a.rs", "n1/x", 500)
+        ]));
+        let later = lease_board(json!([
+            merge_lease("src/a.rs", "n2/y", 500),
+            merge_lease("lib", "n2/y", 500),
+            merge_lease("lib/ab.rs", "n2/z", 500),
+            merge_lease("lib/a.rs/x", "n1/x", 500)
+        ]));
+        let b = Boards::default();
+        let m = b.merge_snapshots(&[first, later], 100, |h| h != "n1/gone");
+        let (leases, released) = merged_leases(&b, &m, 100);
+        let mut live: Vec<(String, String)> = leases
+            .iter()
+            .filter(|l| l.2)
+            .map(|l| (l.0.clone(), l.1.clone()))
+            .collect();
+        live.sort();
+        assert_eq!(
+            live,
+            [
+                ("lib/a.rs".to_string(), "n1/x".to_string()),
+                ("lib/a.rs/x".into(), "n1/x".into()),
+                ("lib/ab.rs".into(), "n2/z".into()),
+                ("src/a.rs".into(), "n2/y".into()),
+            ]
+        );
+        let mut released = released;
+        released.sort();
+        assert_eq!(
+            released,
+            [
+                ("lib".to_string(), "n2/y".to_string()),
+                ("src".into(), "n1/gone".into())
+            ]
+        );
+        let mut held: Vec<(String, String)> = b.by_project.lock().unwrap()["p"]
+            .export_leases("p", 100)
+            .into_iter()
+            .map(|l| (l.0, l.1.as_str().to_string()))
+            .collect();
+        held.sort();
+        assert_eq!(held, live, "every kept lease is held after loading");
+        let mut notices = m.notices.clone();
+        notices.sort_by(|a, b| (&a.to_agent, &a.body).cmp(&(&b.to_agent, &b.body)));
+        assert_eq!(
+            notices,
+            [
+                told(
+                    "n1",
+                    "gone",
+                    json!({"board": "lease_refused", "path": "src", "holder": "n2/y"})
+                ),
+                told(
+                    "n1",
+                    "x",
+                    json!({"board": "lease_conflict", "path": "lib", "other": "n2/y"})
+                ),
+                told(
+                    "n2",
+                    "y",
+                    json!({"board": "lease_conflict", "path": "src", "other": "n1/gone"})
+                ),
+                told(
+                    "n2",
+                    "y",
+                    json!({"board": "lease_refused", "path": "lib", "holder": "n1/x"})
+                ),
             ]
         );
     }

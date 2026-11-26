@@ -1183,6 +1183,36 @@ pub(crate) fn service_status(name: &str) -> io::Result<crate::ServiceState> {
     Systemd::from_env()?.status(name)
 }
 
+/// [`crate::rename_no_replace`] on Linux: `renameat2(RENAME_NOREPLACE)`, made as a system call (a C library older than glibc 2.28
+/// has no wrapper). `ENOSYS` (a kernel before 3.15) and `EINVAL` (a file system without the flag) are `Unsupported`.
+pub(crate) fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &std::path::Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    };
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: two NUL-terminated paths that outlive the call; relative ones resolve against the working folder (`AT_FDCWD`).
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::ENOSYS) | Some(libc::EINVAL) => Err(io::Error::from(io::ErrorKind::Unsupported)),
+        _ => Err(e),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod service_tests {

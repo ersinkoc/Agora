@@ -30,6 +30,12 @@ describe('reading a keybindings file', () => {
     expect(codes(file([{ command: 'go.home', keys: [3] }]))).toEqual(['key']);
     expect(codes(file([{ command: 'go.home', keys: ['ctrl+k ctrl+s ctrl+x'] }]))).toEqual(['key']);
   });
+  it('never throws: a key nested deeper than the problem\'s text can be made from is refused like any other (audit F1802)', () => {
+    const deep = '['.repeat(20000) + ']'.repeat(20000);
+    const text = `{"version":1,"bindings":[{"command":"go.home","keys":[${deep}, 3]}]}`;
+    expect(new TextEncoder().encode(text).length).toBeLessThan(MAX_FILE_BYTES);
+    expect(refused(text)).toEqual([{ code: 'key', command: 'go.home', key: '' }, { code: 'key', command: 'go.home', key: '3' }]);
+  });
   it('refuses unknown fields at every level (a closed set)', () => {
     expect(refused(file([], { name: 'mine' }))).toEqual([{ code: 'field', at: 'name' }]);
     expect(refused(file([{ command: 'go.home', keys: [], when: 'terminalFocus' }]))).toEqual([{ code: 'field', at: 'bindings[0].when' }]);

@@ -230,10 +230,8 @@ fn device_lines(say: &Say, d: &DeviceInfo, standing: Standing) -> Vec<String> {
 }
 
 fn show(say: &Say, d: &DeviceInfo, standing: Standing) {
-    use std::io::Write;
-    let mut out = std::io::stdout();
     for l in device_lines(say, d, standing) {
-        let _ = writeln!(out, "{l}");
+        crate::out_line(&l);
     }
 }
 

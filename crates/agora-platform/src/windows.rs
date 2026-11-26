@@ -1683,6 +1683,25 @@ pub(crate) fn catch_session_end() -> io::Result<()> {
         .map(|_| ())
 }
 
+/// [`crate::rename_no_replace`] on Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (nor `MOVEFILE_COPY_ALLOWED`), which
+/// fails when anything has the new name.
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let w = |p: &Path| -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let (from, to) = (w(from), w(to));
+    // SAFETY: two NUL-terminated wide paths that outlive the call.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        return Ok(());
+    }
+    Err(os_error(unsafe { GetLastError() }))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

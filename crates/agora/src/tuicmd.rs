@@ -1865,7 +1865,7 @@ fn show_notice(say: &Say, c: &mut Console, text: String) {
         .as_ref()
         .map(|s| app_rows(s, now_ms(), &t))
         .unwrap_or_default();
-    draw_console(say, c, &rows, None, None, window_area(), None);
+    draw_console(say, c, &rows, None, None, None, window_area(), None);
 }
 
 /// How long a notice stays in the footer before the summary comes back.
@@ -1957,6 +1957,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         if let Some(n) = apply_theme(say, c, choice) {
             c.notice = n;
         }
+        // ADR-0068: the arrangement of the last run (the tabs, or a tiled layout), when it can be read.
+        let file = current_layout_file();
+        if let Some(ws) = agora_tui::layout::store::load_workspace(&file) {
+            c.app.set_workspace(ws);
+        }
+        c.layout_saved = layout_text(&c.app);
+        c.layout_file = Some(file);
     }
     let _full = FullScreen(keys && console_state.is_none());
     if keys && console_state.is_none() {
@@ -2037,7 +2044,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         let _ = out.write_all(agora_tui::backend::RESET);
                         let _ = out.flush();
                     }
-                    eprint!("{message}{eol}");
+                    crate::err_text(&format!("{message}{eol}"));
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));
@@ -2642,6 +2649,10 @@ struct Console {
     give_lacking: agora_tui::board::Lacking,
     /// ADR-0113: the theme in use and how its file looked when it was last read.
     theme: ThemeUse,
+    /// ADR-0068: the arrangement in use as last written to `tui-layout.json`, so it is written again only when it changed.
+    layout_saved: String,
+    /// Where it is written: set only when the console is started for real (a console made in a test never writes a file).
+    layout_file: Option<PathBuf>,
 }
 
 /// ADR-0113 step 3: the theme the console uses (`theme::folder::Choice`, kept in `tui-theme` in the Agora folder) and the stamp of its
@@ -2740,6 +2751,137 @@ fn reload_theme(say: &Say, c: &mut Console) -> (bool, Option<String>) {
     (c.app.look != before || notice.is_some(), notice)
 }
 
+/// ADR-0068: the saved layouts' folder (`layouts` in the Agora folder, beside `themes`), and the file of the arrangement in use
+/// (`tui-layout.json`, beside `tui-theme`).
+fn layouts_folder() -> PathBuf {
+    home().join(agora_tui::layout::store::FOLDER)
+}
+
+fn current_layout_file() -> PathBuf {
+    home().join(agora_tui::layout::store::CURRENT_FILE)
+}
+
+/// The arrangement in use as the text `tui-layout.json` holds.
+fn layout_text(app: &App) -> String {
+    serde_json::to_string(&agora_tui::layout::store::workspace_value(&app.workspace()))
+        .unwrap_or_default()
+}
+
+/// The saved layouts' folder as notices show it: `~/.agora/layouts` under the home folder.
+fn layouts_folder_shown() -> String {
+    let folder = layouts_folder();
+    let home_dir = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match home_dir.and_then(|h| {
+        folder
+            .strip_prefix(PathBuf::from(h))
+            .ok()
+            .map(Path::to_path_buf)
+    }) {
+        Some(rest) if std::env::var_os("AGORA_HOME").is_none() => {
+            format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+        }
+        _ => folder.display().to_string(),
+    }
+}
+
+/// Why a saved layout could not be used, in words.
+fn layout_error_text(say: &Say, name: &str, e: agora_tui::layout::store::LoadError) -> String {
+    use agora_tui::layout::store::LoadError;
+    use agora_tui::layout::tree::LayoutError;
+    let why = say.text(
+        match e {
+            LoadError::Missing => key!("tui-layout-error-missing"),
+            LoadError::TooLarge => key!("tui-layout-error-too-large"),
+            LoadError::Unreadable => key!("tui-layout-error-unreadable"),
+            LoadError::Layout(LayoutError::Json) => key!("tui-layout-error-json"),
+            LoadError::Layout(LayoutError::Invalid) => key!("tui-layout-error-invalid"),
+            LoadError::Layout(LayoutError::Newer) => key!("tui-layout-error-newer"),
+            LoadError::Layout(LayoutError::TooDeep) => key!("tui-layout-error-too-deep"),
+            LoadError::Layout(LayoutError::TooMany) => key!("tui-layout-error-too-many"),
+        },
+        &[],
+    );
+    say.text(
+        key!("tui-layout-cannot-use"),
+        &[("name", Arg::Str(name.to_string())), ("why", Arg::Str(why))],
+    )
+}
+
+/// The agents a layout's panes may keep: those the hub lists, and any of a machine that is not online now (the hub cannot say it
+/// is gone). A pane of an agent its own online machine no longer has is closed (`Prune`).
+fn layout_alive(s: &Snapshot, ws: &agora_tui::layout::engine::Workspace) -> Vec<String> {
+    let panes = agora_tui::layout::tree::panes_of(&ws.layout.root);
+    // A snapshot with no agent at all (the hub just started) says nothing about which are gone, as in the web window.
+    if s.agents.is_empty() {
+        return panes
+            .iter()
+            .filter_map(|p| p.bound_agent())
+            .map(str::to_string)
+            .collect();
+    }
+    panes
+        .iter()
+        .filter_map(|p| p.bound_agent())
+        .filter(|a| {
+            s.agents.iter().any(|x| x.agent_id == *a)
+                || !a
+                    .split_once('/')
+                    .is_some_and(|(node, _)| s.nodes.iter().any(|n| n.node_id == node && n.online))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// ADR-0068 decision 7: the terminals of the other panes on screen in a tiled layout are watched, and only those. A pane behind a
+/// tab, hidden by a maximized one, or that the window is too small to tile is not watched; the pane in focus is the console's own
+/// `preview`. A stream that could not be opened is tried again after RETRY_OPEN. Each is sized to its pane once per size, as the web
+/// window reports each tile's size (the hub keeps the smallest a terminal is shown at); never the terminal this client runs in.
+fn sync_tiles(
+    session: &mut Session,
+    s: &Snapshot,
+    c: &Console,
+    area: Area,
+    tiles: &mut agora_tui::layout::streams::Streams<Preview>,
+    tried: &mut std::collections::HashMap<String, Instant>,
+    sized: &mut std::collections::HashMap<String, (u16, u16)>,
+) {
+    let wanted = c
+        .app
+        .tile_streams(area, |a| s.terminals.iter().any(|t| t.agent_id == a));
+    let active = c.app.active_agent();
+    let others: Vec<&(String, Area)> = wanted
+        .iter()
+        .filter(|(a, _)| Some(a.as_str()) != active)
+        .collect();
+    let want: Vec<&str> = others.iter().map(|(a, _)| a.as_str()).collect();
+    for p in tiles.unwanted(&want) {
+        p.close(session);
+    }
+    tried.retain(|_, at| at.elapsed() < RETRY_OPEN);
+    tiles.open_missing(&want, |a| {
+        if tried.contains_key(a) {
+            return None;
+        }
+        let p = Preview::open(session, a).ok();
+        if p.is_none() {
+            tried.insert(a.to_string(), Instant::now());
+        }
+        p
+    });
+    sized.retain(|a, _| want.contains(&a.as_str()));
+    for (agent, body) in others {
+        if body.width == 0 || body.height == 0 || c.not_sized.contains(agent) {
+            continue;
+        }
+        if sized.get(agent) != Some(&(body.width, body.height)) {
+            if let Some((node, local)) = agent.split_once('/') {
+                session.terminal_resize(node, &format!("t-{local}"), body.width, body.height);
+            }
+            sized.insert(agent.clone(), (body.width, body.height));
+        }
+    }
+}
+
 impl Console {
     /// A console with nothing held yet, drawn in `window`.
     fn new(window: agora_tui::backend::Window, colors: ColorMode) -> Self {
@@ -2770,6 +2912,8 @@ impl Console {
             typing_taken: std::collections::HashMap::new(),
             give_lacking: agora_tui::board::Lacking::default(),
             theme: ThemeUse::default(),
+            layout_saved: String::new(),
+            layout_file: None,
         }
     }
 }
@@ -2876,6 +3020,13 @@ fn console(
     let mut chat_failed: Option<(String, Instant)> = None;
     // The same for a terminal.
     let mut open_tried: Option<(String, Instant)> = None;
+    // ADR-0068: the terminals of the other panes on screen in a tiled layout, those that could not be opened (and when), and the size
+    // each was given.
+    let mut tiles: agora_tui::layout::streams::Streams<Preview> = Default::default();
+    let mut tile_tried: std::collections::HashMap<String, Instant> = Default::default();
+    let mut tile_sized: std::collections::HashMap<String, (u16, u16)> = Default::default();
+    // A key, a click or a snapshot came: whether the arrangement changed is looked at after it.
+    let mut layout_check = false;
     // How many things needed the user at the last turn: a new one clears an old notice so the footer's summary shows it.
     let mut last_waiting = 0usize;
 
@@ -2904,11 +3055,13 @@ fn console(
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
         // be (any frame from the hub wakes this at once anyway).
-        let mut wait = Duration::from_millis(if preview.is_some() || chat.is_some() {
-            15
-        } else {
-            50
-        });
+        let mut wait = Duration::from_millis(
+            if preview.is_some() || chat.is_some() || !tiles.is_empty() {
+                15
+            } else {
+                50
+            },
+        );
         if redraw {
             wait = wait.min(FRAME.saturating_sub(last_draw.elapsed()));
         }
@@ -2921,6 +3074,11 @@ fn console(
             Update::Snapshot(s) => {
                 // A machine that is not connected now, or came back with another build, is offered tasks again.
                 c.give_lacking.settle(&s);
+                // ADR-0068: a pane of an agent that is gone closes (a tab) or shows nothing (a pane of its own).
+                let alive = layout_alive(&s, &c.app.workspace());
+                layout_check = true;
+                c.app
+                    .layout_act(agora_tui::layout::engine::Action::Prune { alive });
                 c.snapshot = Some(*s);
                 dirty_since = None;
                 redraw = true;
@@ -2968,6 +3126,8 @@ fn console(
             c.selected = id.to_string();
             redraw = true;
         }
+        // ADR-0068: the panes that follow what needs you or the selection, from the rows as they are now.
+        redraw |= c.app.settle_layout(&rows);
         // Motion with no button is asked of this terminal only while the program in front asked for it.
         mouse_motion(
             c.app.mouse
@@ -2983,11 +3143,18 @@ fn console(
             // (`agora tui` started in an agent's shell, then that agent opened). Sizing it again would shrink this window again,
             // down to nothing (seen on Windows: 1x17 for good), so that agent's terminal is left at its size from now on. A pane is
             // always smaller than the window, so this never matches an ordinary resize.
-            if let Some((agent, w, h)) = sized.as_ref() {
-                if (*w, *h) == (now.width, now.height) && !c.not_sized.contains(agent) {
-                    c.not_sized.insert(agent.clone());
-                    c.notice = say.text(key!("tui-app-self-terminal"), &[]);
-                }
+            // The same for a terminal of another pane of a tiled layout, sized to its pane.
+            let given = sized
+                .iter()
+                .map(|(a, w, h)| (a, (*w, *h)))
+                .chain(tile_sized.iter().map(|(a, s)| (a, *s)));
+            if let Some(agent) = given
+                .filter(|(a, s)| *s == (now.width, now.height) && !c.not_sized.contains(*a))
+                .map(|(a, _)| a.clone())
+                .next()
+            {
+                c.not_sized.insert(agent);
+                c.notice = say.text(key!("tui-app-self-terminal"), &[]);
             }
             area = now;
             let _ = c.window.resized();
@@ -3009,6 +3176,7 @@ fn console(
             if let Some(p) = preview.take() {
                 p.close(session);
             }
+            tiles.close_all(|p| p.close(session));
             return Next::Quit;
         }
         // The footer's question about an address goes when the footer says something else or runs out.
@@ -3020,6 +3188,7 @@ fn console(
             redraw = true;
         }
         c.asked = false;
+        layout_check |= !events.is_empty();
         'batch: for (index, ev) in events.into_iter().enumerate() {
             // Keys typed with the one that opened a question (a command, a chat send) came before it was seen: they are dropped,
             // not handled after it closes (a `y` among them could otherwise answer another request in view).
@@ -3054,6 +3223,7 @@ fn console(
             }
             // Pointer motion the program asked for is passed on by the console, not typed: a refusal of it asks nothing.
             let passive = passive_input(&ev);
+            let palette_was = c.app.palette.is_some();
             let acts = c.app.handle(
                 ev,
                 &Ctx {
@@ -3067,6 +3237,10 @@ fn console(
             );
             if ctrl_click && !acts.iter().any(|a| matches!(a, Action::OpenLink { .. })) {
                 c.links.other();
+            }
+            // ADR-0068: the commands offer the saved layouts as the folder holds them when the palette opens.
+            if !palette_was && c.app.palette.is_some() {
+                c.app.saved_layouts = agora_tui::layout::store::list(&layouts_folder());
             }
             // The panes that gained or lost the keyboard: a program that asked for focus events (1004) is told.
             for (agent, gained) in c.app.take_pane_focus() {
@@ -3212,10 +3386,53 @@ fn console(
                         }
                     }
                     Action::Open(_) => {}
+                    // ADR-0068: saved layouts are files in the layouts folder, in the format the web window imports and exports.
+                    Action::SaveLayout(name) => {
+                        use agora_tui::layout::store;
+                        let dir = layouts_folder();
+                        c.notice = match store::save(&dir, &name, &c.app.workspace().layout) {
+                            Ok(_) => say.text(
+                                key!("tui-layout-saved"),
+                                &[
+                                    ("name", Arg::Str(name)),
+                                    ("folder", Arg::Str(layouts_folder_shown())),
+                                ],
+                            ),
+                            Err(_) => say
+                                .text(key!("tui-layout-save-failed"), &[("name", Arg::Str(name))]),
+                        };
+                        c.app.saved_layouts = store::list(&dir);
+                    }
+                    Action::UseLayout(name) => {
+                        match agora_tui::layout::store::load(&layouts_folder(), &name) {
+                            Ok(layout) => {
+                                c.app.use_layout(layout);
+                                c.app.settle_layout(&rows);
+                                c.notice =
+                                    say.text(key!("tui-layout-used"), &[("name", Arg::Str(name))]);
+                            }
+                            Err(e) => c.notice = layout_error_text(say, &name, e),
+                        }
+                    }
+                    Action::DeleteLayout(name) => {
+                        use agora_tui::layout::store;
+                        let dir = layouts_folder();
+                        c.notice = match store::delete(&dir, &name) {
+                            Ok(()) => {
+                                say.text(key!("tui-layout-deleted"), &[("name", Arg::Str(name))])
+                            }
+                            Err(_) => say.text(
+                                key!("tui-layout-delete-failed"),
+                                &[("name", Arg::Str(name))],
+                            ),
+                        };
+                        c.app.saved_layouts = store::list(&dir);
+                    }
                     Action::Quit => {
                         if let Some(p) = preview.take() {
                             p.close(session);
                         }
+                        tiles.close_all(|p| p.close(session));
                         mouse_mode(false);
                         bracketed_paste(false);
                         return Next::Quit;
@@ -3285,6 +3502,19 @@ fn console(
                 }
             }
         }
+        // ADR-0068: the arrangement in use survives a restart; looked at only after a key, a click or a snapshot, and written only
+        // when it changed (never per frame).
+        let arranged = if std::mem::take(&mut layout_check) {
+            layout_text(&c.app)
+        } else {
+            c.layout_saved.clone()
+        };
+        if arranged != c.layout_saved {
+            if let Some(file) = &c.layout_file {
+                let _ = agora_tui::layout::store::save_workspace(file, &c.app.workspace());
+            }
+            c.layout_saved = arranged;
+        }
         // While typing stays refused, its notice stays (or comes back after another one) so the key that asks is never hidden.
         if c.notice.is_empty() && c.typing_refused.is_some() {
             c.notice = c.typing_notice.clone();
@@ -3307,6 +3537,24 @@ fn console(
             c.note.copy = trust_command().filter(|cmd| c.notice.contains(cmd.as_str()));
             redraw = true;
         }
+        // ADR-0068: the keyboard moved to another pane of a tiled layout: the streams change hands instead of closing and opening
+        // again (the agent before stays watched in its own pane while it is on screen; the one now in focus was watched in its pane).
+        if c.app.tiled.is_some() {
+            let active = c.app.active_agent().map(str::to_string);
+            let (left, came) = tiles.hand_over(
+                &mut preview,
+                |p| p.agent.clone(),
+                active.as_deref(),
+                |p| p.close(session),
+            );
+            if let Some((agent, w, h)) = sized.as_ref().filter(|(a, _, _)| left.as_ref() == Some(a))
+            {
+                tile_sized.insert(agent.clone(), (*w, *h));
+            }
+            if let Some(a) = active.as_deref().filter(|_| came) {
+                sized = tile_sized.remove(a).map(|(w, h)| (a.to_string(), w, h));
+            }
+        }
         if let Some(s) = &c.snapshot {
             follow(
                 session,
@@ -3314,6 +3562,15 @@ fn console(
                 c.app.active_agent().unwrap_or(""),
                 &mut preview,
                 &mut open_tried,
+            );
+            sync_tiles(
+                session,
+                s,
+                c,
+                area,
+                &mut tiles,
+                &mut tile_tried,
+                &mut tile_sized,
             );
             match follow_chat(
                 session,
@@ -3399,6 +3656,28 @@ fn console(
                 }
             }
         }
+        // The other panes' terminals: each takes at most a small batch per turn, so floods in them never hold up the pane in focus or
+        // the keyboard (what does not fit waits for the next turn; a stream that falls too far behind is watched again for its screen).
+        let mut tiles_ended = Vec::new();
+        let mut tiles_lost = false;
+        for (agent, p) in tiles.each_mut() {
+            match p.pump_up_to(session, agora_tui::preview::TILE_BATCH) {
+                Pumped::Nothing => {}
+                Pumped::Changed => redraw = true,
+                Pumped::Ended => tiles_ended.push(agent.to_string()),
+                Pumped::Lost => tiles_lost = true,
+            }
+        }
+        if tiles_lost {
+            show_notice(say, c, say.text(key!("tui-lost"), hub_arg));
+            std::thread::sleep(Duration::from_secs(2));
+            return Next::Reconnect;
+        }
+        for agent in tiles_ended {
+            tiles.forget(&agent);
+            tile_tried.insert(agent, Instant::now());
+            redraw = true;
+        }
         // ADR-0041: typing into the agent in front was refused until its owner allows it. The footer says so and names the key
         // that asks (Ctrl-] then g); nothing opens by itself, so no key typed to the agent can answer a question. The typed keys are
         // lost. Another tab's refusal is dropped (typing into it again says it there).
@@ -3446,7 +3725,16 @@ fn console(
             if std::mem::take(&mut fresh) {
                 let _ = c.window.invalidate();
             }
-            draw_console(say, c, &rows, preview.as_ref(), chat.as_ref(), area, None);
+            draw_console(
+                say,
+                c,
+                &rows,
+                preview.as_ref(),
+                chat.as_ref(),
+                Some(&tiles),
+                area,
+                None,
+            );
             last_draw = Instant::now();
             redraw = false;
         }
@@ -3456,6 +3744,7 @@ fn console(
             if let Some(p) = preview.take() {
                 p.close(session);
             }
+            tiles.close_all(|p| p.close(session));
             return Next::Reconnect;
         }
         if dirty_since.is_none() {
@@ -3658,16 +3947,26 @@ fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<S
     lines
 }
 
+// The screens it draws come from three places (the agent in front, its chat, the other panes of a tiled layout): one argument each.
+#[allow(clippy::too_many_arguments)]
 fn draw_console(
     say: &Say,
     c: &mut Console,
     rows: &[Row],
     preview: Option<&Preview>,
     chat: Option<&ChatPane>,
+    tiles: Option<&agora_tui::layout::streams::Streams<Preview>>,
     area: Area,
     dialog: Option<&[String]>,
 ) {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    // ADR-0068: the screens of the agents on screen in a tiled layout (the one in focus is drawn from `term` below).
+    let tile_screens: Vec<_> = tiles
+        .into_iter()
+        .flat_map(|t| t.iter())
+        .map(|(a, p)| (a, p.screen()))
+        .chain(preview.map(|p| (p.agent.as_str(), p.screen())))
+        .collect();
     let details = c
         .snapshot
         .as_ref()
@@ -3742,6 +4041,7 @@ fn draw_console(
                 conversation: conversation.as_deref(),
                 dialog,
                 note: note.as_deref(),
+                tiles: &tile_screens,
                 colors,
                 t: &text,
             },
@@ -4145,7 +4445,16 @@ impl Asker for Over<'_> {
             .map(|s| app_rows(s, now_ms(), &text))
             .unwrap_or_default();
         let area = window_area();
-        draw_console(self.say, self.c, &rows, None, self.chat, area, Some(lines));
+        draw_console(
+            self.say,
+            self.c,
+            &rows,
+            None,
+            self.chat,
+            None,
+            area,
+            Some(lines),
+        );
         self.drawn = Some(area);
     }
 
@@ -8825,5 +9134,60 @@ mod registry_picker_tests {
         assert_eq!(pick(b"", &kinds).0, None);
         assert_eq!(pick(b" ", &kinds).0, None);
         assert_eq!(pick(b"1", &kinds).0, Some(0));
+    }
+}
+
+/// ADR-0068: which panes of a layout a snapshot prunes.
+#[cfg(test)]
+mod layout_prune_tests {
+    use super::*;
+    use agora_protocol::v1::{AgentSnapshot, NodeSnapshot};
+    use agora_tui::layout::engine::{reduce, Action, Preset, Workspace};
+    use agora_tui::layout::tree::Layout;
+
+    fn ws(agents: &[&str]) -> Workspace {
+        reduce(
+            &Workspace::of(Layout::default_layout()),
+            &Action::Preset {
+                preset: Preset::TwoByTwo,
+                agents: agents.iter().map(|a| a.to_string()).collect(),
+            },
+        )
+    }
+
+    fn snapshot(nodes: &[(&str, bool)], agents: &[&str]) -> Snapshot {
+        Snapshot {
+            nodes: nodes
+                .iter()
+                .map(|(id, online)| NodeSnapshot {
+                    node_id: id.to_string(),
+                    online: *online,
+                    ..Default::default()
+                })
+                .collect(),
+            agents: agents
+                .iter()
+                .map(|a| AgentSnapshot {
+                    agent_id: a.to_string(),
+                    node_id: a.split_once('/').map_or("", |(n, _)| n).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_an_agent_its_online_machine_no_longer_has_is_pruned() {
+        let w = ws(&["mac/agent-1", "mac/agent-2", "vps/agent-1", "gone/agent-1"]);
+        // mac is online and lists agent-1 only; vps is offline; "gone" is not listed at all.
+        let s = snapshot(&[("mac", true), ("vps", false)], &["mac/agent-1"]);
+        assert_eq!(
+            layout_alive(&s, &w),
+            ["mac/agent-1", "vps/agent-1", "gone/agent-1"]
+        );
+        // A snapshot with no agent at all (a hub that just started) prunes nothing.
+        let empty = snapshot(&[("mac", true)], &[]);
+        assert_eq!(layout_alive(&empty, &w).len(), 4);
     }
 }

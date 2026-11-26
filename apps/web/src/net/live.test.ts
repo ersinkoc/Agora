@@ -293,6 +293,32 @@ describe('view', () => {
     expect(tiles(v)[0]?.state).toBe('idle');
   });
 
+  // #1150: a machine can record a request after its decision (a re-announcement that copied it first); its card never comes back.
+  // Another machine's request with that id is its own, and the ids remembered are bounded per machine, oldest forgotten first.
+  it('a request stated after its decision brings no card back', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    applyEvent(v, 2, ev('n', 2, { approvalRequested: { approvalId: 'p', agentId: 'a', action: 'write' } }));
+    applyEvent(v, 3, ev('n', 3, { approvalResolved: { approvalId: 'p' } }));
+    applyEvent(v, 4, ev('n', 4, { approvalRequested: { approvalId: 'p', agentId: 'a', action: 'write' } }));
+    expect([...v.approvals.keys()]).toEqual([]);
+    expect(tiles(v)[0]?.state).toBe('idle');
+    applyEvent(v, 5, ev('m', 1, { approvalRequested: { approvalId: 'p', agentId: 'a', action: 'write' } }));
+    expect([...v.approvals.keys()]).toEqual(['m/p']);
+    let pos = 6;
+    for (let i = 0; i < 256; i++) applyEvent(v, pos++, ev('n', pos, { approvalResolved: { approvalId: `r-${i}` } }));
+    applyEvent(v, pos++, ev('n', pos, { approvalResolved: { approvalId: 'r-0' } })); // said again: remembered once
+    applyEvent(v, pos++, ev('n', pos, { approvalRequested: { approvalId: 'p', agentId: 'a', action: 'write' } }));
+    expect(v.approvals.has('n/p')).toBe(true); // `p` was the oldest of 257
+    applyEvent(v, pos++, ev('n', pos, { approvalRequested: { approvalId: 'r-0', agentId: 'a', action: 'write' } }));
+    expect(v.approvals.has('n/r-0')).toBe(false);
+    // Review of #1234: a forgotten machine's decisions are not kept for it; only the hub can forget one.
+    applyEvent(v, pos++, ev('m', 2, { nodeForgotten: { nodeId: 'n' } }));
+    expect(v.resolved?.has('n')).toBe(true);
+    applyEvent(v, pos++, ev('hub', 1, { nodeForgotten: { nodeId: 'n' } }));
+    expect(v.resolved?.has('n')).toBe(false);
+  });
+
   it('ignores events at or before its position, so a replayed tail is harmless', () => {
     const v = emptyView();
     const e = ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } });

@@ -17,6 +17,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
+use crate::layout::engine::{self as layout_engine, Preset};
+use crate::layout::streams::{self as layout_streams, Bindings};
+use crate::layout::tree::{self as layout_tree, Bind, Direction as SplitDirection, Follow};
+use crate::layout::view::{self as layout_view, Placement};
 use crate::pane::{ColorMode, Selection, TerminalPane};
 
 use crate::render::Text;
@@ -154,6 +158,12 @@ pub enum Action {
         row: u16,
         col: u16,
     },
+    /// ADR-0068: save the arrangement in use ([`App::workspace`]) as a layout of this name, use the saved layout of this name, or
+    /// delete it. The caller keeps the files ([`crate::layout::store`]) and answers with [`App::use_layout`] and
+    /// [`App::saved_layouts`].
+    SaveLayout(String),
+    UseLayout(String),
+    DeleteLayout(String),
     Quit,
 }
 
@@ -217,6 +227,8 @@ pub struct Screen<'a> {
     pub dialog: Option<&'a [String]>,
     /// The last notice shown whole in a box above the footer (one too long for the footer, until the next key): its lines.
     pub note: Option<&'a [String]>,
+    /// ADR-0068: the screens of the other agents on screen in a tiled layout, by agent id (the one in focus is [`Screen::terminal`]).
+    pub tiles: &'a [(&'a str, &'a dyn Terminal)],
     pub colors: ColorMode,
     pub t: Text<'a>,
 }
@@ -238,6 +250,22 @@ enum Command {
     ToggleInspector,
     CloseTab,
     CleanUpOld,
+    /// ADR-0068: the layout's commands.
+    Preset(Preset),
+    Maximize,
+    Split(SplitDirection),
+    ClosePane,
+    NextPane,
+    SwapNext,
+    MoveToNext,
+    TakeOut,
+    Grow(SplitDirection, bool),
+    ShowHere(String, Option<Bind>),
+    NameLayout,
+    SaveLayout(String),
+    UseLayout(String),
+    DeleteLayout(String),
+    ResetLayout,
     Quit,
 }
 
@@ -245,6 +273,8 @@ enum Command {
 pub struct Palette {
     pub query: String,
     pub selected: usize,
+    /// ADR-0068: "Save layout as…" was chosen: what is typed is the layout's name, and Enter saves it.
+    pub naming: bool,
 }
 
 /// The parts of the window, from [`App::areas`].
@@ -266,6 +296,8 @@ pub struct Areas {
     /// A theme's lines under the tab bar and above the footer (`pane-borders: always`, ADR-0113).
     pub tab_rule: Option<Rect>,
     pub footer_rule: Option<Rect>,
+    /// ADR-0068: the window's middle, where a tiled layout is drawn (the tab bar and the terminal together otherwise).
+    pub tiles: Rect,
 }
 
 /// Whether the inspector is shown: by default when the window has room for it beside a usable terminal; `i` shows or hides it
@@ -288,7 +320,16 @@ struct Press {
     prog: ProgramModes,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// ADR-0068: a tiled layout in use. Before any tiling (and whenever the layout is one group of agents' tabs again) the app keeps the
+/// arrangement as [`App::tabs`], drawn as before; [`App::workspace`] gives either as a layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tiled {
+    pub ws: layout_engine::Workspace,
+    /// What the panes that follow attention or the selection show now ([`App::settle_layout`]).
+    pub bindings: Bindings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct App {
     pub focus: Focus,
     pub tree_width: u16,
@@ -321,6 +362,10 @@ pub struct App {
     pub viewer: bool,
     /// ADR-0113: the theme in use, mapped to this terminal (`theme::map::Shell`); `None` draws in the terminal's own colours.
     pub look: Option<crate::theme::map::Shell>,
+    /// ADR-0068: the tiled layout in use; `None` while the arrangement is the tabs.
+    pub tiled: Option<Tiled>,
+    /// The saved layouts' names, as the caller last read them from the layouts folder (the commands offer them).
+    pub saved_layouts: Vec<String>,
 }
 
 impl Default for App {
@@ -345,6 +390,8 @@ impl Default for App {
             focus_changes: Vec::new(),
             viewer: false,
             look: None,
+            tiled: None,
+            saved_layouts: Vec::new(),
         }
     }
 }
@@ -359,9 +406,158 @@ impl App {
             .map(|r| r.id.as_str())
     }
 
-    /// The active tab's agent.
+    /// The agent the keyboard goes to: the active tab's, or in a tiled layout the agent of the pane in focus when that pane draws a
+    /// terminal or the agent's own view (a pane of another panel has none).
     pub fn active_agent(&self) -> Option<&str> {
-        self.tabs.get(self.active).map(String::as_str)
+        match &self.tiled {
+            None => self.tabs.get(self.active).map(String::as_str),
+            Some(t) => {
+                let pane = layout_engine::find_pane(&t.ws.layout, t.ws.focus.as_deref())?;
+                if !layout_view::streams(&pane.panel) {
+                    return None;
+                }
+                layout_streams::agent_of(pane, &t.bindings)
+            }
+        }
+    }
+
+    /// ADR-0068: the arrangement in use as a layout. The tabs (before any tiling) are one tab group of agents, the active one in front.
+    pub fn workspace(&self) -> layout_engine::Workspace {
+        if let Some(t) = &self.tiled {
+            return t.ws.clone();
+        }
+        if self.tabs.is_empty() {
+            return layout_engine::Workspace::of(layout_tree::Layout::default_layout());
+        }
+        let children: Vec<layout_tree::Pane> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, a)| layout_tree::Pane::agent(&format!("p{}", i + 1), a))
+            .collect();
+        let active = self.active.min(children.len() - 1);
+        let focus = children[active].id.clone();
+        let ws = layout_engine::Workspace::of(layout_tree::Layout {
+            root: layout_tree::Node::Tabs { active, children },
+        });
+        layout_engine::reduce(&ws, &layout_engine::Action::Focus { pane: focus })
+    }
+
+    /// Takes `ws` as the arrangement in use: as the tabs when it is one group of agents' tabs (or nothing), tiled otherwise.
+    pub fn set_workspace(&mut self, ws: layout_engine::Workspace) {
+        match classic_of(&ws) {
+            Some((tabs, active)) => {
+                self.tabs = tabs;
+                self.active = active;
+                self.tiled = None;
+            }
+            None => {
+                let bindings = self.tiled.take().map(|t| t.bindings).unwrap_or_default();
+                self.tabs.clear();
+                self.active = 0;
+                self.tiled = Some(Tiled { ws, bindings });
+            }
+        }
+        if self.active_agent().is_none() && self.focus == Focus::Terminal {
+            self.focus = Focus::Tree;
+        }
+    }
+
+    /// Applies one layout action to the arrangement in use; answers whether it changed.
+    pub fn layout_act(&mut self, action: layout_engine::Action) -> bool {
+        let ws = self.workspace();
+        let next = layout_engine::reduce(&ws, &action);
+        if next == ws {
+            return false;
+        }
+        self.set_workspace(next);
+        true
+    }
+
+    /// Uses a saved or imported layout.
+    pub fn use_layout(&mut self, layout: layout_tree::Layout) {
+        self.layout_act(layout_engine::Action::Replace { layout });
+    }
+
+    /// What the panes that follow attention or the selection show, from the rows as they are now: the selected agent, and each
+    /// following pane a different agent that needs you (kept while it still does). Answers whether that changed.
+    pub fn settle_layout(&mut self, rows: &[Row]) -> bool {
+        let selection = rows
+            .get(self.selected)
+            .filter(|r| !r.header)
+            .map(|r| r.id.clone());
+        let Some(t) = self.tiled.as_mut() else {
+            return false;
+        };
+        let panes: Vec<String> = layout_tree::panes_of(&t.ws.layout.root)
+            .into_iter()
+            .filter(|p| p.follow() == Some(Follow::Attention))
+            .map(|p| p.id.clone())
+            .collect();
+        let waiting: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.header && r.needs_you)
+            .map(|r| r.id.clone())
+            .collect();
+        let next = Bindings {
+            selection,
+            attention: layout_streams::assign_attention(&panes, &t.bindings.attention, &waiting),
+        };
+        let changed = next != t.bindings;
+        t.bindings = next;
+        changed
+    }
+
+    /// Where each pane of the tiled layout goes in a window of `area`; `None` while the arrangement is the tabs.
+    pub fn placement(&self, area: Rect) -> Option<Placement> {
+        let t = self.tiled.as_ref()?;
+        Some(layout_view::place(&t.ws, self.middle(area)))
+    }
+
+    /// ADR-0068 decision 7: the agents whose terminals are on screen in the tiled layout and the body each is drawn in, one per agent
+    /// (two panes of one agent share its stream), in reading order. Only these are watched; a tab behind another, a pane hidden by a
+    /// maximized one, or one the window is too small to tile is not. Empty while the arrangement is the tabs (the active tab's
+    /// terminal is the caller's as before).
+    pub fn tile_streams(
+        &self,
+        area: Rect,
+        has_terminal: impl Fn(&str) -> bool,
+    ) -> Vec<(String, Rect)> {
+        let (Some(t), Some(placement)) = (self.tiled.as_ref(), self.placement(area)) else {
+            return Vec::new();
+        };
+        let panes = layout_tree::panes_of(&t.ws.layout.root);
+        let visible: Vec<&layout_tree::Pane> = placement
+            .panes
+            .iter()
+            .filter_map(|x| panes.iter().copied().find(|p| p.id == x.id))
+            .collect();
+        let plan =
+            layout_streams::stream_plan(&visible, &t.bindings, layout_view::streams, has_terminal);
+        let mut out: Vec<(String, Rect)> = Vec::new();
+        for x in &placement.panes {
+            if let Some(agent) = plan.get(&x.id) {
+                if !out.iter().any(|(a, _)| a == agent) {
+                    out.push((agent.clone(), x.body));
+                }
+            }
+        }
+        out
+    }
+
+    /// The agents shown somewhere in the arrangement (marked in the tree as open).
+    fn shown(&self, id: &str) -> bool {
+        match &self.tiled {
+            None => self.tabs.iter().any(|t| t == id),
+            Some(t) => layout_tree::panes_of(&t.ws.layout.root)
+                .iter()
+                .any(|p| layout_streams::agent_of(p, &t.bindings) == Some(id)),
+        }
+    }
+
+    /// The window's middle: the tab bar and the terminal (or a tiled layout).
+    fn middle(&self, area: Rect) -> Rect {
+        self.areas(area).tiles
     }
 
     /// Splits the window: footer on the last row; tree | terminal (under its tab bar) | inspector, each divider one column wide.
@@ -394,6 +590,8 @@ impl App {
         let rest = body.width.saturating_sub(tree_w + u16::from(tree_w > 0));
         // The terminal keeps ROOMY_MIDDLE columns before the inspector shows itself; asked for, it keeps only MIN_MIDDLE.
         let keep = match self.inspector {
+            // Panes side by side need more room before the inspector takes its share.
+            Panel::Auto if self.tiled.is_some() => ROOMY_MIDDLE * 2,
             Panel::Auto => ROOMY_MIDDLE,
             Panel::Shown => MIN_MIDDLE,
             Panel::Hidden => body.width,
@@ -419,20 +617,46 @@ impl App {
             width: middle_w,
             ..body
         };
-        let tabs = Rect {
-            height: middle.height.min(1),
-            ..middle
-        };
-        let tab_rule = rules.then_some(Rect {
-            y: middle.y + tabs.height,
-            height: 1,
-            ..middle
-        });
-        let below_tabs = tabs.height + u16::from(rules);
-        let terminal = Rect {
-            y: middle.y + below_tabs,
-            height: middle.height.saturating_sub(below_tabs),
-            ..middle
+        let (tabs, tab_rule, terminal) = match &self.tiled {
+            // A tiled layout: every pane has its own bar; the terminal is the body of the pane in focus (nothing when that pane is
+            // not on screen).
+            Some(t) => {
+                let placed = layout_view::place(&t.ws, middle);
+                let body = t.ws.focus.as_deref().and_then(|f| placed.get(f)).map_or(
+                    Rect {
+                        width: 0,
+                        height: 0,
+                        ..middle
+                    },
+                    |p| p.body,
+                );
+                (
+                    Rect {
+                        height: 0,
+                        ..middle
+                    },
+                    None,
+                    body,
+                )
+            }
+            None => {
+                let tabs = Rect {
+                    height: middle.height.min(1),
+                    ..middle
+                };
+                let tab_rule = rules.then_some(Rect {
+                    y: middle.y + tabs.height,
+                    height: 1,
+                    ..middle
+                });
+                let below_tabs = tabs.height + u16::from(rules);
+                let terminal = Rect {
+                    y: middle.y + below_tabs,
+                    height: middle.height.saturating_sub(below_tabs),
+                    ..middle
+                };
+                (tabs, tab_rule, terminal)
+            }
         };
         let (inspector, inspector_divider) = if show_inspector {
             let x = middle.right() + 1;
@@ -478,6 +702,7 @@ impl App {
             inspector_box: inspector,
             tab_rule,
             footer_rule,
+            tiles: middle,
         }
     }
 
@@ -491,6 +716,7 @@ impl App {
             self.selected.min(cx.rows.len().saturating_sub(1)),
             true,
         );
+        self.settle_layout(cx.rows);
         // A press the program has is forgotten, with no release, when the program itself switched the mouse off.
         if cx.prog.track == Track::Off {
             self.forwarding = None;
@@ -515,6 +741,7 @@ impl App {
             Event::Key(k) => self.key(k, cx, &mut out),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
         }
+        self.settle_layout(cx.rows);
         self.track_pane_focus();
         // The tree (and so the inspector) follows the tab brought to the front.
         let tab_now = self.active_agent().map(str::to_string);
@@ -574,8 +801,21 @@ impl App {
         // Alt+1..9 picks a tab wherever the keyboard is, as in the web window.
         if let Key::Alt(c @ '1'..='9') = k {
             let n = c as usize - '1' as usize;
-            if n < self.tabs.len() {
-                self.active = n;
+            match &self.tiled {
+                // In a tiled layout: the tabs of the pane in focus.
+                Some(t) => {
+                    let tab =
+                        t.ws.focus
+                            .as_deref()
+                            .and_then(|f| layout_engine::tabs_of(&t.ws.layout, f))
+                            .and_then(|tabs| tabs.get(n))
+                            .map(|p| p.id.clone());
+                    if let Some(pane) = tab {
+                        self.layout_act(layout_engine::Action::Activate { pane });
+                    }
+                }
+                None if n < self.tabs.len() => self.active = n,
+                None => {}
             }
             return;
         }
@@ -587,7 +827,7 @@ impl App {
                 return;
             }
             Key::Alt('m' | 'M') => {
-                self.common(Key::Char('m'), cx.area, out);
+                self.common(Key::Char('m'), cx, out);
                 return;
             }
             // ADR-0101: Alt+A asks to allow the request of the agent in front always (the request box confirms it with one key), only
@@ -649,18 +889,35 @@ impl App {
                 Key::Char('w') => self.close_tab(out),
                 Key::Char('<') => self.tree_width = self.tree_width.saturating_sub(2).max(MIN_TREE),
                 Key::Char('>') => self.tree_width = self.tree_width.saturating_add(2),
-                k => self.common(k, cx.area, out),
+                k => self.common(k, cx, out),
             },
             Focus::Inspector => match k {
                 Key::Esc => self.focus = Focus::Tree,
-                k => self.common(k, cx.area, out),
+                k => self.common(k, cx, out),
             },
         }
     }
 
     /// Keys shared by the tree and the inspector.
-    fn common(&mut self, k: Key, area: Rect, out: &mut Vec<Action>) {
+    fn common(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>) {
+        let area = cx.area;
         match k {
+            // ADR-0068: the layout presets, one key each (1x1, 2x1, 1x2, 2x2, focus + strip, 3x2: the digit is the number of panes
+            // where it is one of a kind), maximize / restore, and the pane before / after.
+            Key::Char(c @ '1'..='6') => {
+                let preset = match c {
+                    '1' => Preset::One,
+                    '2' => Preset::TwoByOne,
+                    '3' => Preset::OneByTwo,
+                    '4' => Preset::TwoByTwo,
+                    '5' => Preset::Focus,
+                    _ => Preset::ThreeByTwo,
+                };
+                self.apply_preset(preset, cx.rows);
+            }
+            Key::Char('z') => self.toggle_maximize(),
+            Key::Char('h') => self.step_pane(false, area),
+            Key::Char('l') => self.step_pane(true, area),
             Key::Tab => self.focus = self.next_focus(true, area),
             Key::BackTab => self.focus = self.next_focus(false, area),
             Key::Ctrl('k') => self.palette = Some(Palette::default()),
@@ -683,6 +940,115 @@ impl App {
         }
     }
 
+    /// ADR-0068: a preset over the agents already shown, then the others that have a terminal, in the tree's order.
+    fn apply_preset(&mut self, preset: Preset, rows: &[Row]) {
+        let ws = self.workspace();
+        let mut agents: Vec<String> = layout_tree::panes_of(&ws.layout.root)
+            .iter()
+            .filter_map(|p| p.bound_agent().map(str::to_string))
+            .collect();
+        for r in rows {
+            if !r.header && r.terminal && !agents.contains(&r.id) {
+                agents.push(r.id.clone());
+            }
+        }
+        self.layout_act(layout_engine::Action::Preset { preset, agents });
+    }
+
+    /// Maximizes the pane in focus, or restores the layout when one is maximized.
+    fn toggle_maximize(&mut self) {
+        let Some(t) = &self.tiled else { return };
+        let action = match (&t.ws.zoom, &t.ws.focus) {
+            (Some(_), _) => layout_engine::Action::Restore,
+            (None, Some(f)) => layout_engine::Action::Maximize { pane: f.clone() },
+            (None, None) => return,
+        };
+        self.layout_act(action);
+    }
+
+    /// The pane after (or before) the one in focus among those on screen, wrapping; in a window too small to tile, the next tab.
+    fn next_pane(&self, forward: bool, area: Rect) -> Option<String> {
+        let t = self.tiled.as_ref()?;
+        let placement = layout_view::place(&t.ws, self.middle(area));
+        let order: Vec<String> = if placement.narrow {
+            layout_tree::panes_of(&t.ws.layout.root)
+                .iter()
+                .map(|p| p.id.clone())
+                .collect()
+        } else {
+            placement.panes.iter().map(|p| p.id.clone()).collect()
+        };
+        let n = order.len();
+        if n < 2 {
+            return None;
+        }
+        let at = order
+            .iter()
+            .position(|id| Some(id) == t.ws.focus.as_ref())
+            .unwrap_or(0);
+        Some(
+            order[if forward {
+                (at + 1) % n
+            } else {
+                (at + n - 1) % n
+            }]
+            .clone(),
+        )
+    }
+
+    /// `h` / `l`: the keyboard's pane moves to the one before / after.
+    fn step_pane(&mut self, forward: bool, area: Rect) {
+        if let Some(pane) = self.next_pane(forward, area) {
+            self.layout_act(layout_engine::Action::Activate { pane });
+        }
+    }
+
+    /// The split around the pane in focus that lays its children out in `direction`, and the child holding the pane: what Wider,
+    /// Narrower, Taller and Shorter resize.
+    fn grow(&mut self, direction: SplitDirection, more: bool) {
+        let Some(t) = &self.tiled else { return };
+        let Some(focus) = t.ws.focus.clone() else {
+            return;
+        };
+        let Some(path) = layout_engine::path_of(&t.ws.layout.root, &focus) else {
+            return;
+        };
+        // The nearest split of that direction above the pane.
+        let mut node = &t.ws.layout.root;
+        let mut found: Option<(Vec<usize>, usize, usize)> = None;
+        for (depth, &i) in path.iter().enumerate() {
+            match node {
+                layout_tree::Node::Split {
+                    direction: d,
+                    children,
+                    ..
+                } => {
+                    if *d == direction {
+                        found = Some((path[..depth].to_vec(), i, children.len()));
+                    }
+                    node = &children[i];
+                }
+                _ => break,
+            }
+        }
+        let Some((split, i, n)) = found else { return };
+        const STEP: f64 = 0.05;
+        let action = if i + 1 < n {
+            layout_engine::Action::Resize {
+                path: split,
+                index: i,
+                delta: if more { STEP } else { -STEP },
+            }
+        } else {
+            layout_engine::Action::Resize {
+                path: split,
+                index: i - 1,
+                delta: if more { -STEP } else { STEP },
+            }
+        };
+        self.layout_act(action);
+    }
+
     /// `i`: hides the inspector when it is in view, shows it (even in a narrow window) when it is not.
     fn toggle_inspector(&mut self, area: Rect) {
         self.inspector = if self.areas(area).inspector.width > 0 {
@@ -697,7 +1063,7 @@ impl App {
 
     fn next_focus(&self, forward: bool, area: Rect) -> Focus {
         let mut order = vec![Focus::Tree];
-        if !self.tabs.is_empty() {
+        if self.active_agent().is_some() {
             order.push(Focus::Terminal);
         }
         if self.areas(area).inspector.width > 0 {
@@ -719,8 +1085,19 @@ impl App {
         }
     }
 
-    /// Opens an agent in a tab (or brings its tab to the front) and gives it the keyboard.
+    /// Opens an agent in a tab (or brings its tab to the front) and gives it the keyboard. In a tiled layout: where it is shown, else
+    /// in the pane in focus (filling it when it is empty, as a new tab there otherwise).
     fn open(&mut self, id: &str, out: &mut Vec<Action>) {
+        if self.tiled.is_some() {
+            self.layout_act(layout_engine::Action::Open {
+                agent: id.to_string(),
+                background: false,
+            });
+            if self.active_agent().is_some() {
+                self.focus = Focus::Terminal;
+            }
+            return;
+        }
         if let Some(at) = self.tabs.iter().position(|t| t == id) {
             self.active = at;
         } else {
@@ -732,6 +1109,17 @@ impl App {
     }
 
     fn close_tab(&mut self, out: &mut Vec<Action>) {
+        if let Some(t) = &self.tiled {
+            // The pane in focus closes; its agent keeps running (the caller says so).
+            let Some(focus) = t.ws.focus.clone() else {
+                return;
+            };
+            let agent = self.active_agent().map(str::to_string);
+            if self.layout_act(layout_engine::Action::Close { pane: focus }) {
+                out.extend(agent.map(Action::Close));
+            }
+            return;
+        }
         if self.active < self.tabs.len() {
             out.push(Action::Close(self.tabs.remove(self.active)));
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
@@ -758,6 +1146,21 @@ impl App {
 
     fn commands(&self, cx: &Ctx<'_>) -> Vec<(Command, String)> {
         let t = cx.t;
+        // Naming a layout to save: one row, saving under what is typed once it can be a name.
+        if let Some(p) = self.palette.as_ref().filter(|p| p.naming) {
+            let name = p.query.trim().to_string();
+            return vec![if crate::layout::store::file_name(&name).is_some() {
+                (
+                    Command::SaveLayout(name.clone()),
+                    t(key!("tui-layout-cmd-save"), &[("name", Arg::Str(name))]),
+                )
+            } else {
+                (
+                    Command::SaveLayout(String::new()),
+                    t(key!("tui-layout-name-hint"), &[]),
+                )
+            }];
+        }
         let mut all: Vec<(Command, String)> = cx
             .rows
             .iter()
@@ -811,6 +1214,7 @@ impl App {
         if !self.tabs.is_empty() {
             all.push((Command::CloseTab, t(key!("tui-app-cmd-close"), &[])));
         }
+        all.extend(self.layout_commands(cx));
         // ADR-0073: offered when the tree lists old machines.
         if cx.rows.iter().any(|r| r.id == crate::split::OLD_MACHINES) {
             all.push((Command::CleanUpOld, t(key!("tui-app-cmd-cleanup"), &[])));
@@ -823,6 +1227,182 @@ impl App {
             .unwrap_or_default();
         all.retain(|(_, label)| matches(&label.to_lowercase(), &query));
         all
+    }
+
+    /// ADR-0068: the layout's commands, each offered where it can act.
+    fn layout_commands(&self, cx: &Ctx<'_>) -> Vec<(Command, String)> {
+        let t = cx.t;
+        let mut all = Vec::new();
+        for (p, label) in [
+            (Preset::One, key!("tui-layout-cmd-1x1")),
+            (Preset::TwoByOne, key!("tui-layout-cmd-2x1")),
+            (Preset::OneByTwo, key!("tui-layout-cmd-1x2")),
+            (Preset::TwoByTwo, key!("tui-layout-cmd-2x2")),
+            (Preset::Focus, key!("tui-layout-cmd-focus")),
+            (Preset::ThreeByTwo, key!("tui-layout-cmd-3x2")),
+        ] {
+            all.push((Command::Preset(p), t(label, &[])));
+        }
+        if let Some(tiled) = &self.tiled {
+            let many = layout_tree::panes_of(&tiled.ws.layout.root).len() > 1;
+            let in_tabs = tiled
+                .ws
+                .focus
+                .as_deref()
+                .and_then(|f| layout_engine::tabs_of(&tiled.ws.layout, f))
+                .is_some_and(|tabs| tabs.len() > 1);
+            all.push((
+                Command::Maximize,
+                t(
+                    if tiled.ws.zoom.is_some() {
+                        key!("tui-layout-cmd-restore")
+                    } else {
+                        key!("tui-layout-cmd-maximize")
+                    },
+                    &[],
+                ),
+            ));
+            all.push((
+                Command::Split(SplitDirection::Row),
+                t(key!("tui-layout-cmd-split-right"), &[]),
+            ));
+            all.push((
+                Command::Split(SplitDirection::Column),
+                t(key!("tui-layout-cmd-split-down"), &[]),
+            ));
+            all.push((
+                Command::ClosePane,
+                t(key!("tui-layout-cmd-close-pane"), &[]),
+            ));
+            if many {
+                all.push((Command::NextPane, t(key!("tui-layout-cmd-next-pane"), &[])));
+                all.push((Command::SwapNext, t(key!("tui-layout-cmd-swap"), &[])));
+                all.push((Command::MoveToNext, t(key!("tui-layout-cmd-move"), &[])));
+            }
+            if in_tabs {
+                all.push((Command::TakeOut, t(key!("tui-layout-cmd-take-out"), &[])));
+            }
+            for (d, more, label) in [
+                (SplitDirection::Row, true, key!("tui-layout-cmd-wider")),
+                (SplitDirection::Row, false, key!("tui-layout-cmd-narrower")),
+                (SplitDirection::Column, true, key!("tui-layout-cmd-taller")),
+                (
+                    SplitDirection::Column,
+                    false,
+                    key!("tui-layout-cmd-shorter"),
+                ),
+            ] {
+                all.push((Command::Grow(d, more), t(label, &[])));
+            }
+            for (panel, bind, label) in [
+                ("approvals", None, key!("tui-layout-cmd-show-approvals")),
+                ("fleet", None, key!("tui-layout-cmd-show-fleet")),
+                (
+                    "agent",
+                    Some(Bind::Follow(Follow::Attention)),
+                    key!("tui-layout-cmd-follow-attention"),
+                ),
+                (
+                    "agent",
+                    Some(Bind::Follow(Follow::Selection)),
+                    key!("tui-layout-cmd-follow-selection"),
+                ),
+            ] {
+                all.push((Command::ShowHere(panel.to_string(), bind), t(label, &[])));
+            }
+        }
+        all.push((Command::NameLayout, t(key!("tui-layout-cmd-save-as"), &[])));
+        for name in &self.saved_layouts {
+            all.push((
+                Command::UseLayout(name.clone()),
+                t(
+                    key!("tui-layout-cmd-use"),
+                    &[("name", Arg::Str(name.clone()))],
+                ),
+            ));
+        }
+        for name in &self.saved_layouts {
+            all.push((
+                Command::DeleteLayout(name.clone()),
+                t(
+                    key!("tui-layout-cmd-delete"),
+                    &[("name", Arg::Str(name.clone()))],
+                ),
+            ));
+        }
+        if self.tiled.is_some() || !self.tabs.is_empty() {
+            all.push((Command::ResetLayout, t(key!("tui-layout-cmd-reset"), &[])));
+        }
+        all
+    }
+
+    /// Runs one of the layout's commands from the palette.
+    fn layout_command(&mut self, c: Command, cx: &Ctx<'_>, out: &mut Vec<Action>) {
+        let focus = self.tiled.as_ref().and_then(|t| t.ws.focus.clone());
+        let next = |app: &App| app.next_pane(true, cx.area);
+        match c {
+            Command::Preset(p) => self.apply_preset(p, cx.rows),
+            Command::Maximize => self.toggle_maximize(),
+            Command::Split(direction) => {
+                if let Some(pane) = focus {
+                    self.layout_act(layout_engine::Action::Split {
+                        pane,
+                        direction,
+                        panel: None,
+                        bind: None,
+                    });
+                }
+            }
+            Command::ClosePane => self.close_tab(out),
+            Command::NextPane => self.step_pane(true, cx.area),
+            Command::SwapNext => {
+                if let (Some(a), Some(b)) = (focus, next(self)) {
+                    self.layout_act(layout_engine::Action::Swap { a, b });
+                }
+            }
+            Command::MoveToNext => {
+                if let (Some(pane), Some(target)) = (focus, next(self)) {
+                    self.layout_act(layout_engine::Action::Move {
+                        pane,
+                        target,
+                        place: layout_engine::Place::Center,
+                    });
+                }
+            }
+            Command::TakeOut => {
+                if let Some(pane) = focus {
+                    self.layout_act(layout_engine::Action::Detach { pane });
+                }
+            }
+            Command::Grow(d, more) => self.grow(d, more),
+            Command::NameLayout => {
+                self.palette = Some(Palette {
+                    naming: true,
+                    ..Palette::default()
+                })
+            }
+            Command::ShowHere(panel, bind) => {
+                if let Some(pane) = focus {
+                    self.layout_act(layout_engine::Action::Bind {
+                        pane,
+                        bind,
+                        panel: Some(panel),
+                    });
+                }
+            }
+            // An empty name is the row that says how to name one: it does nothing.
+            Command::SaveLayout(name) if name.is_empty() => {}
+            Command::SaveLayout(name) => out.push(Action::SaveLayout(name)),
+            Command::UseLayout(name) => out.push(Action::UseLayout(name)),
+            Command::DeleteLayout(name) => out.push(Action::DeleteLayout(name)),
+            Command::ResetLayout => {
+                self.set_workspace(layout_engine::Workspace::of(
+                    layout_tree::Layout::default_layout(),
+                ));
+            }
+            _ => {}
+        }
+        self.settle_layout(cx.rows);
     }
 
     fn palette_type(&mut self, text: &str, cx: &Ctx<'_>) {
@@ -863,11 +1443,12 @@ impl App {
                     }
                     Some(Command::NextNeedsYou) => self.next_needs_you(cx.rows, out),
                     Some(Command::Letter(c)) => out.push(Action::Command(c)),
-                    Some(Command::ToggleMouse) => self.common(Key::Char('m'), cx.area, out),
+                    Some(Command::ToggleMouse) => self.common(Key::Char('m'), cx, out),
                     Some(Command::ToggleInspector) => self.toggle_inspector(cx.area),
                     Some(Command::CloseTab) => self.close_tab(out),
                     Some(Command::CleanUpOld) => out.push(Action::CleanUpOld),
                     Some(Command::Quit) => out.push(Action::Quit),
+                    Some(c) => self.layout_command(c, cx, out),
                     None => {}
                 }
             }
@@ -1041,6 +1622,46 @@ impl App {
         std::mem::take(&mut self.focus_changes)
     }
 
+    /// ADR-0068: a click in a tiled layout. A tab in a pane's bar comes to the front; a click in another pane (its bar or its body)
+    /// moves the keyboard there. A click in the body of the pane in focus is the pane's (selection, the program's mouse): not here.
+    fn tiled_click(&mut self, m: Mouse, cx: &Ctx<'_>, area: Rect) -> bool {
+        let target = {
+            let (Some(t), Some(placement)) = (self.tiled.as_ref(), self.placement(area)) else {
+                return false;
+            };
+            let Some(placed) = placement.at(m.col, m.row) else {
+                return false;
+            };
+            let on_bar = placed.bar.contains(Position { x: m.col, y: m.row });
+            if !on_bar && t.ws.focus.as_deref() == Some(placed.id.as_str()) {
+                return false;
+            }
+            if on_bar {
+                let panes = layout_tree::panes_of(&t.ws.layout.root);
+                let tiles = layout_view::Tiles {
+                    rows: cx.rows,
+                    terminals: &[],
+                    bindings: &t.bindings,
+                    focus: None,
+                    keyboard: false,
+                    zoomed: false,
+                    t: cx.t,
+                };
+                layout_view::bar_item_at(placed, &panes, &tiles, m.col)
+                    .unwrap_or_else(|| placed.id.clone())
+            } else {
+                placed.id.clone()
+            }
+        };
+        self.layout_act(layout_engine::Action::Activate { pane: target });
+        self.focus = if self.active_agent().is_some() {
+            Focus::Terminal
+        } else {
+            Focus::Tree
+        };
+        true
+    }
+
     fn mouse(&mut self, m: Mouse, cx: &Ctx<'_>, area: Rect, out: &mut Vec<Action>) {
         if !self.mouse {
             return;
@@ -1057,6 +1678,9 @@ impl App {
             MouseKind::Down => {
                 self.selection = None;
                 self.selecting = false;
+                if self.tiled_click(m, cx, area) {
+                    return;
+                }
                 if m.row < a.footer.y && Some(m.col) == a.tree_divider {
                     self.drag = Some(Divider::Tree);
                 } else if m.row < a.footer.y && Some(m.col) == a.inspector_divider {
@@ -1085,7 +1709,7 @@ impl App {
                         self.active = i;
                         self.focus = Focus::Terminal;
                     }
-                } else if a.terminal.contains(at) && !self.tabs.is_empty() {
+                } else if a.terminal.contains(at) && self.active_agent().is_some() {
                     self.focus = Focus::Terminal;
                     // A press in the pane starts a selection; a drag makes it, the release copies it.
                     let cell = (m.row - a.terminal.y, m.col - a.terminal.x);
@@ -1257,7 +1881,7 @@ impl App {
                 );
                 continue;
             }
-            let open = self.tabs.contains(&row.id);
+            let open = self.shown(&row.id);
             let marker = if row.needs_you {
                 "! "
             } else if open {
@@ -1330,140 +1954,196 @@ impl App {
             }
         }
 
-        // The tab bar.
-        let mut spans = Vec::new();
-        for (i, id) in self.tabs.iter().enumerate() {
-            let style = if i == self.active {
-                chosen
-            } else {
-                Style::default()
-            };
-            let needs_you = s.rows.iter().any(|r| r.id == *id && r.needs_you);
-            spans.push(Span::styled(
-                tab_label(i, id, s.rows),
-                if needs_you && i != self.active {
-                    attention
+        if self.tiled.is_none() {
+            // The tab bar.
+            let mut spans = Vec::new();
+            for (i, id) in self.tabs.iter().enumerate() {
+                let style = if i == self.active {
+                    chosen
                 } else {
-                    style
-                },
-            ));
-            spans.push(Span::raw(" "));
-        }
-        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
-        // over the program's title: it is drawn in a place of its own, and the title takes what is left.
-        let waiting = s
-            .rows
-            .iter()
-            .filter(|r| !r.header && r.needs_you && Some(r.id.as_str()) != self.active_agent())
-            .count();
-        let used: usize = spans.iter().map(Span::width).sum();
-        let mut note_width = 0;
-        let mut note_text = None;
-        if waiting > 0 && !self.tabs.is_empty() {
-            let full = format!(
-                "! {}",
-                (s.t)(
-                    key!("tui-app-tabs-waiting"),
-                    &[(
-                        "count",
-                        Arg::Num(i64::try_from(waiting).unwrap_or(i64::MAX))
-                    )]
-                )
-            );
-            // The whole note where it fits after the tabs, else just the count.
-            let free = usize::from(a.tabs.width).saturating_sub(used);
-            let note = if text_width(&full) < free {
-                full
-            } else {
-                format!("! {waiting}")
-            };
-            note_width = text_width(&note).min(usize::from(a.tabs.width));
-            note_text = Some(note);
-        }
-        // The program's own title (OSC 0 / 2) after the tabs, escaped and cut to the room by display width: it is the program's
-        // text, never drawn raw.
-        if let Some(title) = s
-            .terminal
-            .filter(|_| s.conversation.is_none())
-            .and_then(|t| t.title())
-            .map(|t| safe_title(&t))
-            .filter(|t| !t.is_empty())
-        {
-            let gap = usize::from(note_width > 0);
-            let room = usize::from(a.tabs.width).saturating_sub(used + note_width + gap);
-            // The dash and its space come first, then at least a few characters of the title.
-            if room > 2 + 3 {
-                spans.push(Span::styled(
-                    format!("\u{2014} {}", fit_width(&title, room - 2)),
-                    title_style,
-                ));
+                    Style::default()
+                };
+                let needs_you = s.rows.iter().any(|r| r.id == *id && r.needs_you);
+                let label = tab_label(i, id, s.rows);
+                // The floor (ADR-0113 decision 3, audit F1804): under a theme the tab in front is in the accent, but its "!" keeps the
+                // "needs you" style on the terminal's own background. Without a theme it is inverted with the rest, as it always was.
+                let mark_at = label.find("! ").filter(|_| needs_you && i == self.active);
+                match mark_at.filter(|_| self.look.is_some()) {
+                    Some(at) => {
+                        let (head, rest) = label.split_at(at);
+                        let (mark, tail) = rest.split_at(2);
+                        spans.push(Span::styled(head.to_string(), style));
+                        spans.push(Span::styled(mark.to_string(), attention));
+                        spans.push(Span::styled(tail.to_string(), style));
+                    }
+                    None => spans.push(Span::styled(
+                        label,
+                        if needs_you && i != self.active {
+                            attention
+                        } else {
+                            style
+                        },
+                    )),
+                }
+                spans.push(Span::raw(" "));
             }
-        }
-        let bar = Rect {
-            width: a
-                .tabs
-                .width
-                .saturating_sub(u16::try_from(note_width).unwrap_or(0)),
-            ..a.tabs
-        };
-        Line::from(spans).render(bar, buf);
-        if let Some(note) = note_text {
-            let w = u16::try_from(note_width).unwrap_or(0);
-            let at = Rect {
-                x: a.tabs.right().saturating_sub(w),
-                width: w,
+            // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
+            // over the program's title: it is drawn in a place of its own, and the title takes what is left.
+            let waiting = s
+                .rows
+                .iter()
+                .filter(|r| !r.header && r.needs_you && Some(r.id.as_str()) != self.active_agent())
+                .count();
+            let used: usize = spans.iter().map(Span::width).sum();
+            let mut note_width = 0;
+            let mut note_text = None;
+            if waiting > 0 && !self.tabs.is_empty() {
+                let full = format!(
+                    "! {}",
+                    (s.t)(
+                        key!("tui-app-tabs-waiting"),
+                        &[(
+                            "count",
+                            Arg::Num(i64::try_from(waiting).unwrap_or(i64::MAX))
+                        )]
+                    )
+                );
+                // The whole note where it fits after the tabs, else just the count.
+                let free = usize::from(a.tabs.width).saturating_sub(used);
+                let note = if text_width(&full) < free {
+                    full
+                } else {
+                    format!("! {waiting}")
+                };
+                note_width = text_width(&note).min(usize::from(a.tabs.width));
+                note_text = Some(note);
+            }
+            // The program's own title (OSC 0 / 2) after the tabs, escaped and cut to the room by display width: it is the program's
+            // text, never drawn raw.
+            if let Some(title) = s
+                .terminal
+                .filter(|_| s.conversation.is_none())
+                .and_then(|t| t.title())
+                .map(|t| safe_title(&t))
+                .filter(|t| !t.is_empty())
+            {
+                let gap = usize::from(note_width > 0);
+                let room = usize::from(a.tabs.width).saturating_sub(used + note_width + gap);
+                // The dash and its space come first, then at least a few characters of the title.
+                if room > 2 + 3 {
+                    spans.push(Span::styled(
+                        format!("\u{2014} {}", fit_width(&title, room - 2)),
+                        title_style,
+                    ));
+                }
+            }
+            let bar = Rect {
+                width: a
+                    .tabs
+                    .width
+                    .saturating_sub(u16::try_from(note_width).unwrap_or(0)),
                 ..a.tabs
             };
-            Span::styled(note, attention).render(at, buf);
+            Line::from(spans).render(bar, buf);
+            if let Some(note) = note_text {
+                let w = u16::try_from(note_width).unwrap_or(0);
+                let at = Rect {
+                    x: a.tabs.right().saturating_sub(w),
+                    width: w,
+                    ..a.tabs
+                };
+                Span::styled(note, attention).render(at, buf);
+            }
         }
 
-        // The terminal, or the conversation of an agent that has none.
-        if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
-            let shown: Vec<Line<'_>> = lines.iter().map(|l| Line::raw(l.clone())).collect();
-            Paragraph::new(shown).render(a.terminal, buf);
-        } else {
-            match (self.active_agent(), s.terminal) {
-                (None, _) => welcome(s, a.terminal, buf, (strong, base.dim, attention)),
-                (Some(_), None) => Paragraph::new(
-                    s.no_screen
-                        .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
-                )
-                .style(base.dim)
-                .wrap(Wrap { trim: true })
-                .render(a.terminal, buf),
-                (Some(_), Some(term)) => {
-                    TerminalPane::new(term)
-                        .colors(s.colors)
-                        .palette(self.look.as_ref().map(|l| &l.styles.pane))
-                        .selection(self.selection)
-                        .scroll(self.scroll)
-                        .render(a.terminal, buf);
-                    // Scrolled back: say how far, and how to get back, at the pane's top right.
-                    let back = self
-                        .scroll
-                        .min(TerminalPane::max_scroll(term, a.terminal.height));
-                    if back > 0 {
-                        let note = format!(
-                            " {} ",
-                            (s.t)(
-                                key!("tui-app-scrolled"),
-                                &[("count", Arg::Num(i64::try_from(back).unwrap_or(i64::MAX)))]
-                            )
-                        );
-                        let w = u16::try_from(text_width(&note))
-                            .unwrap_or(u16::MAX)
-                            .min(a.terminal.width);
-                        Line::styled(note, chosen).render(
-                            Rect {
-                                x: a.terminal.right().saturating_sub(w),
-                                width: w,
-                                height: a.terminal.height.min(1),
-                                ..a.terminal
-                            },
-                            buf,
-                        );
+        // The terminal, or the conversation of an agent that has none: in the tab's place, or in the body of the pane in focus.
+        let focused_body = |buf: &mut ratatui::buffer::Buffer, r: Rect| {
+            if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
+                let shown: Vec<Line<'_>> = lines.iter().map(|l| Line::raw(l.clone())).collect();
+                Paragraph::new(shown).render(r, buf);
+            } else {
+                match (self.active_agent(), s.terminal) {
+                    (None, _) => welcome(s, r, buf, (strong, base.dim, attention)),
+                    (Some(_), None) => Paragraph::new(
+                        s.no_screen
+                            .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
+                    )
+                    .style(base.dim)
+                    .wrap(Wrap { trim: true })
+                    .render(r, buf),
+                    (Some(_), Some(term)) => {
+                        TerminalPane::new(term)
+                            .colors(s.colors)
+                            .palette(self.look.as_ref().map(|l| &l.styles.pane))
+                            .selection(self.selection)
+                            .scroll(self.scroll)
+                            .render(r, buf);
+                        // Scrolled back: say how far, and how to get back, at the pane's top right.
+                        let back = self.scroll.min(TerminalPane::max_scroll(term, r.height));
+                        if back > 0 {
+                            let note = format!(
+                                " {} ",
+                                (s.t)(
+                                    key!("tui-app-scrolled"),
+                                    &[("count", Arg::Num(i64::try_from(back).unwrap_or(i64::MAX)))]
+                                )
+                            );
+                            let w = u16::try_from(text_width(&note))
+                                .unwrap_or(u16::MAX)
+                                .min(r.width);
+                            Line::styled(note, chosen).render(
+                                Rect {
+                                    x: r.right().saturating_sub(w),
+                                    width: w,
+                                    height: r.height.min(1),
+                                    ..r
+                                },
+                                buf,
+                            );
+                        }
                     }
                 }
+            }
+        };
+        match self.tiled.as_ref() {
+            None => focused_body(buf, a.terminal),
+            Some(t) => {
+                let placement = layout_view::place(&t.ws, a.tiles);
+                let panes = layout_tree::panes_of(&t.ws.layout.root);
+                let tiles = layout_view::Tiles {
+                    rows: s.rows,
+                    terminals: s.tiles,
+                    bindings: &t.bindings,
+                    focus: t.ws.focus.as_deref(),
+                    keyboard: self.focus == Focus::Terminal && self.palette.is_none(),
+                    zoomed: t.ws.zoom.is_some(),
+                    t: s.t,
+                };
+                let styles = layout_view::PaneStyles {
+                    strong,
+                    dim: base.dim,
+                    chosen,
+                    attention,
+                    line,
+                    divider: chrome.divider(),
+                    themed: self.look.is_some(),
+                };
+                let colors = s.colors;
+                let palette = self.look.as_ref().map(|l| &l.styles.pane);
+                layout_view::draw(
+                    buf,
+                    &placement,
+                    &panes,
+                    &tiles,
+                    styles,
+                    &mut |buf, _pane, r| focused_body(buf, r),
+                    &mut |buf, term, r| {
+                        TerminalPane::new(term)
+                            .colors(colors)
+                            .palette(palette)
+                            .render(r, buf);
+                    },
+                );
             }
         }
 
@@ -1479,6 +2159,10 @@ impl App {
         // The footer: the keys for where the keyboard is, the mouse state, the last notice.
         let keys = match (self.palette.is_some(), self.focus) {
             (true, _) => key!("tui-app-keys-palette"),
+            (false, Focus::Tree) if self.viewer && self.tiled.is_some() => {
+                key!("tui-app-keys-tree-tiled-viewer")
+            }
+            (false, Focus::Tree) if self.tiled.is_some() => key!("tui-app-keys-tree-tiled"),
             (false, Focus::Tree) if self.viewer => key!("tui-app-keys-tree-viewer"),
             (false, Focus::Tree) => key!("tui-app-keys-tree"),
             (false, Focus::Terminal) if self.viewer => key!("tui-app-keys-terminal-viewer"),
@@ -1573,10 +2257,12 @@ impl App {
             let buf = f.buffer_mut();
             Clear.render(r, buf);
             buf.set_style(r, base.fill);
-            let block = Block::bordered().title(Span::styled(
-                (s.t)(key!("tui-app-palette-title"), &[]),
-                strong,
-            ));
+            let title = if p.naming {
+                key!("tui-layout-name-title")
+            } else {
+                key!("tui-app-palette-title")
+            };
+            let block = Block::bordered().title(Span::styled((s.t)(title, &[]), strong));
             let inner = block.inner(r);
             block.render(r, buf);
             let mut lines = vec![Line::raw(format!("> {}", p.query))];
@@ -1630,6 +2316,35 @@ impl App {
         if let Some(p) = cursor {
             f.set_cursor_position(p);
         }
+    }
+}
+
+/// ADR-0068: the tabs a layout is when it is one group of agents' tabs (or nothing), as the app keeps them before any tiling: the
+/// agents in order and the one in front. `None` for anything else (a split, another panel, a pane following something, a maximized
+/// pane, the same agent twice).
+fn classic_of(ws: &layout_engine::Workspace) -> Option<(Vec<String>, usize)> {
+    if ws.zoom.is_some() {
+        return None;
+    }
+    let agent = |p: &layout_tree::Pane| {
+        (p.panel == "agent")
+            .then(|| p.bound_agent())
+            .flatten()
+            .map(str::to_string)
+    };
+    match &ws.layout.root {
+        layout_tree::Node::Pane(p) if p.panel == "empty" && p.bind.is_none() => {
+            Some((Vec::new(), 0))
+        }
+        layout_tree::Node::Pane(p) => agent(p).map(|a| (vec![a], 0)),
+        layout_tree::Node::Tabs { active, children } => {
+            let agents: Vec<String> = children.iter().map(agent).collect::<Option<_>>()?;
+            let mut unique = agents.clone();
+            unique.sort();
+            unique.dedup();
+            (unique.len() == agents.len()).then_some((agents, *active))
+        }
+        layout_tree::Node::Split { .. } => None,
     }
 }
 
@@ -2274,6 +2989,7 @@ mod tests {
                     conversation: None,
                     dialog: None,
                     note: None,
+                    tiles: &[],
                     colors,
                     t: &text,
                 },
@@ -2756,6 +3472,7 @@ mod tests {
                     conversation: None,
                     dialog: None,
                     note: None,
+                    tiles: &[],
                     colors: ColorMode::Mono,
                     t: &text,
                 },
@@ -2800,6 +3517,7 @@ mod tests {
                         conversation: None,
                         dialog: None,
                         note: None,
+                        tiles: &[],
                         colors,
                         t: &text,
                     },
@@ -2966,6 +3684,7 @@ mod tests {
                     conversation: None,
                     dialog: None,
                     note: None,
+                    tiles: &[],
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -3019,6 +3738,7 @@ mod tests {
                     conversation: None,
                     dialog: Some(&question),
                     note: None,
+                    tiles: &[],
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -3471,6 +4191,7 @@ mod tests {
                         conversation: None,
                         dialog: None,
                         note: None,
+                        tiles: &[],
                         colors: ColorMode::Mono,
                         t: &text,
                     },
@@ -3766,6 +4487,7 @@ mod tests {
                     conversation: Some(&conversation),
                     dialog: None,
                     note: None,
+                    tiles: &[],
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -4639,10 +5361,20 @@ mod theme_tests {
 
     /// The window with two tabs open (the one in front does not need the user, the other does) and a request's box on top.
     fn frame(look: Option<Shell>, colors: ColorMode, dialog: Option<&[String]>) -> (App, Buffer) {
+        frame_in_front(look, colors, dialog, 0)
+    }
+
+    /// [`frame`] with tab `active` in front (1: the tab of the agent that needs the user).
+    fn frame_in_front(
+        look: Option<Shell>,
+        colors: ColorMode,
+        dialog: Option<&[String]>,
+        active: usize,
+    ) -> (App, Buffer) {
         let rows = rows();
         let app = App {
             tabs: vec!["mac/agent-1".into(), "mac/agent-3".into()],
-            active: 0,
+            active,
             selected: 1,
             look,
             ..App::default()
@@ -4662,6 +5394,7 @@ mod theme_tests {
                     conversation: None,
                     dialog,
                     note: None,
+                    tiles: &[],
                     colors,
                     t: &text,
                 },
@@ -4748,6 +5481,142 @@ mod theme_tests {
                             "harbour {scheme:?} {colors:?}: the box"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// Audit F1804: the tab in front whose agent needs the user keeps its "!" in the "needs you" style on the terminal's own background
+    /// under every theme (the floor); the rest of its label is in the accent, so it still reads as the tab in front. Without a theme it
+    /// is drawn as it always was.
+    #[test]
+    fn the_needs_you_mark_of_the_tab_in_front_keeps_the_floor_under_every_theme() {
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let (app, plain) = frame_in_front(None, colors, None, 1);
+            let tab_y = app.areas(AREA).tabs.y;
+            let cells = cells_of(&plain, tab_y, "2 ! shell");
+            let (mark, name) = (cells[2], cells[4]);
+            let attention = attention_style(colors);
+            for b in built_ins() {
+                let look = shell(b.id, colors);
+                let (_, themed) = frame_in_front(Some(look), colors, None, 1);
+                let c = &themed[mark];
+                assert_eq!(
+                    (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
+                    ("!", attention.fg.unwrap(), Color::Reset, true),
+                    "{} {colors:?}: the mark of the tab in front",
+                    b.id
+                );
+                assert_eq!(
+                    themed[name].bg,
+                    look.styles.chosen.bg.unwrap(),
+                    "{} {colors:?}: the tab in front",
+                    b.id
+                );
+            }
+            // Without a theme, the tab in front is inverted as before themes, its mark too.
+            assert!(plain[mark].modifier.contains(Modifier::REVERSED));
+            assert_eq!(
+                (plain[mark].fg, plain[mark].bg),
+                (Color::Reset, Color::Reset)
+            );
+        }
+    }
+
+    /// Audit F1804 in a tiled layout (ADR-0068): the pane in focus has the keyboard, so its bar is in the accent; the "!" of its tab in
+    /// front (a group of tabs) and of a pane's own name (no tabs) keeps the "needs you" style on the terminal's own background.
+    #[test]
+    fn the_needs_you_mark_in_a_tiled_bar_in_focus_keeps_the_floor_under_every_theme() {
+        let mut rows = rows();
+        for r in &mut rows {
+            r.needs_you = true;
+            r.state = "needs you".into();
+        }
+        let first = rows[0].clone();
+        rows.extend((4..=5).map(|i| Row {
+            id: format!("mac/agent-{i}"),
+            label: format!("agent{i}"),
+            ..first.clone()
+        }));
+        let draw = |look: Option<Shell>, colors: ColorMode, focus: usize| -> Buffer {
+            let mut app = App {
+                look,
+                ..App::default()
+            };
+            // 2 x 2 with five agents: agent-5 is a tab behind agent-4 in the last pane.
+            app.layout_act(layout_engine::Action::Preset {
+                preset: Preset::TwoByTwo,
+                agents: rows.iter().map(|r| r.id.clone()).collect(),
+            });
+            let ids: Vec<String> = layout_tree::panes_of(&app.workspace().layout.root)
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            app.layout_act(layout_engine::Action::Activate {
+                pane: ids[focus].clone(),
+            });
+            app.layout_act(layout_engine::Action::Focus {
+                pane: ids[focus].clone(),
+            });
+            app.focus = Focus::Terminal;
+            let mut tui =
+                Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
+            let details: Vec<String> = Vec::new();
+            tui.draw(|f| {
+                app.draw(
+                    f,
+                    &Screen {
+                        rows: &rows,
+                        terminal: None,
+                        details: &details,
+                        notice: "",
+                        no_screen: None,
+                        conversation: None,
+                        dialog: None,
+                        note: None,
+                        tiles: &[],
+                        colors,
+                        t: &text,
+                    },
+                );
+            })
+            .unwrap();
+            tui.backend().buffer().clone()
+        };
+        let find = |buf: &Buffer, needle: &str| -> (u16, u16) {
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let row: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    row.find(needle)
+                        .map(|at| (u16::try_from(row[..at].chars().count()).unwrap(), y))
+                })
+                .unwrap_or_else(|| panic!("{needle:?} not drawn"))
+        };
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let attention = attention_style(colors);
+            for b in built_ins() {
+                let look = shell(b.id, colors);
+                // The last pane in focus, its tab in front being agent-5's (tabs of a group); then the first pane (its own name, which
+                // the bar starts with a space: the agents list has "! claude" too).
+                for (focus, needle, at) in [(4, "! 2:agent5", 0), (0, " ! claude", 1)] {
+                    let buf = draw(Some(look), colors, focus);
+                    let (x, y) = find(&buf, needle);
+                    let x = x + at;
+                    let c = &buf[(x, y)];
+                    assert_eq!(
+                        (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
+                        ("!", attention.fg.unwrap(), Color::Reset, true),
+                        "{} {colors:?} {needle}: the mark in the bar in focus",
+                        b.id
+                    );
+                    assert_eq!(
+                        buf[(x + 3, y)].bg,
+                        look.styles.chosen.bg.unwrap(),
+                        "{} {colors:?} {needle}: the bar in focus",
+                        b.id
+                    );
                 }
             }
         }
@@ -4841,5 +5710,448 @@ mod theme_tests {
                 "{chrome}"
             );
         }
+    }
+}
+
+/// ADR-0068 rung 5: the layout in the app shell.
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::layout::tree::panes_of;
+    use agora_vt::{AlacrittyTerminal, Size};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal as Tui;
+    use std::fmt::Write as _;
+
+    fn text(id: &str, args: &[(&str, Arg)]) -> String {
+        let mut s = id.to_string();
+        for (k, v) in args {
+            let v = match v {
+                Arg::Num(n) => n.to_string(),
+                Arg::Str(s) => s.clone(),
+                #[allow(unreachable_patterns)]
+                _ => String::new(),
+            };
+            let _ = write!(s, " {k}={v}");
+        }
+        s
+    }
+
+    fn rows(n: usize) -> Vec<Row> {
+        (1..=n)
+            .map(|i| Row {
+                id: format!("mac/agent-{i}"),
+                label: format!("agent{i}"),
+                state: "idle".into(),
+                needs_you: false,
+                terminal: true,
+                header: false,
+                group: false,
+                request: false,
+                request_always: false,
+                approval: String::new(),
+            })
+            .collect()
+    }
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 30,
+    };
+
+    fn cx(rows: &[Row], area: Rect) -> Ctx<'_> {
+        Ctx {
+            rows,
+            area,
+            modes: Modes::default(),
+            prog: ProgramModes::default(),
+            covered: false,
+            t: &text,
+        }
+    }
+
+    fn key(app: &mut App, rows: &[Row], k: Key) -> Vec<Action> {
+        app.handle(Event::Key(k), &cx(rows, AREA))
+    }
+
+    fn click(app: &mut App, rows: &[Row], col: u16, row: u16) -> Vec<Action> {
+        app.handle(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col,
+                row,
+                ..Default::default()
+            }),
+            &cx(rows, AREA),
+        )
+    }
+
+    fn agents(app: &App) -> Vec<String> {
+        panes_of(&app.workspace().layout.root)
+            .iter()
+            .map(|p| p.bound_agent().unwrap_or(&p.panel).to_string())
+            .collect()
+    }
+
+    fn pane_ids(app: &App) -> Vec<String> {
+        panes_of(&app.workspace().layout.root)
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_digit_in_the_list_applies_a_preset_and_one_goes_back_to_the_tabs() {
+        let rows = rows(3);
+        let mut app = App::default();
+        // The tabs open before tiling come first, then the other agents with a terminal.
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        assert_eq!(app.tabs, ["mac/agent-2"]);
+        key(&mut app, &rows, Key::Char('4'));
+        assert!(app.tiled.is_some());
+        assert!(app.tabs.is_empty());
+        assert_eq!(
+            agents(&app),
+            ["mac/agent-2", "mac/agent-1", "mac/agent-3", "empty"]
+        );
+        assert_eq!(
+            layout_engine::preset_of(&app.workspace().layout.root),
+            Some(Preset::TwoByTwo)
+        );
+        for (c, preset) in [
+            ('2', Preset::TwoByOne),
+            ('3', Preset::OneByTwo),
+            ('5', Preset::Focus),
+            ('6', Preset::ThreeByTwo),
+        ] {
+            key(&mut app, &rows, Key::Char(c));
+            assert_eq!(
+                layout_engine::preset_of(&app.workspace().layout.root),
+                Some(preset),
+                "{c}"
+            );
+        }
+        // 1x1 is one tab group of agents: the tabs as before layouts.
+        key(&mut app, &rows, Key::Char('1'));
+        assert!(app.tiled.is_none());
+        assert_eq!(app.tabs, ["mac/agent-2", "mac/agent-1", "mac/agent-3"]);
+        // Digits never reach the caller as letters.
+        assert!(!key(&mut app, &rows, Key::Char('2'))
+            .iter()
+            .any(|a| matches!(a, Action::Command(_))));
+    }
+
+    #[test]
+    fn a_click_moves_the_keyboard_to_a_pane_and_enter_shows_an_agent_there() {
+        let rows = rows(3);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Char('2'));
+        // Three agents in two panes: agent-1 alone, agent-2 and agent-3 as tabs in the second.
+        assert_eq!(agents(&app), ["mac/agent-1", "mac/agent-2", "mac/agent-3"]);
+        let placement = app.placement(AREA).unwrap_or_default();
+        assert_eq!(placement.panes.len(), 2);
+        let right = placement.panes[1].body;
+        click(&mut app, &rows, right.x + 2, right.y + 2);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        assert_eq!(app.focus, Focus::Terminal);
+        // A click on the second tab in that pane's bar brings it to the front.
+        let bar = placement.panes[1].bar;
+        let tabs = crate::layout::view::bar_items(
+            &placement.panes[1],
+            &panes_of(&app.workspace().layout.root),
+            &crate::layout::view::Tiles {
+                rows: &rows,
+                terminals: &[],
+                bindings: &Bindings::default(),
+                focus: None,
+                keyboard: false,
+                zoomed: false,
+                t: &text,
+            },
+        );
+        let first = u16::try_from(tabs[0].1.chars().count()).unwrap_or(0);
+        click(&mut app, &rows, bar.x + first + 1, bar.y);
+        assert_eq!(app.active_agent(), Some("mac/agent-3"));
+        // Typing goes to the agent of the pane in focus.
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('x')),
+            vec![Action::Input(b"x".to_vec())]
+        );
+        // Back in the list, the first pane, and Enter on an agent already shown brings it to the front where it is.
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Char('h'));
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        app.selected = 1;
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        assert_eq!(agents(&app).len(), 3);
+    }
+
+    #[test]
+    fn enter_fills_the_empty_pane_in_focus_and_w_closes_the_pane() {
+        let rows = rows(4);
+        let mut app = App::default();
+        app.layout_act(layout_engine::Action::Preset {
+            preset: Preset::TwoByTwo,
+            agents: vec!["mac/agent-1".into()],
+        });
+        let ids = pane_ids(&app);
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[3].clone(),
+        });
+        app.selected = 3;
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(
+            agents(&app),
+            ["mac/agent-1", "empty", "empty", "mac/agent-4"]
+        );
+        assert_eq!(pane_ids(&app), ids, "the pane keeps its id");
+        assert_eq!(app.active_agent(), Some("mac/agent-4"));
+        key(&mut app, &rows, Key::Ctrl(']'));
+        // w closes the pane in focus; the agent keeps running (the caller says so).
+        let acts = key(&mut app, &rows, Key::Char('w'));
+        assert_eq!(acts.first(), Some(&Action::Close("mac/agent-4".into())));
+        assert_eq!(agents(&app), ["mac/agent-1", "empty", "empty"]);
+    }
+
+    #[test]
+    fn z_maximizes_the_pane_in_focus_and_restores_the_layout() {
+        let rows = rows(4);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let before = app.workspace().layout;
+        key(&mut app, &rows, Key::Char('l'));
+        key(&mut app, &rows, Key::Char('z'));
+        let placement = app.placement(AREA).unwrap_or_default();
+        assert_eq!(placement.panes.len(), 1);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        // The one pane takes the whole middle.
+        assert_eq!(placement.panes[0].body, Rect::new(29, 1, 91, 28));
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(app.workspace().layout, before);
+        assert_eq!(app.placement(AREA).map(|p| p.panes.len()), Some(4));
+    }
+
+    /// ADR-0068 decision 7: only the panes on screen are watched.
+    #[test]
+    fn only_the_panes_on_screen_are_watched() {
+        let rows = rows(5);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let all = |_: &str| true;
+        let watched = |app: &App, area: Rect| -> Vec<String> {
+            app.tile_streams(area, all)
+                .into_iter()
+                .map(|(a, _)| a)
+                .collect()
+        };
+        // agent-5 is a tab behind agent-4.
+        assert_eq!(
+            watched(&app, AREA),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-4"]
+        );
+        let behind = pane_ids(&app)[4].clone();
+        app.layout_act(layout_engine::Action::Activate { pane: behind });
+        assert_eq!(
+            watched(&app, AREA),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-5"]
+        );
+        // Maximized: one.
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(watched(&app, AREA), ["mac/agent-5"]);
+        key(&mut app, &rows, Key::Char('z'));
+        // A window too small to tile: the pane in focus only.
+        let small = Rect::new(0, 0, 50, 12);
+        assert_eq!(watched(&app, small), ["mac/agent-5"]);
+        // An agent with no terminal (a chat) and a pane of another panel are not watched.
+        let first = pane_ids(&app)[0].clone();
+        app.layout_act(layout_engine::Action::Bind {
+            pane: first,
+            bind: None,
+            panel: Some("approvals".into()),
+        });
+        let no_chat = |a: &str| a != "mac/agent-2";
+        let left: Vec<String> = app
+            .tile_streams(AREA, no_chat)
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(left, ["mac/agent-3", "mac/agent-5"]);
+        // The tabs (before any tiling): none; the active tab's terminal is the caller's as before.
+        key(&mut app, &rows, Key::Char('1'));
+        assert!(app.tile_streams(AREA, all).is_empty());
+    }
+
+    #[test]
+    fn save_layout_as_asks_for_a_name_then_saves_under_it() {
+        let rows = rows(2);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('2'));
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-save-as".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert!(key(&mut app, &rows, Key::Enter).is_empty());
+        assert!(app.palette.as_ref().is_some_and(|p| p.naming));
+        // A name that cannot be a file is not saved.
+        key(&mut app, &rows, Key::Char('/'));
+        assert!(key(&mut app, &rows, Key::Enter).is_empty());
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-save-as".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        key(&mut app, &rows, Key::Enter);
+        for c in "Two".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter),
+            vec![Action::SaveLayout("Two".into())]
+        );
+        assert!(app.palette.is_none());
+        // Saved layouts are offered to use and to delete.
+        app.saved_layouts = vec!["Two".into()];
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-use".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter),
+            vec![Action::UseLayout("Two".into())]
+        );
+    }
+
+    #[test]
+    fn panes_that_follow_what_needs_you_show_a_different_agent_each() {
+        let mut rows = rows(3);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('2'));
+        let ids = pane_ids(&app);
+        for id in &ids[..2] {
+            app.layout_act(layout_engine::Action::Bind {
+                pane: id.clone(),
+                bind: Some(Bind::Follow(Follow::Attention)),
+                panel: None,
+            });
+        }
+        assert!(!app.settle_layout(&rows));
+        rows[2].needs_you = true;
+        rows[0].needs_you = true;
+        assert!(app.settle_layout(&rows));
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[0].clone(),
+        });
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[1].clone(),
+        });
+        assert_eq!(app.active_agent(), Some("mac/agent-3"));
+    }
+
+    fn screen(text: &str) -> AlacrittyTerminal {
+        let mut vt = AlacrittyTerminal::new(Size { cols: 45, rows: 13 });
+        vt.feed(text.as_bytes());
+        vt
+    }
+
+    /// A 2 × 2 layout drawn: four panes, each with its bar and its own agent's screen, the line between the columns, and a panel this
+    /// client cannot draw shown as a placeholder.
+    #[test]
+    fn a_two_by_two_layout_is_drawn_pane_by_pane() {
+        let rows = rows(4);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let ids = pane_ids(&app);
+        app.layout_act(layout_engine::Action::Bind {
+            pane: ids[3].clone(),
+            bind: None,
+            panel: Some("files".into()),
+        });
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[0].clone(),
+        });
+        let (one, two, three) = (
+            screen("screen one"),
+            screen("screen two"),
+            screen("screen three"),
+        );
+        let tiles: Vec<(&str, &dyn Terminal)> = vec![
+            ("mac/agent-2", &two as &dyn Terminal),
+            ("mac/agent-3", &three as &dyn Terminal),
+        ];
+        let details: Vec<String> = Vec::new();
+        let mut tui = match Tui::new(TestBackend::new(AREA.width, AREA.height)) {
+            Ok(t) => t,
+            Err(e) => panic!("{e}"),
+        };
+        let drawn = tui.draw(|f| {
+            app.draw(
+                f,
+                &Screen {
+                    rows: &rows,
+                    terminal: Some(&one),
+                    details: &details,
+                    notice: "",
+                    no_screen: None,
+                    conversation: None,
+                    dialog: None,
+                    note: None,
+                    tiles: &tiles,
+                    colors: ColorMode::Mono,
+                    t: &text,
+                },
+            );
+        });
+        assert!(drawn.is_ok());
+        let buf = tui.backend().buffer().clone();
+        let line = |y: u16| -> String {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        // The middle starts after the tree (28) and its line; the panes are 45 columns with a line between them at 74, and the 29 rows
+        // above the footer make two rows of panes, 15 and 14 (each a bar, then the screen).
+        let (left, right) = (29usize, 75usize);
+        let cell = |y: u16, x: usize, n: usize| line(y).chars().skip(x).take(n).collect::<String>();
+
+        assert!(cell(0, left, 45).starts_with(" agent1"), "{:?}", line(0));
+        assert!(cell(0, right, 45).starts_with(" agent2"), "{:?}", line(0));
+        assert_eq!(cell(1, left, 12), "screen one  ");
+        assert_eq!(cell(1, right, 12), "screen two  ");
+        assert!(cell(15, left, 45).starts_with(" agent3"), "{:?}", line(15));
+        assert!(
+            cell(15, right, 45).starts_with(" tui-layout-panel-files"),
+            "{:?}",
+            line(15)
+        );
+        assert_eq!(cell(16, left, 12), "screen three");
+        // The panel this client cannot draw: its name and "open in the window".
+        assert!(
+            cell(16, right, 45).starts_with("tui-layout-elsewhere"),
+            "{:?}",
+            line(16)
+        );
+        assert!(
+            cell(17, right, 45).starts_with("panel=tui-layout-panel-files"),
+            "{:?}",
+            line(17)
+        );
+        // The tree marks the agents shown.
+        assert!(line(0).starts_with("• agent1") && line(3).starts_with("  agent4"));
+        for y in 0..29 {
+            assert_eq!(line(y).chars().nth(74), Some('│'), "row {y}");
+        }
+        // The footer names the layout's keys.
+        assert!(
+            line(29).contains("tui-app-keys-tree-tiled"),
+            "{:?}",
+            line(29)
+        );
     }
 }

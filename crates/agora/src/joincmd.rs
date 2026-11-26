@@ -266,13 +266,7 @@ pub(crate) fn run(
     // The one place the number is written: this line, on standard output, for the person in front of this screen. It is never
     // logged and never saved.
     let mut show = |n: &agora_node::pairing_client::Number| {
-        let mut out = std::io::stdout();
-        let _ = writeln!(
-            out,
-            "{}",
-            say.text(key!("join-number"), &[("number", n.grouped().into())])
-        );
-        let _ = out.flush();
+        crate::out_line(&say.text(key!("join-number"), &[("number", n.grouped().into())]));
     };
     match pair(&wanted, timeouts, &mut show) {
         Ok(v) => {

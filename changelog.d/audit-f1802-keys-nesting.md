@@ -1,0 +1,1 @@
+- Importing a keybindings file whose key is a deeply nested list now lists the problem instead of doing nothing. (audit F1802, #1232)

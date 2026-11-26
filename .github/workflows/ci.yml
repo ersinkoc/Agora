@@ -129,6 +129,15 @@ jobs:
       - name: Team chat still shows a message after a reload (ADR-0103)
         run: node scripts/e2e-team-chat-reload.mjs
         timeout-minutes: 5
+      - name: A plugin's sandboxed frame reaches nothing and cannot stall or cover the window (ADR-0114)
+        run: node scripts/e2e-plugin-sandbox.mjs --engine chromium
+        timeout-minutes: 10
+      # WebKit is the desktop app's webview on macOS and Linux (T63); --with-deps installs its system libraries on this throwaway runner.
+      - name: Install WebKit
+        run: '"$PW_DIR/node_modules/.bin/playwright-core" install --with-deps webkit'
+      - name: The same plugin sandbox checks under WebKit
+        run: node scripts/e2e-plugin-sandbox.mjs --engine webkit
+        timeout-minutes: 10
 
   schema-breaking:
     # A published message never changes (ADR-0006): compare schema/ with the target branch.

@@ -9,7 +9,6 @@
 //! [`EXIT_TIMEOUT`] `--timeout` ran out, [`EXIT_REFUSED`] the prompt was not sent because the agent waits for the person; 1 an error
 //! (no node, unknown agent, a refusal from the node), 2 a usage error.
 
-use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -263,8 +262,7 @@ fn not_found(say: &Say, id: &str) -> ExitCode {
 
 /// One line on stdout; a reader that went away (`| head`) is not an error and never a panic. `false` when it could not be written.
 fn line(text: &str) -> bool {
-    let mut out = std::io::stdout().lock();
-    writeln!(out, "{text}").and_then(|()| out.flush()).is_ok()
+    crate::out_line(text)
 }
 
 /// `agora agent prompt AGENT_ID TEXT... [--wait [--timeout SECS]] [--force]`. A prompt to an agent that waits for the person
