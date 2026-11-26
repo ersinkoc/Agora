@@ -889,6 +889,77 @@ layout-error-newer = Bu yerleşim daha yeni bir sürümle yapılmış. Kullanmak
 layout-error-too-deep = Bu yerleşim çok derin iç içe (en çok { $max } düzey).
 layout-error-too-many = Bu yerleşimde çok fazla bölme var (en çok { $max }).
 
+## Klavye: komutlar ve tuşları (ADR-0068 4. basamak, docs/ux/keybindings.md)
+palette-keyboard = Klavye ayarları
+keys-cmd-agents = Ajan listesini göster veya gizle
+keys-cmd-tab = { $n }. sekmeye git
+keys-cmd-side = Yan panel, { $n }. sıra
+keys-cmd-side-named = Yan panel: { $name }
+keys-cmd-preset = Yerleşim: { $name }
+keys-cmd-maximize = Bölmeyi büyüt veya geri al
+keys-title = Klavye
+keys-desc = Her eylem komut paletinde bir komuttur. Ona istediğiniz tuşları verin; tuşlar bu tarayıcıda saklanır.
+keys-changed-count = { $count } değişti
+keys-search = Bir komut veya tuş bulun
+keys-import = İçe aktar…
+keys-export = Dışa aktar
+keys-reset-all = Tümünü sıfırla
+keys-unreadable = Bu tarayıcıda saklanan tuşlar okunamadı; varsayılan tuşlar kullanılıyor.
+keys-unknown = { $count ->
+    [one] Tuşlarınız bu pencerede olmayan bir komutu anıyor. Saklanıyor, burada bir şey yapmıyor:
+   *[other] Tuşlarınız bu pencerede olmayan { $count } komutu anıyor. Saklanıyorlar, burada bir şey yapmıyorlar:
+}
+keys-list = Komutlar ve tuşları
+keys-none-match = Eşleşen komut yok.
+keys-fixed-title = Değişmeyen tuşlar
+keys-fixed-safe-mode = Güvenli kip
+keys-fixed-navigation = Pencerede gezinmek
+keys-fixed-terminal = Terminalde kopyalama, bulma ve yapıştırma
+keys-fixed-editing = Metin düzenleme
+keys-terminal-note = Klavye bir terminaldeyken tuşlarınız terminaldeki programa gider. Pencereye yalnızca programın hiç alamayacağı tuşlar ulaşır: ⌘ tuşları ve bir harfle Ctrl+Shift (Ctrl+Shift+K, terminaldeyken komut paletini açar).
+keys-context-anywhere = Her yerde
+keys-context-window = Pencerede
+keys-context-pane = Odaktaki bölme
+keys-context-tabs = Odaktaki sekmeler
+keys-context-side = Yan panel
+keys-changed = Değişti
+keys-press = Tuşlara basın…
+keys-press-second = { $key }, ardından ikinci bir tuş ya da bekleyin
+keys-no-keys = Tuş yok
+keys-fixed = Sabit
+keys-change = Değiştir
+keys-change-named = { $name } komutunun tuşlarını değiştir
+keys-recording = Dinleniyor…
+keys-clear = Temizle
+keys-clear-named = { $name } komutunun tuşlarını temizle
+keys-reset = Sıfırla
+keys-reset-named = { $name } komutuna varsayılan tuşlarını geri ver
+keys-conflict-same = { $key } aynı zamanda “{ $name }” komutunun tuşu.
+keys-conflict-prefix = { $key } ile “{ $name }” aynı ilk tuşu paylaşıyor; ikisinden biri çalışamaz.
+keys-refused-fixed = { $key } olduğu gibi kalır ({ $reason }).
+keys-reset-title = Tüm tuşlar sıfırlansın mı?
+keys-reset-body = Her komut varsayılan tuşlarına döner ve bu tarayıcıda saklanan değişiklikler silinir.
+keys-reset-keep = Tuşlarım kalsın
+keys-reset-confirm = Tümünü sıfırla
+keys-import-title = Tuşları içe aktar
+keys-import-paste = Bir tuş dosyası yapıştırın (JSON)
+keys-import-file = Ya da bir dosya seçin
+keys-import-refused = Bu dosya içe aktarılmadı:
+keys-error-json = Bu geçerli bir JSON değil.
+keys-error-too-big = Bu dosya çok büyük (en çok 64 KB).
+keys-error-shape = Bu, bu pencerenin okuyabildiği bir tuş dosyası değil.
+keys-error-newer = Bu dosya daha yeni bir sürümle yapılmış. Kullanmak için güncelleyin.
+keys-error-too-many = Bu dosyada çok fazla komut var (en çok 200).
+keys-error-field = Bilinmeyen alan “{ $name }”.
+keys-error-command = “{ $command }” bir komut adı değil.
+keys-error-request = “{ $command }”: bir istek kendi kartında yanıtlanır, asla bir tuşla değil.
+keys-error-fixed-command = “{ $command }” tuşlarını korur; değiştirilemezler.
+keys-error-twice = “{ $command }” iki kez yazılmış.
+keys-error-too-many-keys = “{ $command }” için çok fazla tuş var (en çok 4).
+keys-error-key = { $command } için “{ $key }” bu pencerenin tanıdığı bir tuş değil.
+keys-error-fixed-key = { $command } için { $key } olduğu gibi kalır ({ $reason }).
+keys-error-more = …ve { $count } tane daha.
+
 ## Temalar (ADR-0068 2. basamak, docs/ux/themes.md)
 theme-editor-title = Tema
 theme-edit = Temayı düzenle

@@ -914,6 +914,80 @@ layout-error-newer = This layout was made by a newer version. Update to use it.
 layout-error-too-deep = This layout is nested too deeply (at most { $max } levels).
 layout-error-too-many = This layout has too many panes (at most { $max }).
 
+## Keyboard: commands and their keys (ADR-0068 rung 4, docs/ux/keybindings.md)
+palette-keyboard = Keyboard settings
+keys-cmd-agents = Show or hide the agent list
+keys-cmd-tab = Go to tab { $n }
+keys-cmd-side = Side panel, place { $n }
+keys-cmd-side-named = Side panel: { $name }
+keys-cmd-preset = Layout: { $name }
+keys-cmd-maximize = Maximize or restore the pane
+keys-title = Keyboard
+keys-desc = Every action is a command in the command palette. Give it the keys you like; they are kept in this browser.
+keys-changed-count = { $count ->
+    [one] { $count } changed
+   *[other] { $count } changed
+}
+keys-search = Find a command or a key
+keys-import = Import…
+keys-export = Export
+keys-reset-all = Reset all
+keys-unreadable = The keys kept in this browser could not be read, so the default keys are in use.
+keys-unknown = { $count ->
+    [one] Your keys name a command this window does not have. It is kept, and does nothing here:
+   *[other] Your keys name { $count } commands this window does not have. They are kept, and do nothing here:
+}
+keys-list = Commands and their keys
+keys-none-match = No command matches.
+keys-fixed-title = Keys that stay as they are
+keys-fixed-safe-mode = Safe mode
+keys-fixed-navigation = Moving around the window
+keys-fixed-terminal = A terminal's copy, find and paste
+keys-fixed-editing = Editing text
+keys-terminal-note = While a terminal has the keyboard, its program gets your keys. Only keys it can never receive still reach the window: ⌘ keys, and Ctrl+Shift with a letter (Ctrl+Shift+K opens the command palette from a terminal).
+keys-context-anywhere = Anywhere
+keys-context-window = In the window
+keys-context-pane = The pane in focus
+keys-context-tabs = The tabs in focus
+keys-context-side = The side panel
+keys-changed = Changed
+keys-press = Press the keys…
+keys-press-second = { $key }, then a second key, or wait
+keys-no-keys = No keys
+keys-fixed = Fixed
+keys-change = Change
+keys-change-named = Change the keys of { $name }
+keys-recording = Listening…
+keys-clear = Clear
+keys-clear-named = Clear the keys of { $name }
+keys-reset = Reset
+keys-reset-named = Give { $name } its default keys back
+keys-conflict-same = { $key } is also the key of “{ $name }”.
+keys-conflict-prefix = { $key } and “{ $name }” share their first key, so one of them cannot act.
+keys-refused-fixed = { $key } stays as it is ({ $reason }).
+keys-reset-title = Reset every key?
+keys-reset-body = Every command gets its default keys back, and the changes kept in this browser are removed.
+keys-reset-keep = Keep my keys
+keys-reset-confirm = Reset all
+keys-import-title = Import keys
+keys-import-paste = Paste a keybindings file (JSON)
+keys-import-file = Or choose a file
+keys-import-refused = This file was not imported:
+keys-error-json = This is not valid JSON.
+keys-error-too-big = This file is too large (at most 64 KB).
+keys-error-shape = This is not a keybindings file this window can read.
+keys-error-newer = This file was made by a newer version. Update to use it.
+keys-error-too-many = This file lists too many commands (at most 200).
+keys-error-field = Unknown field “{ $name }”.
+keys-error-command = “{ $command }” is not a command name.
+keys-error-request = “{ $command }”: a request is answered on its card, never with a key.
+keys-error-fixed-command = “{ $command }” keeps its keys; they cannot be changed.
+keys-error-twice = “{ $command }” is listed twice.
+keys-error-too-many-keys = “{ $command }” has too many keys (at most 4).
+keys-error-key = “{ $key }” for { $command } is not a key this window knows.
+keys-error-fixed-key = { $key } for { $command } stays as it is ({ $reason }).
+keys-error-more = …and { $count } more.
+
 ## Themes (ADR-0068 rung 2, docs/ux/themes.md)
 theme-editor-title = Theme
 theme-edit = Edit theme
