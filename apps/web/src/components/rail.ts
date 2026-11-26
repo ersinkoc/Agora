@@ -1,6 +1,7 @@
 import type { IconName } from './Icon';
 
-// The right panel's icon rail: which subjects it offers, in what order, the shortcut of each, and the one remembered between visits.
+// The right panel's icon rail: which subjects it offers, in what order, and the one remembered between visits. Its keys (Alt+Shift+1 to 5
+// by place) are the side panel's commands, keys/commands.ts.
 // Pure, so it is tested without a page.
 
 export type RailTab = 'needs' | 'changes' | 'board' | 'messages' | 'usage';
@@ -9,7 +10,7 @@ export interface RailItem { id: RailTab; icon: IconName; labelKey: string; badge
 
 export interface RailCounts { needs: number; changed: number; messages: number; hasBoard: boolean; hasUsage: boolean }
 
-// The rail's items, in a fixed order so a shortcut always means the same subject. Board and Usage appear only when there is something.
+// The rail's items, in a fixed order so a key always means the same place. Board and Usage appear only when there is something.
 export function railItems(c: RailCounts): RailItem[] {
   return [
     { id: 'needs', icon: 'bell', labelKey: 'attention-title', badge: c.needs, alert: true },
@@ -22,15 +23,6 @@ export function railItems(c: RailCounts): RailItem[] {
 
 // A badge reads as a number up to 99, then "99+": a long count never widens the rail.
 export const badgeText = (n: number): string => (n > 99 ? '99+' : String(n));
-
-// Alt+Shift+1 to 5 open the subject at that place of the rail; the same key again closes the panel. Uses the physical key (`code`), since
-// Shift changes what `key` says on most layouts.
-export function shortcutIndex(e: Pick<KeyboardEvent, 'altKey' | 'shiftKey' | 'ctrlKey' | 'metaKey' | 'code'>): number | undefined {
-  if (!e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey) return undefined;
-  const m = /^Digit([1-9])$/.exec(e.code);
-  return m ? Number(m[1]) - 1 : undefined;
-}
-export const shortcutLabel = (i: number): string => `Alt+Shift+${i + 1}`;
 
 // The remembered subject is only used while the rail still offers it (a board that went away falls back to Needs you).
 export function resolveTab(wanted: RailTab | undefined, items: readonly RailItem[]): RailTab {

@@ -8,7 +8,7 @@ The centre of the window is a **layout**: a tree of splits, tab groups and panes
 layout is plain, versioned JSON so every client (web today; the terminal client and any native client later, ADR-0068 rung 5–6)
 reads and writes the same file. This page is the format's specification and the web window's behaviour. Rung 1 covers the
 model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry (rung 3) is under "Panels" below;
-keybindings are a later rung and are not described here.
+keybindings and the commands that drive the layout from the keyboard are `keybindings.md` (rung 4).
 
 ## Format, version 1
 
@@ -212,7 +212,7 @@ Focus + strip:
 
 ## The web window
 
-- **Layout menu** (title bar): the six presets, Maximize/Restore (the pane in focus), Save layout as…, Saved layouts…
+- **Layout menu** (title bar; each item is also a command in the palette, with keys of your choice, `keybindings.md`): the six presets, Maximize/Restore (the pane in focus), Save layout as…, Saved layouts…
   (use, rename, delete), Export (downloads `layout.json`), Import… (paste or choose a file; errors are shown, nothing changes),
   Reset layout.
 - **Pane bar**: a tab group shows its tabs (drag a tab, arrows/Home/End move, Delete closes), each agent's tab with its avatar,

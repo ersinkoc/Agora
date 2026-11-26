@@ -17,7 +17,9 @@ import { TeamChat } from './TeamChat';
 
 import { PairCards, type PairingUi } from './Pairing';
 import { pathParts } from '../net/paneTools';
-import { badgeText, railItems, railLabel, resolveTab, shortcutIndex, shortcutLabel, type RailTab } from './rail';
+import { badgeText, railItems, railLabel, resolveTab, type RailTab } from './rail';
+import { useCommands } from '../keys/registry';
+import { ariaKey, shownKey, useKeymap } from '../keys/view';
 
 type Tab = RailTab;
 
@@ -66,15 +68,13 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
   const seen = useRef(needs);
   useEffect(() => { if (needs > seen.current) onTab('needs', false); seen.current = needs; }, [needs]); // eslint-disable-line react-hooks/exhaustive-deps
   const rail = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      const i = shortcutIndex(e);
-      const item = i === undefined ? undefined : items[i];
-      if (item) { e.preventDefault(); press(item.id); }
-    };
-    window.addEventListener('keydown', on);
-    return () => window.removeEventListener('keydown', on);
-  });
+  // The side panel's commands (docs/ux/keybindings.md): Alt+Shift+1 to 5 by default open the subject at that place of the rail; the
+  // same key again closes the panel.
+  useCommands(Object.fromEntries(Array.from({ length: 5 }, (_, i) => {
+    const item = items[i];
+    return [`side.place-${i + 1}`, { run: () => { if (item) press(item.id); }, available: !!item, label: item ? t('keys-cmd-side-named', { name: t(item.labelKey) }) : undefined }];
+  })));
+  const keymap = useKeymap();
   // The arrow keys walk the rail (a vertical tab list: Up and Down, Home and End); Escape closes the drawer and returns to its icon.
   const railKey = (e: ReactKeyboardEvent<HTMLElement>) => {
     const tabs = [...(rail.current?.querySelectorAll<HTMLElement>('[role=tab]') ?? [])];
@@ -100,8 +100,9 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
         const text = t(x.labelKey);
         const selected = open && active === x.id;
         const count = x.badge ? ` (${x.badge})` : '';
+        const key = shownKey(keymap, `side.place-${i + 1}`);
         return <button key={x.id} id={`rail-${x.id}`} type="button" role="tab" aria-selected={selected} aria-controls={selected ? 'inspector-panel' : undefined} aria-label={railLabel(text, x.badge)}
-          aria-keyshortcuts={shortcutLabel(i)} tabIndex={selected || (!open && active === x.id) ? 0 : -1} data-tip={`${text}${count} · ${shortcutLabel(i)}`}
+          aria-keyshortcuts={ariaKey(keymap, `side.place-${i + 1}`)} tabIndex={selected || (!open && active === x.id) ? 0 : -1} data-tip={key ? `${text}${count} · ${key}` : `${text}${count}`}
           className="rail__btn" onClick={() => press(x.id)}>
           <Icon name={x.icon} className="size-[1.125rem]" />
           {!!x.badge && <span aria-hidden className={`rail__badge${x.alert ? ' rail__badge--alert' : ''}`}>{badgeText(x.badge)}</span>}
