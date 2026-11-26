@@ -11,7 +11,9 @@ cli-usage =
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--setting KİMLİK=DEĞER]... [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
-      agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
+      agora agent prompt AJAN_KİMLİĞİ METİN... [--wait [--timeout SANİYE]] [--force] [--socket YOL]
+      agora agent wait AJAN_KİMLİĞİ [--until working|blocked|idle|done|exited[,...]] [--timeout SANİYE] [--socket YOL]
+      agora events [--agent AJAN_KİMLİĞİ] [--json] [--socket YOL]
       agora agent resume AJAN_KİMLİĞİ [--again] [--socket YOL]
       agora agent list [--socket YOL]
       agora agent kinds [--socket YOL]
@@ -56,6 +58,19 @@ cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ 
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-prompted = İstem { $agent_id } ajanına gönderildi
+cli-agent-prompt-blocked-hint = Önce ajana yanıt verin ya da metni yine de yazmak için --force ekleyin.
+cli-agent-wait-bad-state = --until virgülle ayrılmış durumlar alır: working, blocked, idle, done, exited.
+cli-agent-wait-blocked = { $agent_id } ajanı sizi bekliyor: bir yanıt bekliyor.
+cli-agent-wait-exited = { $agent_id } ajanı artık çalışmıyor (son durumu: { $state }).
+cli-agent-wait-timeout = { $agent_id } ajanı { $seconds } sn beklendi, bekleme bırakıldı; durumu: { $state }.
+cli-event-present = { $agent_id } ({ $kind }): { $state }
+cli-event-added = { $agent_id } ({ $kind }) göründü: { $state }
+cli-event-state = { $agent_id }: { $previous } → { $state }
+cli-event-exited = { $agent_id } durdu (son durumu: { $state })
+cli-event-running = { $agent_id } yeniden çalışıyor: { $state }
+cli-event-restarted = { $agent_id } yeniden başlatıldı (şimdiye dek { $restarts } kez)
+cli-event-interrupted = { $agent_id } yarıda kaldı (son durumu: { $state })
+cli-event-removed = { $agent_id } artık listede yok
 cli-agent-resumed = { $agent_id } ajanı { $worktree } içinde devam ettirildi
 cli-agent-started-again = { $agent_id } ajanı { $worktree } içinde yeniden başlatıldı (yeni bir konuşma)
 cli-agent-list-empty = Bu düğümde ajan yok.

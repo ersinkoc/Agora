@@ -64,6 +64,9 @@ For an SSH-only machine, the hub can maintain a reverse tunnel and install and e
   On Linux and macOS, unconfined terminal and structured agents launched through the background holder
   can also survive a node restart. Windows and confined agents rely on session resume when available.
   [Restart and resume behavior](docs/getting-started.md)
+- **Script it.** `agora agent prompt ID TEXT --wait` waits for the turn and exits with a code for idle, blocked
+  (it needs you), exited or timeout; `agora agent wait ID --until blocked` and `agora events --json` follow agents
+  from a shell. [Script agents from a shell](docs/getting-started.md#script-agents-from-a-shell)
 - **Choose a client.** The embedded web app works on desktop and phone-sized screens and ships in English
   and Turkish. The TUI covers terminals, chat, and approvals. The Tauri desktop app wraps the web app and
   pins the hub CA. [Desktop setup](apps/desktop/README.md)
