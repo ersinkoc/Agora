@@ -1339,14 +1339,27 @@ impl App {
                 Style::default()
             };
             let needs_you = s.rows.iter().any(|r| r.id == *id && r.needs_you);
-            spans.push(Span::styled(
-                tab_label(i, id, s.rows),
-                if needs_you && i != self.active {
-                    attention
-                } else {
-                    style
-                },
-            ));
+            let label = tab_label(i, id, s.rows);
+            // The floor (ADR-0113 decision 3, audit F1804): under a theme the tab in front is in the accent, but its "!" keeps the
+            // "needs you" style on the terminal's own background. Without a theme it is inverted with the rest, as it always was.
+            let mark_at = label.find("! ").filter(|_| needs_you && i == self.active);
+            match mark_at.filter(|_| self.look.is_some()) {
+                Some(at) => {
+                    let (head, rest) = label.split_at(at);
+                    let (mark, tail) = rest.split_at(2);
+                    spans.push(Span::styled(head.to_string(), style));
+                    spans.push(Span::styled(mark.to_string(), attention));
+                    spans.push(Span::styled(tail.to_string(), style));
+                }
+                None => spans.push(Span::styled(
+                    label,
+                    if needs_you && i != self.active {
+                        attention
+                    } else {
+                        style
+                    },
+                )),
+            }
             spans.push(Span::raw(" "));
         }
         // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
@@ -4639,10 +4652,20 @@ mod theme_tests {
 
     /// The window with two tabs open (the one in front does not need the user, the other does) and a request's box on top.
     fn frame(look: Option<Shell>, colors: ColorMode, dialog: Option<&[String]>) -> (App, Buffer) {
+        frame_in_front(look, colors, dialog, 0)
+    }
+
+    /// [`frame`] with tab `active` in front (1: the tab of the agent that needs the user).
+    fn frame_in_front(
+        look: Option<Shell>,
+        colors: ColorMode,
+        dialog: Option<&[String]>,
+        active: usize,
+    ) -> (App, Buffer) {
         let rows = rows();
         let app = App {
             tabs: vec!["mac/agent-1".into(), "mac/agent-3".into()],
-            active: 0,
+            active,
             selected: 1,
             look,
             ..App::default()
@@ -4750,6 +4773,43 @@ mod theme_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Audit F1804: the tab in front whose agent needs the user keeps its "!" in the "needs you" style on the terminal's own background
+    /// under every theme (the floor); the rest of its label is in the accent, so it still reads as the tab in front. Without a theme it
+    /// is drawn as it always was.
+    #[test]
+    fn the_needs_you_mark_of_the_tab_in_front_keeps_the_floor_under_every_theme() {
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let (app, plain) = frame_in_front(None, colors, None, 1);
+            let tab_y = app.areas(AREA).tabs.y;
+            let cells = cells_of(&plain, tab_y, "2 ! shell");
+            let (mark, name) = (cells[2], cells[4]);
+            let attention = attention_style(colors);
+            for b in built_ins() {
+                let look = shell(b.id, colors);
+                let (_, themed) = frame_in_front(Some(look), colors, None, 1);
+                let c = &themed[mark];
+                assert_eq!(
+                    (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
+                    ("!", attention.fg.unwrap(), Color::Reset, true),
+                    "{} {colors:?}: the mark of the tab in front",
+                    b.id
+                );
+                assert_eq!(
+                    themed[name].bg,
+                    look.styles.chosen.bg.unwrap(),
+                    "{} {colors:?}: the tab in front",
+                    b.id
+                );
+            }
+            // Without a theme, the tab in front is inverted as before themes, its mark too.
+            assert!(plain[mark].modifier.contains(Modifier::REVERSED));
+            assert_eq!(
+                (plain[mark].fg, plain[mark].bg),
+                (Color::Reset, Color::Reset)
+            );
         }
     }
 

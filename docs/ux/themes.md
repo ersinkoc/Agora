@@ -391,7 +391,7 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
 - **The floor.** The request box (the box that asks for an answer, `app::dialog`) is cleared to the terminal's own colours and
   drawn as before, whatever the theme; every "needs you" mark (the `!` and the words in the agents list, a waiting tab's label,
   the tab row's count, the welcome's list, the theme list's banner) keeps its fixed colour and bold and sits on the terminal's own
-  background, so no theme's surface can hide it. A test compares those cells, character, colours and attributes, with and
+  background, so no theme's surface can hide it; on the tab in front that is its `!`, the rest of its label being in the accent. A test compares those cells, character, colours and attributes, with and
   without each built-in theme and the sample file, in all three colour modes. The other screens (the board, files, review, the
   folder picker and the plain list when the output is piped) still draw in the terminal's own colours.
 
