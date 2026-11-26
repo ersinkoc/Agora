@@ -36,6 +36,7 @@ cli-usage =
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub themes on|off|status | update [--url URL] [--hub-dir DIR]
+      agora hub plugins on|off|status | update [--url URL] | key set FILE | install ID [--yes] | upgrade ID [--yes] [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
@@ -357,6 +358,67 @@ cli-hub-themes-refused-total = the catalog's themes together would be larger tha
 cli-hub-themes-refused-hash = its file does not have the SHA-256 the index gives.
 cli-hub-themes-refused-not-text = its file is not UTF-8 text.
 cli-hub-themes-refused-theme = it is not a theme Agora can use:
+cli-hub-plugins-on = The plugin catalog is on: windows list its plugins as available, and you can install them on this machine with `agora hub plugins install ID`. `agora hub plugins off` hides it again.
+cli-hub-plugins-off = The plugin catalog is off: windows show no catalog and nothing is installed from it. `agora hub plugins on` turns it on.
+cli-hub-plugins-key-is = Catalog key: { $fingerprint }. Every index is checked against it before anything in it is used.
+cli-hub-plugins-no-key = No catalog key is set, so the catalog cannot be used. Set the key the catalog publishes with `agora hub plugins key set FILE` (its .pub file; compare the fingerprint with the one the project publishes).
+cli-hub-plugins-key-set = Catalog key set: { $fingerprint }. Compare it with the fingerprint the project publishes. If it replaced another key, the catalog fetched under the old one is forgotten: run `agora hub plugins update` again.
+cli-hub-plugins-key-private = This is a private key. Give the public key (the .pub file); nothing was kept.
+cli-hub-plugins-key-invalid = This is not one ssh-ed25519 public key (an `ssh-ed25519 AAAA…` line). Nothing was kept.
+cli-hub-plugins-key-unreadable = Could not read { $file }.
+cli-hub-plugins-never-updated = Nothing fetched yet. `agora hub plugins update --url URL` fetches the catalog's index (the project's catalog repository does not exist yet, so give its address).
+cli-hub-plugins-updated-at = { $count } plugins (index serial { $serial }), fetched { $when } from { $url }.
+cli-hub-plugins-no-url = No catalog address yet. Give the address of the catalog's index.json with `--url` (the project's catalog repository does not exist yet); later updates use it again.
+cli-hub-plugins-updated = Plugin catalog updated: { $kept } plugins kept, { $refused } refused (index serial { $serial }). Nothing was installed or upgraded.
+cli-hub-plugins-newer = The catalog has a newer { $id }: { $old } → { $new }. `agora hub plugins upgrade { $id }` shows what changes and asks before it upgrades.
+cli-hub-plugins-still-off = The catalog is off, so windows do not list it and nothing is installed from it. `agora hub plugins on` turns it on.
+cli-hub-plugins-failed = Could not update the plugin catalog: { $reason } Nothing was changed.
+cli-hub-plugins-refused = Refused { $id }: { $reason }
+cli-hub-plugins-refused-field = its entry in the index has no valid { $field }.
+cli-hub-plugins-refused-unknown-field = its entry in the index has a field this version does not know: { $field }.
+cli-hub-plugins-refused-duplicate = another plugin in the index has the same id.
+cli-hub-plugins-index = the index { $reason }
+cli-hub-plugins-signature-fetch = the index's signature (index.json.sig) { $reason }
+cli-hub-plugins-fetch-address = has no usable address: it must be https:// (plain http:// only to this machine).
+cli-hub-plugins-fetch-fetch = could not be reached.
+cli-hub-plugins-fetch-timeout = took too long to answer.
+cli-hub-plugins-fetch-status = answered with status { $status } (a redirect is not followed: give the final address).
+cli-hub-plugins-fetch-too-large = is larger than { $max } KiB.
+cli-hub-plugins-index-json = is not JSON.
+cli-hub-plugins-index-format = is not a plugin catalog index (it needs "agora-plugin-catalog": 1, a "serial" and a "plugins" list).
+cli-hub-plugins-index-newer = is in a newer format than this version of Agora reads. Update Agora.
+cli-hub-plugins-index-unknown-field = has a field this version does not know: { $field }.
+cli-hub-plugins-index-too-many = lists more than { $max } plugins.
+cli-hub-plugins-signature-malformed = the index's signature is not an SSH signature this version reads.
+cli-hub-plugins-signature-wrong-key = the index is signed by another key than the catalog key set on this hub.
+cli-hub-plugins-signature-namespace = the index's signature was made for another use, not for the plugin catalog.
+cli-hub-plugins-signature-invalid = the index's signature does not match it: the index or its signature was changed after it was signed.
+cli-hub-plugins-rollback = the index is older (serial { $offered }) than the last one this hub took (serial { $seen }), so it may name versions since withdrawn.
+cli-hub-plugins-not-installed = Nothing was installed: { $reason }
+cli-hub-plugins-line = {"  "}{ $text }
+cli-hub-plugins-install-asks = { $id } asks to see: { $capabilities }
+cli-hub-plugins-install-what = { $name } { $version }, by { $author }, licence { $licence }, from the plugin catalog; its package was checked against the signed index.
+cli-hub-plugins-upgrade-asks = What { $id } asks to see changes:
+cli-hub-plugins-caps-added = asks to see more: { $capabilities }
+cli-hub-plugins-caps-removed = no longer asks for: { $capabilities }
+cli-hub-plugins-caps-same = asks for nothing new
+cli-hub-plugins-caps-kept = still asks for: { $capabilities }
+cli-hub-plugins-upgrade-version = { $name } { $old } → { $new }, by { $author }, licence { $licence }; its package was checked against the signed index.
+cli-hub-plugins-confirm = Install it on this hub? [y/N]
+cli-hub-plugins-needs-yes = Nothing was installed: there is no terminal to ask in. Add --yes once you have read the above.
+cli-hub-plugins-declined = Nothing was installed.
+cli-hub-plugins-installed = Installed { $name } { $version } ({ $id }) from the catalog. Each person chooses in the window whether to show it and what it may see.
+cli-hub-plugins-upgraded = Upgraded { $name } ({ $id }) to { $version }. Anyone who allowed the old version is asked again in the window if this one asks to see more.
+cli-hub-plugins-install-off = the plugin catalog is off. `agora hub plugins on` turns it on.
+cli-hub-plugins-install-not-verified = the catalog has not been fetched under the key set now. Run `agora hub plugins update` first.
+cli-hub-plugins-install-not-in-catalog = the catalog has no plugin { $id }. `agora hub plugins update` fetches its newest index.
+cli-hub-plugins-install-installed = { $id } { $version } is installed already. `agora hub plugins upgrade { $id }` takes a newer version.
+cli-hub-plugins-install-not-installed = { $id } is not installed. `agora hub plugins install { $id }` installs it.
+cli-hub-plugins-install-not-newer = the catalog's { $id } ({ $offered }) is not newer than the one installed ({ $installed }).
+cli-hub-plugins-install-fetch = its package { $reason }
+cli-hub-plugins-install-size = its package does not have the size the signed index gives.
+cli-hub-plugins-install-hash = its package does not have the SHA-256 the signed index gives: it was changed after the index was signed.
+cli-hub-plugins-install-mismatch = its package's description says another { $field } than the signed index.
 cli-hub-ssh-started = Keeping SSH tunnels open to { $count } machine(s) from { $file }.
 cli-hub-ssh-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `NAME DESTINATION [PORT]`.
 cli-hub-ssh-none = No SSH machines yet. Add one with "agora hub ssh add NAME DESTINATION".

@@ -36,6 +36,7 @@ cli-usage =
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub themes on|off|status | update [--url URL] [--hub-dir DIR]
+      agora hub plugins on|off|status | update [--url URL] | key set FILE | install ID [--yes] | upgrade ID [--yes] [--hub-dir DIR]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
@@ -350,6 +351,67 @@ cli-hub-themes-refused-total = kataloğun temaları birlikte { $max } KiB'tan b�
 cli-hub-themes-refused-hash = dosyası, dizinin verdiği SHA-256 değerine sahip değil.
 cli-hub-themes-refused-not-text = dosyası UTF-8 metin değil.
 cli-hub-themes-refused-theme = Agora'nın kullanabileceği bir tema değil:
+cli-hub-plugins-on = Eklenti kataloğu açık: pencereler eklentilerini kullanılabilir olarak listeler; onları bu makinede `agora hub plugins install ID` ile kurabilirsiniz. `agora hub plugins off` onu yeniden gizler.
+cli-hub-plugins-off = Eklenti kataloğu kapalı: pencereler katalog göstermez ve ondan hiçbir şey kurulmaz. `agora hub plugins on` onu açar.
+cli-hub-plugins-key-is = Katalog anahtarı: { $fingerprint }. Her dizin, içindeki bir şey kullanılmadan önce ona karşı denetlenir.
+cli-hub-plugins-no-key = Katalog anahtarı ayarlanmamış, bu yüzden katalog kullanılamaz. Kataloğun yayımladığı anahtarı `agora hub plugins key set FILE` ile ayarlayın (.pub dosyası; parmak izini projenin yayımladığıyla karşılaştırın).
+cli-hub-plugins-key-set = Katalog anahtarı ayarlandı: { $fingerprint }. Onu projenin yayımladığı parmak iziyle karşılaştırın. Başka bir anahtarın yerini aldıysa eskisiyle getirilen katalog unutuldu: `agora hub plugins update` komutunu yeniden çalıştırın.
+cli-hub-plugins-key-private = Bu bir özel anahtar. Açık anahtarı (.pub dosyasını) verin; hiçbir şey tutulmadı.
+cli-hub-plugins-key-invalid = Bu tek bir ssh-ed25519 açık anahtarı (bir `ssh-ed25519 AAAA…` satırı) değil. Hiçbir şey tutulmadı.
+cli-hub-plugins-key-unreadable = { $file } okunamadı.
+cli-hub-plugins-never-updated = Henüz bir şey getirilmedi. `agora hub plugins update --url URL` kataloğun dizinini getirir (projenin katalog deposu henüz yok, bu yüzden adresini verin).
+cli-hub-plugins-updated-at = { $count } eklenti (dizin seri numarası { $serial }), { $when } tarihinde { $url } adresinden getirildi.
+cli-hub-plugins-no-url = Henüz katalog adresi yok. Kataloğun index.json adresini `--url` ile verin (projenin katalog deposu henüz yok); sonraki güncellemeler onu yeniden kullanır.
+cli-hub-plugins-updated = Eklenti kataloğu güncellendi: { $kept } eklenti tutuldu, { $refused } reddedildi (dizin seri numarası { $serial }). Hiçbir şey kurulmadı ya da yükseltilmedi.
+cli-hub-plugins-newer = Katalogda { $id } için daha yeni bir sürüm var: { $old } → { $new }. `agora hub plugins upgrade { $id }` neyin değiştiğini gösterir ve yükseltmeden önce sorar.
+cli-hub-plugins-still-off = Katalog kapalı, bu yüzden pencereler onu listelemez ve ondan hiçbir şey kurulmaz. `agora hub plugins on` onu açar.
+cli-hub-plugins-failed = Eklenti kataloğu güncellenemedi: { $reason } Hiçbir şey değiştirilmedi.
+cli-hub-plugins-refused = { $id } reddedildi: { $reason }
+cli-hub-plugins-refused-field = dizindeki kaydında geçerli bir { $field } yok.
+cli-hub-plugins-refused-unknown-field = dizindeki kaydında bu sürümün bilmediği bir alan var: { $field }.
+cli-hub-plugins-refused-duplicate = dizindeki başka bir eklentinin kimliği aynı.
+cli-hub-plugins-index = dizin: { $reason }
+cli-hub-plugins-signature-fetch = dizinin imzası (index.json.sig): { $reason }
+cli-hub-plugins-fetch-address = kullanılabilir bir adresi yok: https:// olmalı (düz http:// yalnızca bu makineye).
+cli-hub-plugins-fetch-fetch = ulaşılamadı.
+cli-hub-plugins-fetch-timeout = yanıt vermesi çok uzun sürdü.
+cli-hub-plugins-fetch-status = { $status } durum koduyla yanıt verdi (yönlendirme izlenmez: son adresi verin).
+cli-hub-plugins-fetch-too-large = { $max } KiB'tan büyük.
+cli-hub-plugins-index-json = JSON değil.
+cli-hub-plugins-index-format = bir eklenti kataloğu dizini değil ("agora-plugin-catalog": 1, bir "serial" ve bir "plugins" listesi gerekir).
+cli-hub-plugins-index-newer = Agora'nın bu sürümünün okuduğundan daha yeni bir biçimde. Agora'yı güncelleyin.
+cli-hub-plugins-index-unknown-field = bu sürümün bilmediği bir alan içeriyor: { $field }.
+cli-hub-plugins-index-too-many = { $max } eklentiden fazlasını listeliyor.
+cli-hub-plugins-signature-malformed = dizinin imzası bu sürümün okuduğu bir SSH imzası değil.
+cli-hub-plugins-signature-wrong-key = dizin, bu hub'da ayarlı katalog anahtarından başka bir anahtarla imzalanmış.
+cli-hub-plugins-signature-namespace = dizinin imzası eklenti kataloğu için değil, başka bir kullanım için yapılmış.
+cli-hub-plugins-signature-invalid = dizinin imzası ona uymuyor: dizin ya da imzası imzalandıktan sonra değiştirilmiş.
+cli-hub-plugins-rollback = dizin, bu hub'ın son aldığından (seri { $seen }) daha eski (seri { $offered }); o zamandan beri geri çekilmiş sürümleri adlandırıyor olabilir.
+cli-hub-plugins-not-installed = Hiçbir şey kurulmadı: { $reason }
+cli-hub-plugins-line = {"  "}{ $text }
+cli-hub-plugins-install-asks = { $id } görmek istediği: { $capabilities }
+cli-hub-plugins-install-what = { $name } { $version }, yapan { $author }, lisans { $licence }, eklenti kataloğundan; paketi imzalı dizine karşı denetlendi.
+cli-hub-plugins-upgrade-asks = { $id } için görmek istedikleri değişiyor:
+cli-hub-plugins-caps-added = daha fazlasını görmek istiyor: { $capabilities }
+cli-hub-plugins-caps-removed = artık istemiyor: { $capabilities }
+cli-hub-plugins-caps-same = yeni bir şey istemiyor
+cli-hub-plugins-caps-kept = hâlâ istiyor: { $capabilities }
+cli-hub-plugins-upgrade-version = { $name } { $old } → { $new }, yapan { $author }, lisans { $licence }; paketi imzalı dizine karşı denetlendi.
+cli-hub-plugins-confirm = Bu hub'a kurulsun mu? [e/H]
+cli-hub-plugins-needs-yes = Hiçbir şey kurulmadı: sorulacak bir terminal yok. Yukarıdakileri okuduktan sonra --yes ekleyin.
+cli-hub-plugins-declined = Hiçbir şey kurulmadı.
+cli-hub-plugins-installed = { $name } { $version } ({ $id }) katalogdan kuruldu. Her kişi pencerede onu gösterip göstermeyeceğini ve neyi görebileceğini kendisi seçer.
+cli-hub-plugins-upgraded = { $name } ({ $id }) { $version } sürümüne yükseltildi. Eski sürüme izin veren herkese, bu sürüm daha fazlasını görmek isterse pencerede yeniden sorulur.
+cli-hub-plugins-install-off = eklenti kataloğu kapalı. `agora hub plugins on` onu açar.
+cli-hub-plugins-install-not-verified = katalog şu anki anahtarla getirilmedi. Önce `agora hub plugins update` çalıştırın.
+cli-hub-plugins-install-not-in-catalog = katalogda { $id } adlı bir eklenti yok. `agora hub plugins update` en yeni dizinini getirir.
+cli-hub-plugins-install-installed = { $id } { $version } zaten kurulu. `agora hub plugins upgrade { $id }` daha yeni bir sürümü alır.
+cli-hub-plugins-install-not-installed = { $id } kurulu değil. `agora hub plugins install { $id }` onu kurar.
+cli-hub-plugins-install-not-newer = katalogdaki { $id } ({ $offered }), kurulu olandan ({ $installed }) daha yeni değil.
+cli-hub-plugins-install-fetch = paketi: { $reason }
+cli-hub-plugins-install-size = paketi imzalı dizinin verdiği boyutta değil.
+cli-hub-plugins-install-hash = paketi imzalı dizinin verdiği SHA-256'ya sahip değil: dizin imzalandıktan sonra değiştirilmiş.
+cli-hub-plugins-install-mismatch = paketinin açıklaması imzalı dizinden başka bir { $field } söylüyor.
 cli-hub-ssh-started = { $file } dosyasındaki { $count } makineye SSH tünelleri açık tutuluyor.
 cli-hub-ssh-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `AD HEDEF [PORT]` olmalı.
 cli-hub-ssh-none = Henüz SSH makinesi yok. "agora hub ssh add AD HEDEF" ile ekleyin.
