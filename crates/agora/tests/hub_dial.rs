@@ -3142,8 +3142,9 @@ flag = ["--mcp-config", "{config_file}"]
                 .then(|| text.lines().map(str::to_string).collect())
         })
     };
+    // The fake agent writes its arguments file line by line: wait for the last one, not the first.
     wait("the agent to report its arguments", || {
-        reported("--model").is_some()
+        reported("--model").is_some_and(|args| args.iter().any(|a| a == "high"))
     });
     let got = reported("--model").unwrap();
     let at = got.iter().position(|a| a == "--model").unwrap();
