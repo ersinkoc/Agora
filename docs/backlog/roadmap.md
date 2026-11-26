@@ -173,7 +173,10 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 - [ ] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
   agent can write a theme, a layout or a plugin for its person
 - [ ] **M6.6 Images in terminals** (G11, **decision**): kitty graphics and sixel
-- [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications
+- [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications.
+  The terminal client's half is done (the bell, a desktop notification through the terminal, the finished mark;
+  [main-window.md](../ux/main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)); the desktop app's own notifications are not
+  built
 
 ## M7. Accepted, not built (from the 2026-11-26 sweep of every Accepted ADR)
 

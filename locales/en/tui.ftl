@@ -670,3 +670,16 @@ tui-keys-fixed-editing = editing text
 tui-keys-kept-answers = { $key } for { $command } is not used here: in the terminal client it answers a request.
 tui-keys-kept-moving = { $key } for { $command } is not used here: in the terminal client it moves around the window.
 tui-keys-unknown = Kept for the web window, not used here: { $commands }
+
+# M6.7: the bell and desktop notification when an agent finishes or needs you, and the finished mark.
+tui-alert-title = Agora
+tui-alert-finished = { $agent } finished
+tui-alert-needs-you = { $agent } needs you
+tui-alert-finished-unnamed = An agent finished
+tui-alert-needs-you-unnamed = A request needs you
+tui-app-cmd-bell-off = Turn the bell off (when an agent finishes or needs you)
+tui-app-cmd-bell-on = Turn the bell on (when an agent finishes or needs you)
+tui-bell-on = The bell rings when an agent finishes or needs you.
+tui-bell-off = The bell is off. The list still marks agents that finish or need you.
+tui-settings-not-kept = It could not be kept in { $file }, so it holds until you quit.
+tui-finished-unseen = ✓ Finished while you were away. Open it to clear this mark.

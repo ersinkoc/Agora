@@ -12,6 +12,8 @@
 - **Notifications:** per trigger and channel, quiet hours. In the web window today: This device → **Needs you** (a card, a banner or
   nothing extra, and system notifications) and This device → **Sounds** (off by default; a volume, each sound on or off, also while the
   window is in front; a muted agent from its menu), both kept in this browser only ([main-window.md](main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)).
+  In the terminal client: `tui-settings` in the Agora folder, `sound` (the bell, on by default; also the palette's **Turn the bell
+  off**) and `desktop_notify` (a notification through the terminal, off by default) (same section of main-window.md).
 - **Appearance:** theme (`themes.md`: a theme for light and one for dark, the theme editor), density, terminal font. In
   the web window today: the title bar's scheme buttons, This device → Appearance, and **Edit theme** in the command palette.
 - **Keyboard:** every command and its keys (`keybindings.md`): change, clear, reset, import and export the keybindings file. In the

@@ -633,3 +633,16 @@ tui-keys-fixed-editing = metin düzenleme
 tui-keys-kept-answers = { $command } için { $key } burada kullanılmıyor: terminal istemcisinde bir isteği yanıtlar.
 tui-keys-kept-moving = { $command } için { $key } burada kullanılmıyor: terminal istemcisinde pencerede gezinir.
 tui-keys-unknown = Web penceresi için saklandı, burada kullanılmıyor: { $commands }
+
+# M6.7: bir ajan bitirdiğinde ya da sizi beklediğinde zil ve masaüstü bildirimi, bitti işareti.
+tui-alert-title = Agora
+tui-alert-finished = { $agent } bitirdi
+tui-alert-needs-you = { $agent } sizi bekliyor
+tui-alert-finished-unnamed = Bir ajan bitirdi
+tui-alert-needs-you-unnamed = Bir istek sizi bekliyor
+tui-app-cmd-bell-off = Zili kapat (bir ajan bitirdiğinde ya da sizi beklediğinde)
+tui-app-cmd-bell-on = Zili aç (bir ajan bitirdiğinde ya da sizi beklediğinde)
+tui-bell-on = Bir ajan bitirdiğinde ya da sizi beklediğinde zil çalar.
+tui-bell-off = Zil kapalı. Liste, biten ya da sizi bekleyen ajanları yine işaretler.
+tui-settings-not-kept = { $file } dosyasına kaydedilemedi; çıkana kadar geçerli.
+tui-finished-unseen = ✓ Siz bakmıyorken bitti. Açınca bu işaret kalkar.
