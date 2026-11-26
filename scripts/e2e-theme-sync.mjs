@@ -31,7 +31,7 @@ try {
 
   // The laptop imports a theme (it becomes the dark choice) and writes it to the hub after the change settles.
   await openEditor(laptop);
-  await laptop.locator('section[aria-label="Theme"] input[type=file]').setInputFiles({ name: 'harbour.json', mimeType: 'application/json', buffer: Buffer.from(HARBOUR) });
+  await laptop.locator('section[aria-label="Theme"] input[type=file]:not([data-import-other])').setInputFiles({ name: 'harbour.json', mimeType: 'application/json', buffer: Buffer.from(HARBOUR) });
   await laptop.waitForFunction(() => JSON.parse(localStorage.getItem('agora.themes.v1') ?? '[]').some((e) => e.file?.name === 'Harbour'));
   const laptopChoice = await choice(laptop);
   assert.match(laptopChoice.dark, /^user-\d+$/);
