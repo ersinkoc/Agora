@@ -48,8 +48,13 @@ function readPx(v: unknown, min: number, max: number): number | undefined {
 // The pieces of a format-1 name that a format-2 file refuses: removed when a format-1 theme becomes format 2, so every theme format
 // 1 accepts stays one format 2 accepts (the name never reaches CSS; it is text on the page).
 const UNSAFE_ALL = UNSAFE.map((r) => new RegExp(r.source, `${r.flags}g`));
-// A name of nothing but those pieces becomes a dash (a mark, not a word: no language's text lives in code).
-export const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''), name).replace(/\s+/g, ' ').trim() || '—';
+// A name of nothing but those pieces becomes a dash (a mark, not a word: no language's text lives in code). Removed until none is left,
+// since a removal can join two pieces of text into a new one (`ur;l(`).
+export function safeName(name: string): string {
+  let n = name;
+  for (let prev = ''; n !== prev;) { prev = n; n = UNSAFE_ALL.reduce((s, r) => s.replace(r, ''), n); }
+  return n.replace(/\s+/g, ' ').trim() || '—';
+}
 
 // ---- Reading --------------------------------------------------------------------------------------------------------------------
 
@@ -127,6 +132,8 @@ function readFormat2(value: Record<string, unknown>): ReadTheme {
 
   for (const k of Object.keys(value)) if (!TOP_FIELDS.includes(k) && !floorKey(k, k)) unknown(k);
   const name = cleanName(value.name);
+  // The name is judged as it is kept too: removing a mark can join two pieces of text into one that is refused (`ur\u200el(`).
+  if (ok('name') && isUnsafe(name)) { unsafe.add('name'); issues.push({ code: 'unsafe', field: 'name' }); }
   if (ok('name') && (name.length === 0 || name.length > MAX_NAME)) issues.push({ code: 'name' });
 
   // `inherits`: a built-in theme whose values stand in for the ones this file leaves out (for its own scheme, and its shape and fonts).

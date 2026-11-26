@@ -196,6 +196,20 @@ describe('format 2', () => {
     expect(issues(readTheme(v2({ dark: { terminal: { red: 'url(x)' } } })))).toEqual([{ code: 'unsafe', field: 'dark.terminal.red' }]);
   });
 
+  it('never accepts a name that is unsafe once cleaned, so an accepted theme is never dropped on the next load (F2000, F2001)', () => {
+    // Format 2: the name is judged as it is kept, after control and direction marks are removed.
+    for (const name of ['ur‎l(x', 'u\u0000rl(x', '@im⁦port']) expect(issues(readTheme(v2({ name, dark: {} })))).toEqual([{ code: 'unsafe', field: 'name' }]);
+    // Format 1: what is removed cannot leave a piece behind; the name kept reads back as format 2, and survives a reload.
+    for (const name of ['ur;l(', 'uurl(rl(', '@im;port', 'a;b']) {
+      const kv = memory();
+      const r = createThemeStore({ kv }).import(JSON.stringify(v1({}, { name })));
+      expect(r.ok, name).toBe(true);
+      if (!r.ok) continue;
+      expect(readTheme(writeTheme(r.theme, r.theme.name)).ok, name).toBe(true);
+      expect(loadState(kv).user.map((u) => u.name), name).toEqual([r.theme.name]);
+    }
+  });
+
   it('refuses a theme that sets what no theme can change, saying why', () => {
     const cases: [Record<string, unknown>, string, string][] = [
       [{ dark: { tokens: { danger: '#ff0000' } } }, 'dark.tokens.danger', 'danger'],

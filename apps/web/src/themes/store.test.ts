@@ -27,6 +27,16 @@ describe('the chosen theme', () => {
     }
   });
 
+  it('keeps a choice made without storage (safe mode) for the visit when another tab changes what is stored (F2002)', () => {
+    const s = createThemeStore({});
+    s.setMode('dark');
+    s.choose('slate');
+    expect(s.import(serialiseTheme(themeFile(sand, 'Mine'))).ok).toBe(true);
+    const before = s.state();
+    s.reload(); // the 'storage' listener of initTheme
+    expect(s.state()).toEqual(before);
+  });
+
   it('applies the theme to the page and tells the terminals', () => {
     const { vars, root } = page();
     let applied = 0;
