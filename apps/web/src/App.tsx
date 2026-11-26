@@ -37,6 +37,7 @@ import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SettingsDemo, Sign
 import { browserName, canBeApprovedOn, deviceLabel, fingerprint, fromHex, registrationVerifies, signAsk, signEndorsement, signRegistration, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
 import { DeviceRequest } from './components/DeviceRequest';
 import { num } from './net/view';
+import { plainText, readKnown } from './net/agentKinds';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
@@ -403,7 +404,17 @@ export function App() {
   // ADR-0091: plan limits as the machines reported them (the demo data when there is no hub).
   const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
   const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
-  const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
+  const agents = useMemo(() => {
+    if (!hub) return demoAgents;
+    if (!live) return [];
+    // ADR-0094: a kind's display name as its machine last reported it (Settings → Agents keeps that list), for "Claude Code in Shell".
+    let known: ReturnType<typeof readKnown> = new Map();
+    try { known = readKnown(window.localStorage); } catch { /* storage unavailable: the kind's own words are shown */ }
+    return tiles(live, (node, kind) => {
+      const name = known.get(node)?.kinds.find((k) => k.kind === kind)?.name;
+      return name ? plainText(name, 40) : undefined;
+    });
+  }, [hub, live]);
   // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
   // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
   const boardList = useMemo(() => (live ? boards(live) : []), [live]);

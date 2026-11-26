@@ -217,6 +217,8 @@ tui-start-acts = How should it act? Press its number; Enter or any other key ask
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
 tui-badge-no-ask = does not ask
 tui-badge-asks-less = asks less
+# ADR-0094: a person runs an agent by hand in this Shell.
+tui-runs-inside = { $name } in Shell
 
 ## A chat agent's tool call in words (as the web window says it)
 tui-tool-read = Read

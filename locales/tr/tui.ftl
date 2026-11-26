@@ -201,6 +201,8 @@ tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir
 tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.
 tui-badge-no-ask = sormuyor
 tui-badge-asks-less = daha az sorar
+# ADR-0094: a person runs an agent by hand in this Shell.
+tui-runs-inside = Shell içinde { $name }
 
 ## A chat agent's tool call in words (as the web window says it)
 tui-tool-read = Okuma

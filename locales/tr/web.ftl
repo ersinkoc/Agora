@@ -833,6 +833,8 @@ agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatı
 agent-does-not-ask-session-neutral-explain = Size önce sormadan çalışır; sona erene veya geri alınana kadar sürer
 agent-does-not-ask-session-explain = Onayınızla, sona erene veya siz geri alana kadar size önce sormadan çalışacak şekilde geçirildi
 agent-always-allowed-short = Daha az sorar
+# ADR-0094: a person runs an agent by hand in this Shell (found from the program in front of its terminal, never its screen).
+agent-runs-inside = Shell içinde { $name }
 agent-always-allowed-explain = Bu oturum için { $count } isteğine izin verdin. Sona erene kadar bunlar için bir daha sormaz.
 agent-always-allowed-explain-kept = { $count } isteğinin yanıtını hatırlamasına izin verdin. Bunlar için bir daha sormaz; yanıtları ne kadar tutacağına kendisi karar verir.
 agent-does-not-ask-cause = Nedeni: { $value }

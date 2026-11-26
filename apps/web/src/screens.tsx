@@ -46,6 +46,7 @@ import { SettingsBlock, SettingsCard, SystemTile } from './components/SettingsCa
 import { isolated, peerText, systemName } from './components/pairChoice';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
+import { RunsInsideChip } from './components/RunsInside';
 import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
@@ -318,6 +319,7 @@ export function Focus({ agent, approvals = [], onResolve, stale = false, source:
         <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{visible(agent.name)}</h1>
         {/* A live chat agent's state and tokens are said once, in its session bar (`PromptBox`); a terminal or a closed agent keeps them here. */}
         {!(agent.terminal === false && !agent.closed) && <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>}
+        <RunsInsideChip agent={agent} />
         <NoAskBadge agent={agent} />
         <AsksLessChip agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{visible(agent.machine)}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{visible(agent.project || agent.workspace)}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{visible(agent.branch)}</span></>}</span>

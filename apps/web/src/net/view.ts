@@ -39,6 +39,8 @@ export interface AgentV {
   hidden?: boolean; // ADR-0073: still running when its machine was forgotten; shown again only if still running when it comes back
   // ADR-0101: the "always" answers its process holds (`AgentAlwaysAllowed`; the snapshot names actions only), newest last, at most 16.
   alwaysAllowed?: { id: string; action: string }[];
+  // ADR-0094: the kind id of the agent a person runs by hand in this Shell (`AgentRunsInside`), while it runs.
+  runsInside?: string;
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -161,6 +163,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       // #902: how a closed agent ended (`AgentSnapshot.exit_code`), so a reloaded window still shows one that failed as failed.
       ...(!a.running && a.exitCode !== undefined && a.exitCode !== null ? { exitCode: a.exitCode } : {}),
       ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.slice(-ALWAYS_LIST_MAX).map((action) => ({ id: '', action })) } : {}),
+      ...(a.running && a.runsInside && insideKind(a.runsInside) ? { runsInside: a.runsInside } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -258,7 +261,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
       // F1421: an ended agent can be asked nothing; its settings and commands go, as after `agentExited` (a later snapshot has none).
-      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; a.alwaysAllowed = undefined; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; a.alwaysAllowed = undefined; a.runsInside = undefined; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
@@ -442,6 +445,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       a.running = false;
       a.state = 4 /* done */;
       a.alwaysAllowed = undefined; // ADR-0101: the hub clears it too
+      a.runsInside = undefined; // ADR-0094: the same
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
       if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; // F1421: ended, as the hub drops them
@@ -456,6 +460,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
         a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
         // ADR-0101: an always answer lives in the agent's process.
         a.alwaysAllowed = undefined;
+        a.runsInside = undefined; // ADR-0094: and so does the program run inside it
         // ADR-0090: an ended agent can be asked nothing; its settings and commands are gone (the hub drops them too).
         if (a.session) a.session = { ...a.session, config: undefined, commands: undefined };
       }
@@ -470,6 +475,17 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const id = b.approvalId ?? '';
       if (id && held.some((h) => h.id === id)) break;
       a.alwaysAllowed = [...held, { id, action: b.action ?? '' }].slice(-ALWAYS_LIST_MAX);
+      break;
+    }
+    // ADR-0094: what a person runs by hand in a running Shell, as its machine found it (empty: it ended). Anything but a plain kind id is
+    // left out, as the hub leaves it.
+    case 'agentRunsInside': {
+      const b = e.agentRunsInside;
+      const a = v.agents.get(q(b.agentId));
+      if (!a?.running) break;
+      const kind = b.kind ?? '';
+      if (!kind) a.runsInside = undefined;
+      else if (insideKind(kind)) a.runsInside = kind;
       break;
     }
     case 'terminalOpened':
@@ -540,7 +556,14 @@ function workspaceName(v: View, wt: WorktreeV): string {
 }
 
 // What Home renders. A waiting approval makes its agent "needs you" even if the agent has not said so.
-export function tiles(v: View): AgentTileModel[] {
+/** ADR-0094: a kind id the window keeps from `AgentRunsInside` (the hub's rule): 1 to 64 of a-z, 0-9, `-`, `_`, `.`. */
+export const insideKind = (kind: string): boolean => /^[a-z0-9._-]{1,64}$/.test(kind);
+
+/** ADR-0094: the name a kind is shown by when nothing better is known: its id's words, each with a capital ("claude-code" → "Claude Code"). */
+export const kindWords = (kind: string): string => kind.split(/[-_.]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+/** `kindName`: the display name a machine reported for one of its kinds (Settings → Agents keeps the last list), when this window has it. */
+export function tiles(v: View, kindName?: (node: string, kind: string) => string | undefined): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
   const sharingCounts = new Map<string, number>();
   for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
@@ -584,6 +607,7 @@ export function tiles(v: View): AgentTileModel[] {
       interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
       skipsPermissions: !!a.skipsPermissions,
       ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.map((h) => h.action) } : {}),
+      ...(a.running && a.runsInside ? { runsInside: { kind: a.runsInside, name: kindName?.(a.nodeId, a.runsInside) || kindWords(a.runsInside) } } : {}),
     } as AgentTileModel;
   });
   const names = new Map(list.map((t) => [t.id, t.name]));

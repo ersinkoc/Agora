@@ -15,6 +15,7 @@ import { useCloseAsk } from '../net/closeAgent';
 import { NoAskBadge } from '../components/NoAskBadge';
 import { FinishedMark } from '../components/FinishedMark';
 import { AlwaysNote, AlwaysOnly, AsksLessChip, alwaysNoteId } from '../components/AllowAlways';
+import { RunsInsideChip } from '../components/RunsInside';
 import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
 import type { PromptSend } from '../components/chatActions';
@@ -252,7 +253,7 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
         <AgentAvatar accent={a.accent || 'var(--agent-slate)'} kind={kindOf({ kind: a.kind, name: a.name })} needsYou={a.state === 'needs-you' && !a.closed} />
         <span className="min-w-0 flex-1">
           <span className="phone-row__name block truncate font-medium text-ink">{visible(a.name)}</span>
-          <span className="block truncate text-caption text-muted">{visible(a.project || a.workspace)}{a.branch ? ` · ${visible(a.branch)}` : ''}</span>
+          <span className="block truncate text-caption text-muted">{a.runsInside && !a.closed ? `${t('agent-runs-inside', { name: visible(a.runsInside.name) })} · ` : ''}{visible(a.project || a.workspace)}{a.branch ? ` · ${visible(a.branch)}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />
         <AsksLessChip agent={a} />
@@ -424,6 +425,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           {agent && <span className="flex min-w-0 items-center gap-2 text-caption text-muted"><StatusPill state={agent.state} failed={endedWithError(agent)} /><span className="truncate">{visible(agent.machine)}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
+        {agent && <RunsInsideChip agent={agent} />}
         {agent && <AsksLessChip agent={agent} />}
         {agent && <CloseAgentMenu agent={agent} />}
         {next && <Button className="phone-next" onClick={() => onOpen(next)}>{t('phone-next', { count: elsewhere.length })}</Button>}

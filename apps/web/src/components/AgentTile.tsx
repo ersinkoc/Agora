@@ -8,6 +8,7 @@ import { Icon, type IconName } from './Icon';
 import { AgentAvatar, StatusPill, Tag } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
+import { RunsInsideChip } from './RunsInside';
 import { LimitChip } from './Quota';
 import { FinishedMark, useFinishedUnseen } from './FinishedMark';
 import { visible } from '../net/hidden';
@@ -64,6 +65,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         aria-label={`${visible(agent.name)}, ${said}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
       >
         <Head agent={agent} failed={failed} />
+        <RunsInsideChip agent={agent} nested />
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <span className="muted">
@@ -94,6 +96,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       <Head agent={agent} failed={failed} />
       {line ? <span className="tile__activity" dir="auto">{visible(line)}</span> : null}
       <span className="tile__foot">
+        <RunsInsideChip agent={agent} nested />
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <LimitChip agent={agent} />

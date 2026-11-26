@@ -12,8 +12,10 @@ and reads it with the matched kind's screen rules, so state and needs-you work f
 Step 2's schema part (approved by the maintainer on 2026-11-26: "onay veriyorum"): the event `AgentRunsInside` (`Event.body` 90) and
 `AgentSnapshot.runs_inside` (46); the node records the mark's changes and says it again after every `AgentStarted` it restates; the hub keeps
 it for a running agent and clears it with the process (`docs/specs/protocol.md`, "What runs inside a plain terminal").
-Not built: the window's "X in Shell" label and the TUI line (step 4), the Windows lookup (step 3, measured on Windows first), and filling
-names from the ACP registry.
+Step 4 (2026-11-27): the window's "Claude Code in Shell" chip on the Shell's tile, pane header and phone row, named by the machine's own
+name for the kind when the window has it (else the kind id's words), and `[Claude Code in Shell]` on the terminal client's line; the Shell
+keeps its own name and avatar (`docs/ux/main-window.md`).
+Not built: the Windows lookup (step 3, measured on Windows first), and filling names from the ACP registry.
 
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
 user-visible viewport". Touches the threat model (a program name is untrusted data).

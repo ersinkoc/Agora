@@ -53,13 +53,52 @@ pub fn asks_less(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
     .then(|| t(key!("tui-badge-asks-less"), &[]))
 }
 
-/// The agent's badge in a line: "does not ask" (ADR-0059), else "asks less" (ADR-0101), else nothing; `sep` goes before it.
+/// ADR-0094: "Claude Code in Shell" while a person runs an agent by hand in this running Shell (`AgentSnapshot.runs_inside`, as its machine
+/// found it from the program in front of the terminal). The kind is named by its id's words; anything but a plain kind id says nothing.
+pub fn runs_inside(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    let kind = a.runs_inside.as_str();
+    let plain = !kind.is_empty()
+        && kind.len() <= 64
+        && kind.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+        });
+    (a.running && plain).then(|| {
+        t(
+            key!("tui-runs-inside"),
+            &[("name", Arg::Str(kind_words(kind)))],
+        )
+    })
+}
+
+/// A kind id's words, each with a capital ("claude-code" → "Claude Code"), as the window names a kind it has no name for.
+fn kind_words(kind: &str) -> String {
+    kind.split(['-', '_', '.'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The agent's badges in a line: what runs inside a Shell (ADR-0094), then "does not ask" (ADR-0059), else "asks less" (ADR-0101); `sep`
+/// goes before each (a space between two when `sep` is empty).
 pub fn badge(a: &AgentSnapshot, t: Text<'_>, sep: &str) -> String {
-    if a.skips_permissions {
-        format!("{sep}[{}]", t(key!("tui-badge-no-ask"), &[]))
+    let inside = runs_inside(a, t).map_or_else(String::new, |l| format!("{sep}[{l}]"));
+    let next = if inside.is_empty() || !sep.is_empty() {
+        sep
     } else {
-        asks_less(a, t).map_or_else(String::new, |l| format!("{sep}[{l}]"))
-    }
+        " "
+    };
+    let asks = if a.skips_permissions {
+        format!("{next}[{}]", t(key!("tui-badge-no-ask"), &[]))
+    } else {
+        asks_less(a, t).map_or_else(String::new, |l| format!("{next}[{l}]"))
+    };
+    inside + &asks
 }
 
 /// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
@@ -929,6 +968,38 @@ mod tests {
             })
             .collect();
         format!("{id}[{}]", a.join(","))
+    }
+
+    /// ADR-0094: a running Shell says what a person runs inside it, by the kind's words, before its other badges; a closed one, an empty
+    /// mark or one that is not a plain kind id says nothing.
+    #[test]
+    fn a_shell_says_what_runs_inside_it() {
+        let shell = |running: bool, inside: &str| AgentSnapshot {
+            agent_id: "laptop/agent-1".into(),
+            kind: "shell".into(),
+            running,
+            runs_inside: inside.into(),
+            ..AgentSnapshot::default()
+        };
+        assert_eq!(
+            badge(&shell(true, "claude-code"), &t, "  "),
+            "  [tui-runs-inside[name=Claude Code]]"
+        );
+        for quiet in [
+            shell(false, "claude-code"),
+            shell(true, ""),
+            shell(true, "Not A Kind"),
+            shell(true, &"k".repeat(65)),
+        ] {
+            assert_eq!(badge(&quiet, &t, "  "), "", "{:?}", quiet.runs_inside);
+        }
+        let mut both = shell(true, "codex");
+        both.skips_permissions = true;
+        assert_eq!(
+            badge(&both, &t, ""),
+            "[tui-runs-inside[name=Codex]] [tui-badge-no-ask[]]"
+        );
+        assert_eq!(kind_words("registry-qwen-code"), "Registry Qwen Code");
     }
 
     /// ADR-0101: the request box quotes the agent's own name for its always option as one short plain line, only when offered.

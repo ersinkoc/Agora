@@ -7,6 +7,7 @@ import { type AgentTileModel, endedWithError } from '../model';
 import { asksUnderHeader } from '../net/chatView';
 import { AgentAddress } from '../components/AgentAddress';
 import { AsksLessChip } from '../components/AllowAlways';
+import { RunsInsideChip } from '../components/RunsInside';
 import { ApprovalBanners } from '../components/ApprovalBanner';
 import { CloseAgentContext, CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { ChatActionsContext } from '../components/chatActions';
@@ -79,6 +80,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
           <Icon name="chevron" className="size-3 flex-none rtl:rotate-180" /></span><Icon name="folder" className="size-3.5 flex-none" /><span className="min-w-[4ch] truncate">{visible(a.project || a.workspace)}</span>
           {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{visible(a.branch)}</span></span>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+          <RunsInsideChip agent={a} />
           <NoAskBadge agent={a} />
           <AsksLessChip agent={a} />
         </div>

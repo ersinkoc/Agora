@@ -855,6 +855,8 @@ agent-does-not-ask-explain = Started so that it acts without asking you first
 agent-does-not-ask-session-neutral-explain = Acts without asking you first, until it ends or is switched back
 agent-does-not-ask-session-explain = Switched, with your approval, so that it acts without asking you first, until it ends or you switch it back
 agent-always-allowed-short = Asks less
+# ADR-0094: a person runs an agent by hand in this Shell (found from the program in front of its terminal, never its screen).
+agent-runs-inside = { $name } in Shell
 agent-always-allowed-explain = You allowed { $count } of its requests for this session. It does not ask again for those until it ends.
 agent-always-allowed-explain-kept = { $count ->
     [one] You let it remember the answer to one of its requests. It does not ask again for that; it decides how long it keeps the answer.
