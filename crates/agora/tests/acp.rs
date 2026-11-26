@@ -409,8 +409,9 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
 }
 
 /// P2-16: an ACP agent whose own session starts in a mode that skips permissions (its default or a saved setting) follows the node's
-/// `skip_permissions` policy as a switch to that mode does: under `forbid` the node stops it and its conversation says why, while an
-/// agent that starts in a mode that asks runs; under `allow` it runs (shown acting freely, `skip_approval.rs`).
+/// `skip_permissions` policy as a switch to that mode does: under `forbid` its start is refused (`agent.option_forbidden`, said in
+/// words by the command line), the agent never gets a prompt and nothing of it runs, while an agent that starts in a mode that asks
+/// runs; under `allow` it runs (shown acting freely, `skip_approval.rs`).
 #[test]
 fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
     for (policy, refused) in [
@@ -425,85 +426,47 @@ fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
         let Some((home, node)) = node_with_acp_policy(tag, Some(policy)) else {
             return;
         };
-        let (code, started) = agora(&home, &["agent", "start", "acp-startbypass"]);
-        assert_eq!(code, 0, "{started}");
-        let id = started
-            .split_whitespace()
-            .find(|w| w.starts_with("agent-"))
-            .expect("an agent id")
-            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
-            .to_string();
-        let mut c = Client::connect(&home.join("node.sock")).unwrap();
         if refused {
-            // Stopped: it takes no prompt. Its conversation, read only after that, says why.
-            let end = Instant::now() + Duration::from_secs(15);
-            loop {
-                let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
-                if code != 0 {
-                    break;
-                }
-                assert!(Instant::now() < end, "the agent still takes prompts: {out}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            loop {
-                let (_, out) = agora(&home, &["agent", "list"]);
-                if out.lines().any(|l| l.contains(&id) && l.contains("done")) {
-                    break;
-                }
-                assert!(Instant::now() < end, "{id} never ended: {out}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            c.call_on(
-                3,
-                Cmd::ChatSubscribe(v1::ChatSubscribe {
-                    agent_id: id.clone(),
-                }),
-            )
-            .unwrap()
-            .expect("subscribed");
-            let end = Instant::now() + Duration::from_secs(30);
-            let notice = loop {
-                assert!(Instant::now() < end, "no notice arrived");
-                let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() else {
-                    continue;
-                };
-                if f.stream_id != 3 {
-                    continue;
-                }
-                let entries = match f.kind {
-                    KIND_CHAT_SNAPSHOT => {
-                        v1::ChatSnapshot::decode(f.payload.as_slice())
-                            .unwrap()
-                            .entries
-                    }
-                    KIND_CHAT_ENTRY => {
-                        vec![v1::ChatEntry::decode(f.payload.as_slice()).unwrap()]
-                    }
-                    _ => continue,
-                };
-                if let Some(n) = entries
-                    .into_iter()
-                    .find(|e| e.code == "agent.skip_permissions_refused")
-                {
-                    break n;
-                }
+            let mut c = Client::connect(&home.join("node.sock")).unwrap();
+            let projects = match c
+                .call(Cmd::ProjectList(v1::ProjectList {}))
+                .unwrap()
+                .unwrap()
+                .result
+            {
+                Some(v1::command_ok::Result::ProjectList(p)) => p.projects,
+                other => panic!("{other:?}"),
             };
-            assert_eq!(
-                notice.params.get("policy").map(String::as_str),
-                Some("forbid")
+            let err = c
+                .call(Cmd::AgentStart(v1::AgentStart {
+                    project_id: projects[0].project_id.clone(),
+                    kind: "acp-startbypass".into(),
+                    ..Default::default()
+                }))
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(err.code, "agent.option_forbidden", "{err:?}");
+            let param = |k: &str| match err.params.get(k).and_then(|p| p.value.clone()) {
+                Some(v1::param_value::Value::Str(s)) => s,
+                other => panic!("{k}: {other:?}"),
+            };
+            assert_eq!(param("option"), "bypassPermissions");
+            assert_eq!(param("policy"), "forbid");
+            // The command line says it in words, from the locale files.
+            let (code, out) = agora(&home, &["agent", "start", "acp-startbypass"]);
+            assert_ne!(code, 0, "{out}");
+            assert!(
+                out.contains("does not let agents act without asking"),
+                "{out}"
             );
-            assert_eq!(
-                notice.params.get("setting").map(String::as_str),
-                Some("mode")
-            );
-            // An agent that starts in a mode that asks runs under the same policy.
+            let (_, list) = agora(&home, &["agent", "list"]);
+            assert!(!list.contains("acp-startbypass"), "{list}");
+            // An agent that starts in a mode that asks runs under the same policy, and takes a prompt.
             let normal = started_agent_of(&home, "acp-fake");
-            std::thread::sleep(Duration::from_millis(600));
             let (code, out) = agora(&home, &["agent", "prompt", &normal, "hello"]);
             assert_eq!(code, 0, "{out}");
         } else {
-            wait_ready(&home, &id);
-            std::thread::sleep(Duration::from_millis(600));
+            let id = started_agent_of(&home, "acp-startbypass");
             let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
             assert_eq!(code, 0, "{out}");
         }

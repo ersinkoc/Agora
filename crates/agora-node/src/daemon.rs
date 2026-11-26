@@ -2378,10 +2378,12 @@ impl Node {
                                 spawner.agent_ended(agent);
                             }
                             // ADR-0090 Amendment A: a card to switch an agent to a mode that skips permission questions names this agent's
-                            // session; when it ends, crashes or is stopped, no decision may apply it later.
+                            // session; when it ends, crashes or is stopped (P2-16: also for what it had in use), no decision may apply it
+                            // later.
                             if let SupervisorEvent::Exited { agent, .. }
                             | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent }
+                            | SupervisorEvent::SkipRefused { agent, .. }
                             | SupervisorEvent::AdapterCrashed { agent } = e
                             {
                                 for id in approvals.withdraw_skips(agent, None) {

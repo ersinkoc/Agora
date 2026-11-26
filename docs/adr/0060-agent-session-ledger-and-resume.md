@@ -88,7 +88,7 @@ of something.
 6. **Nothing is skipped.** The message is ordinary input to the agent. Every approval and the node's policy apply as they did before the restart. Launch
    options (ADR-0059) are not carried by a resume: the node does not pass a "Don't ask" option again (ADR-0062 decision 4,
    `ledger.rs`). This does not by itself make the resumed agent ask: a structured agent can restore its own permission-skipping
-   mode; under a `skip_permissions` policy that refuses it the node stops such an agent with a notice (backlog P2-16), under `allow` it runs on unasked. The message shows in the agent's own terminal and conversation like any prompt,
+   mode; under a `skip_permissions` policy that refuses it the node refuses such a resume (`agent.option_forbidden`) before the agent can take this message, and stops an agent that comes back so after a restart, with a notice (backlog P2-16); under `allow` it runs on unasked. The message shows in the agent's own terminal and conversation like any prompt,
    and the node's log says it was sent.
 
 **Consequences:** a manifest field (`[resume] continue` and `continue_argv`, `docs/specs/agent-manifest.md`), a ledger field (sent at),

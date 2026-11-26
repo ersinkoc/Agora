@@ -1183,13 +1183,23 @@ forwards either to a node that did not offer it.
   never held to any of this. (`AgentSetModel` of a model the node judges as skipping is still refused, `agent.option_forbidden` or
   `agent.option_unconfirmed`: Amendment A covers modes and config options.) All three commands are in the team-default `signed_commands`
   of a node with limited devices. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
-  What an adapter agent has in use is held to the same policy (backlog P2-16): a reported mode, or config option value in use (a select's
-  choice, or a boolean's value judged as a switch to it is, so `ask_for_approval` off counts and a boolean whose words do not say
-  which value protects counts at either value), that skips permissions under a policy that refuses it (`forbid`; `confined_only` for
-  an agent not launched confined) is not kept or passed on (no `AgentSessionOptions` / `AgentSessionConfig` carries it) and the node stops the agent as
-  `AgentStop` would (`AgentExited`), at start, after a resume or restart, on take-up from the holder, or when the agent switches itself;
-  its conversation gets the node's notice `agent.skip_permissions_refused` (params `policy`: `forbid` or `confined_only`, `setting`:
-  `mode` or `config`; only the node makes it). Under `allow` such an agent runs, shown as acting without asking.
+  What an adapter agent has in use is held to the same policy (backlog P2-16), under `forbid` and, for an agent not launched
+  confined, `confined_only`: its current mode or model, or a config option's value in use, that a switch to would be refused (a select's
+  choice; a boolean's value as `AgentSetConfig` judges it, so `ask_for_approval` off counts and a permission boolean whose words do not
+  say which value protects counts at either value; the model by the strong words only, as `AgentSetModel`). Each report is judged as
+  the adapter sent it, before the node bounds it: an id in use that is not in its own list, or not kept of it (past a cap, repeated,
+  too long), is judged on the id alone (a mode id the node's rule cannot place counts as skipping). After a start or a resume (and a
+  restart after a crash) the node reads the adapter's first reports, up to 2 s, before the agent can take a prompt: a start or resume
+  they refuse is answered `agent.option_forbidden` (`kind`, `option`: the mode, model or config option id in use, `policy`) and nothing
+  runs (the process is killed). A refusal later (after a restart, on take-up from the holder, by a report the agent makes of its own,
+  for example a switch it makes itself) stops the agent as `AgentStop` would (`AgentExited`; the process is killed, not asked to
+  stop), its report is not kept or passed on (no `AgentSessionOptions` / `AgentSessionConfig` carries it), no prompt queued behind its
+  turn goes out (it leaves with `adapter.queue_dropped`), and its conversation gets the node's notice
+  `agent.skip_permissions_refused` (params `policy`: `forbid` or `confined_only`, `setting`: `mode`, `model` or `config`; only the node
+  makes it). Meanwhile no prompt reaches such an agent: `AgentPrompt` and every other prompt the node sends (a task given to it, a
+  helper's first prompt) are refused with `agent.option_forbidden`, and with `adapter.no_answer` (call `session`, `waited_ms` 2000) while
+  the first reports after a launch have not come; a prompt already under way when the node stops the agent is answered
+  `agent.option_forbidden`. Under `allow` such an agent runs, shown as acting without asking.
 - **A running agent switched to a mode or option that skips permission questions (ADR-0090 Amendment A).** Raised by the node, from a
   window's `AgentSetMode` or `AgentSetConfig` only (an agent, the mesh and the hub have no path to it); no schema message is new:
   - `ApprovalRequested { action: "agent.skip_permissions", agent_id, detail, expires_at_ms }`, expiring after 10 minutes like every

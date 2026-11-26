@@ -84,14 +84,23 @@ fn env(name: &str, policy: Option<&str>) -> Env {
         format!("kind = \"cfgmode\"\ndisplay_name = \"C\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\", \"--mode-config\"]\n", fake_adapter_path()),
     )
     .unwrap();
-    // P2-16: kinds whose agent starts in a mode, or with an option on, that skips permissions (its own default or a saved setting).
-    for (kind, flag) in [
-        ("startskip", "--start-mode=bypassPermissions"),
-        ("startauto", "--start-auto-approve"),
+    // P2-16: kinds whose agent starts in a mode, or with an option on, that skips permissions (its own default or a saved setting),
+    // one whose mode is not in its own list, one that reports its turns, and ones whose reports come after the node's wait for them.
+    for (kind, flags) in [
+        ("startskip", &["--start-mode=bypassPermissions"][..]),
+        ("startauto", &["--start-auto-approve"][..]),
+        ("startunlisted", &["--start-mode=yolo"][..]),
+        ("turnsskip", &["--turns"][..]),
+        (
+            "slowskip",
+            &["--report-delay-ms=3000", "--start-mode=bypassPermissions"][..],
+        ),
     ] {
+        let mut command = vec![fake_adapter_path(), "--adapter".into(), "--modes".into()];
+        command.extend(flags.iter().map(|f| (*f).to_string()));
         std::fs::write(
             manifests.join(format!("{kind}.toml")),
-            format!("kind = \"{kind}\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\", {flag:?}]\n", fake_adapter_path()),
+            format!("kind = \"{kind}\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = {command:?}\n"),
         )
         .unwrap();
     }
@@ -952,7 +961,7 @@ fn a_secret_in_the_agents_name_for_a_mode_never_reaches_the_card() {
     applied(&worktree, &["applied mode:bypassPermissions"]);
 }
 
-/// P2-16: starts an agent of `kind` without waiting for its reports (an agent the node stops for them never takes a switch).
+/// P2-16: starts an agent of `kind`, without waiting for anything after the start.
 fn start_of(c: &mut Client, kind: &str) -> String {
     let r = ok(c.call(Cmd::AgentStart(v1::AgentStart {
         kind: kind.into(),
@@ -1009,66 +1018,153 @@ fn refused_by_node(n: &Node, id: &str) -> (String, String) {
     }
 }
 
-/// P2-16: under `forbid`, an agent whose own session starts in a mode that skips permissions (its default, or a saved setting) is
-/// stopped with a notice, and it is not left shown as acting freely; a switch to it is not reported to the hub.
+/// P2-16: a start of `kind` that the node refuses for what the agent reports it uses: `agent.option_forbidden` with the id in use and
+/// the policy, and nothing of it left running.
+fn start_refused(n: &Node, c: &mut Client, kind: &str) -> (String, String) {
+    let err = error(c.call(Cmd::AgentStart(v1::AgentStart {
+        kind: kind.into(),
+        ..Default::default()
+    })));
+    assert_eq!(err.code, "agent.option_forbidden", "{err:?}");
+    assert_eq!(param(&err, "kind"), kind);
+    assert!(
+        n.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .iter()
+            .all(|v| v.kind != kind || !v.running),
+        "an agent of {kind} runs"
+    );
+    (param(&err, "option"), param(&err, "policy"))
+}
+
+/// The worktrees agents of this node were started in (each a folder under the node's worktree root).
+fn worktrees(e: &Env) -> Vec<PathBuf> {
+    std::fs::read_dir(e.dir.join("worktrees"))
+        .map(|d| d.filter_map(|x| x.ok()).map(|x| x.path()).collect())
+        .unwrap_or_default()
+}
+
+/// P2-16 (security review of #1244, V1): under `forbid`, a start of an agent whose own session starts in a mode that skips is
+/// refused before it can take any prompt: the start is answered `agent.option_forbidden` (the mode, the policy), no agent of it runs,
+/// and a prompt sent at once to the id it would have had reaches nothing.
 #[test]
-fn a_forbidding_policy_stops_an_agent_that_starts_in_a_mode_that_skips() {
+fn a_forbidding_policy_refuses_the_start_of_an_agent_that_starts_in_a_mode_that_skips() {
     if !local() {
         return;
     }
     let e = env("start-forbid", Some("skip_permissions = forbid\n"));
     let n = node(&e, false);
     let mut c = Client::connect(n.socket().unwrap()).unwrap();
-    let id = start_of(&mut c, "startskip");
-    assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "mode".into()));
-    let agent = agora_core::AgentId::new(&id);
-    assert!(!n.supervisor.lock().unwrap().skips_permissions_now(&agent));
-    // The report that skipped never reached the hub's view.
+    let sock = n.socket().unwrap().to_path_buf();
+    // A prompt sent over and over, from before the start, to the id the agent would get.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    let sender = std::thread::spawn(move || {
+        let mut c2 = Client::connect(&sock).unwrap();
+        while !flag.load(std::sync::atomic::Ordering::Acquire) {
+            let r = c2.call(Cmd::AgentPrompt(v1::AgentPrompt {
+                agent_id: "agent-1".into(),
+                text: "hang".into(),
+            }));
+            assert!(
+                matches!(&r, Ok(Err(e)) if e.code == "agent.not_found"),
+                "a prompt was taken: {r:?}"
+            );
+        }
+    });
+    assert_eq!(
+        start_refused(&n, &mut c, "startskip"),
+        ("bypassPermissions".into(), "forbid".into())
+    );
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    sender.join().unwrap();
+    assert!(
+        worktrees(&e).iter().all(|w| !w.join("hang.txt").exists()),
+        "the agent read a prompt"
+    );
+    // Nothing was reported to the hub as the agent's options.
     assert!(!n.events.events_after(0).into_iter().any(|e| matches!(
         e.body,
-        Some(v1::event::Body::AgentSessionOptions(o)) if o.agent_id == id && o.current_mode == "bypassPermissions"
+        Some(v1::event::Body::AgentSessionOptions(o)) if o.current_mode == "bypassPermissions"
     )));
-    // Stopped as a stop is: no restart, no prompt taken.
-    std::thread::sleep(Duration::from_millis(600));
-    assert!(view(&n, &id).is_some_and(|v| !v.running));
-    let refused = error(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
-        agent_id: id.clone(),
-        text: "hello".into(),
-    })));
-    assert_eq!(refused.code, "agent.not_found");
 }
 
 /// P2-16: the same for a config option that skips and is on from the start.
 #[test]
-fn a_forbidding_policy_stops_an_agent_that_starts_with_an_option_that_skips() {
+fn a_forbidding_policy_refuses_the_start_of_an_agent_with_an_option_that_skips() {
     if !local() {
         return;
     }
     let e = env("start-auto", Some("skip_permissions = forbid\n"));
     let n = node(&e, false);
     let mut c = Client::connect(n.socket().unwrap()).unwrap();
-    let id = start_of(&mut c, "startauto");
-    assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "config".into()));
+    assert_eq!(
+        start_refused(&n, &mut c, "startauto"),
+        ("auto_approve".into(), "forbid".into())
+    );
 }
 
-/// P2-16: `confined_only` refuses it for an agent whose process was not launched confined (this node does not confine).
+/// P2-16 (security review of #1244, V3): a current mode its own list does not have is judged on its id (`yolo` skips), never dropped
+/// as unknown.
 #[test]
-fn a_confined_only_policy_stops_an_unconfined_agent_that_starts_in_a_mode_that_skips() {
+fn a_forbidding_policy_refuses_an_agent_whose_mode_in_use_is_not_in_its_list() {
+    if !local() {
+        return;
+    }
+    let e = env("start-unlisted", Some("skip_permissions = forbid\n"));
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    assert_eq!(
+        start_refused(&n, &mut c, "startunlisted"),
+        ("yolo".into(), "forbid".into())
+    );
+}
+
+/// P2-16: `confined_only` refuses it for an agent whose process would not be confined (this node does not confine).
+#[test]
+fn a_confined_only_policy_refuses_an_unconfined_agent_that_starts_in_a_mode_that_skips() {
     if !local() {
         return;
     }
     let e = env("start-confined", Some("skip_permissions = confined_only\n"));
     let n = node(&e, false);
     let mut c = Client::connect(n.socket().unwrap()).unwrap();
-    let id = start_of(&mut c, "startskip");
     assert_eq!(
-        refused_by_node(&n, &id),
-        ("confined_only".into(), "mode".into())
+        start_refused(&n, &mut c, "startskip"),
+        ("bypassPermissions".into(), "confined_only".into())
     );
 }
 
-/// P2-16: under `forbid` an agent that starts in a mode that asks keeps running, and one that switches itself to a mode that skips
-/// later is stopped as one that started in it.
+/// P2-16: an agent whose first reports come after the node's wait for them starts, but takes no prompt until they came and were
+/// judged (`adapter.no_answer`, call `session`); when they say it skips, it is stopped and its conversation says why.
+#[test]
+fn a_forbidding_policy_takes_no_prompt_before_a_late_first_report_and_then_stops_the_agent() {
+    if !local() {
+        return;
+    }
+    let e = env("slow-report", Some("skip_permissions = forbid\n"));
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let id = start_of(&mut c, "slowskip");
+    let worktree = view(&n, &id).unwrap().worktree;
+    let err = error(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "hang".into(),
+    })));
+    assert_eq!(err.code, "adapter.no_answer", "{err:?}");
+    assert_eq!(param(&err, "call"), "session");
+    assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "mode".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !worktree.join("hang.txt").exists(),
+        "the agent read a prompt"
+    );
+}
+
+/// P2-16: under `forbid` an agent that starts in a mode that asks runs, and one that switches itself to a mode that skips later is
+/// stopped, with a notice; a prompt to it is then refused.
 #[test]
 fn a_forbidding_policy_keeps_a_normal_agent_and_stops_one_that_switches_itself() {
     if !local() {
@@ -1086,6 +1182,135 @@ fn a_forbidding_policy_keeps_a_normal_agent_and_stops_one_that_switches_itself()
         text: "mode:bypassPermissions".into(),
     })));
     assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "mode".into()));
+    let agent = agora_core::AgentId::new(&id);
+    assert!(!n.supervisor.lock().unwrap().skips_permissions_now(&agent));
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        view(&n, &id).is_some_and(|v| !v.running),
+        "it was started again"
+    );
+    let refused = error(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "hello".into(),
+    })));
+    assert_eq!(refused.code, "agent.not_found");
+}
+
+/// P2-16 (security review of #1244, V2): a prompt queued behind a turn does not go out in the tick that reads the turn's end together
+/// with a report that makes the node stop the agent: it is dropped with the queue.
+#[test]
+fn a_queued_prompt_never_goes_out_in_the_tick_that_stops_the_agent() {
+    if !local() {
+        return;
+    }
+    for round in 0..3 {
+        let e = env(
+            &format!("queued-{round}"),
+            Some("skip_permissions = forbid\n"),
+        );
+        let n = node(&e, false);
+        let mut c = Client::connect(n.socket().unwrap()).unwrap();
+        let id = start_of(&mut c, "turnsskip");
+        let worktree = view(&n, &id).unwrap().worktree;
+        let end = Instant::now() + Duration::from_secs(15);
+        while c
+            .call(Cmd::AgentSetMode(v1::AgentSetMode {
+                agent_id: id.clone(),
+                mode: "default".into(),
+            }))
+            .unwrap()
+            .is_err()
+        {
+            assert!(Instant::now() < end, "the modes were never reported");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: id.clone(),
+            text: "slow-bypass".into(),
+        })));
+        let queued = ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: id.clone(),
+            text: "hang".into(),
+        })));
+        assert!(
+            matches!(queued.result, Some(Ok_::AgentPrompt(ref p)) if p.queued),
+            "{queued:?}"
+        );
+        assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "mode".into()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !worktree.join("hang.txt").exists(),
+            "round {round}: the queued prompt reached the agent"
+        );
+    }
+}
+
+/// P2-16: a resume is judged as a start is: an agent whose session comes back in a mode the policy now refuses is not resumed
+/// (`agent.option_forbidden`) and stays stopped.
+#[test]
+fn a_resume_into_a_mode_that_skips_is_refused() {
+    if !local() {
+        return;
+    }
+    let e = env("resume", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let id = start_of(&mut c, "startskip");
+    let agent = agora_core::AgentId::new(&id);
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: id.clone(),
+        ..Default::default()
+    })));
+    n.supervisor
+        .lock()
+        .unwrap()
+        .set_skip_permissions(agora_node::launch_options::SkipPermissions::Forbid);
+    let r = n.supervisor.lock().unwrap().resume(&agent, Instant::now());
+    match r {
+        Err(agora_node::supervisor::SupervisorError::OptionForbidden(kind, option, policy)) => {
+            assert_eq!(
+                (kind.as_str(), option.as_str(), policy),
+                ("startskip", "bypassPermissions", "forbid")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(view(&n, &id).is_some_and(|v| !v.running));
+    assert!(!n.supervisor.lock().unwrap().skips_permissions_now(&agent));
+}
+
+/// P2-16: a crashed adapter started again is judged as a start is: back in a mode the policy now refuses, it is stopped in the
+/// same tick, with a notice, and not started again.
+#[test]
+fn a_restart_after_a_crash_into_a_mode_that_skips_stops_the_agent() {
+    if !local() {
+        return;
+    }
+    let e = env("crash", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let id = start_of(&mut c, "startskip");
+    let agent = agora_core::AgentId::new(&id);
+    let end = Instant::now() + Duration::from_secs(20);
+    while !n.supervisor.lock().unwrap().skips_permissions_now(&agent) {
+        assert!(Instant::now() < end, "the mode in use was never reported");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // It crashes under `allow`; the policy is `forbid` by the time it is started again (a restart waits a second).
+    let _ = c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "crash".into(),
+    }));
+    n.supervisor
+        .lock()
+        .unwrap()
+        .set_skip_permissions(agora_node::launch_options::SkipPermissions::Forbid);
+    assert_eq!(refused_by_node(&n, &id), ("forbid".into(), "mode".into()));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        view(&n, &id).is_some_and(|v| !v.running),
+        "it was started again"
+    );
 }
 
 /// P2-16: under `allow` (the default) the node does not stop such an agent: it runs, shown and checked as acting freely.

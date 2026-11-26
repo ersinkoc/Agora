@@ -51,6 +51,8 @@
 //! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
 //! With `--start-mode=ID` as well it starts in mode ID instead of `default`, and with `--start-auto-approve` with `auto_approve` on
 //! (an agent whose own default or saved setting skips permissions, backlog P2-16).
+//! With `--report-delay-ms=N` as well its first reports come N ms after it answered the start; the prompt `slow-bypass` (with
+//! `--modes`) works for 400 ms, goes idle and then reports `bypassPermissions` as its mode in the same burst.
 //! With `--mode-config` as well, it is an agent whose mode is a config option of category `mode` (what `agora acp-bridge` reports for
 //! an ACP agent that gives its mode as a config option): it also reports an option `approvals` with the four modes as its choices,
 //! and a mode switch is the switch of that option, recorded as `applied config:approvals=ID` (audit F1322).
@@ -208,6 +210,14 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     } else {
                         "false"
                     };
+                    // `--report-delay-ms=N`: the reports come N ms after the start's answer (an agent slower than the node's wait
+                    // for them, P2-16).
+                    if let Some(ms) = std::env::args().find_map(|a| {
+                        a.strip_prefix("--report-delay-ms=")
+                            .and_then(|v| v.parse::<u64>().ok())
+                    }) {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
                     note(
                         out,
                         "session/options",
@@ -497,6 +507,18 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         }
                         note(out, "chat/append", params)?;
                         state(out, &session, "IDLE")?;
+                    }
+                    // P2-16 (security review of #1244, V2): ends a turn, then reports a mode that skips, in one burst.
+                    "slow-bypass" if modes => {
+                        state(out, &session, "WORKING")?;
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        state(out, &session, "IDLE")?;
+                        note(
+                            out,
+                            "session/options",
+                            json!({"sessionId": session, "modes": all_modes(), "models": [],
+                                   "currentMode": "bypassPermissions", "currentModel": ""}),
+                        )?;
                     }
                     switch if modes && switch.starts_with("mode:") => note(
                         out,

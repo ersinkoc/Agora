@@ -551,6 +551,7 @@ notice-adapter-permission_unanswerable = The agent asked for “{ $action }” w
 notice-chat-history_not_saved = This conversation could not be saved on its machine (its disk may be full). The agent keeps working, but turns from now on may be missing after Agora restarts.
 notice-agent-skip_permissions_refused = { $setting ->
     [config] One of this agent's own settings lets it run commands and change files without asking you first.
+    [model] The model this agent uses lets it run commands and change files without asking you first.
    *[mode] This agent's mode lets it run commands and change files without asking you first.
 } { $policy ->
     [confined_only] This machine allows that only for agents confined to their folder, so Agora stopped it. Change that setting in the agent to one that asks, then start it again.
