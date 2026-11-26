@@ -2888,6 +2888,17 @@ async fn run_with(
                 retry = ACCEPT_RETRY_FIRST;
                 tcp
             }
+            // One connection that failed before it was taken: the next is taken at once (no wait, so a burst of them holds nobody).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
             Err(e) => {
                 eprintln!("hub accept failed: {e}");
                 tokio::time::sleep(retry).await;

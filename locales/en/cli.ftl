@@ -306,6 +306,7 @@ cli-devices-declined = Nothing was trusted.
 cli-devices-not-asked = Nothing was trusted: this is not an interactive terminal. Run "agora node trust --from-hub" on this machine, or pass --yes with --fingerprint for each device.
 cli-devices-unmatched = No device the hub lists has the fingerprint { $fingerprint }; it was not trusted.
 cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora node enroll" first.
+cli-node-in-use = Another node already runs on the data folder { $dir } (or on its control socket). Nothing was read or changed. Stop that node first, or use another data folder.
 cli-link-busy = The link folder { $dir } is held by another Agora command that has not finished in time (stopped, or not answering). Nothing was read from it. End that command, then try again.
 cli-link-unreadable = The link folder { $dir } could not be read ({ $reason }). Nothing was read from it.
 cli-devices-failed = Could not get the devices from the hub ({ $reason }).

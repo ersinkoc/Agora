@@ -1152,7 +1152,15 @@ impl AdapterRich {
             *cancel_by = Some(now + CANCEL_GRACE);
         }
         if drop_queue {
-            self.queue.drain(..).map(|q| q.tag).collect()
+            // Audit F2020 review: a prompt that became the turn after a failed send but is not sent yet still waits: it goes too, and
+            // the turn it would have been is free at once (nothing of it reached the adapter).
+            let due = self.due.take().map(|(q, _)| q.tag);
+            if due.is_some() {
+                self.turn = Turn::Idle;
+            }
+            due.into_iter()
+                .chain(self.queue.drain(..).map(|q| q.tag))
+                .collect()
         } else {
             Vec::new()
         }
@@ -7478,6 +7486,18 @@ mod adapter_option_tests {
         let _ = queued(&mut r, "c", 6);
         assert_eq!(r.cancelled(gen(&r), t0, true), [5, 6]);
         assert!(r.expire(t0 + CANCEL_GRACE).is_none());
+        assert_eq!(r.turn, Turn::Idle);
+        // A prompt that became the turn after a failed send, not sent yet (audit F2020): dropped with the queue, and the agent is free.
+        let mut r = AdapterRich::default();
+        let Ok(Route::Send(g0)) = queued(&mut r, "a", 0) else {
+            panic!()
+        };
+        let _ = queued(&mut r, "b", 5);
+        let _ = queued(&mut r, "c", 6);
+        let (_, next) = r.send_result(false, g0, t0);
+        r.due = next;
+        assert_eq!(r.cancelled(gen(&r), t0, true), [5, 6]);
+        assert!(r.due.is_none());
         assert_eq!(r.turn, Turn::Idle);
         // An adapter that does end the cancelled turn (the normal case) needs no grace.
         let mut r = AdapterRich::default();

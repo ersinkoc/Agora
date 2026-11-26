@@ -1166,12 +1166,16 @@ fn a_second_node_on_a_home_in_use_resumes_nothing_before_it_fails() {
     e.wait("the probe's session", |e| !e.session(&p).is_empty());
     e.start();
     assert!(e.node().ledger.get(&p).unwrap().interrupted());
+    // Only this test's agents: the file's other tests run beside it in this process, and theirs start and end meanwhile.
+    let root = std::fs::canonicalize(&e.root).unwrap_or_else(|_| e.root.clone());
     let fakes = || -> std::collections::HashSet<u32> {
         agora_platform::process_children(std::process::id())
             .unwrap_or_default()
             .into_iter()
             .filter(|pid| {
                 agora_platform::process_identity(*pid).is_ok_and(|i| i.name.contains("agora-fake"))
+                    && agora_platform::process_cwd(*pid)
+                        .is_ok_and(|c| std::fs::canonicalize(&c).unwrap_or(c).starts_with(&root))
             })
             .collect()
     };

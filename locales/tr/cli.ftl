@@ -294,6 +294,7 @@ cli-devices-declined = Hiçbir cihaza güvenilmedi.
 cli-devices-not-asked = Hiçbir cihaza güvenilmedi: bu etkileşimli bir terminal değil. Bu makinede "agora node trust --from-hub" çalıştırın ya da her cihaz için --yes ile --fingerprint verin.
 cli-devices-unmatched = Hub'ın listelediği hiçbir cihazın parmak izi { $fingerprint } değil; güvenilmedi.
 cli-devices-not-enrolled = Bu makine bir hub'a kayıtlı değil. Önce "agora node enroll" çalıştırın.
+cli-node-in-use = { $dir } veri klasöründe (ya da onun denetim soketinde) zaten başka bir düğüm çalışıyor. Hiçbir şey okunmadı ya da değiştirilmedi. Önce o düğümü durdurun ya da başka bir veri klasörü kullanın.
 cli-link-busy = { $dir } bağlantı klasörü, zamanında bitmeyen başka bir Agora komutunun elinde (durdurulmuş ya da yanıt vermiyor). Ondan hiçbir şey okunmadı. O komutu sonlandırıp yeniden deneyin.
 cli-link-unreadable = { $dir } bağlantı klasörü okunamadı ({ $reason }). Ondan hiçbir şey okunmadı.
 cli-devices-failed = Cihazlar hub'dan alınamadı ({ $reason }).
