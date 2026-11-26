@@ -1,0 +1,6 @@
+{
+  "//": "The plugin author's types (starter/agora-plugin.d.ts) checked against the window's own (kit.check.ts), and the starter's script against them. Run by `npm run typecheck` and `npm run build`.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "allowJs": true, "checkJs": true },
+  "include": ["starter/agora-plugin.d.ts", "starter/panel.js", "kit.check.ts", "../src/vite-env.d.ts"]
+}

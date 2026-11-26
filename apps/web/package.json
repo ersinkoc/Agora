@@ -5,8 +5,8 @@
   "scripts": {
     "gen": "sh ../../scripts/gen-ts.sh",
     "dev": "vite",
-    "build": "tsc && vite build",
-    "typecheck": "tsc",
+    "build": "tsc && tsc -p plugins && vite build",
+    "typecheck": "tsc && tsc -p plugins",
     "test": "vitest run"
   },
   "dependencies": {

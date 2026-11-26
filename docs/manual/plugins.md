@@ -9,7 +9,9 @@ WebSocket, WebRTC, or file from another origin. Everything it runs is in its pac
 
 The person opens **Plugins** in the command palette (Ctrl K), chooses **Load from a file…**, picks the package, allows what it may
 see, and chooses **Add plugin**. It is kept in that browser only and marked **development**; at most 4 are loaded. Then a pane's
-**Show…** menu offers its panels. `?safe` in the address, or Ctrl+Alt+Shift+S (⌘⌥⇧S on a Mac), opens the window without plugins.
+**Show…** menu offers its panels. In Chrome and Edge the file is watched for the visit: when it changes and still passes the checks,
+the panel starts again with it (a capability added since needs the person's yes first); when it fails, the last version keeps running
+and the pane says why. `?safe` in the address, or Ctrl+Alt+Shift+S (⌘⌥⇧S on a Mac), opens the window without plugins.
 
 ## The package
 
@@ -68,10 +70,19 @@ In the frame, the entry script gets `agora`:
 Draw with `textContent`, never `innerHTML`: agent names are other people's text. Only the entry script runs, so bundle all code
 into it. Messages over 20 a second are dropped, and many of them stop the frame; a malformed message stops it at once.
 
-## Packing
+## Starting, checking and packing
 
-Put the files in one flat folder. Run this there: it writes each file's hash into the manifest, then the package,
-`agents-plugin.json`. List every file but the manifest in `names`.
+`agora plugin new` makes a folder that already passes: a manifest, `panel.js`, `panel.css`, a README, and `agora-plugin.d.ts`, the
+types of `agora` and of each capability's answer (`// @ts-check` in `panel.js` lets an editor check every call). `agora plugin pack`
+writes each file's hash into the manifest (`--write-hashes`), packs the folder, and refuses what the window would, saying why; with
+`--watch` it packs again on every save. `agora plugin check` runs the window's checks on a folder or a package. A refusal names a
+code (`hash`, `unlisted`, `manifest`, `not-a-file`, …) and the file or field. `README.md` and `agora-plugin.d.ts` are never packed, and
+the package is never written into the folder itself. For example: `agora plugin new agents-list`, then
+`agora plugin pack agents-list --out agents-list.json --write-hashes --watch`, then load `agents-list.json` in the window;
+`agora plugin check agents-list.json` says what the window would refuse.
+
+By hand, without the command: put the files in one flat folder and run this there. It writes each file's hash into the manifest,
+then the package, `agents-plugin.json`. List every file but the manifest in `names`.
 
 ```sh
 python3 - <<'EOF'

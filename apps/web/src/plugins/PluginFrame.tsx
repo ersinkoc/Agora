@@ -12,6 +12,7 @@ import type { Capability } from './capabilities';
 import { FRAME_SANDBOX, frameUrl } from './frameDoc';
 import { type CheckedPlugin, type PluginPanelDecl, typeOf } from './package';
 import { type PluginView, type ThemeFacts, project, projectChanges, projectChat } from './projection';
+import { ReloadNote } from './ReloadNote';
 import { type Inbound, type MessageRouter, type Outbound, MAX_WATCHES, frameFilter, gate, messageRouter } from './protocol';
 
 // One listener for every plugin frame of this window (protocol.ts `messageRouter`): a message is taken only from a frame's own window.
@@ -183,7 +184,9 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
       </div>
     );
   }
-  return (
+  // A development plugin's pane says, above the frame's box and in the window's words, when its changed file was not loaded.
+  return (<>
+    {dev && <ReloadNote plugin={m.id} name={m.name} />}
     <div ref={box} className="flex min-h-0 w-full flex-1 flex-col outline-none" data-plugin-box="" data-active={active ? '' : undefined}
       tabIndex={active ? -1 : 0} aria-label={active ? undefined : t('plugin-frame-use', { name: panel.name ?? m.name })}
       onPointerDown={() => { if (!active) setActive(true); }}
@@ -191,5 +194,5 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
       <iframe ref={frame} src={frameUrl(import.meta.env.BASE_URL)} sandbox={FRAME_SANDBOX} referrerPolicy="no-referrer" title={t('plugin-frame-title', { name: panel.name ?? m.name })}
         inert={!active} className="block min-h-0 w-full flex-1 border-0 bg-transparent" data-plugin-frame={m.id} data-plugin-dev={dev ? '' : undefined} data-dropped={dropped} />
     </div>
-  );
+  </>);
 }

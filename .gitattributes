@@ -19,3 +19,5 @@ crates/agora-adapters/tests/fixtures/registry/** -text
 apps/web/plugins/** -text
 # `agora manual` prints docs/manual as it is, and its tests read the examples byte for byte (a plugin's hash among them).
 docs/manual/*.md text eol=lf
+# The plugin kit's packages are held byte for byte to what scripts/pack-plugin.mjs makes (hashes, CRLF in a script, a PNG).
+crates/agora/tests/fixtures/plugin-kit/** -text

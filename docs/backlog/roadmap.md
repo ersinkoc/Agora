@@ -162,8 +162,10 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 - [ ] **M5.5 A gallery** for the theme and plugin catalogs: previews, sort, one-step install
 - [ ] **M5.6 Distribution** (**decision**): a second, "unreviewed but sandboxed" catalog tier (ADR-0114 decision 7 amendment); members
   installing sandboxed plugins for themselves (ADR-0114 open question)
-- [ ] **M5.7 Plugin author kit**: reload on save, `agora plugin new` / `check` / `pack` (today `scripts/pack-plugin.mjs`), a typed
-  description of the bridge messages
+- [x] **M5.7 Plugin author kit**: reload on save, `agora plugin new` / `check` / `pack` (today `scripts/pack-plugin.mjs`), a typed
+  description of the bridge messages ([plugins](../ux/plugins.md#writing-a-plugin): `pack` byte for byte with the mjs, `check` with the
+  hub's port of the window's checks, the types held to the window's by `tsc -p plugins`; reload on save where the browser can watch a
+  file)
 - [ ] **M5.8 Chrome per layout block** and more than one icon set (ADR-0113 follow-ups)
 
 ## M6. Agent coverage and detection (gap review section 2)
