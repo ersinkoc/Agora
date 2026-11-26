@@ -143,7 +143,8 @@ fn notice_to(to: &str, body: Value) -> Option<Notice> {
 pub struct Merged {
     /// The merged board, as [`Boards::snapshot`] text.
     pub bytes: Vec<u8>,
-    /// For the owner of each task given a new id: `task_moved`, as after a join.
+    /// For the owner of each task given a new id: `task_moved`; for the holders of a path two boards' leases held: `lease_refused`
+    /// to the one whose lease was dropped, `lease_conflict` to the one who keeps it (as after a join).
     pub notices: Vec<Notice>,
     /// Each task given a new id, and each task that kept an id another board also had: a window keys a task by project and id, so
     /// it showed the boards' tasks with one id as one, and each is stated again.
@@ -449,10 +450,11 @@ impl Boards {
     /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
     /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
     /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
-    /// its owner is told, as `task_moved` after a join), and a lease on a path already held is dropped (the first holder keeps it).
+    /// its owner is told, as `task_moved` after a join), and a live lease on a path a live lease already holds is dropped (the first
+    /// holder keeps it, and both are told, as after a join; an ended lease, which `load` drops, holds nothing).
     /// A dependency on a task its own board no longer has stays unmet: when another board's task has that id, it is given an id of
     /// its own that no task has or will have, instead of naming that task (#1150). A damaged one is left out.
-    pub fn merge_snapshots(parts: &[Vec<u8>]) -> Merged {
+    pub fn merge_snapshots(parts: &[Vec<u8>], now_ms: u64) -> Merged {
         let boards: Vec<Value> = parts
             .iter()
             .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
@@ -509,7 +511,7 @@ impl Boards {
             renames.push(renamed);
         }
         let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
-        let mut held = BTreeSet::<String>::new();
+        let mut held = BTreeMap::<String, String>::new();
         for (board, renamed) in boards.iter().zip(&renames) {
             let mine = tasks_of(board);
             let own: BTreeSet<String> = mine.iter().map(id_of).collect();
@@ -542,8 +544,34 @@ impl Boards {
                 tasks.push(t);
             }
             for l in board["leases"].as_array().cloned().unwrap_or_default() {
-                if held.insert(l["path"].as_str().unwrap_or("").to_string()) {
-                    leases.push(l);
+                // An ended lease holds no path (`load` drops it): it never shadows a later board's live one.
+                let (Some(path), Some(holder), Some(expires)) = (
+                    l["path"].as_str(),
+                    l["holder"].as_str(),
+                    l["expires_at_ms"].as_u64(),
+                ) else {
+                    continue;
+                };
+                if expires <= now_ms {
+                    continue;
+                }
+                match held.get(path) {
+                    None => {
+                        held.insert(path.to_string(), holder.to_string());
+                        leases.push(l);
+                    }
+                    // #1150: both holders are told, as when a join finds the path held.
+                    Some(kept) if kept != holder => {
+                        notices.extend(notice_to(
+                            holder,
+                            json!({"board": "lease_refused", "path": path, "holder": kept}),
+                        ));
+                        notices.extend(notice_to(
+                            kept,
+                            json!({"board": "lease_conflict", "path": path, "other": holder}),
+                        ));
+                    }
+                    Some(_) => {}
                 }
             }
         }
@@ -1164,7 +1192,7 @@ mod tests {
                 task("t-3", "later three", &["t-1"])
             ]),
         );
-        let m = Boards::merge_snapshots(&[first, later]);
+        let m = Boards::merge_snapshots(&[first, later], 0);
         let v: Value = serde_json::from_slice(&m.bytes).unwrap();
         let tasks = v["tasks"].as_array().unwrap();
         let by_title = |t: &str| tasks.iter().find(|x| x["title"] == t).unwrap();
@@ -1194,6 +1222,67 @@ mod tests {
             let e = entries.iter().find(|e| e.title == title).unwrap();
             assert!(e.depends_on.iter().all(|d| !ids.contains(d.as_str())));
         }
+    }
+
+    /// #1150 (ADR-0115 note 4, first half): when two boards' live leases hold one path, the first board's holder keeps it and both
+    /// are told (`lease_refused`, `lease_conflict`), as after a join; an ended lease never keeps a path from a live one.
+    #[test]
+    fn a_merged_lease_on_a_held_path_tells_both_holders() {
+        let board = |leases: Value| {
+            json!({"next": 1, "tasks": [], "leases": leases})
+                .to_string()
+                .into_bytes()
+        };
+        let lease = |path: &str, holder: &str, expires: u64| json!({"path": path, "holder": holder, "expires_at_ms": expires});
+        let first = board(json!([
+            lease("src/a", "n1/x", 500),
+            lease("src/b", "n1/x", 50)
+        ]));
+        let later = board(json!([
+            lease("src/a", "n2/y", 500),
+            lease("src/b", "n2/y", 500),
+            lease("src/a", "n1/x", 500)
+        ]));
+        let m = Boards::merge_snapshots(&[first, later], 100);
+        let v: Value = serde_json::from_slice(&m.bytes).unwrap();
+        let kept: Vec<(String, String)> = v["leases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                (
+                    l["path"].as_str().unwrap().into(),
+                    l["holder"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("src/a".to_string(), "n1/x".to_string()),
+                ("src/b".into(), "n2/y".into())
+            ]
+        );
+        let told = |node: &str, agent: &str, body: Value| Notice {
+            to_node: node.into(),
+            to_agent: agent.into(),
+            body: body.to_string(),
+        };
+        assert_eq!(
+            m.notices,
+            [
+                told(
+                    "n2",
+                    "y",
+                    json!({"board": "lease_refused", "path": "src/a", "holder": "n1/x"})
+                ),
+                told(
+                    "n1",
+                    "x",
+                    json!({"board": "lease_conflict", "path": "src/a", "other": "n2/y"})
+                ),
+            ]
+        );
     }
 
     fn view(online: &[&str]) -> View {

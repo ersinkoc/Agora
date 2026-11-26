@@ -900,7 +900,7 @@ impl Hub {
             (0, _) => {}
             (1, true) => self.boards.load(project, &parts[0], now_ms),
             _ => {
-                let m = crate::board::Boards::merge_snapshots(&parts);
+                let m = crate::board::Boards::merge_snapshots(&parts, now_ms);
                 let none = self.boards.checkpoint(project);
                 self.boards.load(project, &m.bytes, now_ms);
                 // #1150: the window learns what the merge changed (a task with a new id, and the one that kept the id it had), and
