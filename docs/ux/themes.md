@@ -357,7 +357,8 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   again when it changed. A file that can no longer be used leaves the terminal's own colours with a notice ("press t to see why");
   the choice is kept, so the theme comes back when the file is fixed. The folder itself is read when the list opens. No file-watch
   dependency is used.
-- **Reading.** One function that never panics reads a file and reports every problem at once, in the web's words
+- **Reading.** The file's bytes are decoded as the web's import decodes them (a leading byte-order mark dropped, a byte that is not
+  UTF-8 read as U+FFFD). One function that never panics reads a file and reports every problem at once, in the web's words
   (`locales/<lang>/tui.ftl`, `tui-theme-error-*`): the size cap (asked of the file system before anything is read), unknown fields
   at every level, closed value kinds, the floor, unsafe pieces, and the readability pairs of items 1–4 and 7, so **a file is
   accepted or refused alike in both clients**, including for a region this client does not draw. The warnings are the ones about
@@ -390,7 +391,8 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
 - **The floor.** The request box (the box that asks for an answer, `app::dialog`) is cleared to the terminal's own colours and
   drawn as before, whatever the theme; every "needs you" mark (the `!` and the words in the agents list, a waiting tab's label,
   the tab row's count, the welcome's list, the theme list's banner) keeps its fixed colour and bold and sits on the terminal's own
-  background, so no theme's surface can hide it. A test compares those cells, character, colours and attributes, with and
+  background, so no theme's surface can hide it (on the tab in front, and in the bar of the pane in focus in a tiled layout,
+  that is its `!`, the rest being in the accent). A test compares those cells, character, colours and attributes, with and
   without each built-in theme and the sample file, in all three colour modes. The other screens (the board, files, review, the
   folder picker and the plain list when the output is piped) still draw in the terminal's own colours.
 

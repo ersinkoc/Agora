@@ -544,3 +544,52 @@ fn caps_size_and_problem_count_and_never_panics_on_odd_input() {
     assert!(has(&name(&"😀".repeat(31)), &Issue::Name));
     assert!(has(&name("\u{202e}\u{0007}"), &Issue::Name));
 }
+
+/// Audit F1800/F1801: blanks are the web's (`String.prototype.trim` and `\s` in ECMAScript): U+FEFF is one, U+0085 is not. So a colour,
+/// a size, a pixel value, a font list and a name are trimmed and split as the web does it, and the same file is accepted or refused alike.
+#[test]
+fn blanks_are_the_webs() {
+    let ok = |extra: Value| read_value(&v2(extra)).theme().is_some();
+    let with = |section: Value| {
+        let mut e = json!({ "inherits": "dark" });
+        if let (Some(o), Some(s)) = (e.as_object_mut(), section.as_object()) {
+            for (k, x) in s {
+                o.insert(k.clone(), x.clone());
+            }
+        }
+        ok(e)
+    };
+    // Accepted by the web: U+FEFF (and U+3000, U+00A0) is trimmed there.
+    assert!(with(
+        json!({ "dark": { "terminal": { "cursor": "#ffffff\u{feff}" } } })
+    ));
+    assert!(with(
+        json!({ "dark": { "terminal": { "cursor": "\u{3000}#ffffff\u{a0}" } } })
+    ));
+    assert!(with(json!({ "shape": { "radius-s": "\u{feff}8px" } })));
+    assert!(with(json!({ "chrome": { "pane-gap": "\u{feff}4px" } })));
+    assert!(with(json!({ "text": { "font-ui": "Inter\u{feff}Sans" } })));
+    // Refused by the web: U+0085 is not a blank there.
+    assert!(!with(
+        json!({ "dark": { "terminal": { "cursor": "#ffffff\u{85}" } } })
+    ));
+    assert!(!with(json!({ "shape": { "radius-s": "8px\u{85}" } })));
+    assert!(!with(json!({ "chrome": { "pane-gap": "4px\u{85}" } })));
+    assert!(!with(json!({ "text": { "font-ui": "Inter\u{85}Sans" } })));
+    // A name of nothing but U+FEFF is empty on the web.
+    let name = |s: &str| read_value(&v2(json!({ "name": s, "inherits": "dark" })));
+    assert!(has(&name("\u{feff}"), &Issue::Name));
+    assert_eq!(
+        name("\u{feff}Harbour\u{feff}")
+            .theme()
+            .map(|t| t.name.as_str()),
+        Some("Harbour")
+    );
+    // Format 1 reads its tokens the same way.
+    assert!(read_value(&v1(json!({ "accent": "#8b93ff\u{feff}" })))
+        .theme()
+        .is_some());
+    assert!(read_value(&v1(json!({ "accent": "#8b93ff\u{85}" })))
+        .theme()
+        .is_none());
+}

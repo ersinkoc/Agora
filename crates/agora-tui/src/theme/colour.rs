@@ -5,10 +5,32 @@
 /// A colour as red, green and blue bytes.
 pub type Rgb = [u8; 3];
 
+/// A blank as the web reads a theme file (ECMAScript's WhiteSpace and LineTerminator: what `String.prototype.trim` removes and `\s`
+/// matches). Not Rust's `char::is_whitespace`: U+FEFF is a blank here and U+0085 is not, so a value is trimmed alike in both clients
+/// (audit F1801).
+pub fn js_blank(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
+/// `s` without the blanks ([`js_blank`]) at either end: the web's `trim()`.
+pub fn js_trim(s: &str) -> &str {
+    s.trim_matches(js_blank)
+}
+
 /// A colour value of a theme file: `#rgb` or `#rrggbb` (ASCII hex, either case, surrounding blanks allowed), or `None`. Named
 /// colours, `rgb()` and transparency are not colours here: contrast must be computable exactly.
 pub fn parse_hex(v: &str) -> Option<Rgb> {
-    let h = v.trim().strip_prefix('#')?;
+    let h = js_trim(v).strip_prefix('#')?;
     if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }

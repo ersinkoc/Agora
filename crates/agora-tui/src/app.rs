@@ -1964,14 +1964,27 @@ impl App {
                     Style::default()
                 };
                 let needs_you = s.rows.iter().any(|r| r.id == *id && r.needs_you);
-                spans.push(Span::styled(
-                    tab_label(i, id, s.rows),
-                    if needs_you && i != self.active {
-                        attention
-                    } else {
-                        style
-                    },
-                ));
+                let label = tab_label(i, id, s.rows);
+                // The floor (ADR-0113 decision 3, audit F1804): under a theme the tab in front is in the accent, but its "!" keeps the
+                // "needs you" style on the terminal's own background. Without a theme it is inverted with the rest, as it always was.
+                let mark_at = label.find("! ").filter(|_| needs_you && i == self.active);
+                match mark_at.filter(|_| self.look.is_some()) {
+                    Some(at) => {
+                        let (head, rest) = label.split_at(at);
+                        let (mark, tail) = rest.split_at(2);
+                        spans.push(Span::styled(head.to_string(), style));
+                        spans.push(Span::styled(mark.to_string(), attention));
+                        spans.push(Span::styled(tail.to_string(), style));
+                    }
+                    None => spans.push(Span::styled(
+                        label,
+                        if needs_you && i != self.active {
+                            attention
+                        } else {
+                            style
+                        },
+                    )),
+                }
                 spans.push(Span::raw(" "));
             }
             // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
@@ -2113,6 +2126,7 @@ impl App {
                     attention,
                     line,
                     divider: chrome.divider(),
+                    themed: self.look.is_some(),
                 };
                 let colors = s.colors;
                 let palette = self.look.as_ref().map(|l| &l.styles.pane);
@@ -5347,10 +5361,20 @@ mod theme_tests {
 
     /// The window with two tabs open (the one in front does not need the user, the other does) and a request's box on top.
     fn frame(look: Option<Shell>, colors: ColorMode, dialog: Option<&[String]>) -> (App, Buffer) {
+        frame_in_front(look, colors, dialog, 0)
+    }
+
+    /// [`frame`] with tab `active` in front (1: the tab of the agent that needs the user).
+    fn frame_in_front(
+        look: Option<Shell>,
+        colors: ColorMode,
+        dialog: Option<&[String]>,
+        active: usize,
+    ) -> (App, Buffer) {
         let rows = rows();
         let app = App {
             tabs: vec!["mac/agent-1".into(), "mac/agent-3".into()],
-            active: 0,
+            active,
             selected: 1,
             look,
             ..App::default()
@@ -5457,6 +5481,142 @@ mod theme_tests {
                             "harbour {scheme:?} {colors:?}: the box"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// Audit F1804: the tab in front whose agent needs the user keeps its "!" in the "needs you" style on the terminal's own background
+    /// under every theme (the floor); the rest of its label is in the accent, so it still reads as the tab in front. Without a theme it
+    /// is drawn as it always was.
+    #[test]
+    fn the_needs_you_mark_of_the_tab_in_front_keeps_the_floor_under_every_theme() {
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let (app, plain) = frame_in_front(None, colors, None, 1);
+            let tab_y = app.areas(AREA).tabs.y;
+            let cells = cells_of(&plain, tab_y, "2 ! shell");
+            let (mark, name) = (cells[2], cells[4]);
+            let attention = attention_style(colors);
+            for b in built_ins() {
+                let look = shell(b.id, colors);
+                let (_, themed) = frame_in_front(Some(look), colors, None, 1);
+                let c = &themed[mark];
+                assert_eq!(
+                    (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
+                    ("!", attention.fg.unwrap(), Color::Reset, true),
+                    "{} {colors:?}: the mark of the tab in front",
+                    b.id
+                );
+                assert_eq!(
+                    themed[name].bg,
+                    look.styles.chosen.bg.unwrap(),
+                    "{} {colors:?}: the tab in front",
+                    b.id
+                );
+            }
+            // Without a theme, the tab in front is inverted as before themes, its mark too.
+            assert!(plain[mark].modifier.contains(Modifier::REVERSED));
+            assert_eq!(
+                (plain[mark].fg, plain[mark].bg),
+                (Color::Reset, Color::Reset)
+            );
+        }
+    }
+
+    /// Audit F1804 in a tiled layout (ADR-0068): the pane in focus has the keyboard, so its bar is in the accent; the "!" of its tab in
+    /// front (a group of tabs) and of a pane's own name (no tabs) keeps the "needs you" style on the terminal's own background.
+    #[test]
+    fn the_needs_you_mark_in_a_tiled_bar_in_focus_keeps_the_floor_under_every_theme() {
+        let mut rows = rows();
+        for r in &mut rows {
+            r.needs_you = true;
+            r.state = "needs you".into();
+        }
+        let first = rows[0].clone();
+        rows.extend((4..=5).map(|i| Row {
+            id: format!("mac/agent-{i}"),
+            label: format!("agent{i}"),
+            ..first.clone()
+        }));
+        let draw = |look: Option<Shell>, colors: ColorMode, focus: usize| -> Buffer {
+            let mut app = App {
+                look,
+                ..App::default()
+            };
+            // 2 x 2 with five agents: agent-5 is a tab behind agent-4 in the last pane.
+            app.layout_act(layout_engine::Action::Preset {
+                preset: Preset::TwoByTwo,
+                agents: rows.iter().map(|r| r.id.clone()).collect(),
+            });
+            let ids: Vec<String> = layout_tree::panes_of(&app.workspace().layout.root)
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            app.layout_act(layout_engine::Action::Activate {
+                pane: ids[focus].clone(),
+            });
+            app.layout_act(layout_engine::Action::Focus {
+                pane: ids[focus].clone(),
+            });
+            app.focus = Focus::Terminal;
+            let mut tui =
+                Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
+            let details: Vec<String> = Vec::new();
+            tui.draw(|f| {
+                app.draw(
+                    f,
+                    &Screen {
+                        rows: &rows,
+                        terminal: None,
+                        details: &details,
+                        notice: "",
+                        no_screen: None,
+                        conversation: None,
+                        dialog: None,
+                        note: None,
+                        tiles: &[],
+                        colors,
+                        t: &text,
+                    },
+                );
+            })
+            .unwrap();
+            tui.backend().buffer().clone()
+        };
+        let find = |buf: &Buffer, needle: &str| -> (u16, u16) {
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let row: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    row.find(needle)
+                        .map(|at| (u16::try_from(row[..at].chars().count()).unwrap(), y))
+                })
+                .unwrap_or_else(|| panic!("{needle:?} not drawn"))
+        };
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let attention = attention_style(colors);
+            for b in built_ins() {
+                let look = shell(b.id, colors);
+                // The last pane in focus, its tab in front being agent-5's (tabs of a group); then the first pane (its own name, which
+                // the bar starts with a space: the agents list has "! claude" too).
+                for (focus, needle, at) in [(4, "! 2:agent5", 0), (0, " ! claude", 1)] {
+                    let buf = draw(Some(look), colors, focus);
+                    let (x, y) = find(&buf, needle);
+                    let x = x + at;
+                    let c = &buf[(x, y)];
+                    assert_eq!(
+                        (c.symbol(), c.fg, c.bg, c.modifier.contains(Modifier::BOLD)),
+                        ("!", attention.fg.unwrap(), Color::Reset, true),
+                        "{} {colors:?} {needle}: the mark in the bar in focus",
+                        b.id
+                    );
+                    assert_eq!(
+                        buf[(x + 3, y)].bg,
+                        look.styles.chosen.bg.unwrap(),
+                        "{} {colors:?} {needle}: the bar in focus",
+                        b.id
+                    );
                 }
             }
         }

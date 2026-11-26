@@ -274,6 +274,8 @@ pub struct PaneStyles {
     pub attention: Style,
     pub line: Style,
     pub divider: &'static str,
+    /// A theme is in use: the bar in focus is in its accent, and a "!" there is drawn apart in `attention` (the floor, audit F1804).
+    pub themed: bool,
 }
 
 /// A pane's name in its bar or tab: the agent's label, or the panel's name.
@@ -427,14 +429,26 @@ pub fn draw(
             let front = p.id == placed.id;
             let waits = needs_you(p, tiles);
             used += text.chars().count();
-            let style = if waits && !(front && focused && tiles.keyboard) {
+            let in_accent = front && focused && tiles.keyboard;
+            let style = if waits && !in_accent {
                 st.attention
             } else if front && placed.tabs.is_some() {
                 bar_style.patch(st.strong)
             } else {
                 bar_style
             };
-            spans.push(Span::styled(text, style));
+            // The floor (ADR-0113 decision 3, audit F1804): in the theme's accent, the "!" keeps the "needs you" style on the
+            // terminal's own background. Without a theme the bar in focus is inverted with its mark, as the tab bar's is.
+            match text.find("! ").filter(|_| waits && in_accent && st.themed) {
+                Some(at) => {
+                    let (head, rest) = text.split_at(at);
+                    let (mark, tail) = rest.split_at(2);
+                    spans.push(Span::styled(head.to_string(), style));
+                    spans.push(Span::styled(mark.to_string(), st.attention));
+                    spans.push(Span::styled(tail.to_string(), style));
+                }
+                None => spans.push(Span::styled(text, style)),
+            }
         }
         if focused && tiles.zoomed {
             let note = format!(" {} ", t(key!("tui-layout-maximized"), &[]));
