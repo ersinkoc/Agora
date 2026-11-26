@@ -28,7 +28,7 @@ A command is data (`apps/web/src/keys/commands.ts`):
 
 The **handler** is not in the list. The part of the window that can run a command registers it while it is on screen
 (`keys/registry.ts`), with whether it can act now (a tab that exists, a connected hub). The app registers the palette, Home, the pages,
-the language, the theme editor, plugins and safe mode. The window registers the agent list, the tabs and the layout. The side panel
+the language, the theme editor, plugins, safe mode and sounds. The window registers the agent list, the tabs, the layout and the focused agent's mute. The side panel
 registers its rail. On Settings or on a phone, the window's commands are not on screen, so their keys do nothing there, as before.
 
 | id | name | default keys |
@@ -42,11 +42,13 @@ registers its rail. On Settings or on a phone, the window's commands are not on 
 | `language.system`, `language.en`, `language.tr` | Language | none |
 | `theme.editor`, `plugins.open` | Edit theme, Plugins | none |
 | `window.safe-mode` | Open in safe mode (**fixed**) | Ctrl+Alt+Shift+S, ⌘⌥⇧S |
+| `sounds.toggle` | Turn sounds on or off (in the palette: "Turn sounds on" or "Turn sounds off"; not offered where the browser makes no sound or in safe mode) | none |
 | `window.agents` | Show or hide the agent list | Ctrl+B, ⌘B, Ctrl+Shift+B |
 | `pane.tab-1` … `pane.tab-9` | Go to tab 1 … 9 | Alt+1 … Alt+9 |
 | `side.place-1` … `side.place-5` | Side panel, place 1 … 5 (in the palette: "Side panel: Needs you") | Alt+Shift+1 … Alt+Shift+5 |
 | `layout.preset-1x1` … `layout.preset-focus` | Layout: one of the six presets | none |
 | `layout.maximize`, `layout.split-right`, `layout.split-down`, `layout.close-pane`, `layout.reset` | the pane in focus; Reset layout | none |
+| `agent.mute-sounds` | Mute or unmute the sounds of the focused pane's agent (while sounds are on) | none |
 
 The defaults are the shortcuts the window had before this rung. The side panel's keys stay by **place** (the third subject of the rail,
 whichever it is), because Board and Usage come and go.

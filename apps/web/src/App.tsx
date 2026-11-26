@@ -55,6 +55,10 @@ import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
+import { AgentAlerts } from './components/AgentAlerts';
+import { canPlaySounds, unlockSounds } from './components/chime';
+import { soundPrefs } from './net/sounds';
+import { useOnScreen } from './net/onScreen';
 import { AnswerHoldsProvider } from './components/useAnswerGuard';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
@@ -525,6 +529,8 @@ export function App() {
 
   // What needs the person (the one list the console, the panel and the phone bar show), for the attention layer's card, banner and notice.
   const attention = useMemo(() => attentionList(approvalsNow, agents, pairing.ui?.cards ?? []), [approvalsNow, agents, pairing.ui?.cards]);
+  // The full-size view and the phone's agent screen show one agent: it is the one on screen (the window's panes say theirs in Console).
+  useOnScreen(current, current === undefined ? [] : [current]);
   // T44 (#1048): one set of answer holds for the whole window, so a request answered on one surface (a pane's card, the side panel, Home,
   // the attention dialog, a switch's card) is held on every other; an answer that went is forgotten when its request leaves this list.
   const heldIds = useMemo(() => approvalsNow.map((x) => x.id), [approvalsNow]);
@@ -578,6 +584,9 @@ export function App() {
     // so its command is here for the palette and its keys are fixed.
     'plugins.open': { run: () => setPluginsOpen(true) },
     'window.safe-mode': SAFE ? false : { run: () => location.assign(safeAddress(location.href)) },
+    // Sounds on or off for this browser (never in safe mode or where the browser makes no sound); turning them on is the person's act, so
+    // the audio may start.
+    'sounds.toggle': { run: () => { const on = !soundPrefs.get().on; if (on) unlockSounds(); soundPrefs.set({ on }); }, available: canPlaySounds(), label: t(soundPrefs.get().on ? 'palette-sounds-off' : 'palette-sounds-on') },
   });
   const keymap = useKeymap();
   const commandsVersion = useCommandsVersion();
@@ -655,6 +664,7 @@ export function App() {
           shows every request in full itself, so nothing floats there. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && !isMachinesHash(hash) && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       {/* The demo Settings page shows Settings only: no demo requests over it. */}
+      <AgentAlerts agents={agents} attention={attention} ready={!hub || live !== undefined} />
       <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={answerRequest} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {pluginsOpen && <PluginsDialog onClose={() => setPluginsOpen(false)} />}

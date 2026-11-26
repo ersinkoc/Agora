@@ -13,6 +13,7 @@ import { Icon, type IconName } from '../components/Icon';
 import { CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { useCloseAsk } from '../net/closeAgent';
 import { NoAskBadge } from '../components/NoAskBadge';
+import { FinishedMark } from '../components/FinishedMark';
 import { AlwaysNote, AlwaysOnly, AsksLessChip, alwaysNoteId } from '../components/AllowAlways';
 import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
@@ -236,6 +237,7 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
         </span>
         <NoAskBadge agent={a} />
         <AsksLessChip agent={a} />
+        <FinishedMark agentId={a.id} />
         <StatusPill state={a.state} failed={endedWithError(a)} />
         <Icon name="chevron" className="size-4 flex-none text-muted rtl:rotate-180" />
       </button>
