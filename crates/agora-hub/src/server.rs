@@ -2076,7 +2076,13 @@ pub(crate) fn plugin_command(
     let plugins = crate::plugins::Plugins::new(hub.store());
     let internal = |_| Error::new(ErrorCode::Internal).with("incident_id", "plugins");
     let empty = || command_ok::Result::Empty(v1::Empty {});
-    let mut admit = crate::dispatch::Admit::Yes;
+    // Each person's grant changes are limited (one refusal row per span, `crate::dispatch::Admit`); nothing changes when refused.
+    let admit = match &req.command {
+        Some(C::PluginGrantSet(_) | C::PluginGrantRemove(_)) if req.target_node.is_empty() => hub
+            .grant_writes()
+            .admit(&who.user, std::time::Instant::now()),
+        _ => crate::dispatch::Admit::Yes,
+    };
     let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
         Some(
             C::PluginList(_)
@@ -2110,14 +2116,8 @@ pub(crate) fn plugin_command(
                 })
                 .map_err(internal),
         ),
-        // Each person's grant changes are limited (one refusal row per span, `crate::dispatch::Admit`); nothing changes when refused.
         Some(C::PluginGrantSet(_) | C::PluginGrantRemove(_))
-            if {
-                admit = hub
-                    .grant_writes()
-                    .admit(&who.user, std::time::Instant::now());
-                admit != crate::dispatch::Admit::Yes
-            } =>
+            if admit != crate::dispatch::Admit::Yes =>
         {
             (
                 if admit == crate::dispatch::Admit::First {
