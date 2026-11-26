@@ -49,7 +49,13 @@ const cardOf = (file: string) => [...host.querySelectorAll('.phone__main section
 const btn = (file: string, name: string) => [...(cardOf(file)?.querySelectorAll('button') ?? [])].find((b) => b.textContent === name) as HTMLButtonElement;
 
 describe.each(surfaces)('request cards on %s keep T44 (#1048 item 4)', (_name, draw) => {
-  const render = (approvals: ApprovalModel[], onResolve: Resolve, o?: Opts) => act(() => root.render(draw(approvals, onResolve, o)));
+  // On an agent's screen a card folds to one line while the bar at the bottom holds a request (finding 16 of the visual pass): these
+  // cases are about the cards' buttons, so every folded card is opened as the person would, a tap on its line (which is itself a change
+  // the dwell starts again for).
+  const render = (approvals: ApprovalModel[], onResolve: Resolve, o?: Opts) => {
+    act(() => root.render(draw(approvals, onResolve, o)));
+    for (const line of host.querySelectorAll<HTMLButtonElement>('.phone-fold__btn')) act(() => line.click());
+  };
 
   it('waits out the dwell before Allow or Deny does anything, and a press during it sends nothing', () => {
     const sent: [string, boolean][] = [];
@@ -291,6 +297,7 @@ describe('one answer per request across the phone\'s screens (the window\'s hold
     const list = [ask('r1', 'a.rs')];
     const inWindow = (screen: ReactElement) => act(() => root.render(<AnswerHoldsProvider listed={list.map((x) => x.id)}>{screen}</AnswerHoldsProvider>));
     inWindow(<PhoneAgent key="agent" agent={agent} agents={[agent]} machines={machines} approvals={list} onResolve={on} onOpen={() => {}} onBack={() => {}} />);
+    act(() => (host.querySelector('.phone-fold__btn') as HTMLButtonElement).click()); // folded while the bar holds it: open it
     dwell();
     act(() => btn('a.rs', 'Deny').click());
     await flush();
@@ -371,5 +378,44 @@ describe('the phone uses the type scale, never a pixel font size', () => {
   it('the scan finds the kinds it looks for', () => {
     expect('className="text-[15px]"'.match(/\btext-\[\s*[\d.]+px\s*\]/g)).toHaveLength(1);
     expect('font-size: 15px;'.match(/font-size:\s*[\d.]+px/g)).toHaveLength(1);
+  });
+});
+
+// Visual pass 2026-11, finding 16: on an agent's screen, while the bar at the bottom holds a request, the card above folds to one line so
+// the terminal or the conversation keeps its room. The line never answers; it opens the card, whose buttons wait for a fresh dwell.
+describe('a request on an agent\'s screen folds to one line while the bar holds it', () => {
+  it('is one line with the ask\'s title and no answer, opens in place on a tap, waits a fresh dwell, and folds again', () => {
+    const sent: [string, boolean][] = [];
+    act(() => root.render(<PhoneAgent agent={agent} agents={[agent]} machines={machines} approvals={[ask('r1', 'a.rs')]} onResolve={(x, ok) => { sent.push([x.id, ok]); }} onOpen={() => {}} onBack={() => {}} />));
+    dwell();
+    const line = host.querySelector('.phone__main .phone-fold__btn') as HTMLButtonElement;
+    expect(line.textContent).toBe('claude · teal wants to change a file');
+    expect(line.getAttribute('aria-expanded')).toBe('false');
+    expect(host.querySelector('.phone__main .phone-asks')?.textContent).not.toMatch(/Allow|Deny/);
+    // The bar is still there: the request is never hidden, and its Review and decide opens the card too.
+    expect(host.querySelector('.phone-dock')?.textContent).toContain(t('fleet-review'));
+    act(() => line.click());
+    expect(btn('a.rs', 'Allow').getAttribute('aria-disabled')).toBe('true');
+    act(() => btn('a.rs', 'Allow').click());
+    expect(sent).toEqual([]);
+    dwell();
+    act(() => btn('a.rs', 'Allow').click());
+    expect(sent).toEqual([['r1', true]]);
+    act(() => (host.querySelector(`button[aria-label="${t('phone-ask-fold')}"]`) as HTMLButtonElement).click());
+    expect(host.querySelector('.phone__main .phone-fold__btn')).not.toBeNull();
+  });
+
+  it('opens from the bar\'s Review and decide', () => {
+    act(() => root.render(<PhoneAgent agent={agent} agents={[agent]} machines={machines} approvals={[ask('r1', 'a.rs')]} onResolve={() => {}} onOpen={() => {}} onBack={() => {}} />));
+    const review = [...(host.querySelector('.phone-dock')?.querySelectorAll('button') ?? [])].find((b) => b.textContent === t('fleet-review')) as HTMLButtonElement;
+    act(() => review.click());
+    expect(host.querySelector('.phone__main .phone-fold__btn')).toBeNull();
+    expect(cardOf('a.rs')).toBeTruthy();
+  });
+
+  it('stays whole on the list, where no bar on an agent folds it', () => {
+    act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={[ask('r1', 'a.rs')]} onResolve={() => {}} link="live" onOpen={() => {}} />));
+    expect(host.querySelector('.phone-fold__btn')).toBeNull();
+    expect(cardOf('a.rs')).toBeTruthy();
   });
 });

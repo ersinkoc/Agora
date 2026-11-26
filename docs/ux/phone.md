@@ -30,6 +30,10 @@ terminals get the key bar when the screen is a touch screen.
    and **Allow** (the primary, last, as on every request) as 52 px buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
    structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
    decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.
+   On an agent's screen, while the bar holds a request, the cards above fold to one line each (the kind's icon, the ask's title and a
+   chevron, on the needs tint), so the terminal or the conversation keeps its room (visual pass 2026-11, finding 16). The line answers
+   nothing: a tap on it, or the bar's **Review and decide**, opens the card in place, whose Deny and Allow wait for a fresh dwell (the fold
+   is part of what the guard watches), and the open card can be folded again. The request is never hidden: the line and the bar stay.
    The list's cards and the bar keep T44 as every other surface does, with the shared guard (`useAnswerGuard`, #1048,
    [approvals.md](approvals.md)): Allow and Deny do nothing for 600 ms after anything the card or the bar shows changed (a request that
    has just replaced another, a card that came in above, the trust notice, the link row), after the person came back to the window and
@@ -42,7 +46,9 @@ terminals get the key bar when the screen is a touch screen.
    While the link is down Allow and Deny are disabled everywhere on the phone and say why. The state of the link has a row of its own
    under the title bar (it no longer pushes the buttons off a 390 px screen); that row is the one banner for the link, and the bar adds only the reason next to its disabled buttons.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
-   device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
+   device** and **More**, a menu of the side panel's deep subjects (rows a finger can press): **Shared tasks and files** (the board,
+   `#/board`), **Team chat** (`#/messages`) and **Usage** (`#/usage`), each a screen of its own with Back that draws what the side
+   panel draws (visual pass 2026-11, finding 15). The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
    device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
 
 A notice's link to an approval (`#/approvals/<node>%2F<id>`, ADR-0046) opens the agent that asks once the window knows the request;

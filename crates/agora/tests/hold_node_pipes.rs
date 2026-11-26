@@ -186,6 +186,23 @@ impl Drop for Rig {
                 let _ = agora_platform::terminate_process(pid);
             }
         }
+        if std::thread::panicking() {
+            // A failed test keeps its home, and says what the holder logged (`run/hold.log`: its stderr, with why it refused a start).
+            let log = self.root.join("run/hold.log");
+            let tail = match std::fs::read(&log) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let lines: Vec<&str> = text.lines().collect();
+                    lines[lines.len().saturating_sub(40)..].join("\n")
+                }
+                Err(e) => format!("({} not read: {e})", log.display()),
+            };
+            eprintln!(
+                "the rig's home is kept at {}; the end of the holder's log:\n{tail}",
+                self.root.display()
+            );
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -1648,8 +1665,16 @@ fn a_node_stops_in_time_while_its_holder_does_not_answer() {
     let stopping = Instant::now();
     drop(node);
     let took = stopping.elapsed();
+    // The stop's own bounds (`agora_node::daemon`, `LOCK_RETRY_UNTIL`: "4 s in all at most"): the lock and the readers' drain end by
+    // `LOCK_WAIT + DRAIN_WAIT` from the stop's start, and the loop's last round gets `LOOP_WAIT` more. A stop that waited for the hung
+    // read would take the link's frame time (5 s) less the 300 ms above, so this still tells the two apart. (It was `DRAIN_WAIT + 1 s`,
+    // which left nothing for the loop's round, and a slow macOS runner took 3.35 s.)
+    let bound = agora_node::daemon::LOCK_WAIT
+        + agora_node::daemon::DRAIN_WAIT
+        + agora_node::daemon::LOOP_WAIT;
+    assert!(bound + Duration::from_millis(300) < agora_node::holder_link::FRAME_TIMEOUT);
     assert!(
-        took < agora_node::daemon::DRAIN_WAIT + Duration::from_secs(1),
+        took < bound,
         "the stop waited {took:?} for a holder that does not answer"
     );
     drop(paused);

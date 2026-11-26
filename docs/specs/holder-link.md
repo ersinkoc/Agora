@@ -45,7 +45,11 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    that is empty or longer than `MAX_AGENT_ID` (256 bytes) is `Refused(BadRequest)` and nothing starts (#929), so every reply that names
    an agent fits a frame (below, "Limits of the holder itself"). A holder that already keeps `MAX_HELD_AGENTS` agents (15,251, terminal
    and pipe agents together) answers a `Start` or `StartPipe` for a new id `Refused(Failed)` and starts nothing (#983). (The
-   confinement a node builds is not carried yet; a later step adds it as a new tag.)
+   confinement a node builds is not carried yet; a later step adds it as a new tag.) `Refused` is frozen and carries no reason, so a
+   start refused with `Failed` is logged on the holder's stderr (`run/hold.log` when a node started it; an operational line, not shown
+   to a person): the agent id, the step that failed (full; the terminal or the program; the copy of the terminal for the node), the
+   error's kind and number, and whether the program (and the folder, when one was asked for) exists at that moment. The program's
+   arguments and the environment are never logged.
 5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
    then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
    the node's process still runs does **not** start the reads: the node still holds its own copy of each master and reads it itself,

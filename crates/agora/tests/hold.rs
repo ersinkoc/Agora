@@ -19,7 +19,17 @@ use agora_node::holder_link::{
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
 
+/// The path a helper is handed, so that it never runs `cargo` itself (see [`fake_agent`]).
+const FAKE_AGENT_ENV: &str = "AGORA_HOLD_FAKE_AGENT";
+
+/// `agora-fake-agent`, built once by this test process. A helper (a copy of this binary) takes the path its parent hands it and never
+/// builds: on macOS cargo copies a binary into place (never a hard link, cargo issue 10060), so the copy is never "the same file" as
+/// its source and every `cargo build`, even one with nothing to do, removes `target/debug/agora-fake-agent` and copies it again. A
+/// helper that built while another test's holder started an agent made that start fail (`ENOENT`, refused `Failed`).
 fn fake_agent() -> String {
+    if let Ok(path) = std::env::var(FAKE_AGENT_ENV) {
+        return path;
+    }
     let mut p = PathBuf::from(AGORA);
     p.pop();
     let target = p.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -81,9 +91,29 @@ fn start_request(agent: &str, script: &str) -> StartRequest {
 }
 
 /// An `agora hold` on its own home, killed with everything it holds when this value is dropped.
+///
+/// The holder's stderr (where it says why it refused a start) is `<home>/hold.stderr`. A test that fails keeps its home and prints the
+/// end of that file, so a refusal on a CI runner says why.
 struct Rig {
     home: PathBuf,
     holder: Child,
+}
+
+/// The holder's stderr in a rig's home.
+fn holder_log(home: &Path) -> PathBuf {
+    home.join("hold.stderr")
+}
+
+/// The last `lines` lines of `path`, or why it could not be read. Never panics: it runs while a test unwinds.
+fn tail(path: &Path, lines: usize) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            let all: Vec<&str> = text.lines().collect();
+            all[all.len().saturating_sub(lines)..].join("\n")
+        }
+        Err(e) => format!("({} not read: {e})", path.display()),
+    }
 }
 
 impl Rig {
@@ -94,6 +124,7 @@ impl Rig {
         // holder's stdin) and a variable of its own that no agent may see.
         let extra = home.join("extra");
         std::fs::write(&extra, b"x").expect("extra file");
+        let log = std::fs::File::create(holder_log(&home)).expect("holder log");
         let holder = Command::new("sh")
             .args([
                 "-c",
@@ -105,7 +136,7 @@ impl Rig {
             .env("AGORA_HOLD_TEST_SECRET", "leaked")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .expect("start agora hold");
         let rig = Rig { home, holder };
@@ -163,6 +194,15 @@ impl Drop for Rig {
         // The agents get SIGHUP with the holder (Linux, ADR-0079 decision 8) and the master closing.
         let _ = self.holder.kill();
         let _ = self.holder.wait();
+        if std::thread::panicking() {
+            // Kept for a look (the agents ended with the holder); the end of the holder's stderr goes with the failure.
+            eprintln!(
+                "the holder's home is kept at {}; the end of its stderr:\n{}",
+                self.home.display(),
+                tail(&holder_log(&self.home), 40)
+            );
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.home);
     }
 }
@@ -274,6 +314,9 @@ fn helper(role: &str, rig: &Rig, script: Option<&str>) -> Child {
     cmd.args(["--exact", "helper_entry", "--nocapture", "--test-threads=1"])
         .env("AGORA_HOLD_HELPER", role)
         .env("AGORA_HOLD_SOCKET", rig.socket())
+        // Built here, never by the helper (see `fake_agent`); a helper that tried to build anyway fails at once.
+        .env(FAKE_AGENT_ENV, fake_agent())
+        .env("CARGO", rig.home.join("no-cargo-in-a-helper"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -842,4 +885,50 @@ fn an_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_listed_a
     assert!(held[0].terminal.is_some());
     node.stop(&at, true).expect("stop");
     drop(master);
+}
+
+/// A start the holder refuses with `Failed` says why on its stderr (`run/hold.log` when a node started it): the refusal on the link is
+/// frozen and cannot carry it. Here the program is not there: the kind of error and whether the program exists now are in the log, and
+/// the holder serves on.
+#[test]
+fn a_start_refused_because_the_program_is_missing_says_why_on_the_holders_stderr() {
+    let rig = Rig::new("missing");
+    rig.lock_self();
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    let missing = rig.home.join("no-such-program");
+    let request = StartRequest {
+        agent: "a1".into(),
+        argv: vec![
+            missing.to_string_lossy().into_owned(),
+            "--secret-arg".into(),
+        ],
+        cols: 80,
+        rows: 24,
+        ..StartRequest::default()
+    };
+    match c.start(&request) {
+        Err(LinkError::Refused(Refusal::Failed, _)) => {}
+        Err(e) => panic!("refused for another reason: {e}"),
+        Ok((pid, _)) => panic!("a missing program started (pid {pid})"),
+    }
+    let log = std::fs::read_to_string(holder_log(&rig.home)).expect("the holder's stderr");
+    let line = log
+        .lines()
+        .find(|l| l.contains("\"a1\" refused (Failed)"))
+        .unwrap_or_else(|| panic!("no reason logged: {log:?}"));
+    assert!(line.contains("NotFound"), "{line}");
+    assert!(
+        line.contains(&format!(
+            "{:?} exists now: false",
+            missing.to_string_lossy()
+        )),
+        "{line}"
+    );
+    assert!(
+        !line.contains("--secret-arg"),
+        "the arguments were logged: {line}"
+    );
+    // The holder serves on.
+    assert!(c.list().expect("list").is_empty());
 }

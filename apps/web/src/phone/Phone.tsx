@@ -30,7 +30,10 @@ import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from '../
 import { AgentAvatar, Button, Callout, Pill, StatusPill, Tag } from '../components/kit';
 import { ATTENTION_DWELL_MS } from '../net/attention';
 import { requestShown, useAnswerGuard, type AnswerGuard } from '../components/useAnswerGuard';
-import { PHONE_QUERY, byMachine, dockOf, needsYou, type Dock, type NeedsItem } from './nav';
+import { PHONE_DETAILS, PHONE_QUERY, byMachine, dockOf, needsYou, type Dock, type NeedsItem, type PhoneDetailsTab } from './nav';
+import { Details } from '../components/Inspector';
+import { Menu, type MenuItem } from '../layout/Menu';
+import type { BoardModel, MessageModel } from '../net/view';
 import { type FleetFilter, askLine, emptyKind, fleetCounts, matchesFilter } from '../net/fleet';
 import { FleetEmpty, FleetSummary } from '../components/FleetConsole';
 import { PairCards, PairRecentList, PairWindowControl, type PairingUi } from '../components/Pairing';
@@ -88,33 +91,48 @@ function NavButton({ icon, label, onClick, href, primary }: { icon: IconName; la
 // goes through the same guard; a switch keeps its own guards (its Allow dwell, its one-click lock, its Deny always available).
 // What a list of request cards draws, for its guard's layout: a change in any of it can move a card or a button.
 // `machine`: the machine's name as the card draws it (the agent's, else the request's, else the machine list's).
-type PhoneAsk = { approval: ApprovalModel; agent?: AgentTileModel; machine: string; docked: boolean };
+// `folded`: drawn as one line (an agent's screen while the bar at the bottom holds a request); a fold or an unfold moves the buttons,
+// so it is part of what the guard watches and the dwell starts again with it.
+type PhoneAsk = { approval: ApprovalModel; agent?: AgentTileModel; machine: string; docked: boolean; folded?: boolean };
 const asksShown = (asks: readonly PhoneAsk[], status: (id: string) => string, around: unknown) =>
-  JSON.stringify([around, asks.map((a) => [...requestShown(a.approval, a.agent), a.machine, a.docked, status(a.approval.id)])]);
+  JSON.stringify([around, asks.map((a) => [...requestShown(a.approval, a.agent), a.machine, a.docked, !!a.folded, status(a.approval.id)])]);
 
 // One request in the phone's list: the one request component in its row density (redesign PR 13), with the text across the card and the
 // buttons under it, each as wide as it can be. The ask is whole: the action as one chip and the agent's full detail, any hidden character
 // written out (what you allow is what you see). A plain request the bar answers says so instead of repeating the buttons; a request to start
 // an agent and a switch are read whole in their own cards (they carry a folder, a prompt, settings) and never answered from the bar.
-function PhoneRequest({ ask, guard, onResolve, onOpen }: { ask: PhoneAsk; guard: AnswerGuard; onResolve?: Resolve; onOpen?: () => void }) {
+// `onFold`: on an agent's screen, a request folds and unfolds in place (visual pass 2026-11, finding 16). Folded it is one line, the ask's
+// title and nothing to answer with: Deny and Allow are only ever beside the ask read whole.
+function PhoneRequest({ ask, guard, onResolve, onOpen, onFold }: { ask: PhoneAsk; guard: AnswerGuard; onResolve?: Resolve; onOpen?: () => void; onFold?: (folded: boolean) => void }) {
   const { approval: x, agent, machine, docked } = ask;
+  if (ask.folded && onFold) {
+    const title = askTitle(x, visible(agent?.name || approvalName(x)));
+    return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-fold kit-tone-needs">
+      <button type="button" className="phone-fold__btn" aria-expanded={false} onClick={() => onFold(false)}>
+        <span aria-hidden className="phone-fold__chip"><Icon name={ASK_ICON[askKind(x)]} className="size-4" /></span>
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        <Icon name="chevronDown" className="size-4 flex-none text-muted" />
+      </button>
+    </div>;
+  }
+  const fold = onFold && <button type="button" className="phone-iconbtn phone-req__open" aria-expanded onClick={() => onFold(true)} aria-label={t('phone-ask-fold')} title={t('phone-ask-fold')}><Icon name="chevronDown" className="size-4 rotate-180" /></button>;
   const send = (go: () => unknown) => guard.answer(x.id, go);
   const stale = guard.stale;
   const staleWhy = stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>;
-  if (x.start) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><StartApproval approval={x} start={x.start} busy={!guard.canAnswer(x.id)} onResolve={onResolve ? (ok, choice) => send(() => onResolve(x, ok, choice)) : undefined} />{onResolve && staleWhy}</div>;
+  if (x.start) return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-card phone-card--slab">{fold && <div className="phone-fold__back">{fold}</div>}<StartApproval approval={x} start={x.start} busy={!guard.canAnswer(x.id)} onResolve={onResolve ? (ok, choice) => send(() => onResolve(x, ok, choice)) : undefined} />{onResolve && staleWhy}</div>;
   // ADR-0090 Amendment A: a switch to a mode that skips permissions is read in the node's own rendering, never as raw text. Its answer
   // returns how it went, so the window's holds free it again when it failed.
-  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--slab"><SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{onResolve && staleWhy}</div>;
+  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-card phone-card--slab">{fold && <div className="phone-fold__back">{fold}</div>}<SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{onResolve && staleWhy}</div>;
   const name = agent?.name || approvalName(x);
   const why = `phone-why-${x.id}`;
   const sent = guard.status(x.id) === 'sent';
   const off = { disabled: stale, 'aria-disabled': !guard.canAnswer(x.id) || undefined, 'aria-describedby': stale ? why : undefined };
   return (
-    <div id={`phone-ask-${x.id}`} className="phone-req">
+    <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-req">
       <ApprovalRequest density="row" stacked icon={ASK_ICON[askKind(x)]}
         avatar={<AgentAvatar accent={agent?.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />}
         title={askTitle(x, visible(name))} where={<bdi>{visible(machine)}</bdi>}
-        titleEnd={onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
+        titleEnd={fold || onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
         actions={onResolve && !docked && <AnswerButtons approval={x} off={off} alwaysNote={alwaysNoteId(x, 'phone')}
           onDeny={() => send(() => onResolve(x, false))} onAllow={() => send(() => onResolve(x, true))} onAlways={() => send(() => onResolve(x, true, undefined, true))} />}
         foot={onResolve && (docked || x.always || stale || sent) ? <>
@@ -307,6 +325,8 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <NavButton icon="plus" label={t('phone-start')} onClick={onStart} primary />
         <NavButton icon="stack" label={t('phone-machines')} href="#/machines" />
         <NavButton icon="settings" label={t('device-link')} href="#/device" />
+        {/* The deep subjects the side panel holds on a larger screen, each a screen of its own here. */}
+        <Menu label={t('phone-more')} items={moreItems} className="phone__nav" align="end"><Icon name="more" className="size-5" /><span className="truncate">{t('phone-more')}</span></Menu>
       </>}>
       {notice && <div className="phone-notice"><Callout tone="danger" icon="warn" title={notice} alert /></div>}
       {/* The state of the link has a row of its own (in the title bar it pushed the buttons off a 390 px screen): one notice, what it means and Retry. */}
@@ -377,14 +397,25 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   const stale = link !== 'live';
   const docked = dock?.kind === 'answer' ? dock.approval.id : undefined;
   const whereOf = (x: ApprovalModel) => agent?.machine || x.machineName || machineName(machines, x.node);
-  const asks = mine.map((approval): PhoneAsk => ({ approval, agent, machine: whereOf(approval), docked: approval.id === docked }));
+  // While the bar at the bottom holds a request, the cards above fold to one line each, so the terminal or the conversation keeps its
+  // room (visual pass 2026-11, finding 16): the bar answers a plain yes or no, and its Review and decide (or a tap on the line) unfolds
+  // the card. Unfolded, a card can be folded again.
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(() => new Set());
+  const folds = !!dock && !!agent && !agent.closed;
+  const asks = mine.map((approval): PhoneAsk => ({ approval, agent, machine: whereOf(approval), docked: approval.id === docked, folded: folds && !unfolded.has(approval.id) }));
+  // Open or fold one card; what had focus (the line or the fold button, which go away) moves to the card itself.
+  const unfold = (id: string | undefined, open: boolean) => {
+    if (!id) return;
+    setUnfolded((cur) => { const next = new Set(cur); if (open) next.add(id); else next.delete(id); return next; });
+    window.setTimeout(() => { const el = document.getElementById(`phone-ask-${id}`); el?.focus({ preventScroll: true }); el?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }); }, 0);
+  };
   const distrusted = [...new Set(asks.filter((a) => untrusted?.(a.approval.node)).map((a) => a.machine))];
   // Everything above the cards that can move them: the notice, the close confirmation (open or not), the tools row and the trust callout.
   const closing = useCloseAsk();
   const guard = useAskGuard(asks, stale, [notice ?? '', !!agent?.closed, !!agent && closing?.id === agent.id && closing.where === 'pane', changed > 0 && !!loadDiff, !!files, distrusted]);
   return (
     <PhoneShell label={agent?.name ?? t('focus-not-found')}
-      dock={agent && dock && !agent.closed && <NeedsDock dock={dock} count={mine.length} machines={machines} stale={stale} onResolve={onResolve} onOpen={(id) => (id === agent.id ? bring(`phone-ask-${mine[0]?.id}`) : onOpen(id))} />}
+      dock={agent && dock && !agent.closed && <NeedsDock dock={dock} count={mine.length} machines={machines} stale={stale} onResolve={onResolve} onOpen={(id) => (id === agent.id ? unfold(mine[0]?.id, true) : onOpen(id))} />}
       top={<>
         <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
         <div className="min-w-0 flex-1">
@@ -405,7 +436,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
             {files && <Button size="sm" onClick={() => setShown('files')}><Icon name="files" className="size-4" />{t('console-files')}</Button>}
           </div>
         )}
-        {mine.length > 0 && <div className="phone-asks"><TrustCallout machines={distrusted} />{asks.map((a) => <PhoneRequest key={a.approval.id} ask={a} guard={guard} onResolve={onResolve} />)}</div>}
+        {mine.length > 0 && <div className="phone-asks"><TrustCallout machines={distrusted} />{asks.map((a) => <PhoneRequest key={a.approval.id} ask={a} guard={guard} onResolve={onResolve} onFold={folds ? (folded) => unfold(a.approval.id, !folded) : undefined} />)}</div>}
         {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} source={agent.terminal === false ? chatSource : undefined} onReview={loadDiff ? () => setShown('changes') : undefined} onFiles={files ? () => setShown('files') : undefined} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
           : <div className="phone-pane" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
             {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
@@ -417,6 +448,34 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
         {shown === 'changes' && loadDiff && <DiffDialog agent={agent} load={loadDiff} read={files?.read} onClose={() => setShown(undefined)} />}
         {shown === 'files' && files && <FilesDialog agent={agent} files={files} load={loadDiff} onClose={() => setShown(undefined)} />}
       </>}
+    </PhoneShell>
+  );
+}
+
+// The side panel's deep subjects, reached from More in the bottom bar: the board, Team chat and Usage.
+const DETAILS_LABEL: Record<PhoneDetailsTab, string> = { board: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-usage' };
+const DETAILS_ICON: Record<PhoneDetailsTab, IconName> = { board: 'board', messages: 'chat', usage: 'gauge' };
+const moreItems = (): MenuItem[] => (Object.keys(PHONE_DETAILS) as PhoneDetailsTab[]).map((tab) => ({
+  label: t(DETAILS_LABEL[tab]), lead: <Icon name={DETAILS_ICON[tab]} className="size-4 text-muted" />, run: () => { window.location.hash = PHONE_DETAILS[tab]; },
+}));
+
+// One of them on a phone: a screen with Back, as the theme editor. It draws what the side panel draws for that subject.
+export function PhoneDetails({ tab, agents, boards, messages, onOpen, onBack }: {
+  tab: PhoneDetailsTab;
+  agents: readonly AgentTileModel[];
+  boards: readonly BoardModel[];
+  messages: readonly MessageModel[];
+  onOpen: (id: string) => void;
+  onBack: () => void;
+}) {
+  const title = t(DETAILS_LABEL[tab]);
+  return (
+    <PhoneShell label={title}
+      top={<>
+        <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
+        <h1 className="phone-title">{title}</h1>
+      </>}>
+      <div className="phone-details"><Details tab={tab} fleet={agents} attention={[]} approvals={[]} changed={[]} boards={boards} messages={messages} onOpen={onOpen} /></div>
     </PhoneShell>
   );
 }

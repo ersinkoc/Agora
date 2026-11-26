@@ -5,7 +5,7 @@ import { LimitChip } from './Quota';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { agentKind, endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
-import { bytesLabel, type MachineModel } from '../net/view';
+import type { MachineModel } from '../net/view';
 import { ago, agoShort } from '../net/time';
 import { Icon } from './Icon';
 import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
@@ -139,7 +139,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // never less than its tools and a few rows) and its agents scroll inside it, so the panes' tab bar never slides over its rows (#1069).
   return <aside data-region="sidebar" className="flex min-h-0 flex-col border-sidebar-line bg-sidebar text-sidebar-ink max-lg:max-h-[max(35dvh,16rem)] max-lg:flex-none max-lg:border-b lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
-      <h2 className="m-0 flex-1 text-xs">{t('console-agents')}</h2>
+      <h2 className="m-0 flex-1">{t('console-agents')}</h2>
       {!watching && <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>}
       <button type="button" className="ide-iconbtn" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelLeft" /></button>
     </div>
@@ -193,7 +193,6 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="min-w-0 flex-1 truncate">{name}{m && sharesName(m, machines) && <code className="ms-1.5 text-xs font-normal text-muted">{m.id}</code>}</span>
               {m && !m.online && <span className="flex-none truncate text-xs font-normal text-muted" data-last-seen>{t('explorer-offline-for', { when: agoShort(m.lastSeenMs, now) })}</span>}
-              {!!m?.memoryBytes && <span className="font-mono text-xs font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
               {(m?.online !== false || count > 0) && <span className="text-xs font-normal text-muted">{count}</span>}
             </button>
             {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}

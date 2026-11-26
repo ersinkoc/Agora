@@ -51,8 +51,8 @@ describe('the Settings page', () => {
     expect(titles).toEqual(['Appearance', 'Keyboard', 'Needs you', 'Sounds', 'Passkey', 'Your other devices', 'Machines']);
     // Each card is a region named by its title.
     for (const s of host.querySelectorAll('section.set-card')) expect(document.getElementById(s.getAttribute('aria-labelledby') ?? '')?.tagName).toBe('H3');
-    // The only uppercase text is the side index's group labels.
-    expect([...host.querySelectorAll('[class*="uppercase"]')].every((el) => el.classList.contains('set-nav__overline'))).toBe(true);
+    // No text is set in capitals: the side index's group labels are sentence case too (visual pass 2026-11, finding 12).
+    expect(host.querySelectorAll('[class*="uppercase"]')).toHaveLength(0);
   });
 
   it('has a side index with an icon per section, the current one marked, and a count of other devices', () => {

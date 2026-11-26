@@ -213,6 +213,10 @@ describe('a viewer\'s window shows each request with no answers (ADR-0106, #1140
     await until(() => expect(answers(document.querySelector('.phone-dock'))).toEqual([t('approval-deny'), t('approval-allow')]));
     again();
     await windowAs(VIEWER, '#/agent/n1%2Fa1');
+    // While the bar holds it, the card folds to one line (visual pass 2026-11, finding 16): opened, it is still read-only.
+    await until(() => expect(document.querySelector('.phone-fold__btn')).not.toBeNull());
+    expect(answers(document.body)).toEqual([]);
+    await click(document.querySelector('.phone-fold__btn'));
     await until(() => expect(document.querySelector('.phone-req')?.textContent).toContain('src/auth.rs'));
     expect(answers(document.body)).toEqual([]);
   });
