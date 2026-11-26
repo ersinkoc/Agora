@@ -28,8 +28,10 @@ export type ReadKeys = { ok: true; file: KeyFile; unknown: string[] } | { ok: fa
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
-// Text from the file shown back in a problem: no control or direction characters, and short.
-const shown = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v) ?? '').replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '').slice(0, 64);
+// Text from the file shown back in a problem: no control or direction characters, and short. A value nested too deep to write back
+// (JSON.stringify recurses; a file under the size cap can nest 30 000 deep) is shown as nothing rather than thrown (audit F1802).
+const written = (v: unknown): string => { try { return JSON.stringify(v) ?? ''; } catch { return ''; } };
+const shown = (v: unknown) => (typeof v === 'string' ? v : written(v)).replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '').slice(0, 64);
 // A command id: dotted lower-case words (`layout.preset-2x2`). Anything else is not an id, rather than an unknown one.
 const ID = /^[a-z][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$/;
 const TOP = new Set(['version', 'bindings']);

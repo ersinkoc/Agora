@@ -5,10 +5,11 @@
 ![A pane that follows what needs you](../screenshots/adr68-follow-attention-dark.png)
 
 The centre of the window is a **layout**: a tree of splits, tab groups and panes that the user arranges, saves and shares. The
-layout is plain, versioned JSON so every client (web today; the terminal client and any native client later, ADR-0068 rung 5–6)
+layout is plain, versioned JSON so every client (the web window and the terminal client; any native client later, ADR-0068 rung 6)
 reads and writes the same file. This page is the format's specification and the web window's behaviour. Rung 1 covers the
 model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry (rung 3) is under "Panels" below;
-keybindings and the commands that drive the layout from the keyboard are `keybindings.md` (rung 4).
+keybindings and the commands that drive the layout from the keyboard are `keybindings.md` (rung 4); the terminal client (rung 5) is
+"The terminal client" below.
 
 ## Format, version 1
 
@@ -239,6 +240,79 @@ Focus + strip:
   this narrow mode is what the layout engine does if the window is ever drawn that narrow; the saved layout is kept for wider ones.
 - **Until you arrange it** (no layout action yet), the window opens up to four running agents as tabs of one pane, as before;
   any change you make stops that. Reset layout starts over.
+
+## The terminal client (rung 5)
+
+The terminal client (`agora tui`) has the same model in Rust (`crates/agora-tui/src/layout/`): the format and its reading (`tree.rs`,
+the same rules and refusals as above, never a panic), the reducer and the presets (`engine.rs`), what is on screen and what streams
+(`streams.rs`, `view.rs`) and the files (`store.rs`). A layout made in either client opens in the other:
+`crates/agora-tui/src/layout/testdata/web-layout.json` was written by the web's own reducer and serialiser, and a test reads it and
+writes it back as the same JSON; the file the Rust writer makes was also read back by the web's parser as the same layout.
+
+- **The tabs are the 1x1 layout.** Until you tile, the client is as before: the agents you open are tabs. A layout that is one tab
+  group of agents is drawn as those tabs; any other layout is tiled.
+- **Drawing:** each pane on screen has a one-line bar (the agent's name or the panel's; a tab group's tabs as `1:name 2:name`; `!`
+  before one that needs you; the pane in focus in the accent while it has the keyboard, in bold otherwise; "maximized · z restores")
+  and its body under it. Panes side by side are parted by a line; stacked panes by the lower one's bar. When a pane would be narrower
+  than 12 columns or lower than 3 rows, every pane is drawn as the tabs of one group with the pane in focus in front (the web's narrow
+  mode); the layout itself is unchanged. While tiled, the inspector shows itself only when the middle keeps 120 columns (`i` still
+  shows or hides it).
+- **Panels it draws:**
+
+  | id | in the terminal client |
+  | --- | --- |
+  | `terminal` | the bound agent's terminal |
+  | `agent` | its terminal; a chat agent's conversation in the pane in focus (another pane says to move there) |
+  | `approvals` | Needs you: each agent that waits, with its state. Answering stays where it was: y / n in the list, Alt+Y / Alt+N in the agent's pane |
+  | `fleet` | the agent list, read-only |
+  | `empty` | how to show an agent here |
+
+  Every other panel (`conversation`, `changes`, `files`, `manager`, `tasks`, `messages`, `usage`, `theme`, a plugin's) is kept and drawn
+  as a placeholder naming it: "Files: open in the window to see it." An id no client knows says "Unknown panel “…”: open in the
+  window to see it."
+- **Keys** (in the agent list: from a pane, Ctrl-] or F12 first, since inside a pane every key is the program's). Digits are free in
+  the list and the same on every keyboard layout (no AltGr); 1, 2, 4 and 6 are the number of panes:
+
+  | key | does |
+  | --- | --- |
+  | 1 | 1x1 (one pane with tabs) |
+  | 2 | 2x1 (two side by side) |
+  | 3 | 1x2 (two, one above the other) |
+  | 4 | 2x2 |
+  | 5 | focus + strip (one large, three small) |
+  | 6 | 3x2 |
+  | h / l | the pane before / after (in a window too small to tile, the tab before / after) |
+  | z | maximize the pane in focus / restore |
+  | Enter | show the selected agent: where it is shown, else in the pane in focus (filling it when it is empty, as a new tab otherwise) |
+  | w | close the pane in focus (its agent keeps running) |
+  | Alt+1…9 | a tab of the pane in focus (also inside a pane) |
+
+  A click in a pane moves the keyboard there; a click on a tab in a bar brings it to the front. The commands (Alt+K, or Ctrl K in the
+  list) add: the presets, Maximize / Restore, Split right, Split down, Close pane, Next pane, Swap with the next pane, Move to the next
+  pane as a tab, Take out of the tabs, Make this pane wider / narrower / taller / shorter (5 % of its split), Show here: Needs you,
+  the fleet, what needs you next or the agent selected in the list, Save layout as…, Use layout “…”, Delete layout “…”, Reset layout.
+  The terminal client has no keybindings file yet: these keys are fixed.
+- **Saved layouts, import and export:** each saved layout is a file `layouts/<name>.json` in the client's Agora folder
+  (`$AGORA_HOME`, else `~/.agora`, beside `themes/` and `tui-theme`), holding exactly what the web window's Export writes and its Import
+  reads. So saving here is exporting (import that file in the web window), and a `layout.json` exported from the web, put in that
+  folder, is listed here as "layout". A name is a file name (not hidden, at most 60 characters, none of `/ \ : * ? " < > |`); saving
+  under a name that exists replaces it; at most 50 are listed. A file over 256 KiB is refused before it is read; one that cannot be
+  read or that a newer version wrote says why, and nothing changes.
+- **The arrangement in use** is `tui-layout.json` beside `tui-theme` (`{ "version": 1, "layout", "focus", "zoom" }`, the object the web
+  keeps in its storage). It is written when it changes (looked at only after a key, a click or a snapshot) and read at the start.
+- **Agents that are gone:** a pane of an agent that its machine, online, no longer has is pruned as in the web (a tab closes, a pane of
+  its own stays, empty); this holds for the tabs too. An agent of a machine that is offline or not listed stays, since the hub cannot
+  say it is gone, and a snapshot with no agent at all prunes nothing.
+- **Performance (ADR-0022, decision 7):** only panes on screen are watched. The client takes the terminals to watch from the same
+  placement it draws (`App::tile_streams`): a tab behind another, every pane behind a maximized one, and every pane but the one in
+  focus in a window too small to tile hold no stream and are closed when they leave the screen. Two panes of one agent share its
+  stream; the pane in focus uses the client's own stream as before. Keys are read every turn of the loop before any stream (2 ms waits
+  while typing); then the pane in focus takes at most 256 stream items, as before, and every other pane at most 32 (with the node's
+  16 KiB chunks, 512 KiB: about 5 ms of feeding at the 100 MB/s `examples/pane_timing.rs` measures for a pane). So floods in other panes
+  cost the keyboard and the pane being typed in about 5 ms per flooding pane per turn, never a pane's whole backlog; what does not fit
+  waits for the next turn, and a stream that falls too far behind is watched again for its screen. Each terminal on screen is sized to its pane once per size, as the web window reports every tile (the hub keeps the
+  smallest size a terminal is shown at); the terminal this client runs in is never sized. `streams.rs` and `app.rs` test the
+  subscriptions with fakes (a 2 × 2 watches four, a tab behind none, maximize one, too small one, a chat or another panel none).
 
 ## Storage
 

@@ -150,14 +150,16 @@ pub fn load(path: &Path) -> Loaded {
         Ok(bytes) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES => {
             theme(Issue::TooLarge)
         }
-        Ok(bytes) => match String::from_utf8(bytes)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        {
-            Some(v) if is_pack(&v) => Loaded::Pack(read_pack(&v)),
-            Some(v) => Loaded::Theme(read_value(&v)),
-            None => theme(Issue::Json),
-        },
+        // Decoded as the web's import decodes a file (`Blob.text()`, UTF-8 decode): a leading byte-order mark is dropped and a byte
+        // that is not UTF-8 becomes U+FFFD, so a file is accepted or refused alike in both clients (audit F1800).
+        Ok(bytes) => {
+            let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+            match serde_json::from_str::<Value>(&String::from_utf8_lossy(body)) {
+                Ok(v) if is_pack(&v) => Loaded::Pack(read_pack(&v)),
+                Ok(v) => Loaded::Theme(read_value(&v)),
+                Err(_) => theme(Issue::Json),
+            }
+        }
         Err(_) => theme(Issue::Unreadable),
     }
 }
@@ -571,6 +573,39 @@ mod tests {
             load_file(&d.join("none.json")),
             Read::Refused(vec![Issue::Unreadable.into()])
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Audit F1800: a file is decoded as the web's import decodes it (`Blob.text()`): a leading byte-order mark (Windows PowerShell 5.1's
+    /// `Out-File -Encoding utf8`, older Notepad) is dropped and a byte that is not UTF-8 becomes U+FFFD, so the file is accepted here too.
+    #[test]
+    fn a_file_is_decoded_as_the_web_decodes_it() {
+        let d = scratch("decode");
+        let theme = br#"{"agora-theme": 2, "name": "Harbour", "inherits": "dark"}"#;
+        let bom = d.join("bom.json");
+        std::fs::write(&bom, [&[0xEF, 0xBB, 0xBF][..], theme].concat()).unwrap();
+        assert!(
+            matches!(load_file(&bom), Read::Ok { .. }),
+            "{:?}",
+            load_file(&bom)
+        );
+        let latin = d.join("latin1.json");
+        let mut bytes = br#"{"agora-theme": 2, "name": "Caf"#.to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(br#"", "inherits": "dark"}"#);
+        std::fs::write(&latin, bytes).unwrap();
+        match load_file(&latin) {
+            Read::Ok { theme, .. } => assert_eq!(theme.name, "Caf\u{fffd}"),
+            refused => panic!("{refused:?}"),
+        }
+        // A BOM is dropped only at the start: one inside the text is not JSON there.
+        let inside = d.join("inside.json");
+        std::fs::write(
+            &inside,
+            [&b" "[..], &[0xEF, 0xBB, 0xBF][..], theme].concat(),
+        )
+        .unwrap();
+        assert_eq!(load_file(&inside), Read::Refused(vec![Issue::Json.into()]));
         let _ = std::fs::remove_dir_all(&d);
     }
 

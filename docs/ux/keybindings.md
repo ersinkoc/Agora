@@ -8,7 +8,8 @@
 Keys and commands are data (ADR-0068 decision 6). Every action of the web window is a **command** with a stable id, a name and,
 optionally, keys. The command palette (Ctrl K) lists every command with the key it has now, and **Settings > Keyboard** changes the
 keys. The person's changes are one small JSON file, the **keybindings file**, kept in this browser and exported or imported as a file.
-This page is the file's specification and the web window's behaviour. The terminal client gets the same model in rung 5.
+This page is the file's specification and the web window's behaviour. The terminal client has fixed keys and no keybindings file yet;
+its layout keys (rung 5) are in [layout.md](layout.md), "The terminal client".
 
 ## Commands
 
@@ -184,6 +185,11 @@ Settings has a **Keyboard** card (`#/device/keyboard`; also **Keyboard settings*
 - The safe-mode row is marked **Fixed**, with no buttons.
 - **Keys that stay as they are:** the fixed keys, grouped by why, and how a terminal keeps its keys.
 - The commands a file names that this window does not have, kept and listed.
+
+**Import…** opens a one-column dialog: paste the file, or choose one, then **Import**.
+
+![The import dialog, dark](screens/keybindings-import-dark.png)
+![The import dialog, light](screens/keybindings-import-light.png)
 
 ## Storage and safe mode
 

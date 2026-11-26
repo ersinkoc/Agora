@@ -551,3 +551,78 @@ tui-theme-error-more = { $count ->
 }
 # A problem in one scheme of a theme that has both; $scheme is tui-theme-scheme-dark or -light.
 tui-theme-issue-in-scheme = In the { $scheme } colours: { $text }
+# ADR-0068 rung 5: layouts in the terminal client (docs/ux/layout.md, "The terminal client"). The panel names and the presets use the
+# web window's words (web.ftl layout-*), so both clients name the same thing the same way.
+tui-app-keys-tree-tiled = Ctrl K commands · Enter show here · h / l pane · z maximize · 1…6 layout · w close pane · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · o files · b board · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-tree-tiled-viewer = Ctrl K commands · Enter show here · h / l pane · z maximize · 1…6 layout · w close pane · N next that needs you · r changes · o files · b board · a ask · Tab next part · i details · q quit
+tui-layout-panel-approvals = Needs you
+tui-layout-panel-fleet = Fleet
+tui-layout-panel-empty = Empty pane
+tui-layout-panel-conversation = Conversation
+tui-layout-panel-changes = Changes
+tui-layout-panel-files = Files
+tui-layout-panel-manager = File manager
+tui-layout-panel-tasks = Shared tasks and files
+tui-layout-panel-messages = Team chat
+tui-layout-panel-usage = Usage
+tui-layout-panel-theme = Theme
+tui-layout-panel-plugin = Plugin
+tui-layout-follows-attention = Follows what needs you
+tui-layout-follows-selection = Follows the selection
+tui-layout-maximized = maximized · z restores
+tui-layout-nothing-waiting = Nothing needs you now. This pane shows the next agent that does.
+tui-layout-nothing-selected = Select an agent in the list to see it here.
+tui-layout-empty-hint = Empty pane. Choose an agent in the list and press Enter to show it here.
+tui-layout-chat-focus = This agent is a chat. Move here (h / l, or a click) to read and write.
+tui-layout-no-terminal = This agent is a chat; it has no terminal.
+tui-layout-approvals-none = Nothing needs you.
+# A panel of the web window the terminal client does not draw; $panel is its name.
+tui-layout-elsewhere = { $panel }: open in the window to see it.
+# A panel id no client here knows (a newer version's); $panel is the id as the layout names it.
+tui-layout-unknown = Unknown panel “{ $panel }”: open in the window to see it.
+tui-layout-cmd-1x1 = Layout: one pane with tabs (1)
+tui-layout-cmd-2x1 = Layout: two side by side (2)
+tui-layout-cmd-1x2 = Layout: two, one above the other (3)
+tui-layout-cmd-2x2 = Layout: four, 2 × 2 (4)
+tui-layout-cmd-focus = Layout: one large, three small (5)
+tui-layout-cmd-3x2 = Layout: six, 3 × 2 (6)
+tui-layout-cmd-maximize = Maximize this pane (z)
+tui-layout-cmd-restore = Restore the layout (z)
+tui-layout-cmd-split-right = Split right
+tui-layout-cmd-split-down = Split down
+tui-layout-cmd-close-pane = Close pane (w)
+tui-layout-cmd-next-pane = Next pane (l)
+tui-layout-cmd-swap = Swap with the next pane
+tui-layout-cmd-move = Move to the next pane, as a tab
+tui-layout-cmd-take-out = Take out of the tabs
+tui-layout-cmd-wider = Make this pane wider
+tui-layout-cmd-narrower = Make this pane narrower
+tui-layout-cmd-taller = Make this pane taller
+tui-layout-cmd-shorter = Make this pane shorter
+tui-layout-cmd-show-approvals = Show here: Needs you
+tui-layout-cmd-show-fleet = Show here: Fleet
+tui-layout-cmd-follow-attention = Show here: what needs you next
+tui-layout-cmd-follow-selection = Show here: the agent selected in the list
+tui-layout-cmd-save = Save layout as “{ $name }”
+tui-layout-cmd-save-as = Save layout as…
+tui-layout-name-title = Save the layout
+tui-layout-name-hint = Type a name for the layout, then Enter. A saved layout of that name is replaced.
+tui-layout-cmd-use = Use layout “{ $name }”
+tui-layout-cmd-delete = Delete layout “{ $name }”
+tui-layout-cmd-reset = Reset layout
+# $folder is where the file went (~/.agora/layouts); the web window's Import reads the file as it is.
+tui-layout-saved = Saved the layout “{ $name }” in { $folder }. The web window can import that file.
+tui-layout-save-failed = Could not save the layout “{ $name }”.
+tui-layout-used = Using the layout “{ $name }”.
+tui-layout-deleted = Deleted the layout “{ $name }”.
+tui-layout-delete-failed = Could not delete the layout “{ $name }”.
+# $why is one of tui-layout-error-*.
+tui-layout-cannot-use = Could not use the layout “{ $name }”: { $why }
+tui-layout-error-missing = the file is not there.
+tui-layout-error-too-large = the file is too large to be a layout.
+tui-layout-error-unreadable = the file cannot be read.
+tui-layout-error-json = this is not valid JSON.
+tui-layout-error-invalid = this is not a layout this client can read.
+tui-layout-error-newer = it was made by a newer version. Update to use it.
+tui-layout-error-too-deep = it is nested too deeply (at most 6 levels).
+tui-layout-error-too-many = it has too many panes (at most 32).

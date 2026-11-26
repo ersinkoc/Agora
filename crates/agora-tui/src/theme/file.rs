@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use super::colour::{contrast, mix, over, parse_hex, Rgb};
+use super::colour::{contrast, js_blank, js_trim, mix, over, parse_hex, Rgb};
 use super::{
     base_colours, built_ins, floor_of, is_unsafe, BuiltIn, Chrome, ChromeKind, FloorItem, Look,
     RegionDefault, Scheme, TextStyle, Theme, ACCENT, ANSI, CHROME, COLOUR_TOKENS, DEFAULT_FONTS,
@@ -237,13 +237,21 @@ pub(crate) fn clean_name(v: Option<&Value>) -> String {
     let Some(s) = v.and_then(Value::as_str) else {
         return String::new();
     };
-    s.chars()
+    let s = s
+        .chars()
         .filter(|&c| {
             !matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         })
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect::<String>();
+    js_trim(&s).to_string()
+}
+
+/// The words of `s` joined by one space: the web's `.trim().replace(/\s+/g, ' ')`, blanks as it counts them ([`js_blank`]).
+fn words(s: &str) -> String {
+    s.split(js_blank)
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A key as a problem names it: cleaned, at most 40 characters.
@@ -279,7 +287,7 @@ fn safe_name(name: &str) -> String {
         }
         rest = &rest[c.len_utf8()..];
     }
-    let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = words(&out);
     if joined.is_empty() {
         "\u{2014}".to_string()
     } else {
@@ -317,7 +325,7 @@ fn read_colour(v: &Value) -> Option<Rgb> {
 
 /// A font list: family names, quoted or not, separated by commas; nothing that could end a CSS declaration.
 fn read_font(v: &Value) -> Option<String> {
-    let f = v.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let f = words(v.as_str()?);
     let ok_chars = f.chars().all(|c| {
         c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | ',' | '\'' | '"' | '-')
     });
@@ -330,7 +338,7 @@ fn read_size(v: &Value, min: f64, max: f64) -> Option<String> {
     let n = match v {
         Value::Number(n) => n.as_f64()?,
         Value::String(s) => {
-            let s = s.trim().strip_suffix("px")?;
+            let s = js_trim(s).strip_suffix("px")?;
             let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
             let digits = |d: &str| d.bytes().all(|b| b.is_ascii_digit());
             let shape_ok = (1..=3).contains(&whole.len())
@@ -361,7 +369,7 @@ fn read_px(v: &Value, min: u8, max: u8) -> Option<u8> {
     let n = match v {
         Value::Number(n) => n.as_f64()?,
         Value::String(s) => {
-            let d = s.trim().strip_suffix("px")?;
+            let d = js_trim(s).strip_suffix("px")?;
             if !(1..=3).contains(&d.len()) || !d.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }

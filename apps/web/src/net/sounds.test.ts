@@ -133,6 +133,17 @@ describe('a burst is one sound', () => {
     expect(flush(held.next, 1000, () => true).play).toEqual(asks('c'));
   });
 
+  it('keeps the most urgent of a burst however many less urgent ones come after it (audit F1803)', () => {
+    const many = Array.from({ length: 40 }, (_, i) => fin(`f${i}`));
+    let g = gate(openGate(), [fin('a')], 0).next;
+    g = gate(g, [asks('b')], 100).next;
+    g = gate(g, many, 200).next;
+    expect(flush(g, 1000, () => true).play).toEqual(asks('b'));
+    // Still bounded: at most so many of each kind wait.
+    expect(g.pending.filter((e) => e.kind === 'finished').length).toBeLessThanOrEqual(32);
+    expect(g.pending.filter((e) => e.kind === 'needs-you')).toEqual([asks('b')]);
+  });
+
   it('checks what waited again at the end of the gap', () => {
     const held = gate(gate(openGate(), [fin('a')], 0).next, [asks('b')], 200);
     const r = flush(held.next, 1000, (ev) => ev.agent !== 'b');
