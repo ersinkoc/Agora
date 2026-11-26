@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -414,6 +414,24 @@ impl SqliteStore {
             ))?;
         }
         if version < 15 {
+            // ADR-0113 decision 6: the community theme catalog the owner fetched (`agora hub themes update`), one row per accepted
+            // theme with its file as fetched. An update replaces every row in one transaction.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS theme_catalog (
+                     id         TEXT PRIMARY KEY,
+                     name       TEXT NOT NULL,
+                     version    INTEGER NOT NULL,
+                     author     TEXT NOT NULL,
+                     licence    TEXT NOT NULL,
+                     sha256     TEXT NOT NULL,
+                     data       TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
+        }
+        if version < 16 {
             // ADR-0114 decision 6: the plugins the owner installed on this hub (each package as opaque bytes, never run, with what the
             // hub read from its checked manifest) and what each person allowed each plugin to see, for the version they were shown.
             conn.execute_batch(
@@ -436,7 +454,7 @@ impl SqliteStore {
                      set_ms    INTEGER NOT NULL,
                      PRIMARY KEY (user_id, plugin_id)
                  );
-                 PRAGMA user_version = 15;
+                 PRAGMA user_version = 16;
                  COMMIT;",
             )?;
         }
@@ -1168,6 +1186,65 @@ mod tests {
         );
         drop(s);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0113 (schema 15) then ADR-0114 (schema 16): a fresh database is at 16 with both tables; one at 14 gains the theme catalog and
+    /// then the plugin tables, in that order; one at 15 keeps its catalog rows and gains the plugin tables. Its events stay.
+    #[test]
+    fn databases_at_14_and_15_upgrade_to_the_plugin_tables() {
+        let tables = |s: &SqliteStore| -> Vec<String> {
+            let conn = s.lock().unwrap();
+            let mut st = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants') ORDER BY name")
+                .unwrap();
+            let names = st.query_map([], |r| r.get(0)).unwrap();
+            names.collect::<Result<_, _>>().unwrap()
+        };
+        let version = |s: &SqliteStore| -> i64 {
+            s.lock()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap()
+        };
+        let fresh = store();
+        assert_eq!(version(&fresh), 16);
+        assert_eq!(
+            tables(&fresh),
+            ["plugin_grants", "plugins", "theme_catalog"]
+        );
+        for (from, undo) in [
+            (14, "DROP TABLE plugins; DROP TABLE plugin_grants; DROP TABLE theme_catalog; PRAGMA user_version = 14;"),
+            (15, "DROP TABLE plugins; DROP TABLE plugin_grants; PRAGMA user_version = 15;"),
+        ] {
+            let d = tmpdir(&format!("upgrade{from}"));
+            let path = d.join("hub.db");
+            {
+                let s = SqliteStore::open(&path).unwrap();
+                s.append("n1", 1, 5, b"a").unwrap();
+                let conn = s.lock().unwrap();
+                conn.execute_batch(undo).unwrap();
+                if from == 15 {
+                    conn.execute(
+                        "INSERT INTO theme_catalog (id, name, version, author, licence, sha256, data) VALUES ('t', 'T', 1, 'a', 'MIT', 'h', '{}')",
+                        [],
+                    )
+                    .unwrap();
+                }
+            }
+            assert!(verify(&path).is_ok(), "an older database is a valid backup");
+            let s = SqliteStore::open(&path).unwrap();
+            assert_eq!(version(&s), 16, "from {from}");
+            assert_eq!(tables(&s), ["plugin_grants", "plugins", "theme_catalog"], "from {from}");
+            assert_eq!(s.acked("n1").unwrap(), 1);
+            let kept: i64 = s
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM theme_catalog", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(kept, i64::from(from == 15), "from {from}");
+            drop(s);
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     /// ADR-0085: a schema 12 database opens, keeps its enrolled devices and gains the `first_seen_ms` column, empty.

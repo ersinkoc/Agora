@@ -6,7 +6,7 @@
 import { type ThemeData, cloneLooks, deserialise, readTheme, writeTheme } from './file';
 import { SAFE } from '../plugins/safe';
 import {
-  BUILT_IN, COLOR_TOKENS, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
+  BUILT_IN, COLOR_TOKENS, type CatalogOrigin, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
   applyTheme, chromeOf, hasScheme, looksOf, schemesOf, textOf,
 } from './tokens';
 
@@ -30,6 +30,14 @@ function write(kv: KV | undefined, key: string, value: string | undefined) {
 function json(text: string | null): unknown {
   try { return text ? JSON.parse(text) : undefined; } catch { return undefined; }
 }
+// Where an installed theme came from (ADR-0113 decision 6): the catalog's id rules (catalog.ts) and a whole version from 1. Anything
+// else is dropped and the theme is kept as one of the person's own.
+export function catalogOrigin(v: unknown): CatalogOrigin | undefined {
+  const o = v as { id?: unknown; version?: unknown } | undefined;
+  return o && typeof o === 'object' && typeof o.id === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(o.id)
+    && typeof o.version === 'number' && Number.isInteger(o.version) && o.version >= 1 && o.version <= 1_000_000
+    ? { id: o.id, version: o.version } : undefined;
+}
 
 // What this browser had stored. Anything unreadable (another version's, edited by hand) falls back to the defaults; a stored user
 // theme goes through the same checks as an imported file. Themes are stored as format-2 files; one stored before is a format-1 file.
@@ -43,7 +51,8 @@ export function loadState(kv: KV | undefined): ThemeState {
       const id = (e as { id?: unknown })?.id;
       if (typeof id !== 'string' || !/^user-\d{1,6}$/.test(id) || user.some((u) => u.id === id)) continue;
       const p = readTheme((e as { file?: unknown }).file);
-      if (p.ok) user.push({ id, ...p.theme });
+      const catalog = catalogOrigin((e as { catalog?: unknown }).catalog);
+      if (p.ok) user.push(catalog ? { id, ...p.theme, catalog } : { id, ...p.theme });
     }
   }
   const c = json(read(kv, CHOICE_KEY)) as Partial<Record<Scheme, unknown>> | undefined;
@@ -72,7 +81,7 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
   const active = (): Theme => byId(state.choice[scheme()]) ?? (BUILT_IN.find((t) => t.id === DEFAULT_THEME[scheme()]) as Theme);
   const apply = () => { if (env.root) applyTheme(env.root, active(), scheme()); env.onApply?.(); };
   const set = (next: ThemeState) => { state = next; apply(); notify(); };
-  const persistUser = (user: readonly Theme[]) => write(env.kv, USER_KEY, JSON.stringify(user.map((u) => ({ id: u.id, file: writeTheme(u, u.name) }))));
+  const persistUser = (user: readonly Theme[]) => write(env.kv, USER_KEY, JSON.stringify(user.map((u) => (u.catalog ? { id: u.id, file: writeTheme(u, u.name), catalog: u.catalog } : { id: u.id, file: writeTheme(u, u.name) }))));
   const persistChoice = (choice: Record<Scheme, string>) =>
     write(env.kv, CHOICE_KEY, choice.dark === DEFAULT_THEME.dark && choice.light === DEFAULT_THEME.light ? undefined : JSON.stringify(choice));
   const freshId = () => `user-${Math.max(0, ...state.user.map((u) => Number(u.id.slice(5)))) + 1}`;
@@ -140,7 +149,7 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       if (patch.name !== undefined) file = { ...file, name: patch.name };
       const p = readTheme(file);
       if (!p.ok) return p;
-      const theme: Theme = { id, ...p.theme };
+      const theme: Theme = cur.catalog ? { id, ...p.theme, catalog: cur.catalog } : { id, ...p.theme };
       const user = state.user.map((u) => (u.id === id ? theme : u));
       persistUser(user);
       set({ ...state, user });
@@ -151,6 +160,29 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       if (!p.ok) return p;
       const r = adopt({ id: freshId(), ...p.theme });
       return r.ok && p.warnings ? { ...r, warnings: p.warnings } : r;
+    },
+    // ADR-0113 decision 6: a theme from the hub's catalog, checked like an imported file and added to the person's own themes with
+    // where it came from. It changes only through `upgrade`, when the person picks a newer version.
+    install(text: string, origin: CatalogOrigin): Saved {
+      const p = deserialise(text);
+      if (!p.ok) return p;
+      const r = adopt({ id: freshId(), ...p.theme, catalog: origin });
+      return r.ok && p.warnings ? { ...r, warnings: p.warnings } : r;
+    },
+    // The newer version of an installed theme, in its place: the same theme of the person, chosen where it was (a scheme it no longer
+    // has goes back to the default).
+    upgrade(id: string, text: string, origin: CatalogOrigin): Saved {
+      if (!state.user.some((u) => u.id === id)) return { ok: false, issues: [{ code: 'invalid' }] };
+      const p = deserialise(text);
+      if (!p.ok) return p;
+      const theme: Theme = { id, ...p.theme, catalog: origin };
+      const user = state.user.map((u) => (u.id === id ? theme : u));
+      persistUser(user);
+      const keep = (s: Scheme) => (state.choice[s] === id && !hasScheme(theme, s) ? DEFAULT_THEME[s] : state.choice[s]);
+      const choice = { dark: keep('dark'), light: keep('light') };
+      persistChoice(choice);
+      set({ ...state, user, choice });
+      return p.warnings ? { ok: true, theme, warnings: p.warnings } : { ok: true, theme };
     },
     remove(id: string) {
       if (!state.user.some((u) => u.id === id)) return;

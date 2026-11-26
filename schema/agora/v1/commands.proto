@@ -106,12 +106,16 @@ message CommandRequest {
     TaskDispatch task_dispatch = 109;
     // ADR-0109: the hub sends this only to a node after negotiating `mesh.task_handoff.v1`.
     DeliverTaskHandoff deliver_task_handoff = 110;
+    // ADR-0113 decision 6: the community theme catalog the hub keeps. Answered by the hub itself (no `target_node`); any signed-in
+    // person may ask.
+    ThemeCatalogList theme_catalog_list = 111;
+    ThemeCatalogGet theme_catalog_get = 112;
     // ADR-0114 decision 6: plugins kept by the hub and each person's grants (plugins.proto). Answered by the hub; they name no node.
-    PluginList plugin_list = 111;
-    PluginFetch plugin_fetch = 112;
-    PluginGrantList plugin_grant_list = 113;
-    PluginGrantSet plugin_grant_set = 114;
-    PluginGrantRemove plugin_grant_remove = 115;
+    PluginList plugin_list = 113;
+    PluginFetch plugin_fetch = 114;
+    PluginGrantList plugin_grant_list = 115;
+    PluginGrantSet plugin_grant_set = 116;
+    PluginGrantRemove plugin_grant_remove = 117;
   }
 }
 
@@ -165,10 +169,13 @@ message CommandOk {
     TaskDispatchResult task_dispatch = 31;
     // ADR-0109: the node has durably accepted a `DeliverTaskHandoff`.
     TaskHandoffReceipt task_handoff_receipt = 32;
+    // ADR-0113 decision 6: the answers to `ThemeCatalogList` and `ThemeCatalogGet`.
+    ThemeCatalogListResult theme_catalog_list = 33;
+    ThemeCatalogTheme theme_catalog_theme = 34;
     // ADR-0114 decision 6
-    PluginListResult plugin_list = 33;
-    PluginFetchResult plugin_fetch = 34;
-    PluginGrantListResult plugin_grant_list = 35;
+    PluginListResult plugin_list = 35;
+    PluginFetchResult plugin_fetch = 36;
+    PluginGrantListResult plugin_grant_list = 37;
   }
 }
 
@@ -915,4 +922,44 @@ message DeliverTaskHandoff {
 message TaskHandoffReceipt {
   bytes delivery_id = 1;
   bytes receiver_run_id = 2;
+}
+
+// ADR-0113 decision 6: the community theme catalog. The hub fetches it only on its owner's command (`agora hub themes update`), checks
+// every theme with the theme rules of `docs/ux/themes.md`, and keeps the accepted ones; a window never fetches from another origin. The
+// catalog is off until the owner turns it on (`agora hub themes on`).
+message ThemeCatalogList {}
+
+// One theme of the catalog, as its index names it. All of it is text from the catalog's index: shown as text, never as markup.
+message ThemeCatalogEntry {
+  // Lowercase letters, digits and `-`, at most 40; unique in the catalog.
+  string id = 1;
+  string name = 2;
+  // A whole number from 1 that only grows: a higher number is a newer version of the same theme.
+  uint32 version = 3;
+  string author = 4;
+  // An SPDX licence identifier, as the index gives it.
+  string licence = 5;
+  // The SHA-256 of the theme file as fetched, 64 lowercase hex characters.
+  string sha256 = 6;
+  // The theme file's size in bytes.
+  uint32 size = 7;
+}
+
+// `on` is false while the owner has not turned the catalog on; `entries` is then empty. `updated_at_ms` is when the hub last fetched
+// the catalog (0: never).
+message ThemeCatalogListResult {
+  bool on = 1;
+  repeated ThemeCatalogEntry entries = 2;
+  uint64 updated_at_ms = 3;
+}
+
+// One theme's file, by its id. Refused with `theme.catalog_off` while the catalog is off and `theme.not_found` for an id it lacks.
+message ThemeCatalogGet {
+  string id = 1;
+}
+
+// The theme file exactly as the hub fetched and checked it (JSON text, format 1 or 2). A window checks it again before showing it.
+message ThemeCatalogTheme {
+  ThemeCatalogEntry entry = 1;
+  string data = 2;
 }

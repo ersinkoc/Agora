@@ -72,7 +72,11 @@ export interface Theme {
   looks?: Looks;
   chrome?: Chrome;
   text?: TextStyle;
+  // ADR-0113 decision 6: installed from the hub's community catalog, with its id there and the version installed. Kept beside the
+  // theme's file, never in it, so an export is the theme alone.
+  catalog?: CatalogOrigin;
 }
+export interface CatalogOrigin { id: string; version: number }
 export const looksOf = (t: Pick<Theme, 'scheme' | 'tokens' | 'looks'>): Looks => t.looks ?? { [t.scheme]: { tokens: t.tokens, ...noExtras() } };
 export const chromeOf = (t: Pick<Theme, 'chrome'>): Chrome => t.chrome ?? DEFAULT_CHROME;
 export const textOf = (t: Pick<Theme, 'text'>): TextStyle => t.text ?? DEFAULT_TEXT;

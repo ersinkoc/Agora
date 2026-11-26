@@ -114,7 +114,7 @@ pub fn link_dir() -> PathBuf {
 /// and they hold the hashes of the live one-time codes (short enough to search for offline within their 10 minutes), of the sessions
 /// and of the screen password, and the event history. An existing folder is closed too, so a hub made by an older version is closed at
 /// its next start.
-fn private_hub_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn private_hub_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     agora_platform::restrict_to_owner(dir).map_err(|e| format!("{}: {e}", dir.display()))
 }

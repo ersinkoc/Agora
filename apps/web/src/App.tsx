@@ -49,6 +49,7 @@ import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
+import { catalogAskFor, setCatalogSource } from './themes/catalog';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -347,6 +348,10 @@ export function App() {
   }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   // What the agents cost so far, asked for by the owner's window only (#1044).
   const usage = useUsageReport(api, live !== undefined, pairing.owner);
+  // ADR-0113 decision 6: the theme editor asks this hub for its community theme catalog once the window has the hub's first view (a
+  // question sent before the link is open is refused), and the demo window has a sample one.
+  const viewed = live !== undefined;
+  useEffect(() => { setCatalogSource(catalogAskFor(api, viewed, !!hub)); }, [api, viewed, hub]);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.

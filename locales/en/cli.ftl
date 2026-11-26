@@ -35,6 +35,7 @@ cli-usage =
       agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
+      agora hub themes on|off|status | update [--url URL] [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
@@ -326,6 +327,36 @@ cli-hub-notify-unreachable = Could not reach { $target }: { $reason }
 cli-hub-prices-updated = Price table updated: { $count } models.
 cli-hub-prices-failed = Could not update the price table: { $reason }
 cli-hub-prices-skipped = { $count } entries of prices.json were not understood and are ignored. Each needs input and output prices (USD per million tokens).
+cli-hub-themes-on = The theme catalog is on: everyone signed in to this hub can browse and install its themes in the theme editor. `agora hub themes off` hides it again.
+cli-hub-themes-off = The theme catalog is off: windows show no catalog. `agora hub themes on` lets everyone signed in to this hub browse and install its themes.
+cli-hub-themes-never-updated = Nothing fetched yet. `agora hub themes update --url URL` fetches the catalog's index (the project's catalog repository does not exist yet, so give its address).
+cli-hub-themes-updated-at = { $count } themes, fetched { $when } from { $url }.
+cli-hub-themes-no-url = No catalog address yet. Give the address of the catalog's index.json with `--url` (the project's catalog repository does not exist yet); later updates use it again.
+cli-hub-themes-updated = Theme catalog updated: { $kept } themes kept, { $refused } refused.
+cli-hub-themes-still-off = The catalog is off, so windows do not show it yet. `agora hub themes on` turns it on.
+cli-hub-themes-refused = Refused { $id }: { $reason }
+cli-hub-themes-problem = {"  "}{ $text }
+cli-hub-themes-failed = Could not update the theme catalog: { $reason } Nothing was changed.
+cli-hub-themes-theme-unreachable = the file of { $id } could not be fetched: { $reason }
+cli-hub-themes-index-address = the address is not https:// (plain http:// is allowed only to this machine).
+cli-hub-themes-index-fetch = it could not be reached.
+cli-hub-themes-index-timeout = it took too long to answer.
+cli-hub-themes-index-status = it answered with status { $status } (a redirect is not followed: give the final address).
+cli-hub-themes-index-too-large = it is larger than { $max } KiB.
+cli-hub-themes-index-json = it is not JSON.
+cli-hub-themes-index-format = it is not a theme catalog index (it needs "agora-theme-catalog": 1 and a "themes" list).
+cli-hub-themes-index-newer = it is in a newer format than this version of Agora reads. Update Agora.
+cli-hub-themes-index-unknown-field = it has a field this version does not know: { $field }.
+cli-hub-themes-index-too-many = it lists more than { $max } themes.
+cli-hub-themes-refused-entry = its entry in the index has no valid { $field }.
+cli-hub-themes-refused-unknown-field = its entry in the index has a field this version does not know: { $field }.
+cli-hub-themes-refused-duplicate = another theme in the index has the same id.
+cli-hub-themes-refused-status = its file answered with status { $status } (a redirect is not followed).
+cli-hub-themes-refused-too-large = its file is larger than { $max } KiB.
+cli-hub-themes-refused-total = the catalog's themes together would be larger than { $max } KiB.
+cli-hub-themes-refused-hash = its file does not have the SHA-256 the index gives.
+cli-hub-themes-refused-not-text = its file is not UTF-8 text.
+cli-hub-themes-refused-theme = it is not a theme Agora can use:
 cli-hub-ssh-started = Keeping SSH tunnels open to { $count } machine(s) from { $file }.
 cli-hub-ssh-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `NAME DESTINATION [PORT]`.
 cli-hub-ssh-none = No SSH machines yet. Add one with "agora hub ssh add NAME DESTINATION".

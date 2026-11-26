@@ -22,20 +22,32 @@ use crate::users::{viewer_may, Access, Role};
 pub enum Route {
     /// Refused before any node hears of it (ADR-0049): a viewer's command that changes something, or a member's outside their
     /// projects. `auth.forbidden` with `action`; the audit trail names `action` against the request's `target_node`.
-    Forbidden { action: String },
+    Forbidden {
+        action: String,
+    },
     /// A command the hub answers itself was sent with a `target_node`: `protocol.invalid_message` (`field: target_node`).
     TargetNotAllowed,
     /// ADR-0053: the hub forgets a closed agent, named by its hub-wide key `node/agent` (`node` is its first part, for the audit).
-    ForgetAgent { agent_id: String, node: String },
+    ForgetAgent {
+        agent_id: String,
+        node: String,
+    },
     /// ADR-0073: the hub forgets an offline machine.
     ForgetNode {
         node_id: String,
         refuse_return: bool,
     },
     /// ADR-0073: `node.forget` from anyone but the owner. `auth.forbidden`, audited against the named machine.
-    ForgetNodeForbidden { node_id: String },
+    ForgetNodeForbidden {
+        node_id: String,
+    },
     /// ADR-0033: the hub answers from its own view and prices.
     UsageReport,
+    /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
+    ThemeCatalogList,
+    ThemeCatalogGet {
+        id: String,
+    },
     /// Everything else goes to the node the request names (the router still checks that it is known, connected and able).
     Forward,
 }
@@ -79,6 +91,11 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         },
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
+        Some(C::ThemeCatalogList(_) | C::ThemeCatalogGet(_)) if names_a_node => {
+            Route::TargetNotAllowed
+        }
+        Some(C::ThemeCatalogList(_)) => Route::ThemeCatalogList,
+        Some(C::ThemeCatalogGet(g)) => Route::ThemeCatalogGet { id: g.id.clone() },
         _ => Route::Forward,
     }
 }
@@ -282,6 +299,51 @@ mod tests {
             route(&member, None, &req("n1", forget_node(false))),
             Route::TargetNotAllowed
         );
+    }
+
+    /// ADR-0113 decision 6: every signed-in person may read the theme catalog (whether it is on is the hub's answer, not a refusal), and
+    /// the hub answers it itself: one that names a machine is refused, never forwarded.
+    #[test]
+    fn everyone_may_ask_the_hub_for_the_theme_catalog_and_it_never_goes_to_a_node() {
+        let list = C::ThemeCatalogList(v1::ThemeCatalogList::default());
+        let get = C::ThemeCatalogGet(v1::ThemeCatalogGet {
+            id: "harbour".into(),
+        });
+        let member = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Member)
+        };
+        let scope = Scope::from_view(
+            member.projects.clone().unwrap(),
+            &crate::projection::View::default(),
+        );
+        let viewer = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Viewer)
+        };
+        for (person, scope) in [
+            (who(Role::Owner), None),
+            (member.clone(), Some(&scope)),
+            (viewer, Some(&scope)),
+            (who(Role::Viewer), None),
+        ] {
+            assert_eq!(
+                route(&person, scope, &req("", list.clone())),
+                Route::ThemeCatalogList
+            );
+            assert_eq!(
+                route(&person, scope, &req("", get.clone())),
+                Route::ThemeCatalogGet {
+                    id: "harbour".into()
+                }
+            );
+            for c in [list.clone(), get.clone()] {
+                assert_eq!(
+                    route(&person, scope, &req("n1", c)),
+                    Route::TargetNotAllowed
+                );
+            }
+        }
     }
 
     /// #1044: clients tell the hub's refusal for a person's role from a machine's refusal for a limited device by `action`: the hub names

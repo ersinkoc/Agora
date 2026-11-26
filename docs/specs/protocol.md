@@ -1408,11 +1408,34 @@ node sets. The window's button and the terminal client's key come with the next 
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
 
+### The community theme catalog (ADR-0113)
+
+ADR-0113 decision 6. The hub keeps a catalog of community themes that it fetched on its owner's command (`agora hub themes update`) and
+checked (`docs/ux/themes.md`, "The community catalog"); a window asks the hub for it and never fetches from another origin. Added to the
+schema append-only, no capability (a window sends no `Hello`; a window normally talks to the hub that served it, and an older hub that
+does not know these commands refuses them, which the window treats as "no catalog"):
+
+- `CommandRequest.theme_catalog_list` (111, `ThemeCatalogList {}`) and `CommandRequest.theme_catalog_get` (112,
+  `ThemeCatalogGet { id }`): commands the hub answers itself, with no `target_node` (one that names a machine is refused,
+  `protocol.invalid_message`, `field: target_node`) and never forwarded. Every signed-in person may ask, whatever their role and
+  projects (viewers included); a node refuses them as unsupported.
+- `CommandOk.theme_catalog_list` (33, `ThemeCatalogListResult { on, entries, updated_at_ms }`): `on` is false while the owner has not
+  turned the catalog on (`agora hub themes on`), and then `entries` is empty; it is an answer, not a refusal, so a window that opens its
+  theme editor writes no refused row in the owner's Activity. `updated_at_ms` is when the hub last fetched the catalog (0: never).
+  `entries` are sorted by name, each a `ThemeCatalogEntry { id, name, version, author, licence, sha256, size }`: the index's id
+  (lowercase letters, digits, `-`, at most 40), name, a version that only grows (a higher number is newer), author, SPDX licence, the
+  SHA-256 of the file as fetched (64 lowercase hex) and its size in bytes. Every text is from the catalog's index: clients show it as
+  text, never as markup.
+- `CommandOk.theme_catalog_theme` (34, `ThemeCatalogTheme { entry, data }`): one theme's file exactly as the hub fetched and checked it
+  (JSON text, theme format 1 or 2, at most 256 KiB). A client checks it again with its own theme rules before showing or installing it.
+  Refused with `theme.catalog_off` while the catalog is off and `theme.not_found` (`id`) for an id the catalog lacks.
+
+Golden fixtures of each case are in `schema/fixtures/theme-catalog/` (`crates/agora-protocol/tests/theme_catalog.rs`).
 ### Plugins (ADR-0114)
 
 Schema step of ADR-0114 decision 6 (Accepted). New messages in `schema/agora/v1/plugins.proto` and new arms of `CommandRequest`
-(`plugin_list` 111, `plugin_fetch` 112, `plugin_grant_list` 113, `plugin_grant_set` 114, `plugin_grant_remove` 115) and `CommandOk`
-(`plugin_list` 33, `plugin_fetch` 34, `plugin_grant_list` 35); nothing published changed. No capability: a window sends them to any hub,
+(`plugin_list` 113, `plugin_fetch` 114, `plugin_grant_list` 115, `plugin_grant_set` 116, `plugin_grant_remove` 117) and `CommandOk`
+(`plugin_list` 35, `plugin_fetch` 36, `plugin_grant_list` 37); nothing published changed. No capability: a window sends them to any hub,
 and an older hub refuses them (the window then has no hub plugins). Every one is answered by the hub itself, for any signed-in person
 (owner, member or viewer alike, ahead of the routing that limits a viewer or a member's projects); one that names a node
 (`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node never receives them (refused as

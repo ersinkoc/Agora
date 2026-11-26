@@ -182,6 +182,7 @@ mod secretcmd;
 mod servicecmd;
 mod supervise;
 mod tailscale;
+mod themecmd;
 mod trustcli;
 mod tuicmd;
 mod update;
@@ -549,7 +550,7 @@ fn main() -> ExitCode {
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
-        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "plugin"]
+        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "themes" | "plugin"]
             if !hubcli::hub_dir(&opts).is_dir() =>
         {
             hubcli::not_here(&say, &opts)
@@ -566,6 +567,7 @@ fn main() -> ExitCode {
         ["hub", "machines"] => hubcli::hub_machines(&say, &opts),
         ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
         ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
+        ["hub", "themes"] => themecmd::hub_themes(&say, &opts),
         ["hub", "notify"] => hubcli::hub_notify(&say, &opts),
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),

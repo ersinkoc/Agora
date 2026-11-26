@@ -35,6 +35,7 @@ cli-usage =
       agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
+      agora hub themes on|off|status | update [--url URL] [--hub-dir DIR]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
@@ -319,6 +320,36 @@ cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }
 cli-hub-prices-updated = Fiyat tablosu güncellendi: { $count } model.
 cli-hub-prices-failed = Fiyat tablosu güncellenemedi: { $reason }
 cli-hub-prices-skipped = prices.json içindeki { $count } kayıt anlaşılamadı ve yok sayılıyor. Her kayıtta giriş ve çıkış fiyatı (milyon token başına USD) olmalı.
+cli-hub-themes-on = Tema kataloğu açık: bu hub'a giriş yapan herkes tema düzenleyicide temalarına göz atıp kurabilir. `agora hub themes off` onu yeniden gizler.
+cli-hub-themes-off = Tema kataloğu kapalı: pencereler katalog göstermez. `agora hub themes on` bu hub'a giriş yapan herkesin temalarına göz atıp kurmasını sağlar.
+cli-hub-themes-never-updated = Henüz bir şey getirilmedi. `agora hub themes update --url URL` kataloğun dizinini getirir (projenin katalog deposu henüz yok, bu yüzden adresini verin).
+cli-hub-themes-updated-at = { $count } tema, { $when } tarihinde { $url } adresinden getirildi.
+cli-hub-themes-no-url = Henüz katalog adresi yok. Kataloğun index.json adresini `--url` ile verin (projenin katalog deposu henüz yok); sonraki güncellemeler onu yeniden kullanır.
+cli-hub-themes-updated = Tema kataloğu güncellendi: { $kept } tema tutuldu, { $refused } reddedildi.
+cli-hub-themes-still-off = Katalog kapalı, bu yüzden pencereler onu henüz göstermez. `agora hub themes on` onu açar.
+cli-hub-themes-refused = { $id } reddedildi: { $reason }
+cli-hub-themes-problem = {"  "}{ $text }
+cli-hub-themes-failed = Tema kataloğu güncellenemedi: { $reason } Hiçbir şey değişmedi.
+cli-hub-themes-theme-unreachable = { $id } dosyası getirilemedi: { $reason }
+cli-hub-themes-index-address = adres https:// değil (düz http:// yalnızca bu makineye izinli).
+cli-hub-themes-index-fetch = ona ulaşılamadı.
+cli-hub-themes-index-timeout = yanıt vermesi çok uzun sürdü.
+cli-hub-themes-index-status = { $status } durumuyla yanıt verdi (yönlendirme izlenmez: son adresi verin).
+cli-hub-themes-index-too-large = { $max } KiB'tan büyük.
+cli-hub-themes-index-json = JSON değil.
+cli-hub-themes-index-format = bir tema kataloğu dizini değil ("agora-theme-catalog": 1 ve bir "themes" listesi gerekir).
+cli-hub-themes-index-newer = bu Agora sürümünün okuduğundan daha yeni bir biçimde. Agora'yı güncelleyin.
+cli-hub-themes-index-unknown-field = bu sürümün bilmediği bir alanı var: { $field }.
+cli-hub-themes-index-too-many = { $max } temadan fazlasını listeliyor.
+cli-hub-themes-refused-entry = dizindeki girdisinde geçerli bir { $field } yok.
+cli-hub-themes-refused-unknown-field = dizindeki girdisinde bu sürümün bilmediği bir alan var: { $field }.
+cli-hub-themes-refused-duplicate = dizindeki başka bir temanın kimliği aynı.
+cli-hub-themes-refused-status = dosyası { $status } durumuyla yanıt verdi (yönlendirme izlenmez).
+cli-hub-themes-refused-too-large = dosyası { $max } KiB'tan büyük.
+cli-hub-themes-refused-total = kataloğun temaları birlikte { $max } KiB'tan büyük olurdu.
+cli-hub-themes-refused-hash = dosyası, dizinin verdiği SHA-256 değerine sahip değil.
+cli-hub-themes-refused-not-text = dosyası UTF-8 metin değil.
+cli-hub-themes-refused-theme = Agora'nın kullanabileceği bir tema değil:
 cli-hub-ssh-started = { $file } dosyasındaki { $count } makineye SSH tünelleri açık tutuluyor.
 cli-hub-ssh-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `AD HEDEF [PORT]` olmalı.
 cli-hub-ssh-none = Henüz SSH makinesi yok. "agora hub ssh add AD HEDEF" ile ekleyin.

@@ -1301,6 +1301,29 @@ where
                 result: Some(command_ok::Result::UsageReport(hub.usage_report())),
             })),
         }),
+        // ADR-0113 decision 6: answered by the hub itself from the theme catalog it keeps; it names no node.
+        crate::dispatch::Route::ThemeCatalogList => {
+            Some(match crate::theme_catalog::list(hub.store()) {
+                Ok(list) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ThemeCatalogList(list)),
+                    })),
+                },
+                Err(_) => refuse(Error::new(ErrorCode::Internal)),
+            })
+        }
+        crate::dispatch::Route::ThemeCatalogGet { id } => {
+            Some(match crate::theme_catalog::get(hub.store(), &id) {
+                Ok(theme) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ThemeCatalogTheme(theme)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
     };
     if let Some(resp) = resp {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))

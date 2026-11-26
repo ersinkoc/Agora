@@ -7,8 +7,9 @@
 A **theme** is a small file of **design tokens** (the variables in `apps/web/src/design/tokens.css`). Every colour, font, size,
 corner and spacing a component draws comes from a token (`visual-language.md` §3), so a theme restyles the whole window without
 code. This page is the file format's specification and the web window's behaviour. Rung 2 covers the web window; the terminal
-client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). The hub is not involved: themes and the choice are kept in the browser (syncing them
-per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6).
+client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). Themes and the choice are kept in the browser (syncing them
+per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6). The hub is
+involved only for the [community catalog](#the-community-catalog), which it fetches on its owner's command (build step 5).
 
 **Format 2** ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md), below) goes deeper where the look comes from:
 both schemes in one file, the terminal's palette, the colours of the window's parts, and the window's chrome (pane borders and
@@ -394,11 +395,130 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   without each built-in theme and the sample file, in all three colour modes. The other screens (the board, files, review, the
   folder picker and the plain list when the output is piped) still draw in the terminal's own colours.
 
+## The community catalog
+
+Community themes, off until the hub's owner turns them on ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md)
+decision 6, build step 5). The **hub** fetches the catalog, and only when its owner asks; a window never loads anything from another
+origin, and its page policy is unchanged.
+
+![The catalog in the theme editor: Harbour installed with a newer version, Meadow previewed (Dark)](../screenshots/adr113-theme-catalog-dark.png)
+![The same in Light](../screenshots/adr113-theme-catalog-light.png)
+
+### On the hub: `agora hub themes`
+
+Run on the hub's machine by its owner (the hub folder is the owner's alone); each change is in the audit trail as the owner's
+(`theme_catalog.on`, `theme_catalog.off`, `theme_catalog.update` with `ok`, `partial` or `failed`).
+
+- `agora hub themes on` / `off`: whether windows show the catalog. Off when never set.
+- `agora hub themes status`: on or off, how many themes, when and from where they were fetched.
+- `agora hub themes update [--url URL]`: fetches the catalog's index and every theme it lists, checks them, and keeps the accepted
+  ones in the hub's database, replacing the catalog it had in one step. `--url` is the address of the catalog's `index.json`; it is
+  remembered for the next update. **The project's catalog repository does not exist yet**, so until the owner gives an address there is
+  none: the built-in default is a placeholder (`https://themes.agora.invalid/index.json`, a name that can never resolve) and `update`
+  without `--url` says so and fetches nothing. Exit 0 when every theme was kept; 1 when the catalog could not be read (nothing
+  changed) or some theme was refused (the others are kept, and each refusal is printed with its reason, a refused theme's with every
+  reason the theme rules give, in the same words as the terminal client's theme list). Updating works while the catalog is off, so the
+  owner can look before turning it on.
+
+What the hub checks (`crates/agora-hub/src/theme_catalog.rs`):
+
+- **The address.** `https://`, or `http://` only to `localhost` or `127.0.0.1`.
+- **Redirects are not followed.** A 3xx answer is a refusal (of the whole update for the index, of that theme for a file). The owner
+  gives the final address (for a GitHub repository, its `raw.githubusercontent.com` address); a redirect could otherwise take the hub
+  somewhere the owner never named.
+- **Where a theme file comes from.** Only a relative path under the index's own folder, on the same scheme, host and port: letters,
+  digits, `.`, `_`, `-` and `/`, ending in `.json`, with no empty, `.` or `..` part. The index cannot send the hub to another address.
+- **Sizes and time.** The index at most 256 KiB, each theme at most 256 KiB (the theme rules' own cap), at most 200 themes and 4 MiB of
+  themes in all (themes past it are refused). Connecting, and each read or write, at most 10 seconds; the whole update at most 2
+  minutes. A theme file that cannot be reached in time stops the update with nothing changed, so a network failure half way never
+  drops themes that are fine.
+- **The index** is read strictly: a field it does not know, at the top or in an entry, refuses the index or that entry (below).
+- **Each theme** must have the SHA-256 the index gives (of the file's bytes as served), be UTF-8, and pass the theme rules: the
+  terminal client's reader ([above](#the-terminal-client)), which accepts and refuses a file exactly as the web window does. The file
+  is kept exactly as fetched.
+
+### In the window
+
+Once the owner turned the catalog on, the theme editor shows a **Catalog** section to every person signed in to the hub, whatever
+their role (a viewer too: installing changes only their own browser). It asks the hub once when the editor opens (no polling); nothing
+is shown while the catalog is off, the hub is an older one, or the window is not connected. The demo window (no hub) shows a sample
+catalog of two themes.
+
+- Each theme shows its name, author and licence, as text, and its version, or **Installed**, or **Version N available**.
+- **Preview** fetches the theme from the hub, checks it with the window's own rules, and draws a small sample in the theme's own
+  colours (its panels, text, accent, a working mark and a terminal); nothing changes until the person installs it. A theme the window
+  refuses lists its reasons and cannot be installed.
+- **Install** copies the theme into the person's own themes (the 20-theme limit applies, with its message), selects it as an import
+  does, and remembers where it came from: the catalog's id and the version, kept beside the theme in `agora.themes.v1`
+  (`{"id", "file", "catalog": {"id", "version"}}`), never in the theme's file, so an export is the theme alone.
+- **An installed theme never changes by itself.** When the catalog has a higher version, the theme says **Version N available** and
+  offers **Update to version N**, which replaces that theme in place (same place in the list, still chosen; a scheme the new version no
+  longer has goes back to the default). Editing an installed theme keeps where it came from.
+- The editor asks when it opens: a catalog the owner turns on while the editor is open shows the next time it is opened.
+
+`scripts/e2e-theme-catalog.mjs` runs all of this in a real browser on a real hub: the owner's `update` from a catalog served on the
+machine, nothing shown while off, the list once on, a preview and an install, and no request to any origin but the hub's.
+
+### The protocol
+
+`ThemeCatalogList` and `ThemeCatalogGet { id }` (`schema/agora/v1/commands.proto`, [protocol.md](../specs/protocol.md#the-community-theme-catalog-adr-0113)),
+answered by the hub itself. The list answers `on: false` and nothing else while the catalog is off (not a refusal, so a window that opens
+the editor writes no row in the owner's Activity); `ThemeCatalogGet` answers the file as text, or `theme.catalog_off` or
+`theme.not_found`.
+
+### The catalog repository the hub expects
+
+A separate public repository (ADR-0113's proposed answer), to be created by the maintainer. Every addition is reviewed, and its CI
+checks the schema, the readability floor and that there are no extra fields (decision 6). The hub needs only static files:
+
+```
+agora-themes/
+  index.json                 the index the owner's --url points at
+  themes/
+    harbour.json             one theme file per entry, format 1 or 2 (this page)
+    meadow.json
+  README.md, LICENSE, CI     the repository's own; never fetched
+```
+
+`index.json`:
+
+```json
+{
+  "agora-theme-catalog": 1,
+  "themes": [
+    {
+      "id": "harbour",
+      "name": "Harbour",
+      "version": 2,
+      "author": "Ada Example",
+      "licence": "MIT",
+      "sha256": "<64 lowercase hex digits: the SHA-256 of themes/harbour.json as served>",
+      "file": "themes/harbour.json"
+    }
+  ]
+}
+```
+
+- `agora-theme-catalog`: the index format, `1`. A higher number is refused whole ("update Agora"). No other top-level field.
+- `id`: lowercase letters, digits and `-` (not first), at most 40; unique. It names the theme across versions.
+- `name` (at most 60 characters) and `author` (at most 100): plain text, no control, format or direction-changing character, no
+  space at either end.
+- `version`: a whole number from 1 to 1 000 000 that only grows; a higher number is a newer version, offered to people who installed
+  an older one.
+- `licence`: an SPDX licence identifier or expression (letters, digits, `.`, `-`, `+`, spaces and brackets), at most 64.
+- `sha256`: of the file's bytes exactly as served (no line-ending conversion on the way).
+- `file`: the relative path described above.
+- No other field in an entry; an entry with one, or with a field missing or of the wrong kind, is refused alone.
+
+The repository's CI should run the same checks before merging: the index's rules above, each file's SHA-256, and the theme rules,
+for example with `agora tui`'s reader or the web window's (`apps/web/src/themes/file.ts`), so a merged theme is never refused by a hub.
+
 ## Not yet (later steps of ADR-0113)
 
 - **Theme packs** and "Export as pack": a theme with its layouts (and keys, once ADR-0068 rung 4 exists); build step 2.
 - **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
-- **The community catalog** and `agora hub themes update`; step 5.
+- **The catalog repository itself** (step 5's hub side is built, [above](#the-community-catalog)): the maintainer creates it; the hub
+  then fetches it with `--url`. Packs in the catalog wait for packs (step 2).
 - More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
   ADR-0113, whose answer is: not in format 2).
 - The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.
