@@ -590,6 +590,17 @@ audit-action-user-role = Rol değiştirildi
 audit-action-user-remove = Ekipten biri çıkarıldı
 audit-action-user-grant = Bir projeye erişim verildi
 audit-action-user-revoke = Bir projeye erişim geri alındı
+audit-action-plugin-add = Bir eklenti kurdu
+audit-action-plugin-remove = Bir eklentiyi kaldırdı
+audit-action-plugin-grant = Bir eklentinin neleri görebileceğini seçti
+audit-action-plugin-ungrant = Bir eklentiyi göstermeyi bıraktı
+audit-action-plugin-catalog-on = Eklenti kataloğunu açtı
+audit-action-plugin-catalog-off = Eklenti kataloğunu kapattı
+audit-action-plugin-catalog-key = Eklenti kataloğunun anahtarını ayarladı
+audit-action-plugin-catalog-update = Eklenti kataloğunu getirdi
+audit-action-plugin-catalog-install = Katalogdan bir eklenti kurdu
+audit-action-plugin-catalog-upgrade = Katalogdan bir eklentiyi yükseltti
+audit-action-settings-set = Temalarını cihazlarında aynı tuttu
 audit-action-pair-open = Yeni makinelerin katılmak istemesine izin verdi
 audit-action-pair-close = Yeni makinelerin katılmak istemesini kapattı
 audit-action-pair-status = Yeni makinelerin katılmak isteyip isteyemeyeceğine baktı
@@ -1050,6 +1061,160 @@ theme-import-note-window-colours = VS Code'un { $count } pencere rengi alınmad�
 theme-import-note-include = Bu tema başka bir dosyanın üzerine kurulu (include); o dosya okunmadı, yalnızca bu dosyadaki renkler kullanıldı.
 theme-import-note-fallback = Dosyada { $key } yok, bu yüzden { $from } değerinden alındı.
 theme-import-note-syntax = { $count } kod rengi temanın simge renklerinden alındı.
+theme-catalog = Katalog
+theme-catalog-hint = Agora'nızın sahibinin eklediği topluluk temaları. Kurmak birini temalarınıza kopyalar; o tema yalnızca yeni sürümünü seçtiğinizde değişir.
+theme-catalog-empty = Katalogda henüz tema yok.
+theme-catalog-by = { $author } · { $licence }
+theme-catalog-version = Sürüm { $version }
+theme-catalog-installed = Kurulu
+theme-catalog-newer = Sürüm { $version } çıktı
+theme-catalog-preview = Önizle
+theme-catalog-hide = Önizlemeyi gizle
+theme-catalog-install = Kur
+theme-catalog-update = { $version }. sürüme güncelle
+theme-catalog-refused = Bu tema kullanılamıyor:
+theme-catalog-gone = Bu tema artık katalogda değil.
+theme-catalog-off = Katalog kapatıldı.
+theme-catalog-unavailable = Tema getirilemedi. Yeniden deneyin.
+theme-sync-label = Temalarım tüm cihazlarımda aynı olsun
+theme-sync-syncing = Temalarınız, paketleriniz ve tema seçiminiz oturum açtığınız her cihazda aynı olur.
+theme-sync-synced = Temalarınız, paketleriniz ve tema seçiminiz oturum açtığınız her cihazda aynı olur.
+theme-sync-off = Temalarınız bu tarayıcıda kalır. Diğer cihazlarınızda da olmaları için bunu açın.
+theme-sync-safe = Güvenli mod: cihazlarınızda hiçbir şey eşitlenmez.
+theme-sync-local = Temalarınız bu tarayıcıda kalır. Diğer cihazlarınızda da olmaları için Agora'nızda oturum açın.
+theme-sync-older = Agora'nız henüz temaları saklayamıyor, bu yüzden bu tarayıcıda kalıyorlar.
+theme-sync-too-large = Temalarınız ve paketleriniz Agora'nızda saklanamayacak kadar büyük (en fazla { $max } KB), bu yüzden bu tarayıcıda kalıyorlar. Bir temayı silin ya da bir paketi unutun.
+theme-sync-newer = Agora'nızda saklanan temalar daha yeni bir sürümle kaydedilmiş. Kullanmak için bu pencereyi güncelleyin; o zamana kadar sizinkiler bu tarayıcıda kalır.
+theme-sync-error = Agora'nıza şu an ulaşılamadı. Temalarınız burada duruyor ve bir sonraki değişikliğinizde kaydedilecek.
+theme-sync-paused = Tema eşitleme duraklatıldı: bu tarayıcının başka bir sekmesinde başka biri oturum açtı. Eşitlemek için burada yeniden oturum açın.
+theme-synced-title = Paketleriniz ve cihazlarınız
+theme-synced-hint = Burada ve diğer cihazlarınızda içe aktardığınız paketler. Birini açmak içinde ne olduğunu gösterir; parçalarını seçene kadar hiçbir şey değişmez.
+theme-synced-packs = Paketleriniz
+theme-synced-open = Aç…
+theme-synced-forget = Unut
+theme-synced-remove = Cihazlarımdan kaldır
+theme-synced-waiting = { $count ->
+    [one] Diğer cihazlarınızdan 1 tema buraya sığmıyor: en fazla { $max } tema tutabilirsiniz. Yer açmak için kendi temalarınızdan birini silin.
+   *[other] Diğer cihazlarınızdan { $count } tema buraya sığmıyor: en fazla { $max } tema tutabilirsiniz. Yer açmak için kendi temalarınızdan birini silin.
+}
+theme-synced-waiting-packs = { $count ->
+    [one] Diğer cihazlarınızdan 1 paket burada tutulmuyor: en fazla { $max } paket tutulur. Yer açmak için birini unutun.
+   *[other] Diğer cihazlarınızdan { $count } paket burada tutulmuyor: en fazla { $max } paket tutulur. Yer açmak için birini unutun.
+}
+theme-synced-invalid-theme = Diğer cihazlarınızdan gelen "{ $name }" teması burada kullanılamıyor:
+theme-synced-invalid-theme-unnamed = Diğer cihazlarınızdan gelen bir tema burada kullanılamıyor:
+theme-synced-invalid-pack = Diğer cihazlarınızdan gelen "{ $name }" paketi burada kullanılamıyor:
+theme-synced-invalid-pack-unnamed = Diğer cihazlarınızdan gelen bir paket burada kullanılamıyor:
+pack-sync-themes = { $count ->
+    [one] 1 tema
+   *[other] { $count } tema
+}
+pack-sync-layouts = { $count ->
+    [one] 1 kayıtlı yerleşim
+   *[other] { $count } kayıtlı yerleşim
+}
+pack-sync-keys = { $count ->
+    [one] 1 komutun tuşları
+   *[other] { $count } komutun tuşları
+}
+pack-import = Paket içe aktar…
+theme-import-is-pack = Bu bir tema paketi. İçinde ne olduğunu görmek ve neyi kullanacağınızı seçmek için Paket içe aktar…’ı kullanın.
+pack-export = Paket olarak dışa aktar…
+pack-export-title = Paket olarak dışa aktar
+pack-export-hint = Paket; temaları, kayıtlı yerleşimleri ve tuşları paylaşmak ya da başka bir tarayıcıda kullanmak için tek bir dosyadır. İçine neyin gireceğini seçin.
+pack-name = Paket adı
+pack-name-default = Paketim
+pack-themes = Temalar
+pack-layouts = Kayıtlı yerleşimler
+pack-keys = Tuşlar
+pack-panes = { $count ->
+    [one] 1 bölme
+   *[other] { $count } bölme
+}
+pack-export-no-layouts = Henüz kayıtlı yerleşim yok. Yerleşim menüsünden bir tane kaydedin.
+pack-export-unbound = Ajanlarınızdan birini gösteren bölme onsuz kaydedilir: paket yalnızca panelleri adlandırır.
+pack-keys-own = Tuşlarınız
+pack-keys-none = Varsayılan tuşları kullanıyorsunuz.
+pack-keys-count = { $count ->
+    [one] Kendi tuşları olan 1 komut
+   *[other] Kendi tuşları olan { $count } komut
+}
+pack-export-do = Dışa aktar
+pack-import-title = Paket içe aktar
+pack-import-hint = Bir şey değişmeden önce paketin içinde ne olduğunu görür ve neyi kullanacağınızı seçersiniz.
+pack-import-paste = Bir paket yapıştırın (JSON)
+pack-import-file = Ya da bir dosya seçin
+pack-import-refused = Bu paket kullanılamaz:
+pack-preview-do = İçinde ne var, gör
+pack-preview-title = “{ $name }” paketi
+pack-preview-hint = Kullanılacakları işaretleyin. Siz işaretleyene kadar hiçbir şey değişmez. Temalar ve yerleşimler sizinkilere eklenir; tuşlar, neyi değiştireceklerini gördükten sonra birleştirilir.
+pack-theme-warnings = { $count ->
+    [one] zor görünen 1 şey
+   *[other] zor görünen { $count } şey
+}
+pack-themes-room = { $count ->
+    [one] 1 tema daha
+   *[other] { $count } tema daha
+} için yeriniz var. Kendi temalarınızdan birini silin ya da daha azını işaretleyin.
+pack-layout-plugin = { $panels } için bir eklenti gerekir. Paket hiçbir zaman eklenti kurmaz: siz kurup izin verene kadar bölme gösterilemediğini söyler.
+pack-layout-unknown = Bu pencere { $panels } gösteremez: bölme bunu söyler.
+pack-keys-theirs = Paketin tuşları
+pack-keys-unknown = { $count ->
+    [one] Bu pencerede olmayan bir komutu adlandırıyor. Saklanır ve burada bir şey yapmaz.
+   *[other] Bu pencerede olmayan { $count } komutu adlandırıyor. Saklanırlar ve burada bir şey yapmazlar.
+}
+pack-back = Geri
+pack-next = İleri
+pack-apply = İşaretlileri kullan
+pack-close = Kapat
+pack-keys-confirm-title = Paketin tuşları birleştirilsin mi?
+pack-keys-confirm-hint = { $count ->
+    [one] Paket 1 komutun tuşlarını belirliyor. Diğer tuşlarınız olduğu gibi kalır.
+   *[other] Paket { $count } komutun tuşlarını belirliyor. Diğer tuşlarınız olduğu gibi kalır.
+}
+pack-keys-no-conflicts = Kendi belirlediğiniz hiçbir şey değişmez ve hiçbir tuş iki iş yapmaz.
+pack-keys-replaced = Bunların yerini aldığı tuşlarınız
+pack-keys-replaced-row = { $name }: { $mine } yerine { $theirs }
+pack-keys-clashes = İki iş yapacak tuşlar
+pack-keys-clash-same = { $key } hem { $a } hem { $b } olur.
+pack-keys-clash-prefix = { $key } hem { $a } hem { $b } tuşunu başlatır.
+pack-keys-merge-do = Tuşları birleştir ve işaretlileri kullan
+pack-layout-copy = { $name } ({ $n })
+pack-done-themes = { $count ->
+    [one] 1 tema sizinkilere eklendi. İstediğinizde yukarıdan seçin.
+   *[other] { $count } tema sizinkilere eklendi. İstediğinizde yukarıdan birini seçin.
+}
+pack-done-layouts = { $count ->
+    [one] 1 yerleşim kaydedildi: { $names }. Yerleşim menüsünde bulabilirsiniz.
+   *[other] { $count } yerleşim kaydedildi: { $names }. Yerleşim menüsünde bulabilirsiniz.
+}
+pack-done-keys = { $count ->
+    [one] 1 komutun tuşları birleştirildi.
+   *[other] { $count } komutun tuşları birleştirildi.
+}
+pack-error-json = Bu geçerli bir JSON değil.
+pack-error-invalid = Bu bir paket değil.
+pack-error-newer = Bu paket daha yeni bir sürümle yapılmış. Kullanmak için güncelleyin.
+pack-error-empty = Bu pakette kullanılacak bir şey yok.
+pack-error-name = Paketin 1 ile { $max } karakter arasında, “;”, “<” ya da “url(” içermeyen bir adı olmalı.
+pack-error-too-large = Bu paket { $max } KB'tan büyük.
+pack-error-unknown-field = “{ $field }” bir paketin parçası değil.
+pack-error-part = “{ $part }”, paketin onu tuttuğu biçimde değil.
+pack-error-too-many-themes = Bir pakette en çok { $max } tema olabilir.
+pack-error-too-many-layouts = Bir pakette en çok { $max } yerleşim olabilir.
+pack-error-theme-format = { $n }. tema güncel biçimde bir tema değil.
+pack-in-theme = { $n }. tema: { $text }
+pack-in-layout = { $n }. yerleşim: { $text }
+pack-in-keys = Tuşlar: { $text }
+pack-error-layout-entry = { $n }. yerleşim adlandırılmış bir yerleşim değil.
+pack-error-layout-name = { $n }. yerleşimin 1 ile 60 karakter arasında, “;”, “<” ya da “url(” içermeyen bir adı olmalı.
+pack-error-layout-twice = { $n }. yerleşim: “{ $name }” adı iki kez kullanılmış.
+pack-error-layout-field = { $n }. yerleşim: “{ $field }” bir yerleşimin parçası değil.
+pack-error-layout-panel = { $n }. yerleşim: “{ $panel }” bir panel adı değil.
+pack-error-layout-agent = { $n }. yerleşim birinin ajanlarından birini gösteriyor. Paketteki yerleşim yalnızca panelleri adlandırır.
+pack-error-layouts-full = En çok { $max } kayıtlı yerleşim tutabilirsiniz. Bazılarını silin ya da daha azını işaretleyin.
+pack-error-keys-merge = Tuşlar birleştirilemiyor: { $text }
+pack-error-more = …ve { $count } tane daha.
 theme-name-dark = Koyu
 theme-name-light = Açık
 theme-name-high-contrast = Yüksek karşıtlık
@@ -1275,7 +1440,7 @@ palette-open-machine = Makine: { $name }
 palette-open-project = Proje: { $name }
 palette-settings = Ayarlar
 device-appearance = Görünüm
-device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor. Temalar yalnızca bu tarayıcıda saklanır.
+device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor.
 
 ## ADR-0067 2. basamak: telefon boyutunda pencere ve terminal tuş çubuğu.
 phone-nav = Git
@@ -1856,7 +2021,7 @@ plugin-marker = Eklenti
 plugin-development = geliştirme
 plugin-frame-title = { $name } (eklenti)
 plugins-title = Eklentiler
-plugins-intro = Bir dosyadan yüklediğiniz eklentiler yalnızca bu tarayıcıda, her biri kendi korumalı bölmesinde çalışır. Yalnızca izin verdiklerinizi görürler; anahtarlarınızı, ağı ve sizi bekleyenleri asla göremezler. Birini bir bölmede göstermek için bölmenin Göster… menüsünü kullanın.
+plugins-intro = Hub'ın sahibinin kurduğu eklentiler ve bir dosyadan yüklediğiniz eklentiler (yalnızca bu tarayıcıda) her biri kendi korumalı bölmesinde çalışır. Yalnızca izin verdiklerinizi görürler; anahtarlarınızı, ağı ve sizi bekleyenleri asla göremezler. Birini bir bölmede göstermek için bölmenin Göster… menüsünü kullanın.
 plugins-safe = Güvenli kip: hiçbir eklenti çalışmıyor ve yerleşik tema açık. Eklentilerinizi yeniden kullanmak için güvenli kipten çıkın.
 plugins-done = Tamam
 plugin-load = Dosyadan yükle…
@@ -1880,6 +2045,25 @@ plugin-grant-nothing = Sizden hiçbir şey görmek istemiyor.
 plugin-cancel = Vazgeç
 plugin-add = Eklentiyi ekle
 plugin-save = Kaydet
+plugin-from-hub = bu hub'da kurulu
+plugin-not-shown = Gösterilmiyor. Neleri görmek istediğine bakın, isterseniz gösterin.
+plugin-look = Bak
+plugin-hide = Göstermeyi bırak
+plugin-grant-title-hub = { $name } gösterilsin mi?
+plugin-show = Göster
+plugin-grant-failed = Hub seçiminizi saklamadı. Pencereyi yeniden açıp bir kez daha deneyin.
+plugin-replaces-hub = Bu tarayıcıda hub'ın { $name } eklentisinin yerini, burada izin verdiklerinizle alır. Hub'ınkini yeniden kullanmak için bunu kaldırın.
+plugin-replaced = Bu tarayıcıda aynı kimlikli bir geliştirme eklentisi bunun yerini aldı. Bunu yeniden kullanmak için o eklentiyi kaldırın.
+plugin-catalog-title = Hub'ın kataloğundan
+plugin-catalog-intro = Hub'ın sahibinin bu hub'daki herkes için kurabileceği, incelenmiş topluluk eklentileri. Hub her birini kataloğun imzasına karşı denetledi.
+plugin-catalog-none = Hub'ın kataloğundaki her şey zaten kurulu.
+plugin-catalog-asks = Görmek istedikleri: { $what }
+plugin-catalog-unknown = { $count ->
+    [one] bu pencerenin bilmediği bir şey
+   *[other] bu pencerenin bilmediği { $count } şey
+}
+plugin-catalog-install-how = Onu yalnızca hub'ın sahibi, hub'ın makinesinde kurar:
+plugin-catalog-upgrade-how = Kurulu olandan daha yeni bir sürüm. Onu yalnızca hub'ın sahibi, hub'ın makinesinde yükseltir:
 plugin-cap-agents-read = Ajanlarınızın adları, türleri ve durumları, makineleri ve projeleriyle birlikte
 plugin-cap-usage-read = Ajanlarınızın kullandığı token, bağlam ve süre
 plugin-cap-tasks-read = Projelerinizin ortak görevleri

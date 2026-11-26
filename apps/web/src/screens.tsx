@@ -15,6 +15,7 @@ import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
 import { type Mode, themeStore } from './themes/store';
 import { themeName } from './themes/messages';
+import { ThemeSyncSetting } from './themes/SyncPanels';
 import { PromptBox } from './components/PromptBox';
 import type { PromptSend } from './components/chatActions';
 import type { ActionResult } from './net/refusal';
@@ -493,6 +494,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                 </>}
               </SettingRow>
               <SettingRow label={t('language-label')}>{() => <LanguagePicker compact />}</SettingRow>
+              <ThemeSyncSetting />
             </SettingsCard>
             <KeyboardSettings />
             <div {...anchor('notifications')}><AttentionSettings /></div>

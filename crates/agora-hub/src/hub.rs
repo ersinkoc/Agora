@@ -123,6 +123,9 @@ pub struct Hub {
     boards: crate::board::Boards,
     /// ADR-0095: each person's recent task dispatches, across all their windows.
     dispatches: crate::dispatch::DispatchRates,
+    /// ADR-0113 step 4 and ADR-0114: each person's writes of their settings value and of their plugin grants.
+    settings_writes: crate::dispatch::WriteRates,
+    grant_writes: crate::dispatch::WriteRates,
     /// ADR-0065: pairing sessions, in memory only.
     pairing: crate::pairing_net::Shared,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
@@ -224,6 +227,14 @@ impl Hub {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
             dispatches: crate::dispatch::DispatchRates::default(),
+            settings_writes: crate::dispatch::WriteRates::new(
+                crate::dispatch::MAX_SETTINGS_WRITES,
+                crate::dispatch::WRITE_WINDOW,
+            ),
+            grant_writes: crate::dispatch::WriteRates::new(
+                crate::dispatch::MAX_GRANT_WRITES,
+                crate::dispatch::WRITE_WINDOW,
+            ),
             boards: crate::board::Boards::new(),
             pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
@@ -336,6 +347,16 @@ impl Hub {
     /// ADR-0095: the per-person dispatch counts (`task.dispatch_limited`).
     pub fn dispatches(&self) -> &crate::dispatch::DispatchRates {
         &self.dispatches
+    }
+
+    /// ADR-0113 step 4: each person's writes of their own settings value (`rate.limited`).
+    pub fn settings_writes(&self) -> &crate::dispatch::WriteRates {
+        &self.settings_writes
+    }
+
+    /// ADR-0114: each person's plugin grant changes (`rate.limited`).
+    pub fn grant_writes(&self) -> &crate::dispatch::WriteRates {
+        &self.grant_writes
     }
 
     /// Where connected nodes wait for commands (ADR-0029).

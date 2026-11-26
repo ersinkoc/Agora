@@ -498,6 +498,9 @@ impl Scope {
             }
             // What agents a machine can start is not private to a project, but only for machines the person works on.
             C::AgentKinds(_) => self.node_visible(node),
+            // ADR-0113 decision 6: the community theme catalog belongs to no project; every signed-in person may read it (the hub
+            // answers it itself and refuses one that names a machine).
+            C::ThemeCatalogList(_) | C::ThemeCatalogGet(_) => true,
             // ADR-0049 Amendment A (#1049): folders of a project granted on this machine, and below them; never the home folder (an
             // empty path), a new project identity or a changed one (what a machine also refuses to a device limited to projects). The
             // machine answers with the folder it really opened, which `confine_answer` checks again.

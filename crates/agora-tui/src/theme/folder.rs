@@ -3,13 +3,17 @@
 //! `tui-theme` there. The caller passes both paths, so tests never touch the real folder.
 //!
 //! A file is read only when it is at most [`MAX_FILE_BYTES`](super::file::MAX_FILE_BYTES) (asked of the file system first), and
-//! only `*.json` files directly in the folder are themes. Live reload: the caller asks for [`stamp`] of the file in use now and then
+//! only `*.json` files directly in the folder are themes. A file that is a theme pack (`super::pack`) gives each of its themes; its
+//! layouts and keybindings are the web window's and are listed as not used here. Live reload: the caller asks for [`stamp`] of the file in use now and then
 //! (its size and modification time, no reading), and reads it again when that changed.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::file::{read_text, Issue, Read, MAX_FILE_BYTES};
+use serde_json::Value;
+
+use super::file::{read_value, Issue, Read, MAX_FILE_BYTES};
+use super::pack::{is_pack, read_pack, Pack, PackRead};
 use super::starter::{starter, starters, Starter, FILES};
 use super::{built_ins, Scheme, Theme};
 
@@ -32,11 +36,17 @@ pub enum Choice {
     Starter { id: String, scheme: Scheme },
     /// One scheme of a theme file in the folder, by file name.
     File { name: String, scheme: Scheme },
+    /// One scheme of a pack's theme (`index` from 0) in the folder, by file name.
+    Pack {
+        name: String,
+        index: usize,
+        scheme: Scheme,
+    },
 }
 
 impl Choice {
-    /// The choice kept in [`CHOICE_FILE`]: one line, `terminal`, `built-in <id>`, `starter <dark|light> <id>` or
-    /// `file <dark|light> <file name>`. Anything else is no theme.
+    /// The choice kept in [`CHOICE_FILE`]: one line, `terminal`, `built-in <id>`, `starter <dark|light> <id>`,
+    /// `file <dark|light> <file name>` or `pack <dark|light> <theme number from 0> <file name>`. Anything else is no theme.
     pub fn parse(text: &str) -> Choice {
         let line = text.lines().next().unwrap_or("").trim();
         if let Some(id) = line.strip_prefix("built-in ") {
@@ -61,6 +71,27 @@ impl Choice {
                 };
             }
         }
+        if let Some(rest) = line.strip_prefix("pack ") {
+            let mut parts = rest.splitn(3, ' ');
+            let scheme = match parts.next() {
+                Some("dark") => Some(Scheme::Dark),
+                Some("light") => Some(Scheme::Light),
+                _ => None,
+            };
+            let index = parts
+                .next()
+                .filter(|n| !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<usize>().ok());
+            if let (Some(scheme), Some(index), Some(name)) = (scheme, index, parts.next()) {
+                if is_theme_file_name(name) {
+                    return Choice::Pack {
+                        name: name.to_string(),
+                        index,
+                        scheme,
+                    };
+                }
+            }
+        }
         Choice::Terminal
     }
 
@@ -70,6 +101,19 @@ impl Choice {
             Choice::BuiltIn(id) => format!("built-in {id}\n"),
             Choice::Starter { id, scheme } => format!("starter {} {id}\n", scheme.word()),
             Choice::File { name, scheme } => format!("file {} {name}\n", scheme.word()),
+            Choice::Pack {
+                name,
+                index,
+                scheme,
+            } => format!("pack {} {index} {name}\n", scheme.word()),
+        }
+    }
+
+    /// The file in the themes folder this choice reads, if any.
+    pub fn file_name(&self) -> Option<&str> {
+        match self {
+            Choice::File { name, .. } | Choice::Pack { name, .. } => Some(name),
+            _ => None,
         }
     }
 }
@@ -91,24 +135,62 @@ fn is_theme_file_name(name: &str) -> bool {
         && name.to_ascii_lowercase().ends_with(".json")
 }
 
-/// Reads one theme file: refused as too large from its size alone, before anything is read.
-pub fn load_file(path: &Path) -> Read {
-    let too_large = || Read::Refused(vec![Issue::TooLarge.into()]);
+/// A file of the folder, read: a theme, or a theme pack.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Loaded {
+    Theme(Read),
+    Pack(PackRead),
+}
+
+impl Loaded {
+    /// The file as one theme row would show it: a pack that cannot be used is a file that cannot be used, with its reasons.
+    fn refused(&self) -> Option<Read> {
+        match self {
+            Loaded::Theme(r @ Read::Refused(_)) => Some(r.clone()),
+            Loaded::Pack(PackRead::Refused(p)) => Some(Read::Refused(p.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// Reads one file of the folder, a theme or a pack (the same size cap for both): refused as too large from its size alone, before
+/// anything is read.
+pub fn load(path: &Path) -> Loaded {
+    let theme = |i: Issue| Loaded::Theme(Read::Refused(vec![i.into()]));
     match std::fs::metadata(path) {
-        Ok(m) if !m.is_file() => return Read::Refused(vec![Issue::Unreadable.into()]),
-        Ok(m) if m.len() > MAX_FILE_BYTES => return too_large(),
+        Ok(m) if !m.is_file() => return theme(Issue::Unreadable),
+        Ok(m) if m.len() > MAX_FILE_BYTES => return theme(Issue::TooLarge),
         Ok(_) => {}
-        Err(_) => return Read::Refused(vec![Issue::Unreadable.into()]),
+        Err(_) => return theme(Issue::Unreadable),
     }
     match std::fs::read(path) {
-        Ok(bytes) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES => too_large(),
+        Ok(bytes) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES => {
+            theme(Issue::TooLarge)
+        }
         // Decoded as the web's import decodes a file (`Blob.text()`, UTF-8 decode): a leading byte-order mark is dropped and a byte
         // that is not UTF-8 becomes U+FFFD, so a file is accepted or refused alike in both clients (audit F1800).
         Ok(bytes) => {
             let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
-            read_text(&String::from_utf8_lossy(body))
+            let text = String::from_utf8_lossy(body);
+            // The decoded text is held to the cap too, as `read_text` holds it: a byte that is not UTF-8 grows to three.
+            if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+                return theme(Issue::TooLarge);
+            }
+            match serde_json::from_str::<Value>(&text) {
+                Ok(v) if is_pack(&v) => Loaded::Pack(read_pack(&v)),
+                Ok(v) => Loaded::Theme(read_value(&v)),
+                Err(_) => theme(Issue::Json),
+            }
         }
-        Err(_) => Read::Refused(vec![Issue::Unreadable.into()]),
+        Err(_) => theme(Issue::Unreadable),
+    }
+}
+
+/// Reads one theme file (a pack is not one theme: it is refused here as not a theme file).
+pub fn load_file(path: &Path) -> Read {
+    match load(path) {
+        Loaded::Theme(r) => r,
+        Loaded::Pack(_) => Read::Refused(vec![Issue::Invalid.into()]),
     }
 }
 
@@ -121,6 +203,16 @@ pub fn stamp(path: &Path) -> Stamp {
         .map(|m| (m.len(), m.modified().ok()))
 }
 
+/// What the list says about the pack a theme came from: its name, which of its themes this is, and what it holds that this client
+/// does not use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InPack {
+    pub pack: String,
+    pub themes: usize,
+    pub layouts: usize,
+    pub keys: usize,
+}
+
 /// Where an entry of the theme list comes from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
@@ -131,6 +223,13 @@ pub enum Source {
     File {
         name: String,
         read: Read,
+    },
+    /// Theme `index` (from 0) of the pack in file `name`.
+    Pack {
+        name: String,
+        index: usize,
+        read: Read,
+        pack: InPack,
     },
 }
 
@@ -160,6 +259,17 @@ impl Entry {
                 scheme: self.scheme,
             }),
             Source::File { .. } => None,
+            Source::Pack {
+                name,
+                index,
+                read: Read::Ok { .. },
+                ..
+            } => Some(Choice::Pack {
+                name: name.clone(),
+                index: *index,
+                scheme: self.scheme,
+            }),
+            Source::Pack { .. } => None,
         }
     }
 
@@ -172,7 +282,7 @@ impl Entry {
                 .find(|b| b.id == *id)
                 .map(|b| b.theme),
             Source::Starter(s) => Some(s.theme.clone()),
-            Source::File { read, .. } => read.theme().cloned(),
+            Source::File { read, .. } | Source::Pack { read, .. } => read.theme().cloned(),
         }
     }
 }
@@ -214,7 +324,15 @@ pub fn entries(folder: &Path) -> Vec<Entry> {
         }
     }
     for name in file_names(folder) {
-        let read = load_file(&folder.join(&name));
+        let loaded = load(&folder.join(&name));
+        if let Loaded::Pack(PackRead::Ok(pack)) = &loaded {
+            pack_rows(&mut out, &name, pack);
+            continue;
+        }
+        let read = match loaded {
+            Loaded::Theme(r) => r,
+            other => other.refused().unwrap_or(Read::Refused(Vec::new())),
+        };
         let schemes = read.theme().map(Theme::schemes).unwrap_or_default();
         if schemes.is_empty() {
             out.push(Entry {
@@ -234,6 +352,29 @@ pub fn entries(folder: &Path) -> Vec<Entry> {
         }
     }
     out
+}
+
+/// A pack's rows: one per scheme of each of its themes.
+fn pack_rows(out: &mut Vec<Entry>, name: &str, pack: &Pack) {
+    let info = InPack {
+        pack: pack.name.clone(),
+        themes: pack.themes.len(),
+        layouts: pack.layouts,
+        keys: pack.keys,
+    };
+    for (index, read) in pack.themes.iter().enumerate() {
+        for scheme in read.theme().map(Theme::schemes).unwrap_or_default() {
+            out.push(Entry {
+                source: Source::Pack {
+                    name: name.to_string(),
+                    index,
+                    read: read.clone(),
+                    pack: info.clone(),
+                },
+                scheme,
+            });
+        }
+    }
 }
 
 /// The theme a choice names now, with the scheme to show: `Ok(None)` for no theme, `Err` with the reasons when its file cannot be
@@ -257,15 +398,30 @@ pub fn resolve(choice: &Choice, folder: &Path) -> Result<Option<(Theme, Scheme)>
             }
             refused => Err(refused),
         },
+        Choice::Pack {
+            name,
+            index,
+            scheme,
+        } => match load(&folder.join(name)) {
+            Loaded::Pack(PackRead::Ok(pack)) => match pack.theme(*index) {
+                Some(theme) if theme.look(*scheme).is_some() => Ok(Some((theme.clone(), *scheme))),
+                Some(theme) => {
+                    let first = theme.schemes().first().copied().unwrap_or(Scheme::Dark);
+                    Ok(Some((theme.clone(), first)))
+                }
+                // The pack no longer has that theme.
+                None => Err(Read::Refused(vec![Issue::Invalid.into()])),
+            },
+            Loaded::Pack(PackRead::Refused(p)) => Err(Read::Refused(p)),
+            // The file is a theme now, not a pack.
+            Loaded::Theme(_) => Err(Read::Refused(vec![Issue::Invalid.into()])),
+        },
     }
 }
 
 /// The path of the file a choice reads, for [`stamp`].
 pub fn path_of(choice: &Choice, folder: &Path) -> Option<PathBuf> {
-    match choice {
-        Choice::File { name, .. } => Some(folder.join(name)),
-        _ => None,
-    }
+    choice.file_name().map(|name| folder.join(name))
 }
 
 /// The kept choice (no theme when the file is missing or says something else).
@@ -400,6 +556,98 @@ mod tests {
         assert_eq!(resolve(&dracula, &d).unwrap().unwrap().1, Scheme::Dark);
         assert_eq!(path_of(&gruvbox, &d), None);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn a_pack(themes: &str) -> String {
+        format!(
+            r#"{{"agora-pack": 1, "name": "Harbour set", "themes": [{themes}],
+               "layouts": [{{"name": "Review", "layout": {{"version": 1, "root": {{"type": "pane", "panel": "plugin.clock.face"}}}}}}],
+               "keybindings": {{"version": 1, "bindings": [{{"command": "palette.open", "keys": ["ctrl+p"]}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_pack_in_the_folder_gives_its_themes_and_says_what_it_does_not_use() {
+        let d = scratch("pack");
+        let harbour = include_str!("testdata/harbour.json");
+        std::fs::write(d.join("set.json"), a_pack(harbour)).unwrap();
+        let rows = entries(&d);
+        // No theme, the six built-in themes, the starter themes, then the pack's theme in both its schemes.
+        let starter_rows: usize = starters().iter().map(|s| s.theme.schemes().len()).sum();
+        let fixed = 1 + 6 + starter_rows;
+        assert_eq!(rows.len(), fixed + 2);
+        let chosen: Vec<Choice> = rows[fixed..].iter().map(|r| r.choice().unwrap()).collect();
+        assert_eq!(
+            chosen,
+            [
+                Choice::Pack {
+                    name: "set.json".into(),
+                    index: 0,
+                    scheme: Scheme::Dark
+                },
+                Choice::Pack {
+                    name: "set.json".into(),
+                    index: 0,
+                    scheme: Scheme::Light
+                },
+            ]
+        );
+        assert!(matches!(
+            &rows[fixed].source,
+            Source::Pack { pack, .. } if *pack == InPack { pack: "Harbour set".into(), themes: 1, layouts: 1, keys: 1 }
+        ));
+        // The same theme as the file on its own.
+        assert_eq!(
+            rows[fixed].theme().as_ref(),
+            super::super::file::read_text(harbour).theme()
+        );
+        let (theme, scheme) = resolve(&chosen[1], &d).unwrap().unwrap();
+        assert_eq!((theme.name.as_str(), scheme), ("Harbour", Scheme::Light));
+        assert_eq!(path_of(&chosen[1], &d), Some(d.join("set.json")));
+        // A theme the pack no longer has, and a pack that can no longer be used, fall back with the reasons.
+        let gone = Choice::Pack {
+            name: "set.json".into(),
+            index: 3,
+            scheme: Scheme::Dark,
+        };
+        assert!(resolve(&gone, &d).is_err());
+        std::fs::write(
+            d.join("set.json"),
+            a_pack(r#"{"agora-theme": 1, "name": "Old", "scheme": "dark", "tokens": {}}"#),
+        )
+        .unwrap();
+        assert!(
+            matches!(resolve(&chosen[0], &d), Err(Read::Refused(p)) if p[0].issue == Issue::PackThemeFormat(1))
+        );
+        // A pack that cannot be used is one row that says why, never offered.
+        let rows = entries(&d);
+        assert_eq!(rows.len(), fixed + 1);
+        assert!(
+            matches!(&rows[fixed].source, Source::File { name, read: Read::Refused(_) } if name == "set.json")
+        );
+        assert_eq!(rows[fixed].choice(), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_pack_choice_round_trips_and_a_bad_one_is_no_theme() {
+        let c = Choice::Pack {
+            name: "my set.json".into(),
+            index: 12,
+            scheme: Scheme::Dark,
+        };
+        assert_eq!(c.line(), "pack dark 12 my set.json\n");
+        assert_eq!(Choice::parse(&c.line()), c);
+        for bad in [
+            "pack dark x set.json",
+            "pack dark -1 set.json",
+            "pack dark 1234 set.json",
+            "pack blue 0 set.json",
+            "pack dark 0 ../set.json",
+            "pack dark 0",
+        ] {
+            assert_eq!(Choice::parse(bad), Choice::Terminal, "{bad}");
+        }
     }
 
     #[test]

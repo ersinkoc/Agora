@@ -48,6 +48,8 @@ import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
+import { catalogAskFor, setCatalogSource } from './themes/catalog';
+import { themeSync } from './themes/sync';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -72,6 +74,7 @@ import { IS_MAC } from './keys/strokes';
 import { ariaKey, commandLabel, shownKey, useKeymap } from './keys/view';
 import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
 import { SAFE, safeAddress } from './plugins/safe';
+import { pluginStore } from './plugins/store';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -346,8 +349,33 @@ export function App() {
     trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,
   }));
   const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
+  // ADR-0114 step 3: the plugins installed on the hub and this person's grants, read once this window is connected (again after a sign-in).
+  useEffect(() => {
+    if (!api) { void pluginStore.attachHub(undefined); return; }
+    if (live !== undefined) void pluginStore.attachHub({ command: (body) => api.command('', body) });
+  }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   // What the agents cost so far, asked for by the owner's window only (#1044).
   const usage = useUsageReport(api, live !== undefined, pairing.owner);
+  // ADR-0113 decision 6: the theme editor asks this hub for its community theme catalog once the window has the hub's first view (a
+  // question sent before the link is open is refused), and the demo window has a sample one.
+  const viewed = live !== undefined;
+  useEffect(() => { setCatalogSource(catalogAskFor(api, viewed, !!hub)); }, [api, viewed, hub]);
+  // ADR-0113 step 4: the person's themes, packs and theme choice, read from this hub once the window has its first view and kept the same
+  // on all their devices; read again whenever the window comes back into view (another device may have changed them).
+  useEffect(() => { themeSync.attach(api && viewed ? (body) => api.command('', body) : undefined, !!hub); }, [api, viewed, hub]);
+  useEffect(() => {
+    const back = () => { if (document.visibilityState === 'visible') void themeSync.refresh(); };
+    // (A link that drops and comes back reads again too: below.)
+    document.addEventListener('visibilitychange', back);
+    return () => document.removeEventListener('visibilitychange', back);
+  }, []);
+  // Only a return: the first time the link is live, the sign-in read above runs.
+  const linkWas = useRef<'never' | 'live' | 'down'>('never');
+  useEffect(() => {
+    if (link === 'live' && linkWas.current === 'down' && viewed) void themeSync.refresh();
+    if (link === 'live') linkWas.current = 'live';
+    else if (linkWas.current === 'live') linkWas.current = 'down';
+  }, [link, viewed]);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.

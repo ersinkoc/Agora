@@ -81,7 +81,8 @@ Quota facts are researched continuously, not decided once (backlog `research.md`
 ## Implementation status
 `agora-hub::usage`: models.dev catalog parsing, overrides, exact micro-USD estimates, reported-cost-wins, totals that keep
 reported, estimated and unpriced apart. ADR-0033 is built: the hub embeds a trimmed models.dev snapshot (`crates/agora-hub/data/prices.json`, rebuilt by
-`scripts/update-prices.sh`), `agora hub prices update` fetches the live catalog on request into `<hub dir>/prices-catalog.json`, and
+`scripts/update-prices.sh`), `agora hub prices update` fetches the live catalog on request into `<hub dir>/prices-catalog.json` (each connect, read or write
+at most 10 s, inside TLS too, and the whole fetch at most 120 s), and
 `<hub dir>/prices.json` overrides (USD per million tokens) sit on top, edited with `agora hub prices set|unset` and shown with
 `agora hub prices show`; an override of `provider/model` also wins for the bare id. ADR-0021's periodic fetch is built and off until
 the owner runs `agora hub prices auto on` (about daily, spread by chance, backing off after failures; `<hub dir>/prices-auto`), and a running

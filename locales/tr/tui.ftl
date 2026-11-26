@@ -405,6 +405,30 @@ tui-theme-no-colour = Bu terminalde renkler kapalı (NO_COLOR), bu yüzden tema 
 tui-theme-chosen = Tema: { $name }.
 tui-theme-not-kept = Tema: { $name }, şimdilik: bir sonraki açılış için saklanamadı ({ $code }).
 tui-theme-fell-back = { $file } tema dosyası şu an kullanılamıyor, bu yüzden terminalinizin renkleri gösteriliyor. Nedenini görmek için t'ye basın.
+tui-theme-in-pack = "{ $pack }" paketinde ({ $file } dosyası): { $count } temadan { $n }. tema.
+tui-theme-pack-unused = Pakette ayrıca, terminal istemcisinde kullanılmayanlar: { $list }.
+tui-theme-pack-layouts = { $count ->
+    [one] 1 kayıtlı yerleşim
+   *[other] { $count } kayıtlı yerleşim
+}
+tui-theme-pack-keys = { $count ->
+    [one] 1 komutun tuşları
+   *[other] { $count } komutun tuşları
+}
+tui-theme-error-pack-field = "{ $field }" bir tema paketinin parçası değil.
+tui-theme-error-pack-name = Tema paketinin 1 ile { $max } karakter arasında, ";", "<" ya da "url(" içermeyen bir adı olmalı.
+tui-theme-error-pack-part = "{ $part }", tema paketinin onu tuttuğu biçimde değil.
+tui-theme-error-pack-too-many-themes = Bir tema paketinde en çok { $max } tema olabilir.
+tui-theme-error-pack-too-many-layouts = Bir tema paketinde en çok { $max } yerleşim olabilir.
+tui-theme-error-pack-theme-format = Paketin { $n }. teması güncel biçimde bir tema değil.
+tui-theme-error-in-pack-theme = Paketin { $n }. teması: { $text }
+tui-theme-error-pack-no-themes = Bu tema paketinde tema yok. İçindeki { $layouts ->
+    [one] 1 yerleşim
+   *[other] { $layouts } yerleşim
+} ve { $keys ->
+    [one] 1 komutun
+   *[other] { $keys } komutun
+} tuşları web penceresi içindir; terminal istemcisi bunları kullanmaz.
 tui-theme-token-surface-0 = Arka plan
 tui-theme-token-surface-1 = Paneller
 tui-theme-token-surface-2 = Yükseltilmiş yüzeyler

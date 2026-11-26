@@ -7,13 +7,18 @@
 A **theme** is a small file of **design tokens** (the variables in `apps/web/src/design/tokens.css`). Every colour, font, size,
 corner and spacing a component draws comes from a token (`visual-language.md` §3), so a theme restyles the whole window without
 code. This page is the file format's specification and the web window's behaviour. Rung 2 covers the web window; the terminal
-client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). The hub is not involved: themes and the choice are kept in the browser (syncing them
-per person through the hub is a later step, [ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 6).
+client reads the same files ([below](#the-terminal-client), ADR-0113 build step 3). Themes and the choice are kept in the browser and,
+through the hub, the same on all the person's devices ([below](#keeping-themes-the-same-on-your-devices), build step 4): the hub keeps them
+as the person's own opaque value and never reads them. The hub also keeps the [community catalog](#the-community-catalog), which it
+fetches on its owner's command (build step 5).
 
 **Format 2** ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md), below) goes deeper where the look comes from:
 both schemes in one file, the terminal's palette, the colours of the window's parts, and the window's chrome (pane borders and
 gaps, the tab bar, density, how a state is shown, shadows, motion), always as values from closed lists, never CSS. A theme stays
 data: it never holds code, CSS, `url()` or anything from the network, and it can never change what needs you ([the floor](#the-floor-what-no-theme-can-change)).
+
+A **theme pack** ([below](#theme-packs), ADR-0113 decision 5) is one file with themes, saved layouts and keys, to share a look with
+the arrangement and keys it was made for.
 
 ## Format, version 1
 
@@ -338,7 +343,7 @@ How a palette becomes a theme (the same for each):
 `scripts/screenshots-starter-themes.mjs` takes the shots above from the demo window (the picker's list is shown in the page by giving
 the select a size for the shot: a browser cannot capture the list the system draws).
 
-## Choosing (per person, in this browser)
+## Choosing (per person)
 
 - The title bar's three buttons are unchanged: **Follow the system**, **Dark**, **Light**.
 - Each scheme has **its theme**: "Light theme" and "Dark theme" in the editor. Following the system switches between the two
@@ -351,6 +356,93 @@ the select a size for the shot: a browser cannot capture the list the system dra
   themes) and `agora.themes.v1` (the person's own themes, at most 20). Storage that is missing, full or blocked costs only the
   memory: every choice still holds for the visit. Another tab of the same browser applies a change at once (live reload).
 - **Reset to defaults** goes back to following the system with Light and Dark; the person's themes are kept.
+- The two themes chosen (not the scheme) and the person's own themes are kept the same on their devices
+  ([below](#keeping-themes-the-same-on-your-devices)); whether this browser follows the system or is forced dark or light stays its own,
+  since a phone and a laptop often differ.
+
+## Keeping themes the same on your devices
+
+ADR-0113 decision 6, build step 4. The person's **own themes**, the **packs** they imported and the **theme choice** follow them to
+every device they sign in to on the same hub, so the phone and the laptop agree.
+
+![Settings, This device, Appearance: "Keep my themes the same on my devices" (dark)](../screenshots/adr113-theme-sync-setting-dark.png)
+![The same in light](../screenshots/adr113-theme-sync-setting-light.png)
+
+**On the hub.** The hub keeps one value per person under the key `themes` (`UserSettingsGet` and `UserSettingsSet`,
+[protocol.md](../specs/protocol.md#per-person-settings-adr-0113)): opaque bytes it never parses, checks or shows, at most **256 KiB**
+(`settings.too_large` over that), keyed by the session's person, so nobody reads or writes another person's. Each write raises the
+value's **version**; a write based on an older version is refused (`settings.stale`), so two windows never overwrite each other unseen.
+A person's writes are limited to **60 a minute** across their windows (`rate.limited` past that, with one Activity row however many
+are refused). Writes are rows of the person's Activity ("Kept their themes the same on their devices") with the outcome and nothing of the value; a
+read writes none, and neither does a stale write (it changed nothing). Removing a person forgets their value. The hub's database moves to schema 17 for it.
+
+**In the window.**
+
+![The theme editor's "Your packs and devices": a pack imported on another device, to open or forget (dark)](../screenshots/adr113-theme-synced-packs-dark.png)
+![The same in light](../screenshots/adr113-theme-synced-packs-light.png)
+
+- **Settings > This device > Appearance**, "**Keep my themes the same on my devices**": on by default (a switch per browser,
+  `agora.themes.sync.v1`). Under it, where it stands: kept the same; off; this browser only, because the window has no hub (the demo)
+  or an **older hub** that does not know the messages (it refuses one as `auth.forbidden` with the action `None`, and the window asks
+  no more on that connection); too large;
+  saved by a newer version; or the hub could not be reached (tried again at the next change). The switch is off and disabled without a
+  hub, with an older hub, and in **safe mode**, which never syncs: nothing is read from the hub and nothing is written.
+- **When.** On sign-in (once the window has its first view), the window reads the value, checks it, merges it with this browser and
+  writes the result when it differs. A change here (a theme made, edited, imported, installed, added from a pack or deleted; a pack
+  kept or forgotten; a theme chosen) is written **1.5 seconds** after the last one. The window reads again whenever it **comes back
+  into view** and when its connection comes back, which is when another device's change shows. A write refused as stale reads again, merges and writes again (three times
+  at most).
+- **Checked on load.** Every theme in the value goes through the theme file's reader (`readTheme`, the rules on this page), every pack
+  through the pack reader (`readPack`). **Something the window cannot read is not applied**: the theme editor's **Your packs and
+  devices** section names it with its problems and offers **Remove from my devices**; until then it is written back as it was, so a
+  theme from a newer window survives an older one. A value written by a newer version of the format is not read and never written over.
+- **Merging** is the union by a **lasting id** each theme and pack gets where it is first made (24 hex characters, kept beside the theme
+  in `agora.themes.v1` with the time of its last edit; never in the theme's file, so an export is the theme alone):
+  - A theme on both sides takes the **newer edit**; on a tie, this browser's.
+  - **No theme of this browser is dropped silently.** A theme deleted on another device leaves a dated mark (`agora.themes.removed.v1`,
+    the newest 200); the mark removes the theme here only when it is newer than the theme's last edit here, so a theme edited here
+    since stays (and comes back on the other device). A theme deleted here does not come back from another device.
+  - A theme that does not fit this browser's **20** waits: it is listed in Your packs and devices ("doesn't fit here"), stays in the
+    value for the devices that have room, and arrives here once one of yours is deleted.
+  - **The choice** (each scheme's theme, a built-in by its id or one of yours by its lasting id) takes the newer one
+    (`agora.theme.choice.at.v1`), and the hub's on a tie, so two devices never keep writing their own over each other's. A choice made
+    before this version counts as made at time 1, the defaults (never chosen) as 0, so a new device takes an existing one's choice. A newer choice naming a theme this browser cannot show keeps this browser's choice on screen and stays
+    the newer one for the devices that can.
+  - Times are each device's clock, believed only up to the hub's now (from its `Welcome`) plus **5 minutes**: a later edit time, removal
+    or choice time (a device whose clock is far ahead) is cut back to that and written back cut back, so it cannot stay "the newer one"
+    for long. A clock that is behind still makes its edits look older than they are.
+- **One browser, two people.** The hub sends each person's random **tag** with their value, and the browser keeps the tag it last
+  synced with (`agora.themes.sync.tag.v1`). When someone else signs in to the same browser and their value has another tag (or none),
+  the browser merges **nothing** of its own into it: their themes, removals, choice and packs replace what this browser held (the
+  previous person's are in their own value already) and nothing goes up. **Two tabs at once:** the last to sign in owns the browser's
+  store. A tab signed in as someone else that sees the browser claimed for another tag (its storage event, or before any read, write or
+  change it would apply) stops: it reads, writes and applies nothing, and Settings says "Theme sync paused: another person signed in to
+  this browser in another tab" until that tab is signed in again or reloaded. **What remains:** the first time a browser syncs at all (no
+  tag kept yet, for example the first sign-in after updating), what it held is merged into the value of whoever signs in, as when one
+  person turns this on; a browser two people used before this version merges into whoever signs in first.
+- **Packs.** A pack imported with **Import pack…** is kept as the file it was (`agora.packs.v1`, the 8 most recent; a ninth replaces the
+  oldest), and is synced like a theme. **Your packs and devices** lists them with what each holds: **Open…** shows the same Import pack
+  preview with nothing ticked (nothing of a pack is applied on another device until the person picks its parts there), and **Forget**
+  removes it from every device (what was added from it stays). The pack's themes the person added are already among their themes.
+- **Too large.** Before writing, the window measures the value; over 256 KiB it writes nothing, changes nothing here and says so.
+
+**The value**, format 1 (JSON, written in one order, by lasting id, so the same themes give the same bytes on every device and a value
+read and written back unchanged is not written):
+
+```json
+{
+  "agora-theme-sync": 1,
+  "themes": [{ "uid": "3fa1…", "edited": 1795600000000, "file": { "agora-theme": 2, "name": "Harbour", "…": "…" }, "catalog": { "id": "harbour", "version": 1 } }],
+  "themesRemoved": [{ "uid": "77c0…", "at": 1795600100000 }],
+  "packs": [{ "uid": "a01b…", "added": 1795600000000, "file": { "agora-pack": 1, "name": "Harbour set", "…": "…" } }],
+  "packsRemoved": [],
+  "choice": { "dark": "u:3fa1…", "light": "sand", "at": 1795600000000 }
+}
+```
+
+`apps/web/src/themes/sync.ts` (the value, the merge and when it reads and writes), `kept.ts` (kept packs), `SyncPanels.tsx` (the switch
+and the section). `scripts/e2e-theme-sync.mjs` runs it in two real browsers signed in as the same person on a real hub: a theme
+imported in one and a choice made in the other reach the other, and nothing is asked of any origin but the hub's.
 
 ## The theme editor
 
@@ -392,7 +484,7 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 - **Import…** reads a theme file of either format (refused with its reasons, or added and selected for every scheme it has),
   **Import from another app…** reads another terminal's or editor's colours ([below](#import-from-another-app)), **Export** saves
   the theme on screen as `theme.json` in format 2, **Delete theme** removes one of yours (its schemes fall back to Light and Dark),
-  **Reset to defaults** as above.
+  **Reset to defaults** as above. **Import pack…** and **Export as pack…** are [theme packs](#theme-packs).
 
 ## Import from another app
 
@@ -440,6 +532,108 @@ the terminal's colours, every note on what was left out or guessed, and what the
   than eight, or has more than 20 000 elements. A fuzz test throws random and mutated files at every converter.
 - Taken by `scripts/screenshots-theme-import.mjs` from the demo window.
 
+## Theme packs
+
+A **pack** is one JSON file that bundles one or more themes, saved layouts ([layout.md](layout.md)) and keybindings
+([keybindings.md](keybindings.md)), so a look can be shared with the arrangement and the keys it was made for
+([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md) decision 5, build step 2). Like a theme it is data and is never
+run: a pack never contains or references code, never names an agent, and **never installs or enables anything**, plugins included.
+
+![Import pack: what the pack holds, nothing ticked, so nothing changes yet (dark)](../../apps/web/visual/pack-import-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-import-desktop-light.png)
+![Merging the pack's keys: which of yours they replace and which keys would do two things (dark)](../../apps/web/visual/pack-keys-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-keys-desktop-light.png)
+![Export as pack: pick the themes, saved layouts and keys that go in (dark)](../../apps/web/visual/pack-export-desktop-dark.png)
+![The same in light](../../apps/web/visual/pack-export-desktop-light.png)
+
+### Format, version 1
+
+```json
+{
+  "agora-pack": 1,
+  "name": "Harbour set",
+  "themes": [{ "agora-theme": 2, "name": "Harbour", "inherits": "slate", "dark": { "tokens": { "accent": "#5cc8c2" } } }],
+  "layouts": [{ "name": "Review", "layout": { "version": 1, "root": { "type": "split", "direction": "row", "ratios": [0.5, 0.5],
+    "children": [{ "type": "pane", "id": "p1", "panel": "changes", "bind": { "follow": "selection" } },
+                 { "type": "pane", "id": "p2", "panel": "plugin.clock.face" }] } } }],
+  "keybindings": { "version": 1, "bindings": [{ "command": "palette.open", "keys": ["ctrl+p"] }] }
+}
+```
+
+- `agora-pack`: the format version, `1`. A higher number is refused with "made by a newer version"; nothing of it is guessed.
+- `name`: the pack's name, 1 to 60 characters, with the rules of a theme's name (control and text-direction characters removed, none
+  of `url(`, `@import`, `;`, `}`, `expression(`, `<`). Shown as text.
+- `themes` (optional): up to **20** themes, each a whole [format 2](#format-version-2) theme file. A format-1 theme in a pack is
+  refused (a window writes format 2).
+- `layouts` (optional): up to **50** saved layouts, each `{ "name": …, "layout": <layout version 1> }` with a name of 1 to 60
+  characters, unique in the pack.
+- `keybindings` (optional): one [keybindings file](keybindings.md#the-keybindings-file-version-1), version 1.
+- No other field is allowed. A pack with nothing in it is refused.
+
+### Reading a pack (validation)
+
+One function (`apps/web/src/themes/pack.ts` `readPack`) reads every pack. It never throws, and like a theme file it is refused
+**whole** for any problem, with **every problem listed at once** (at most 50, then how many more), each one saying which theme or
+layout it is in:
+
+1. Larger than **256 KiB** (a theme file's cap): refused before it is read. Not JSON, not an object with an integer `agora-pack`
+   ≥ 1, or newer: refused.
+2. An unknown field at the top, a missing or bad name, a part that is not a list (or, for keybindings, an object), more than 20
+   themes or 50 layouts.
+3. **Themes** are read by the theme reader (`readTheme`) with all its rules: unknown fields at every level, closed value kinds,
+   unsafe pieces, the floor and readability. A theme's warnings are shown in the preview, as for an import.
+4. **Layouts** are held to the closed set of layout version 1 at every level (`version` and `root`; a pane's `type`, `id`,
+   `panel` and `bind`; a tab group's `type`, `active` and `children`; a split's `type`, `direction`, `ratios` and `children`),
+   then read by the layout reader (`parseLayout`) with its rules and limits (32 panes, 6 levels). The window reads its own stored
+   layouts more leniently (it keeps a newer client's fields); a pack is someone else's file. In a pack:
+   - a panel is named **only by id**: a built-in's word (`terminal`), or a plugin's `plugin.<plugin id>.<panel id>` (ADR-0114),
+     or a newer client's of the same shape; any other text is refused, so nothing else reaches the "unknown panel" placeholder;
+   - a pane may follow what needs you or the selection, but **never names an agent** (`bind.agent` is refused): an agent is on
+     someone's own machine;
+   - a pane id is letters, digits, `_` and `-`, at most 64.
+5. **Keybindings** are read by the keybindings reader (`readKeysValue`) with all its rules, so **the fixed keys stay fixed**: the
+   safe-mode key, moving around the window, a terminal's copy and paste and editing keys can't be bound, `window.safe-mode` can't be
+   named, and no command answers a request (`request.*`, `approval.*`, …). The part is capped at the keybindings file's own 64 KiB.
+
+### Import pack
+
+**Import pack…** in the theme editor takes a pasted pack or a file (a file over the cap is refused before it is read) and shows a
+**preview**: the pack's name, then each part with what it holds: each theme with its schemes (and how many things are hard to see
+in it), each layout with its number of panes, the keybindings with how many commands they set (and those this window does not
+have). **Nothing is ticked**, and nothing is applied until the person ticks a part and confirms; Back and Cancel change nothing.
+
+- **Themes** are **added** to the person's own themes. None is chosen: the theme on screen stays, and an added one is chosen as any
+  other. When the ticked themes do not all fit (20 of your own), the preview says how many fit and nothing is added.
+- **Layouts** are **added** as saved layouts (the layout menu's **Saved layouts…**). A name that is taken gets a number
+  ("Review (2)"), so a saved layout is never replaced; when they do not all fit (50 saved layouts), nothing is added.
+- **A layout that names a panel this window does not draw** says so in the preview. A plugin's panel shows only once that plugin is
+  installed and allowed ([plugins.md](plugins.md)), which a pack never does; until then the pane shows the "unknown panel"
+  placeholder, as does a panel of a newer client.
+- **Keybindings** are **merged**: each command the pack names takes the pack's keys; every other command keeps yours. Before
+  anything is kept, a confirmation shows **which of your own keys they replace** (yours, then the pack's) and **which keys would
+  then do two things** (a key on two commands, or one that starts another's chord), with Back. A merge that could not be kept as a
+  keybindings file (over 200 entries or 64 KiB) is refused, so the person's own keys are never lost on the next load.
+- Every part ticked is checked before any is kept, so a part that cannot be applied leaves all of them as they were. The last step
+  says what was added: the themes, the layouts with the names they were saved under, the keys merged.
+
+### Export as pack
+
+**Export as pack…** in the theme editor asks for the pack's name (the theme on screen's, or "My pack" for a built-in theme) and
+which **themes** (your own first, then the built-in ones; the one on screen is ticked), **saved layouts** and **your keys** go in,
+and saves `theme-pack.json`. A pane bound to one of your agents is written unbound (its panel stays; following what needs you or the
+selection is kept), since a pack names panels only. What is written is read back before it is saved, so a pack over the cap is
+never written. Reading an exported pack gives the same themes (as Export writes them), the same layouts (unbound, in the layout
+reader's normal form) and the same keys.
+
+### Where packs are read
+
+- **The web and desktop window:** the theme editor's Import pack… (above). A pack imported there is kept and offered on the person's
+  other devices ([above](#keeping-themes-the-same-on-your-devices)), never applied there until they pick its parts.
+- **The terminal client:** a pack in its themes folder gives its themes ([below](#the-terminal-client)). Its layouts and keys are
+  the window's and are listed as not used there.
+- **The community catalog** holds themes only: a catalog entry that is a pack would need a `kind` in the index and in
+  `ThemeCatalogEntry` (a schema change, so an ADR) and the hub's check to read layouts and keys, which it does not (see "Not yet").
+
 ## The terminal client
 
 `agora tui` reads the same theme files, format 1 and 2, with the same rules (ADR-0113 decision 4, build step 3;
@@ -459,8 +653,18 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   `crates/agora-tui/src/theme/starter.rs`; a row per scheme, and the list says where the colours come from), and every `*.json` file
   directly in the **themes folder**:
   `themes` in the Agora folder, so `~/.agora/themes` (or `$AGORA_HOME/themes`), beside the client's device key. The theme in use
-  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>`, `starter <dark|light> <id>` or `file <dark|light> <file name>`). The first entry,
+  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>`, `starter <dark|light> <id>`, `file <dark|light> <file name>` or
+  `pack <dark|light> <theme number from 0> <file name>`). The first entry,
   **Your terminal's colours**, is no theme: the client draws exactly as it did before themes (the default).
+- **Theme packs.** A `*.json` file in the folder that is a [theme pack](#theme-packs) gives each of its themes as rows of the list
+  (one per scheme, as a theme file). Under a pack's theme the list says which pack and file it is in ("In the pack "Harbour set"
+  (file set.json): theme 1 of 2") and what else the pack holds that this client does not use ("Also in the pack, not used in the
+  terminal client: 2 saved layouts; keys for 3 commands"): this client has no layout model or keybindings yet. The pack's own
+  fields are held to the closed set and its name to the name rules, and every theme is read by the theme reader, so one bad theme
+  makes the whole pack a file that "can't be used", with every reason. The layouts and keybindings are checked only for their form
+  (a list of at most 50 objects, an object with a `bindings` list), since their rules are the window's; a pack the window refuses
+  for a layout or a key can still give this client its themes, each of which passed the theme rules. A pack with no theme is a file
+  that can't be used, and says its layouts and keys are for the web window. Live reload covers a pack's file too.
 - **Choosing.** `t` in the agents list, or **Theme…** in the commands (Ctrl K), opens the theme list: whole-screen, drawn in the
   theme the keyboard is on, so a theme shows before it is chosen. Enter uses it at once and keeps it for the next start; q or Esc
   goes back. A theme with both schemes is two rows ("Harbour · dark", "Harbour · light"): a terminal has no light or dark setting
@@ -508,11 +712,138 @@ These are drawn by the client into ratatui's test screen and shown in a browser 
   without each built-in theme and the sample file, in all three colour modes. The other screens (the board, files, review, the
   folder picker and the plain list when the output is piped) still draw in the terminal's own colours.
 
+## The community catalog
+
+Community themes, off until the hub's owner turns them on ([ADR-0113](../adr/0113-deep-themes-and-community-themes-stay-data.md)
+decision 6, build step 5). The **hub** fetches the catalog, and only when its owner asks; a window never loads anything from another
+origin, and its page policy is unchanged.
+
+![The catalog in the theme editor: Harbour installed with a newer version, Meadow previewed (Dark)](../screenshots/adr113-theme-catalog-dark.png)
+![The same in Light](../screenshots/adr113-theme-catalog-light.png)
+
+### On the hub: `agora hub themes`
+
+Run on the hub's machine by its owner (the hub folder is the owner's alone); each change is in the audit trail as the owner's
+(`theme_catalog.on`, `theme_catalog.off`, `theme_catalog.update` with `ok`, `partial` or `failed`).
+
+- `agora hub themes on` / `off`: whether windows show the catalog. Off when never set.
+- `agora hub themes status`: on or off, how many themes, when and from where they were fetched.
+- `agora hub themes update [--url URL]`: fetches the catalog's index and every theme it lists, checks them, and keeps the accepted
+  ones in the hub's database, replacing the catalog it had in one step. `--url` is the address of the catalog's `index.json`; it is
+  remembered for the next update. **The project's catalog repository does not exist yet**, so until the owner gives an address there is
+  none: the built-in default is a placeholder (`https://themes.agora.invalid/index.json`, a name that can never resolve) and `update`
+  without `--url` says so and fetches nothing. Exit 0 when every theme was kept; 1 when the catalog could not be read (nothing
+  changed) or some theme was refused (the others are kept, and each refusal is printed with its reason, a refused theme's with every
+  reason the theme rules give, in the same words as the terminal client's theme list). Updating works while the catalog is off, so the
+  owner can look before turning it on.
+
+What the hub checks (`crates/agora-hub/src/theme_catalog.rs`):
+
+- **The address.** `https://`, or `http://` only to `localhost` or `127.0.0.1`.
+- **Redirects are not followed.** A 3xx answer is a refusal (of the whole update for the index, of that theme for a file). The owner
+  gives the final address (for a GitHub repository, its `raw.githubusercontent.com` address); a redirect could otherwise take the hub
+  somewhere the owner never named.
+- **Where a theme file comes from.** Only a relative path under the index's own folder, on the same scheme, host and port: letters,
+  digits, `.`, `_`, `-` and `/`, ending in `.json`, with no empty, `.` or `..` part. The index cannot send the hub to another address.
+- **Sizes and time.** The index at most 256 KiB, each theme at most 256 KiB (the theme rules' own cap), at most 200 themes and 4 MiB of
+  themes in all (themes past it are refused). Connecting, and each read or write, at most 10 seconds; the whole update at most 2
+  minutes. These hold inside TLS too: every read and write of the socket gets only the time left, so a server that sends a TLS record
+  a byte at a time is given up at the deadline. A theme file that cannot be reached in time, or whose server answers 429 (too many
+  requests) or a 5xx status, stops the update with nothing changed, so a network or server failure half way never drops themes that
+  are fine. Any other status refuses that theme alone.
+- **What is printed** from the catalog (ids, field names, a theme's problems) has every control character and every invisible or
+  direction-changing character written as a visible `\u{…}`, so a catalog cannot send the owner's terminal escape sequences.
+- **The index** is read strictly: a field it does not know, at the top or in an entry, refuses the index or that entry (below).
+- **Each theme** must have the SHA-256 the index gives (of the file's bytes as served), be UTF-8, and pass the theme rules: the
+  terminal client's reader ([above](#the-terminal-client)), which accepts and refuses a file exactly as the web window does. The file
+  is kept exactly as fetched.
+
+### In the window
+
+Once the owner turned the catalog on, the theme editor shows a **Catalog** section to every person signed in to the hub, whatever
+their role (a viewer too: installing changes only their own browser). It asks the hub once when the editor opens (no polling); nothing
+is shown while the catalog is off, the hub is an older one, or the window is not connected. The demo window (no hub) shows a sample
+catalog of two themes.
+
+- Each theme shows its name, author and licence, as text, and its version, or **Installed**, or **Version N available**.
+- **Preview** fetches the theme from the hub, checks it with the window's own rules, and draws a small sample in the theme's own
+  colours (its panels, text, accent, a working mark and a terminal); nothing changes until the person installs it. A theme the window
+  refuses lists its reasons and cannot be installed.
+- **Install** copies the theme into the person's own themes (the 20-theme limit applies, with its message), selects it as an import
+  does, and remembers where it came from: the catalog's id and the version, kept beside the theme in `agora.themes.v1`
+  (`{"id", "file", "catalog": {"id", "version"}}`), never in the theme's file, so an export is the theme alone.
+- **An installed theme never changes by itself.** When the catalog has a higher version, the theme says **Version N available** and
+  offers **Update to version N**, which replaces that theme in place (same place in the list, still chosen; a scheme the new version no
+  longer has goes back to the default). Editing an installed theme keeps where it came from.
+- The editor asks when it opens: a catalog the owner turns on while the editor is open shows the next time it is opened.
+
+`scripts/e2e-theme-catalog.mjs` runs all of this in a real browser on a real hub: the owner's `update` from a catalog served on the
+machine, nothing shown while off, the list once on, a preview and an install, and no request to any origin but the hub's.
+
+### The protocol
+
+`ThemeCatalogList` and `ThemeCatalogGet { id }` (`schema/agora/v1/commands.proto`, [protocol.md](../specs/protocol.md#the-community-theme-catalog-adr-0113)),
+answered by the hub itself. The list answers `on: false` and nothing else while the catalog is off (not a refusal, so a window that opens
+the editor writes no row in the owner's Activity); `ThemeCatalogGet` answers the file as text, or `theme.catalog_off` or
+`theme.not_found`.
+
+### The catalog repository the hub expects
+
+A separate public repository (ADR-0113's proposed answer), to be created by the maintainer. Every addition is reviewed, and its CI
+checks the schema, the readability floor and that there are no extra fields (decision 6). The hub needs only static files:
+
+```
+agora-themes/
+  index.json                 the index the owner's --url points at
+  themes/
+    harbour.json             one theme file per entry, format 1 or 2 (this page)
+    meadow.json
+  README.md, LICENSE, CI     the repository's own; never fetched
+```
+
+`index.json`:
+
+```json
+{
+  "agora-theme-catalog": 1,
+  "themes": [
+    {
+      "id": "harbour",
+      "name": "Harbour",
+      "version": 2,
+      "author": "Ada Example",
+      "licence": "MIT",
+      "sha256": "<64 lowercase hex digits: the SHA-256 of themes/harbour.json as served>",
+      "file": "themes/harbour.json"
+    }
+  ]
+}
+```
+
+- `agora-theme-catalog`: the index format, `1`. A higher number is refused whole ("update Agora"). No other top-level field.
+- `id`: lowercase letters, digits and `-` (not first), at most 40; unique. It names the theme across versions.
+- `name` (at most 60 characters) and `author` (at most 100): plain text, no control, format or direction-changing character, no
+  space at either end.
+- `version`: a whole number from 1 to 1 000 000 that only grows; a higher number is a newer version, offered to people who installed
+  an older one.
+- `licence`: an SPDX licence identifier or expression (letters, digits, `.`, `-`, `+`, spaces and brackets), at most 64.
+- `sha256`: of the file's bytes exactly as served (no line-ending conversion on the way).
+- `file`: the relative path described above.
+- No other field in an entry; an entry with one, or with a field missing or of the wrong kind, is refused alone.
+
+The repository's CI should run the same checks before merging: the index's rules above, each file's SHA-256, and the theme rules,
+for example with `agora tui`'s reader or the web window's (`apps/web/src/themes/file.ts`), so a merged theme is never refused by a hub.
+
 ## Not yet (later steps of ADR-0113)
 
-- **Theme packs** and "Export as pack": a theme with its layouts (and keys, once ADR-0068 rung 4 exists); build step 2.
-- **Syncing** themes, packs and the choice through the hub per person (a schema message); step 4.
-- **The community catalog** and `agora hub themes update`; step 5.
+- **Syncing** a pack's saved layouts and keybindings as the person's own (step 4 keeps the pack file and offers it on their other devices;
+  layouts and keys stay per browser), and a change on another device showing at once (the window reads again when it comes back into
+  view; the hub sends nothing by itself).
+- **The catalog repository itself** (step 5's hub side is built, [above](#the-community-catalog)): the maintainer creates it; the hub
+  then fetches it with `--url`. **Packs in the catalog** are left out: an entry that is a pack needs a `kind` field in the index and in
+  `ThemeCatalogEntry` (a schema change, which needs an ADR), the hub's check to read a pack's layouts and keys (it has only the theme
+  rules), and the editor's install to show a pack's preview.
+- In the terminal client: a pack's layouts and keybindings (it has neither yet; ADR-0068 rung 5).
 - More than one icon set (the `icons` key has one value, `lines`); ligatures in terminals; background images (left open by
   ADR-0113, whose answer is: not in format 2).
 - The phone layout's own parts as regions: it uses the tokens and the chrome values that apply to it.

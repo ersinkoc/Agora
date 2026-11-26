@@ -22,6 +22,10 @@ import {
   themeName, tokenLabel,
 } from './messages';
 import { type Saved, themeStore } from './store';
+import { ThemeCatalog } from './ThemeCatalog';
+import { SyncedItems } from './SyncPanels';
+import { ExportPack, ImportPack } from './PackDialogs';
+import { isPack } from './pack';
 import {
   COLOR_TOKENS, type Look, MAX_NAME, type Scheme, type Theme, type ThemeIssue, type TokenName, chromeOf, hasScheme, kindOf, looksOf, pxOf,
   readValue, textOf,
@@ -36,6 +40,7 @@ export function ThemeEditor() {
   const other = useRef<HTMLInputElement>(null);
   // A colour file of another app, converted and waiting in the import dialog for Add or Cancel.
   const [imported, setImported] = useState<Converted>();
+  const [pack, setPack] = useState<'export' | 'import' | undefined>();
   // An imported theme for the scheme not on screen has no Readability shown, so its warnings are said here; one on screen lists
   // them in its own Readability section.
   const report = (r: Saved) => setProblems(r.ok
@@ -73,6 +78,8 @@ export function ThemeEditor() {
         <button type="button" className="button" onClick={() => file.current?.click()}>{t('theme-import')}</button>
         <button type="button" className="button" onClick={() => other.current?.click()}>{t('theme-import-other')}</button>
         <button type="button" className="button" onClick={() => download(serialise(writeTheme(theme, themeName(theme))))}>{t('theme-export')}</button>
+        <button type="button" className="button" onClick={() => setPack('import')}>{t('pack-import')}</button>
+        <button type="button" className="button" onClick={() => setPack('export')}>{t('pack-export')}</button>
         {!theme.builtIn && <button type="button" className="button" onClick={() => { themeStore.remove(theme.id); setProblems([]); }}>{t('theme-delete')}</button>}
         <button type="button" className="button" onClick={() => { themeStore.reset(); setProblems([]); }}>{t('theme-reset')}</button>
         <input ref={file} type="file" accept=".json,application/json" className="hidden" aria-hidden tabIndex={-1}
@@ -80,7 +87,12 @@ export function ThemeEditor() {
             const f = e.target.files?.[0];
             e.target.value = '';
             // A file over the cap is refused before it is read at all.
-            if (f) report(f.size > MAX_FILE_BYTES ? { ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] } : themeStore.import(await f.text()));
+            if (!f) return;
+            if (f.size > MAX_FILE_BYTES) { report({ ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] }); return; }
+            const text = await f.text();
+            // A pack is not a theme: say where it goes rather than "not a theme file".
+            if (isPack(parsed(text))) { setProblems([t('theme-import-is-pack')]); return; }
+            report(themeStore.import(text));
           }} />
         {/* No `accept`: a Ghostty theme file has no extension. Any file is size-capped, then read as text and never run. */}
         <input ref={other} type="file" className="hidden" aria-hidden tabIndex={-1} data-import-other
@@ -95,6 +107,10 @@ export function ThemeEditor() {
       </div>
       {imported && <ImportDialog result={imported} onClose={() => setImported(undefined)} onAdded={(r) => { setImported(undefined); report(r); }} />}
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
+      {pack === 'export' && <ExportPack onClose={() => setPack(undefined)} />}
+      {pack === 'import' && <ImportPack onClose={() => setPack(undefined)} />}
+      <SyncedItems />
+      <ThemeCatalog />
     </section>
   );
 }
@@ -413,6 +429,10 @@ function Preview({ look, scheme }: { look: Look; scheme: Scheme }) {
       </div>
     </div>
   );
+}
+
+function parsed(text: string): unknown {
+  try { return JSON.parse(text); } catch { return undefined; }
 }
 
 function download(text: string) {

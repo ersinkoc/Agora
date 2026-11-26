@@ -9,7 +9,8 @@ import { decodeTerminalFrame, historyPairing, type TerminalEvent } from '../term
 import type { TerminalSource } from '../terminal/source';
 import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_CONTROL, STREAM_EVENTS } from './frame';
 import { decodePairFrame, type PairNote } from './pairing';
-import { mayChange, welcomeRole, type PersonRole } from './role';
+import { mayChange, welcomeRole, welcomeTime, type PersonRole } from './role';
+import { noteHubTime } from './hubClock';
 import { applyEvent, emptyView, fromSnapshot, num, type View } from './view';
 
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -362,6 +363,7 @@ export function connectLive(o: LiveOptions): Live {
         return;
       }
       if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.WELCOME) {
+        noteHubTime(welcomeTime(f.payload));
         settle(welcomeRole(f.payload));
         return;
       }

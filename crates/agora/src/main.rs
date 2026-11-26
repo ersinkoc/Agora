@@ -180,6 +180,7 @@ mod meshbridge;
 mod orchestrate;
 mod paircmd;
 mod panelcmd;
+mod plugincmd;
 mod pluginkit;
 mod pricefeed;
 mod remotecmd;
@@ -187,6 +188,7 @@ mod secretcmd;
 mod servicecmd;
 mod supervise;
 mod tailscale;
+mod themecmd;
 mod trustcli;
 mod tuicmd;
 mod update;
@@ -618,7 +620,8 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
-        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet"]
+        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "themes" | "plugin"
+        | "plugins"]
             if !hubcli::hub_dir(opts).is_dir() =>
         {
             Box::new(hubcli::not_here)
@@ -628,12 +631,15 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         ["hub", "login"] => Box::new(hubcli::hub_login),
         ["hub", "user"] => Box::new(hubcli::hub_user),
         ["hub", "fleet"] => Box::new(hubcli::hub_fleet),
+        ["hub", "plugin"] => Box::new(hubcli::hub_plugin),
         ["hub", "metrics-token"] => Box::new(hubcli::hub_metrics_token),
         ["hub", "audit"] => Box::new(hubcli::hub_audit),
         ["hub", "devices"] => Box::new(hubcli::hub_devices),
         ["hub", "machines"] => Box::new(hubcli::hub_machines),
         ["hub", "ssh"] => Box::new(hubcli::hub_ssh),
         ["hub", "prices"] => Box::new(hubcli::hub_prices),
+        ["hub", "themes"] => Box::new(themecmd::hub_themes),
+        ["hub", "plugins"] => Box::new(plugincmd::hub_plugins),
         ["hub", "notify"] => Box::new(hubcli::hub_notify),
         ["hub", "backup"] => Box::new(hubcli::hub_backup),
         ["hub", "restore"] => Box::new(hubcli::hub_restore),

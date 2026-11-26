@@ -1,0 +1,15 @@
+{
+  "on": true,
+  "entries": [
+    {
+      "id": "x",
+      "name": "x",
+      "version": 1,
+      "author": "x",
+      "licence": "x",
+      "sha256": "x",
+      "size": 1
+    }
+  ],
+  "updatedAtMs": "1"
+}

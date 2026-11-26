@@ -1,0 +1,19 @@
+{
+  "on": true,
+  "entries": [
+    {
+      "pluginId": "x",
+      "name": "x",
+      "version": "x",
+      "author": "x",
+      "licence": "x",
+      "description": "x",
+      "capabilities": [
+        "x"
+      ],
+      "sha256": "x",
+      "size": "1"
+    }
+  ],
+  "updatedAtMs": "1"
+}

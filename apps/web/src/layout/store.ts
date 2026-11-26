@@ -6,7 +6,7 @@ import { type Layout, bindOf, defaultLayout, panesOf, parseLayout } from './tree
 export const CURRENT_KEY = 'agora.workspace.v1';
 export const SAVED_KEY = 'agora.layouts.v1';
 const OLD_KEY = 'agora.layout'; // the tabs of the window before layouts (net/layout.ts)
-const MAX_SAVED = 50;
+export const MAX_SAVED = 50;
 export const MAX_NAME = 60;
 
 type KV = Pick<Storage, 'getItem' | 'setItem'>;
@@ -101,6 +101,30 @@ export function saveNamed(name: string, layout: Layout, kv: KV | undefined = sto
   const next = [{ name: n, layout }, ...list].slice(0, MAX_SAVED);
   writeSaved(next, kv);
   return next;
+}
+
+// Layouts from elsewhere (a theme pack, ADR-0113 decision 5) added to the saved ones, all or none: a name that is taken gets the first free
+// `rename(name, n)` (n = 2, 3, …; its words are the caller's, from locales/), so no saved layout is ever replaced, and when they do not all
+// fit under the cap nothing is added (the person's oldest are never dropped to make room). Answers the names they were saved under.
+export function addNamed(items: readonly Named[], rename: (name: string, n: number) => string, kv: KV | undefined = storage()):
+  { ok: true; names: string[]; list: Named[] } | { ok: false; room: number } {
+  const list = savedLayouts(kv);
+  const room = MAX_SAVED - list.length;
+  if (items.length > room) return { ok: false, room: Math.max(0, room) };
+  const taken = new Set(list.map((x) => x.name));
+  const added: Named[] = [];
+  for (const item of items) {
+    const base = item.name.trim().slice(0, MAX_NAME);
+    // A long name is shortened so its number still shows; at most MAX_SAVED names are taken, so a free one comes within MAX_SAVED + 1 tries.
+    const short = base.slice(0, MAX_NAME - 10);
+    let name = base;
+    for (let n = 2; (taken.has(name) || !name) && n <= MAX_SAVED + 2; n++) name = rename(short, n).trim().slice(0, MAX_NAME);
+    taken.add(name);
+    added.push({ name, layout: item.layout });
+  }
+  const next = [...added, ...list];
+  writeSaved(next, kv);
+  return { ok: true, names: added.map((x) => x.name), list: next };
 }
 
 export function renameNamed(from: string, to: string, kv: KV | undefined = storage()): Named[] {

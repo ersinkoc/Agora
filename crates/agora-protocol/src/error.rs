@@ -125,6 +125,19 @@ pub enum ErrorCode {
     /// RM-19 (#903): the kind's program could not be started because this machine cannot find it (not in the node's `PATH`, not
     /// installed by `agora agent install`, or a path that does not exist).
     AgentProgramMissing,
+    /// ADR-0113 decision 6: the hub's owner has not turned the community theme catalog on (`agora hub themes on`).
+    ThemeCatalogOff,
+    /// ADR-0113 decision 6: the community theme catalog has no theme with this id.
+    ThemeNotFound,
+    /// ADR-0114: no plugin with that id is installed on the hub (at the version or package asked for).
+    PluginNotFound,
+    /// ADR-0113 decision 6 (step 4): a person's settings value is larger than the hub keeps (262144 bytes).
+    SettingsTooLarge,
+    /// ADR-0113 decision 6 (step 4): a settings write was based on an older version than the hub's; read again, merge and write again.
+    SettingsStale,
+    /// ADR-0113 step 4 and ADR-0114: this person made more writes of this kind (their settings value, their plugin grants) than the hub
+    /// takes in a minute (`limit`); nothing changed.
+    RateLimited,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -235,6 +248,12 @@ impl ErrorCode {
         ErrorCode::EnrollRenewRefused,
         ErrorCode::TaskDispatchLimited,
         ErrorCode::AgentProgramMissing,
+        ErrorCode::ThemeCatalogOff,
+        ErrorCode::ThemeNotFound,
+        ErrorCode::PluginNotFound,
+        ErrorCode::SettingsTooLarge,
+        ErrorCode::SettingsStale,
+        ErrorCode::RateLimited,
         ErrorCode::Internal,
     ];
 
@@ -342,6 +361,12 @@ impl ErrorCode {
             ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
             ErrorCode::TaskDispatchLimited => "task.dispatch_limited",
             ErrorCode::AgentProgramMissing => "agent.program_missing",
+            ErrorCode::ThemeCatalogOff => "theme.catalog_off",
+            ErrorCode::ThemeNotFound => "theme.not_found",
+            ErrorCode::PluginNotFound => "plugin.not_found",
+            ErrorCode::SettingsTooLarge => "settings.too_large",
+            ErrorCode::SettingsStale => "settings.stale",
+            ErrorCode::RateLimited => "rate.limited",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -461,6 +486,12 @@ impl ErrorCode {
             ErrorCode::EnrollRenewRefused => &["reason"],
             ErrorCode::TaskDispatchLimited => &["limit"],
             ErrorCode::AgentProgramMissing => &["kind", "program"],
+            ErrorCode::ThemeCatalogOff => &[],
+            ErrorCode::ThemeNotFound => &["id"],
+            ErrorCode::PluginNotFound => &["plugin_id"],
+            ErrorCode::SettingsTooLarge => &["max"],
+            ErrorCode::SettingsStale => &["version"],
+            ErrorCode::RateLimited => &["limit"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

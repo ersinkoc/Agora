@@ -1,5 +1,6 @@
 // Screenshots for ADR-0068 rung 2 (docs/ux/themes.md): the theme editor in both schemes, four themes, a change refused for
-// contrast, and changes applied with warnings (text on a coloured background, #1021; the kit's other colours, #1054), from the
+// contrast, changes applied with warnings (text on a coloured background, #1021; the kit's other colours, #1054), and the catalog
+// (ADR-0113 decision 6), from the
 // built web app's demo window (`#/demo`, no hub). Needs a built web app and playwright-core with a Chromium:
 //   cd apps/web && npm run build
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/screenshots-themes.mjs [dist] [outdir]
@@ -82,6 +83,27 @@ for (const [file, scheme, values] of [
 ]) {
   const { page, ctx } = await open(scheme, custom(values));
   const f = `${out}/${file}-${scheme}.png`;
+  await ((await pane(page).count()) ? pane(page) : page.locator('section[aria-label="Theme"]')).screenshot({ path: f });
+  console.log(f);
+  await ctx.close();
+}
+// The catalog (ADR-0113 decision 6): the demo window's sample catalog, with Harbour's version 1 installed (so its version 2 is marked
+// newer) and Meadow previewed in its own colours.
+const harbourV1 = { 'agora-theme': 2, name: 'Harbour', inherits: 'slate', dark: { tokens: { accent: '#4fb3ad' } }, light: { tokens: { accent: '#0b6e69', 'on-accent': '#ffffff' } } };
+for (const scheme of ['dark', 'light']) {
+  const { page, ctx } = await open(scheme, async (p) => {
+    await p.evaluate((file) => { localStorage.setItem('agora.themes.v1', JSON.stringify([{ id: 'user-1', file, catalog: { id: 'harbour', version: 1 } }])); }, harbourV1);
+    await p.reload();
+    await p.waitForSelector('.ide');
+    await p.keyboard.press('Control+k');
+    await p.keyboard.type('Edit theme');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('section[aria-label="Theme"] [data-theme-catalog]');
+    await p.locator('[data-catalog-entry="meadow"]').getByRole('button', { name: 'Preview' }).click();
+    await p.locator('[data-catalog-entry="meadow"] [data-catalog-preview]').waitFor();
+    await p.locator('[data-theme-catalog]').scrollIntoViewIfNeeded();
+  });
+  const f = `${out}/adr113-theme-catalog-${scheme}.png`;
   await ((await pane(page).count()) ? pane(page) : page.locator('section[aria-label="Theme"]')).screenshot({ path: f });
   console.log(f);
   await ctx.close();

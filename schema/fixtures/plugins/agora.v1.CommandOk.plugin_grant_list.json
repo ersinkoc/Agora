@@ -1,0 +1,13 @@
+{
+  "pluginGrantList": {
+    "grants": [
+      {
+        "pluginId": "sample-agents",
+        "version": "0.1.0",
+        "seen": ["agents.read", "theme.read"],
+        "granted": ["agents.read"],
+        "setMs": "1764150060000"
+      }
+    ]
+  }
+}

@@ -114,7 +114,7 @@ pub fn link_dir() -> PathBuf {
 /// and they hold the hashes of the live one-time codes (short enough to search for offline within their 10 minutes), of the sessions
 /// and of the screen password, and the event history. An existing folder is closed too, so a hub made by an older version is closed at
 /// its next start.
-fn private_hub_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn private_hub_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     agora_platform::restrict_to_owner(dir).map_err(|e| format!("{}: {e}", dir.display()))
 }
@@ -746,6 +746,149 @@ pub fn hub_fleet(say: &Say, o: &Opts) -> ExitCode {
         &[],
     );
     ExitCode::SUCCESS
+}
+
+/// `agora hub plugin add FILE | list | remove ID` (ADR-0114 decision 6): the plugins of this hub, installed by its owner on the hub's own
+/// machine (no protocol message installs one). A package is checked exactly as a window checks it and kept as it came; the hub never
+/// runs it. Each person chooses in the window whether to show it and what it can see. The store is read on every request, so a running
+/// hub follows a change without a restart: windows that load next see it. Adding and removing are rows in the audit trail.
+pub fn hub_plugin(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::plugin_package::{Refusal, MAX_PACKAGE_BYTES};
+    use agora_hub::plugins::{AddError, Plugins, MAX_PLUGINS};
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
+    if !matches!(words.as_slice(), ["add", _] | ["list"] | ["remove", _]) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    // A package is read before the hub's database is opened, and only up to its limit.
+    let package = match words.as_slice() {
+        ["add", file] => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let read = std::fs::File::open(file)
+                .and_then(|f| f.take(MAX_PACKAGE_BYTES as u64 + 1).read_to_end(&mut bytes));
+            if read.is_err() {
+                say.err(
+                    key!("cli-hub-plugin-unreadable"),
+                    &[("file", (*file).into())],
+                );
+                return ExitCode::from(1);
+            }
+            Some(bytes)
+        }
+        _ => None,
+    };
+    let dir = hub_dir(o);
+    if private_hub_dir(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let plugins = Plugins::new(&store);
+    let caps_of = |caps: &[String]| {
+        if caps.is_empty() {
+            "-".to_string()
+        } else {
+            caps.join(", ")
+        }
+    };
+    match (words.as_slice(), package) {
+        (["add", _], Some(bytes)) => {
+            match plugins.add(&bytes, env!("CARGO_PKG_VERSION"), server::now_ms()) {
+                Ok(a) => {
+                    let args = [
+                        ("id", a.id.clone().into()),
+                        ("name", node_text(&a.name).into()),
+                        ("version", a.version.clone().into()),
+                        ("capabilities", caps_of(&a.capabilities).into()),
+                    ];
+                    match &a.replaced {
+                        Some(old) => {
+                            let mut with = args.to_vec();
+                            with.push(("old", old.clone().into()));
+                            say.out(key!("cli-hub-plugin-replaced"), &with);
+                        }
+                        None => say.out(key!("cli-hub-plugin-added"), &args),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(AddError::Refused(r)) => {
+                    let detail = node_text(r.detail.as_deref().unwrap_or(""));
+                    let k = match r.code {
+                        Refusal::TooLarge => key!("cli-hub-plugin-error-too-large"),
+                        Refusal::Format => key!("cli-hub-plugin-error-format"),
+                        Refusal::NewerFormat => key!("cli-hub-plugin-error-newer-format"),
+                        Refusal::TooMany => key!("cli-hub-plugin-error-too-many"),
+                        Refusal::Path => key!("cli-hub-plugin-error-path"),
+                        Refusal::Link => key!("cli-hub-plugin-error-link"),
+                        Refusal::Type => key!("cli-hub-plugin-error-type"),
+                        Refusal::Manifest => key!("cli-hub-plugin-error-manifest"),
+                        Refusal::Capability => key!("cli-hub-plugin-error-capability"),
+                        Refusal::Unlisted => key!("cli-hub-plugin-error-unlisted"),
+                        Refusal::Missing => key!("cli-hub-plugin-error-missing"),
+                        Refusal::Hash => key!("cli-hub-plugin-error-hash"),
+                        Refusal::Newer => key!("cli-hub-plugin-error-newer"),
+                    };
+                    say.err(k, &[("detail", detail.into())]);
+                    ExitCode::from(1)
+                }
+                Err(AddError::Full) => {
+                    say.err(
+                        key!("cli-hub-plugin-full"),
+                        &[("limit", (MAX_PLUGINS as i64).into())],
+                    );
+                    ExitCode::from(1)
+                }
+                Err(AddError::Store(e)) => fail(e),
+            }
+        }
+        (["list"], _) => match plugins.list() {
+            Ok(list) if list.is_empty() => {
+                say.out(key!("cli-hub-plugin-none"), &[]);
+                ExitCode::SUCCESS
+            }
+            Ok(list) => {
+                for p in list {
+                    say.out(
+                        key!("cli-hub-plugin-line"),
+                        &[
+                            ("id", p.plugin_id.into()),
+                            ("name", node_text(&p.name).into()),
+                            ("version", p.version.into()),
+                            ("capabilities", caps_of(&p.capabilities).into()),
+                            ("installed", utc(p.installed_ms).into()),
+                        ],
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e.to_string()),
+        },
+        (["remove", id], _) => match plugins.remove(id, server::now_ms()) {
+            Ok(true) => {
+                say.out(key!("cli-hub-plugin-removed"), &[("id", (*id).into())]);
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-hub-plugin-unknown"),
+                    &[("id", node_text(id).into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(e) => fail(e.to_string()),
+        },
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// `agora hub user add|list|role|remove|login` (ADR-0049): the people of a team hub and what each may do.

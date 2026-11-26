@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0114 decision 6 (build step 3): community plugins kept by the hub, and what each person allowed them to see.
+//
+// The hub's owner installs a plugin on the hub's own machine (`agora hub plugin add FILE`); no message installs or removes one. The
+// hub checks the package as the window does (docs/ux/plugins.md, "The package"), keeps it as opaque bytes and never runs it. A window
+// lists the installed plugins, fetches each package in pieces (a package is up to 2 MiB, a frame at most 1 MiB), checks it again
+// itself and runs it only in a sandboxed frame. Grants are kept per person: each person, owner, member or viewer, sets and reads only
+// their own. Every message here is answered by the hub itself and names no node (`CommandRequest.target_node` empty).
+
+// client -> hub, answered with `PluginListResult`: the plugins installed on this hub.
+message PluginList {}
+
+// One installed plugin, from the manifest the hub checked. The window takes nothing here on trust: it runs a plugin only from the
+// package it fetched and checked itself.
+message PluginInfo {
+  // The manifest's `id`.
+  string plugin_id = 1;
+  // The manifest's `version` (`x.y.z`).
+  string version = 2;
+  // The manifest's `name`: the plugin's own text, shown as text, never as the window's words.
+  string name = 3;
+  // The SHA-256 of the whole package, lowercase hex; `PluginFetch` names it.
+  string sha256 = 4;
+  // The package's size in bytes (at most 2 MiB).
+  uint64 size = 5;
+  // The manifest's `capabilities`, in its order.
+  repeated string capabilities = 6;
+  // Milliseconds since the Unix epoch, hub clock.
+  uint64 installed_ms = 7;
+}
+
+message PluginListResult {
+  // Ordered by `plugin_id`.
+  repeated PluginInfo plugins = 1;
+}
+
+// client -> hub, answered with `PluginFetchResult`: a piece of an installed package, from `offset`. Refused with `plugin.not_found`
+// when no plugin `plugin_id` is installed with that package (it was removed, or replaced by another version).
+message PluginFetch {
+  string plugin_id = 1;
+  // `PluginInfo.sha256` of the package wanted.
+  string sha256 = 2;
+  // Where the piece starts, in bytes; at most the package's size.
+  uint64 offset = 3;
+}
+
+message PluginFetchResult {
+  string plugin_id = 1;
+  string sha256 = 2;
+  // The whole package's size in bytes.
+  uint64 total_size = 3;
+  // Where `data` starts in the package.
+  uint64 offset = 4;
+  // The bytes from `offset`, at most 512 KiB; empty at the end.
+  bytes data = 5;
+}
+
+// What one person allowed one plugin to see (docs/ux/plugins.md, "Grants").
+message PluginGrant {
+  string plugin_id = 1;
+  // The version the grant was given for.
+  string version = 2;
+  // The capabilities that version asked for, all shown to the person. A later version that asks for one not here is held until the
+  // person looks again.
+  repeated string seen = 3;
+  // The capabilities the person allowed, each one of `seen`.
+  repeated string granted = 4;
+  // Milliseconds since the Unix epoch, hub clock.
+  uint64 set_ms = 5;
+}
+
+// client -> hub, answered with `PluginGrantListResult`: the caller's own grants, one per plugin, each for the version it was given
+// for (which may be older than the one installed now).
+message PluginGrantList {}
+
+message PluginGrantListResult {
+  // Ordered by `plugin_id`.
+  repeated PluginGrant grants = 1;
+}
+
+// client -> hub, answered with `Empty`: the caller allows `granted` of what the installed `version` of `plugin_id` asks for, and has
+// seen all of it. Replaces the caller's grant for that plugin. Refused with `plugin.not_found` unless that version, with the package
+// `sha256`, is installed now (the person was shown exactly that package), and with `protocol.invalid_message` (`granted`) for a
+// capability it does not ask for. The hub records `seen` from the installed manifest itself.
+message PluginGrantSet {
+  string plugin_id = 1;
+  string version = 2;
+  repeated string granted = 3;
+  // `PluginInfo.sha256` of the package the person was shown.
+  string sha256 = 4;
+}
+
+// client -> hub, answered with `Empty`: the caller stops showing `plugin_id` and forgets their grant for it (the plugin stays installed
+// for everyone else). Forgetting a grant that does not exist is not an error.
+message PluginGrantRemove {
+  string plugin_id = 1;
+}
+
+// ADR-0114 decision 7 (build step 4): the community plugin catalog, read only. The hub's owner pins the catalog's key and fetches its
+// signed index on the hub's machine (`agora hub plugins key set FILE`, `agora hub plugins update`); the hub checks the index's signature
+// before it keeps an entry. Installing from the catalog is the owner's too, on the hub's machine (`agora hub plugins install ID`); no
+// message installs, upgrades or fetches an archive. A window may list the entries so the person sees what is available.
+
+// client -> hub, answered with `PluginCatalogListResult`. Any signed-in person may ask; it names no node.
+message PluginCatalogList {}
+
+// One plugin as the catalog's signed index lists it. All of it is text from the index: shown as text, never as the window's words or
+// as markup.
+message PluginCatalogEntry {
+  // Lowercase letters, digits and `-`, at most 40: the manifest id it installs as.
+  string plugin_id = 1;
+  string name = 2;
+  // `x.y.z`, as the manifest's.
+  string version = 3;
+  string author = 4;
+  // An SPDX licence identifier.
+  string licence = 5;
+  // One line of what it does; empty when the index gives none.
+  string description = 6;
+  // What it asks to see: rung-1 capability names, in the manifest's order.
+  repeated string capabilities = 7;
+  // The archive's SHA-256, lowercase hex, as the signed index gives it.
+  string sha256 = 8;
+  // The archive's size in bytes (at most 2 MiB).
+  uint64 size = 9;
+}
+
+// `on` is false while the owner has not turned the catalog on; `entries` is then empty. With no catalog key pinned, or a key pinned
+// since the last fetch, it is on with no entry. `updated_at_ms` is when the hub last fetched an index it could verify (0: never).
+message PluginCatalogListResult {
+  bool on = 1;
+  // Ordered by name, then `plugin_id`.
+  repeated PluginCatalogEntry entries = 2;
+  uint64 updated_at_ms = 3;
+}

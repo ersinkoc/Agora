@@ -97,13 +97,18 @@ impl<'a> Users<'a> {
         let reserved = |id: &str| matches!(id, "owner" | "hub");
         // The devices a removed person registered stay listed under their id (the owner may still revoke them, ADR-0061), so that id
         // is never given to someone else: the new person would get them as theirs, and machines would be offered them (audit F910).
+        // Nor is one with rows a person's settings or plugin grants left behind (removing a person deletes them; a database from
+        // another build, or one edited by hand, may still hold some): a new person never inherits another's themes or grants.
         let mut id = base.clone();
         let mut n = 1;
         while reserved(&id)
             || conn
                 .query_row(
                     "SELECT 1 FROM users WHERE id = ?1
-                     UNION ALL SELECT 1 FROM user_devices WHERE user_id = ?1 LIMIT 1",
+                     UNION ALL SELECT 1 FROM user_devices WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM user_settings WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM user_settings_tags WHERE user_id = ?1
+                     UNION ALL SELECT 1 FROM plugin_grants WHERE user_id = ?1 LIMIT 1",
                     [&id],
                     |_| Ok(()),
                 )
@@ -201,6 +206,14 @@ impl<'a> Users<'a> {
         conn.execute("DELETE FROM grants WHERE user_id = ?1", [id])
             .map_err(db)?;
         conn.execute("DELETE FROM passkeys WHERE user_id = ?1", [id])
+            .map_err(db)?;
+        // ADR-0114: what this person allowed plugins to see goes with them.
+        conn.execute("DELETE FROM plugin_grants WHERE user_id = ?1", [id])
+            .map_err(db)?;
+        // ADR-0113 decision 6: and their own settings values (their themes, packs and theme choice).
+        conn.execute("DELETE FROM user_settings WHERE user_id = ?1", [id])
+            .map_err(db)?;
+        conn.execute("DELETE FROM user_settings_tags WHERE user_id = ?1", [id])
             .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
@@ -393,7 +406,9 @@ pub fn fleet_allowed(store: &SqliteStore) -> bool {
 }
 
 /// What a viewer may still do: everything that only reads. The command names are the schema's, so a new command is refused to
-/// viewers until it is listed here.
+/// viewers until it is listed here. Answered before this check, for every person: the device commands (ADR-0061) and the plugin
+/// commands (ADR-0114, `server::plugin_command`), so a viewer may also set and remove their own plugin grants. Those are the hub's
+/// alone: a grant is the person's own row on the hub and nothing reaches a node.
 pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> bool {
     use agora_protocol::v1::command_request::Command as C;
     matches!(
@@ -403,6 +418,8 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
             | C::AgentList(_)
             | C::AgentKinds(_)
             | C::UsageReport(_)
+            | C::ThemeCatalogList(_)
+            | C::ThemeCatalogGet(_)
             | C::FilesList(_)
             | C::FilesRead(_)
             | C::FilesWatch(_)

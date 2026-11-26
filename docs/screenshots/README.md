@@ -73,7 +73,7 @@ plus the theme editor as a phone screen).
 
 ## Visual regression baselines
 `apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery, sign-in and the
-Settings page on demo data at `#/gallery/settings`, both themes, desktop and phone). They are the contract for how the shared components look: a pull request that changes them updates the
+Settings page on demo data at `#/gallery/settings`, both themes, desktop and phone; the theme packs' three dialogs, `pack-*`, on a desktop). They are the contract for how the shared components look: a pull request that changes them updates the
 images with `--update`, and the diff shows in review.
 
 `grant-dark.png` and `grant-light.png` show the permission window a machine's `signed_commands` policy triggers (ADR-0041).

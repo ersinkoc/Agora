@@ -612,6 +612,17 @@ audit-action-user-role = Changed a role
 audit-action-user-remove = Removed a team member
 audit-action-user-grant = Gave access to a project
 audit-action-user-revoke = Took back access to a project
+audit-action-plugin-add = Installed a plugin
+audit-action-plugin-remove = Removed a plugin
+audit-action-plugin-grant = Chose what a plugin may see
+audit-action-plugin-ungrant = Stopped showing a plugin
+audit-action-plugin-catalog-on = Turned the plugin catalog on
+audit-action-plugin-catalog-off = Turned the plugin catalog off
+audit-action-plugin-catalog-key = Set the plugin catalog's key
+audit-action-plugin-catalog-update = Fetched the plugin catalog
+audit-action-plugin-catalog-install = Installed a plugin from the catalog
+audit-action-plugin-catalog-upgrade = Upgraded a plugin from the catalog
+audit-action-settings-set = Kept their themes the same on their devices
 audit-action-pair-open = Let new machines ask to join
 audit-action-pair-close = Stopped new machines from asking to join
 audit-action-pair-status = Checked whether new machines may ask to join
@@ -1084,6 +1095,160 @@ theme-import-note-syntax = { $count ->
     [one] One code colour was taken from the theme's token colours.
    *[other] { $count } code colours were taken from the theme's token colours.
   }
+theme-catalog = Catalog
+theme-catalog-hint = Community themes your Agora's owner added. Installing copies one into your themes; it changes only when you choose its newer version.
+theme-catalog-empty = The catalog has no themes yet.
+theme-catalog-by = by { $author } · { $licence }
+theme-catalog-version = Version { $version }
+theme-catalog-installed = Installed
+theme-catalog-newer = Version { $version } available
+theme-catalog-preview = Preview
+theme-catalog-hide = Hide preview
+theme-catalog-install = Install
+theme-catalog-update = Update to version { $version }
+theme-catalog-refused = This theme can't be used:
+theme-catalog-gone = This theme is no longer in the catalog.
+theme-catalog-off = The catalog was turned off.
+theme-catalog-unavailable = The theme could not be fetched. Try again.
+theme-sync-label = Keep my themes the same on my devices
+theme-sync-syncing = Your themes, packs and theme choice are the same on every device where you sign in.
+theme-sync-synced = Your themes, packs and theme choice are the same on every device where you sign in.
+theme-sync-off = Your themes stay in this browser. Turn this on to have them on your other devices too.
+theme-sync-safe = Safe mode: nothing is kept the same on your devices.
+theme-sync-local = Your themes stay in this browser. Sign in to your Agora to have them on your other devices too.
+theme-sync-older = Your Agora can't keep themes yet, so they stay in this browser.
+theme-sync-too-large = Your themes and packs are too large to keep in your Agora (at most { $max } KB), so they stay in this browser. Delete a theme or forget a pack.
+theme-sync-newer = The themes kept in your Agora were saved by a newer version. Update this window to use them; until then yours stay in this browser.
+theme-sync-error = Couldn't reach your Agora just now. Your themes are kept here and will be saved at your next change.
+theme-sync-paused = Theme sync paused: another person signed in to this browser in another tab. Sign in again here to sync.
+theme-synced-title = Your packs and devices
+theme-synced-hint = Packs you imported, here and on your other devices. Opening one shows what it holds; nothing changes until you pick its parts.
+theme-synced-packs = Your packs
+theme-synced-open = Open…
+theme-synced-forget = Forget
+theme-synced-remove = Remove from my devices
+theme-synced-waiting = { $count ->
+    [one] 1 theme from your other devices doesn't fit here: you can keep { $max }. Delete one of yours to make room.
+   *[other] { $count } themes from your other devices don't fit here: you can keep { $max }. Delete one of yours to make room.
+}
+theme-synced-waiting-packs = { $count ->
+    [one] 1 pack from your other devices isn't kept here: up to { $max } are. Forget one to make room.
+   *[other] { $count } packs from your other devices aren't kept here: up to { $max } are. Forget one to make room.
+}
+theme-synced-invalid-theme = The theme "{ $name }" from your other devices can't be used here:
+theme-synced-invalid-theme-unnamed = A theme from your other devices can't be used here:
+theme-synced-invalid-pack = The pack "{ $name }" from your other devices can't be used here:
+theme-synced-invalid-pack-unnamed = A pack from your other devices can't be used here:
+pack-sync-themes = { $count ->
+    [one] 1 theme
+   *[other] { $count } themes
+}
+pack-sync-layouts = { $count ->
+    [one] 1 saved layout
+   *[other] { $count } saved layouts
+}
+pack-sync-keys = { $count ->
+    [one] keys for 1 command
+   *[other] keys for { $count } commands
+}
+pack-import = Import pack…
+theme-import-is-pack = This is a theme pack. Use Import pack… to see what it holds and choose what to use.
+pack-export = Export as pack…
+pack-export-title = Export as pack
+pack-export-hint = A pack is one file with themes, saved layouts and keys, to share or to use in another browser. Pick what goes in.
+pack-name = Pack name
+pack-name-default = My pack
+pack-themes = Themes
+pack-layouts = Saved layouts
+pack-keys = Keys
+pack-panes = { $count ->
+    [one] 1 pane
+   *[other] { $count } panes
+}
+pack-export-no-layouts = No saved layouts yet. Save one from the layout menu.
+pack-export-unbound = A pane that shows one of your agents is saved without it: the pack names panels only.
+pack-keys-own = Your keys
+pack-keys-none = You use the default keys.
+pack-keys-count = { $count ->
+    [one] 1 command with its own keys
+   *[other] { $count } commands with their own keys
+}
+pack-export-do = Export
+pack-import-title = Import pack
+pack-import-hint = You see what the pack holds before anything changes, and choose what to use.
+pack-import-paste = Paste a pack (JSON)
+pack-import-file = Or choose a file
+pack-import-refused = This pack can't be used:
+pack-preview-do = See what's in it
+pack-preview-title = Pack “{ $name }”
+pack-preview-hint = Tick what to use. Nothing changes until you do. Themes and layouts are added to yours; keys are merged after you see what they change.
+pack-theme-warnings = { $count ->
+    [one] 1 thing hard to see
+   *[other] { $count } things hard to see
+}
+pack-themes-room = You have room for { $count ->
+    [one] 1 more theme
+   *[other] { $count } more themes
+}. Delete one of yours or tick fewer.
+pack-layout-plugin = Needs a plugin to show { $panels }. A pack never installs plugins: until you install and allow it, the pane says it can't be shown.
+pack-layout-unknown = This window can't show { $panels }: the pane says so.
+pack-keys-theirs = The pack's keys
+pack-keys-unknown = { $count ->
+    [one] It names a command this window does not have. It is kept, and does nothing here.
+   *[other] It names { $count } commands this window does not have. They are kept, and do nothing here.
+}
+pack-back = Back
+pack-next = Next
+pack-apply = Use what's ticked
+pack-close = Close
+pack-keys-confirm-title = Merge the pack's keys?
+pack-keys-confirm-hint = { $count ->
+    [one] The pack sets the keys of 1 command. Your other keys stay as they are.
+   *[other] The pack sets the keys of { $count } commands. Your other keys stay as they are.
+}
+pack-keys-no-conflicts = Nothing you set yourself changes, and no key would do two things.
+pack-keys-replaced = Your keys these replace
+pack-keys-replaced-row = { $name }: { $mine } becomes { $theirs }
+pack-keys-clashes = Keys that would do two things
+pack-keys-clash-same = { $key } would be both { $a } and { $b }.
+pack-keys-clash-prefix = { $key } starts a key of both { $a } and { $b }.
+pack-keys-merge-do = Merge keys and use what's ticked
+pack-layout-copy = { $name } ({ $n })
+pack-done-themes = { $count ->
+    [one] 1 theme added to yours. Choose it above when you want it.
+   *[other] { $count } themes added to yours. Choose one above when you want it.
+}
+pack-done-layouts = { $count ->
+    [one] 1 layout saved: { $names }. Find it in the layout menu.
+   *[other] { $count } layouts saved: { $names }. Find them in the layout menu.
+}
+pack-done-keys = { $count ->
+    [one] Keys of 1 command merged.
+   *[other] Keys of { $count } commands merged.
+}
+pack-error-json = This is not valid JSON.
+pack-error-invalid = This is not a pack.
+pack-error-newer = This pack was made by a newer version. Update to use it.
+pack-error-empty = This pack holds nothing to use.
+pack-error-name = The pack needs a name of 1 to { $max } characters, without “;”, “<” or “url(”.
+pack-error-too-large = This pack is larger than { $max } KB.
+pack-error-unknown-field = “{ $field }” is not part of a pack.
+pack-error-part = “{ $part }” is not in the form a pack keeps it in.
+pack-error-too-many-themes = A pack holds at most { $max } themes.
+pack-error-too-many-layouts = A pack holds at most { $max } layouts.
+pack-error-theme-format = Theme { $n } is not a theme of the current format.
+pack-in-theme = Theme { $n }: { $text }
+pack-in-layout = Layout { $n }: { $text }
+pack-in-keys = Keys: { $text }
+pack-error-layout-entry = Layout { $n } is not a named layout.
+pack-error-layout-name = Layout { $n } needs a name of 1 to 60 characters, without “;”, “<” or “url(”.
+pack-error-layout-twice = Layout { $n }: the name “{ $name }” is used twice.
+pack-error-layout-field = Layout { $n }: “{ $field }” is not part of a layout.
+pack-error-layout-panel = Layout { $n }: “{ $panel }” is not a panel's name.
+pack-error-layout-agent = Layout { $n } shows one of someone's agents. A pack's layout names panels only.
+pack-error-layouts-full = You can keep at most { $max } saved layouts. Delete some or tick fewer.
+pack-error-keys-merge = The keys can't be merged: { $text }
+pack-error-more = …and { $count } more.
 theme-name-dark = Dark
 theme-name-light = Light
 theme-name-high-contrast = High contrast
@@ -1320,7 +1485,7 @@ palette-open-machine = Machine: { $name }
 palette-open-project = Project: { $name }
 palette-settings = Settings
 device-appearance = Appearance
-device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
+device-appearance-intro = This browser shows the { $name } theme.
 
 ## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
 phone-nav = Go to
@@ -1957,7 +2122,7 @@ plugin-marker = Plugin
 plugin-development = development
 plugin-frame-title = { $name } (plugin)
 plugins-title = Plugins
-plugins-intro = Plugins you load from a file run in this browser only, each in its own sandboxed pane. They see only what you allow, and never your keys, the network or what needs you. Show one in a pane from the pane's Show… menu.
+plugins-intro = Plugins the hub's owner installed, and plugins you load from a file (in this browser only), each run in their own sandboxed pane. They see only what you allow, and never your keys, the network or what needs you. Show one in a pane from the pane's Show… menu.
 plugins-safe = Safe mode: no plugin runs and the built-in theme is on. Leave safe mode to use your plugins again.
 plugins-done = Done
 plugin-load = Load from a file…
@@ -1981,6 +2146,25 @@ plugin-grant-nothing = It asks to see nothing of yours.
 plugin-cancel = Cancel
 plugin-add = Add plugin
 plugin-save = Save
+plugin-from-hub = installed on this hub
+plugin-not-shown = Not shown. Look at what it asks to see, and show it if you like.
+plugin-look = Look at it
+plugin-hide = Stop showing
+plugin-grant-title-hub = Show { $name }?
+plugin-show = Show it
+plugin-grant-failed = The hub did not keep your choice. Open the window again and try once more.
+plugin-replaces-hub = Replaces the hub's { $name } in this browser, with what you allow here. Remove it to use the hub's again.
+plugin-replaced = Replaced in this browser by a development plugin with the same id. Remove that one to use this again.
+plugin-catalog-title = From the hub's catalog
+plugin-catalog-intro = Reviewed community plugins the hub's owner can install for everyone on this hub. The hub checked each against the catalog's signature.
+plugin-catalog-none = Everything in the hub's catalog is installed already.
+plugin-catalog-asks = Asks to see: { $what }
+plugin-catalog-unknown = { $count ->
+    [one] one thing this window does not know
+   *[other] { $count } things this window does not know
+}
+plugin-catalog-install-how = Only the hub's owner installs it, on the hub's machine:
+plugin-catalog-upgrade-how = A newer version than the one installed. Only the hub's owner upgrades it, on the hub's machine:
 plugin-cap-agents-read = The names, kinds and states of your agents, with their machines and projects
 plugin-cap-usage-read = How many tokens, how much context and how much time your agents have used
 plugin-cap-tasks-read = The shared tasks of your projects

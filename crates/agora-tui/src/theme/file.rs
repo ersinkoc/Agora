@@ -118,6 +118,28 @@ pub enum Issue {
     /// The file could not be read (gone, a folder, no permission).
     Unreadable,
     More(usize),
+    /// A theme pack's own problems (`super::pack`, `docs/ux/themes.md` "Theme packs"): a field a pack does not have.
+    PackField(String),
+    /// The pack's name is missing, too long, or holds a piece a theme value may not.
+    PackName,
+    /// A part (`themes`, `layouts`, `keybindings`) is not in the form a pack keeps it in.
+    PackPart(&'static str),
+    PackTooMany {
+        part: &'static str,
+        max: usize,
+    },
+    /// Theme `n` (from 1) is not a format-2 theme.
+    PackThemeFormat(usize),
+    /// A problem of the pack's theme `n` (from 1).
+    InPackTheme {
+        n: usize,
+        problem: Box<Problem>,
+    },
+    /// A pack without a theme: nothing here this client can use (its layouts and keys are the window's).
+    PackNoThemes {
+        layouts: usize,
+        keys: usize,
+    },
 }
 
 /// A problem, and the scheme it is in when the theme has both.
@@ -211,7 +233,7 @@ fn capped(r: Read) -> Read {
 // ---- Values ------------------------------------------------------------------------------------------------------------------
 
 /// Control and text-direction characters never reach the screen in a name someone else wrote.
-fn clean_name(v: Option<&Value>) -> String {
+pub(crate) fn clean_name(v: Option<&Value>) -> String {
     let Some(s) = v.and_then(Value::as_str) else {
         return String::new();
     };
@@ -233,7 +255,7 @@ fn words(s: &str) -> String {
 }
 
 /// A key as a problem names it: cleaned, at most 40 characters.
-fn short_key(k: &str) -> String {
+pub(crate) fn short_key(k: &str) -> String {
     clean_name(Some(&Value::String(k.to_string())))
         .chars()
         .take(40)

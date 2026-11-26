@@ -1438,6 +1438,104 @@ node sets. The window's button and the terminal client's key come with the next 
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
 
+### The community theme catalog (ADR-0113)
+
+ADR-0113 decision 6. The hub keeps a catalog of community themes that it fetched on its owner's command (`agora hub themes update`) and
+checked (`docs/ux/themes.md`, "The community catalog"); a window asks the hub for it and never fetches from another origin. Added to the
+schema append-only, no capability (a window sends no `Hello`; a window normally talks to the hub that served it, and an older hub that
+does not know these commands refuses them, which the window treats as "no catalog"):
+
+- `CommandRequest.theme_catalog_list` (111, `ThemeCatalogList {}`) and `CommandRequest.theme_catalog_get` (112,
+  `ThemeCatalogGet { id }`): commands the hub answers itself, with no `target_node` (one that names a machine is refused,
+  `protocol.invalid_message`, `field: target_node`) and never forwarded. Every signed-in person may ask, whatever their role and
+  projects (viewers included); a node refuses them as unsupported.
+- `CommandOk.theme_catalog_list` (33, `ThemeCatalogListResult { on, entries, updated_at_ms }`): `on` is false while the owner has not
+  turned the catalog on (`agora hub themes on`), and then `entries` is empty; it is an answer, not a refusal, so a window that opens its
+  theme editor writes no refused row in the owner's Activity. `updated_at_ms` is when the hub last fetched the catalog (0: never).
+  `entries` are sorted by name, each a `ThemeCatalogEntry { id, name, version, author, licence, sha256, size }`: the index's id
+  (lowercase letters, digits, `-`, at most 40), name, a version that only grows (a higher number is newer), author, SPDX licence, the
+  SHA-256 of the file as fetched (64 lowercase hex) and its size in bytes. Every text is from the catalog's index: clients show it as
+  text, never as markup.
+- `CommandOk.theme_catalog_theme` (34, `ThemeCatalogTheme { entry, data }`): one theme's file exactly as the hub fetched and checked it
+  (JSON text, theme format 1 or 2, at most 256 KiB). A client checks it again with its own theme rules before showing or installing it.
+  Refused with `theme.catalog_off` while the catalog is off and `theme.not_found` (`id`) for an id the catalog lacks.
+
+Golden fixtures of each case are in `schema/fixtures/theme-catalog/` (`crates/agora-protocol/tests/theme_catalog.rs`).
+
+### Per-person settings (ADR-0113)
+
+ADR-0113 decision 6, build step 4: the hub keeps each person's own settings value so their devices agree; today one key, `themes` (the
+person's themes, kept packs and theme choice, `docs/ux/themes.md` "Keeping themes the same on your devices"). New messages in
+`schema/agora/v1/settings.proto` and new arms of `CommandRequest` (`user_settings_get` 118, `user_settings_set` 119) and `CommandOk`
+(`user_settings` 38); nothing published changed. No capability: a window sends them to any hub, and an older hub refuses them (it cannot
+name the command: `auth.forbidden` with the `action` `None`, the name of a request with no command), which the window takes as "this hub keeps nothing; themes stay in this browser".
+Answered by the hub itself, for any signed-in person (owner, member or viewer alike, ahead of the routing that limits a viewer or a
+member's projects); one that names a node (`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node
+never receives them (refused as unsupported).
+
+- **`UserSettingsGet { key }`** → `UserSettingsValue { key, value, version, updated_ms, tag }`: the caller's own value. One never written is
+  version 0 with an empty value (an answer, not a refusal).
+- **`UserSettingsSet { key, value, base_version }`** → `UserSettingsValue` with the new version: replaces the caller's own value when
+  `base_version` is the current version (0 for none yet), and raises the version by one. Otherwise `settings.stale` (`version`, the current
+  one) and nothing changes: another window wrote first, so the client reads again, merges and writes again. A value over 262144 bytes is
+  `settings.too_large` (`max`), refused whole before anything is read or written.
+- **The tag** (`UserSettingsValue.tag`, 32 lowercase hex): random, made by the hub once per person and sent with every value; it names
+  nobody. A person removed and added again gets a new one. A client keeps the tag it last synced with and takes a value with another tag
+  (or none) as someone else's: it merges nothing of its own into it.
+- **Limited.** At most 60 `UserSettingsSet` per person a minute, across all their windows: past that `rate.limited` (`limit`) and nothing
+  changes; only the first refusal in a minute is an audit row.
+- **Opaque and per person.** `value` is bytes the hub never parses, checks or shows; every client checks what it reads. The value is
+  keyed by the session's person (`owner` on a hub with one person) and the key, never by anything the request names, so nobody reads or
+  writes another person's. `key` is a closed set (`themes`); any other is `protocol.invalid_message` (`key`). Removing a person forgets
+  their values. The hub keeps them in its database (schema 17, table `user_settings`).
+- **Audit.** A write is a row of the person (`settings.set`, its `node` the key, `themes`) with the outcome (`ok`, `settings.stale`,
+  `settings.too_large`, ...) and nothing of the value; a read writes no row, nor does a stale write (it changed nothing, and the client
+  writes again after merging).
+- Golden fixtures: `schema/fixtures/v1/agora.v1.UserSettings*` and `schema/fixtures/user-settings/`
+  (`crates/agora-protocol/tests/user_settings.rs`).
+### Plugins (ADR-0114)
+
+Schema step of ADR-0114 decision 6 (Accepted). New messages in `schema/agora/v1/plugins.proto` and new arms of `CommandRequest`
+(`plugin_list` 113, `plugin_fetch` 114, `plugin_grant_list` 115, `plugin_grant_set` 116, `plugin_grant_remove` 117) and `CommandOk`
+(`plugin_list` 35, `plugin_fetch` 36, `plugin_grant_list` 37); nothing published changed. No capability: a window sends them to any hub,
+and an older hub refuses them (the window then has no hub plugins). Every one is answered by the hub itself, for any signed-in person
+(owner, member or viewer alike, ahead of the routing that limits a viewer or a member's projects); one that names a node
+(`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node never receives them (refused as
+unsupported). No message installs or removes a plugin: the owner does, on the hub's machine (`agora hub plugin add FILE | list |
+remove ID`, docs/ux/plugins.md).
+
+- **`PluginList`** → `PluginListResult.plugins`: each installed plugin by id: `plugin_id`, `version`, `name`, `capabilities` (from the
+  manifest the hub checked), `sha256` of the whole package, `size` (at most 2 MiB) and `installed_ms`. A hub keeps at most 16.
+- **`PluginFetch { plugin_id, sha256, offset }`** → `PluginFetchResult { plugin_id, sha256, total_size, offset, data }`: at most 512 KiB of
+  the package from `offset`, empty at the end (a frame carries at most 1 MiB). `plugin.not_found` (`plugin_id`) unless that plugin is
+  installed with that package (removed, or replaced by another version); an `offset` past the end is `protocol.invalid_message`
+  (`offset`). The window joins the pieces, checks that they hash to `sha256`, and checks the package again as a file
+  (docs/ux/plugins.md, "The package"); the manifest must name the listed id and version.
+- **`PluginGrantList`** → `PluginGrantListResult.grants`: the caller's own grants, one per plugin: `plugin_id`, the `version` it was given
+  for (possibly older than the installed one), `seen` (what that version asked for), `granted` (what the person allowed, each in
+  `seen`) and `set_ms`. A window holds a plugin whose installed version asks for a capability not in `seen`.
+- **`PluginGrantSet { plugin_id, version, granted, sha256 }`** → `Empty`: replaces the caller's grant for that plugin. `plugin.not_found`
+  unless `version` with the package `sha256` (the one the person was shown) is the installed one; `protocol.invalid_message` (`granted`) for a capability that version does not ask for. The hub records
+  `seen` from the installed manifest and `granted` in the manifest's order.
+- **`PluginGrantRemove { plugin_id }`** → `Empty`: forgets the caller's grant (stop showing it); none is not an error.
+- **Kept per person.** Grants are keyed by the person (`owner` on a hub with one person) and plugin id. Removing a plugin forgets everyone's
+  grant for it; removing a person forgets theirs. At most 30 grant changes (`PluginGrantSet` and `PluginGrantRemove`) per person a minute:
+  past that `rate.limited` (`limit`), nothing changes, and only the first refusal in a minute is an audit row (ADR-0113 step 4 review).
+  Setting and removing a grant are audit rows of the person (`plugin.grant`,
+  `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`). The row's `node` names the plugin
+  (`<id>` or `<id>@<version>`), as a `user.*` row names the person.
+- Golden fixtures: `schema/fixtures/v1/agora.v1.Plugin*` and `schema/fixtures/plugins/` (`crates/agora-protocol/tests/plugins.rs`).
+- **`PluginCatalogList`** (ADR-0114 decision 7, build step 4; `CommandRequest.plugin_catalog_list` 120, `CommandOk.plugin_catalog_list`
+  39) → `PluginCatalogListResult { on, entries, updated_at_ms }`: the community catalog's plugins as the hub kept them from the last index
+  whose signature it verified under the key its owner pinned (docs/ux/plugins.md, "The community catalog"), ordered by name then
+  `plugin_id`. Each `PluginCatalogEntry` is `plugin_id`, `name`, `version`, `author`, `licence`, `description` (empty when none),
+  `capabilities` (rung-1 names), the archive's `sha256` and `size`; all of it is the index's text, shown as text. While the owner has the
+  catalog off: `on: false` and nothing else (not an error). With no key pinned, or a key pinned since the last fetch: `on: true` with no
+  entry and `updated_at_ms` 0. Read only and answered like the others above (any signed-in person; `target_node` refused; a node never
+  receives it; no capability, an older hub refuses it and the window shows no catalog). No message installs, upgrades or fetches a
+  catalog archive: the owner does, on the hub's machine (`agora hub plugins install|upgrade ID`). Golden fixtures:
+  `schema/fixtures/plugin-catalog/` (`crates/agora-protocol/tests/plugin_catalog.rs`).
+
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub

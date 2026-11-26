@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 18;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -412,6 +412,94 @@ impl SqliteStore {
                  PRAGMA user_version = 14;
                  COMMIT;"
             ))?;
+        }
+        if version < 15 {
+            // ADR-0113 decision 6: the community theme catalog the owner fetched (`agora hub themes update`), one row per accepted
+            // theme with its file as fetched. An update replaces every row in one transaction.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS theme_catalog (
+                     id         TEXT PRIMARY KEY,
+                     name       TEXT NOT NULL,
+                     version    INTEGER NOT NULL,
+                     author     TEXT NOT NULL,
+                     licence    TEXT NOT NULL,
+                     sha256     TEXT NOT NULL,
+                     data       TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
+        }
+        if version < 16 {
+            // ADR-0114 decision 6: the plugins the owner installed on this hub (each package as opaque bytes, never run, with what the
+            // hub read from its checked manifest) and what each person allowed each plugin to see, for the version they were shown.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS plugins (
+                     id           TEXT PRIMARY KEY,
+                     version      TEXT NOT NULL,
+                     name         TEXT NOT NULL,
+                     capabilities TEXT NOT NULL,
+                     sha256       TEXT NOT NULL,
+                     installed_ms INTEGER NOT NULL,
+                     package      BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS plugin_grants (
+                     user_id   TEXT NOT NULL,
+                     plugin_id TEXT NOT NULL,
+                     version   TEXT NOT NULL,
+                     seen      TEXT NOT NULL,
+                     granted   TEXT NOT NULL,
+                     set_ms    INTEGER NOT NULL,
+                     PRIMARY KEY (user_id, plugin_id)
+                 );
+                 PRAGMA user_version = 16;
+                 COMMIT;",
+            )?;
+        }
+        if version < 17 {
+            // ADR-0113 decision 6 (step 4): each person's own settings values, opaque bytes the hub never reads (`user_settings.rs`), with
+            // a version raised on every write so two windows never overwrite each other unseen, and each person's random tag (a browser
+            // tells by it whose value it last synced with).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS user_settings (
+                     user_id    TEXT NOT NULL,
+                     key        TEXT NOT NULL,
+                     version    INTEGER NOT NULL,
+                     value      BLOB NOT NULL,
+                     updated_ms INTEGER NOT NULL,
+                     PRIMARY KEY (user_id, key)
+                 );
+                 CREATE TABLE IF NOT EXISTS user_settings_tags (
+                     user_id TEXT PRIMARY KEY,
+                     tag     TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 17;
+                 COMMIT;",
+            )?;
+        }
+        if version < 18 {
+            // ADR-0114 decision 7 (step 4): the community plugin catalog's entries, as its last signed index listed them
+            // (`plugin_catalog.rs`). The archives are not kept here: one is fetched only when the owner installs it, and kept in `plugins`.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS plugin_catalog (
+                     id           TEXT PRIMARY KEY,
+                     name         TEXT NOT NULL,
+                     version      TEXT NOT NULL,
+                     author       TEXT NOT NULL,
+                     licence      TEXT NOT NULL,
+                     description  TEXT NOT NULL,
+                     capabilities TEXT NOT NULL,
+                     sha256       TEXT NOT NULL,
+                     size         INTEGER NOT NULL,
+                     file         TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 18;
+                 COMMIT;",
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1149,6 +1237,84 @@ mod tests {
         );
         drop(s);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0113 (schema 15), ADR-0114 (schema 16), ADR-0113 step 4 (schema 17), then ADR-0114 step 4 (schema 18): a fresh database is at
+    /// 18 with every table; one at 14 gains the theme catalog, the plugin tables, the settings table and the plugin catalog, in that
+    /// order; one at 15 keeps its catalog rows, one at 16 its plugins too, and each gains what came after. Its events stay.
+    #[test]
+    fn databases_at_14_to_17_upgrade_to_the_plugin_catalog_table() {
+        let all = [
+            "plugin_catalog",
+            "plugin_grants",
+            "plugins",
+            "theme_catalog",
+            "user_settings",
+            "user_settings_tags",
+        ];
+        let tables = |s: &SqliteStore| -> Vec<String> {
+            let conn = s.lock().unwrap();
+            let mut st = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants', 'user_settings', 'user_settings_tags', 'plugin_catalog') ORDER BY name")
+                .unwrap();
+            let names = st.query_map([], |r| r.get(0)).unwrap();
+            names.collect::<Result<_, _>>().unwrap()
+        };
+        let version = |s: &SqliteStore| -> i64 {
+            s.lock()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap()
+        };
+        let count = |s: &SqliteStore, table: &str| -> i64 {
+            s.lock()
+                .unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        let fresh = store();
+        assert_eq!(version(&fresh), 18);
+        assert_eq!(tables(&fresh), all);
+        for (from, undo) in [
+            (14, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; DROP TABLE theme_catalog; PRAGMA user_version = 14;"),
+            (15, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; PRAGMA user_version = 15;"),
+            (16, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; PRAGMA user_version = 16;"),
+            (17, "DROP TABLE plugin_catalog; PRAGMA user_version = 17;"),
+        ] {
+            let d = tmpdir(&format!("upgrade{from}"));
+            let path = d.join("hub.db");
+            {
+                let s = SqliteStore::open(&path).unwrap();
+                s.append("n1", 1, 5, b"a").unwrap();
+                let conn = s.lock().unwrap();
+                conn.execute_batch(undo).unwrap();
+                if from >= 15 {
+                    conn.execute(
+                        "INSERT INTO theme_catalog (id, name, version, author, licence, sha256, data) VALUES ('t', 'T', 1, 'a', 'MIT', 'h', '{}')",
+                        [],
+                    )
+                    .unwrap();
+                }
+                if from >= 16 {
+                    conn.execute(
+                        "INSERT INTO plugin_grants (user_id, plugin_id, version, seen, granted, set_ms) VALUES ('u', 'p', '1.0.0', '', '', 1)",
+                        [],
+                    )
+                    .unwrap();
+                }
+            }
+            assert!(verify(&path).is_ok(), "an older database is a valid backup");
+            let s = SqliteStore::open(&path).unwrap();
+            assert_eq!(version(&s), 18, "from {from}");
+            assert_eq!(tables(&s), all, "from {from}");
+            assert_eq!(s.acked("n1").unwrap(), 1);
+            assert_eq!(count(&s, "theme_catalog"), i64::from(from >= 15), "from {from}");
+            assert_eq!(count(&s, "plugin_grants"), i64::from(from >= 16), "from {from}");
+            assert_eq!(count(&s, "user_settings"), 0, "from {from}");
+            assert_eq!(count(&s, "plugin_catalog"), 0, "from {from}");
+            drop(s);
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     /// ADR-0085: a schema 12 database opens, keeps its enrolled devices and gains the `first_seen_ms` column, empty.

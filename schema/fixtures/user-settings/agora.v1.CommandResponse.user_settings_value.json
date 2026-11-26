@@ -1,0 +1,12 @@
+{
+  "requestId": "s2",
+  "ok": {
+    "userSettings": {
+      "key": "themes",
+      "value": "eyJhZ29yYS10aGVtZS1zeW5jIjoxLCJ0aGVtZXMiOltdLCJwYWNrcyI6W119",
+      "version": "4",
+      "updatedMs": "1795600000000",
+      "tag": "3fa1c09d7b2e4a6f8c5d1e0b9a7f6c42"
+    }
+  }
+}

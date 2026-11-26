@@ -1220,6 +1220,18 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0114: the hub's plugins and each person's own grants, answered by the hub for owner, member and viewer alike.
+    if let Some(resp) = plugin_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
+    // ADR-0113 decision 6 (step 4): each person's own settings value, answered by the hub for owner, member and viewer alike.
+    if let Some(resp) = settings_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Who may do what is decided apart from the transport (R9, `dispatch.rs`); here only what the answer says is done.
     let ok_empty = |request_id: String| v1::CommandResponse {
         request_id,
@@ -1295,6 +1307,29 @@ where
                 result: Some(command_ok::Result::UsageReport(hub.usage_report())),
             })),
         }),
+        // ADR-0113 decision 6: answered by the hub itself from the theme catalog it keeps; it names no node.
+        crate::dispatch::Route::ThemeCatalogList => {
+            Some(match crate::theme_catalog::list(hub.store()) {
+                Ok(list) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ThemeCatalogList(list)),
+                    })),
+                },
+                Err(_) => refuse(Error::new(ErrorCode::Internal)),
+            })
+        }
+        crate::dispatch::Route::ThemeCatalogGet { id } => {
+            Some(match crate::theme_catalog::get(hub.store(), &id) {
+                Ok(theme) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ThemeCatalogTheme(theme)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
     };
     if let Some(resp) = resp {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
@@ -2021,6 +2056,186 @@ fn device_command(
             request_id: req.request_id.clone(),
             result: Some(command_response::Result::Ok(v1::CommandOk {
                 result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0114 decisions 6 and 7: the plugin commands a window sends, answered here; `None` for any other command. Every signed-in person,
+/// owner, member or viewer, may list the installed plugins and the catalog's entries, fetch the installed packages and set or read their
+/// own grants: a plugin only reads what its
+/// person can already see in the window, and choosing what it may see is the person's own (a viewer could use no plugin otherwise). No
+/// message installs or removes a plugin: that is the owner's, on the hub's machine (`agora hub plugin`). A request that names a node is
+/// refused, as for the device commands.
+pub(crate) fn plugin_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let plugins = crate::plugins::Plugins::new(hub.store());
+    let internal = |_| Error::new(ErrorCode::Internal).with("incident_id", "plugins");
+    let empty = || command_ok::Result::Empty(v1::Empty {});
+    // Each person's grant changes are limited (one refusal row per span, `crate::dispatch::Admit`); nothing changes when refused.
+    let admit = match &req.command {
+        Some(C::PluginGrantSet(_) | C::PluginGrantRemove(_)) if req.target_node.is_empty() => hub
+            .grant_writes()
+            .admit(&who.user, std::time::Instant::now()),
+        _ => crate::dispatch::Admit::Yes,
+    };
+    let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
+        Some(
+            C::PluginList(_)
+            | C::PluginFetch(_)
+            | C::PluginGrantList(_)
+            | C::PluginGrantSet(_)
+            | C::PluginGrantRemove(_)
+            | C::PluginCatalogList(_),
+        ) if !req.target_node.is_empty() => (
+            "",
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
+        ),
+        Some(C::PluginList(_)) => (
+            "",
+            plugins
+                .list()
+                .map(|plugins| command_ok::Result::PluginList(v1::PluginListResult { plugins }))
+                .map_err(internal),
+        ),
+        // ADR-0114 decision 7: the catalog's entries, read only (installing from it is the owner's, on the hub's machine).
+        Some(C::PluginCatalogList(_)) => (
+            "",
+            crate::plugin_catalog::list(hub.store())
+                .map(command_ok::Result::PluginCatalogList)
+                .map_err(internal),
+        ),
+        Some(C::PluginFetch(f)) => (
+            "",
+            plugins
+                .piece(&f.plugin_id, &f.sha256, f.offset)
+                .map(command_ok::Result::PluginFetch),
+        ),
+        Some(C::PluginGrantList(_)) => (
+            "",
+            plugins
+                .grants_of(&who.user)
+                .map(|grants| {
+                    command_ok::Result::PluginGrantList(v1::PluginGrantListResult { grants })
+                })
+                .map_err(internal),
+        ),
+        Some(C::PluginGrantSet(_) | C::PluginGrantRemove(_))
+            if admit != crate::dispatch::Admit::Yes =>
+        {
+            (
+                if admit == crate::dispatch::Admit::First {
+                    if matches!(req.command, Some(C::PluginGrantSet(_))) {
+                        "plugin.grant"
+                    } else {
+                        "plugin.ungrant"
+                    }
+                } else {
+                    ""
+                },
+                Err(Error::new(ErrorCode::RateLimited)
+                    .with("limit", hub.grant_writes().max() as i64)),
+            )
+        }
+        Some(C::PluginGrantSet(g)) => (
+            "plugin.grant",
+            plugins.set_grant(&who.user, g, now_ms()).map(|()| empty()),
+        ),
+        Some(C::PluginGrantRemove(g)) => (
+            "plugin.ungrant",
+            plugins
+                .remove_grant(&who.user, &g.plugin_id)
+                .map(|()| empty())
+                .map_err(internal),
+        ),
+        _ => return None,
+    };
+    if !action.is_empty() {
+        // Which plugin, when the id is one a manifest could have (anything else a window sent is not written into the trail).
+        let id = match &req.command {
+            Some(C::PluginGrantSet(g)) => g.plugin_id.as_str(),
+            Some(C::PluginGrantRemove(g)) => g.plugin_id.as_str(),
+            _ => "",
+        };
+        let plain = !id.is_empty()
+            && id.len() <= 40
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        // The row's place names the plugin, as for the owner's `plugin.add` and `plugin.remove`.
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(e) => e.code.as_str(),
+        };
+        audit(hub, who, action, if plain { id } else { "" }, outcome);
+    }
+    Some(match result {
+        Ok(ok) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0113 decision 6 (step 4): a person's own settings value, answered here; `None` for any other command. Every signed-in person,
+/// owner, member or viewer, reads and writes only their own: the value is keyed by the session's person (`who.user`), and nothing in
+/// the request names a person. The hub keeps the value as opaque bytes and never reads it. A write is an audit row of the person
+/// (`settings.set`, its `node` the key) with its outcome, and nothing of the value; a read and a stale write write none. A request that names a node
+/// is refused, as for the device and plugin commands.
+pub(crate) fn settings_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let settings = crate::user_settings::UserSettings::new(hub.store());
+    let result = match &req.command {
+        Some(C::UserSettingsGet(_) | C::UserSettingsSet(_)) if !req.target_node.is_empty() => {
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        }
+        Some(C::UserSettingsGet(g)) => settings.get(&who.user, &g.key),
+        Some(C::UserSettingsSet(s)) => {
+            // The key when it is one the hub keeps (anything else a window sent is not written into the trail).
+            let key = crate::user_settings::known_key(&s.key).unwrap_or("");
+            // Each person's writes are limited; past the limit nothing changes, and only the first refusal of a span is a row.
+            let admit = hub
+                .settings_writes()
+                .admit(&who.user, std::time::Instant::now());
+            let r = if admit == crate::dispatch::Admit::Yes {
+                settings.set(&who.user, s, now_ms())
+            } else {
+                Err(Error::new(ErrorCode::RateLimited)
+                    .with("limit", hub.settings_writes().max() as i64))
+            };
+            // A stale write is routine (two windows of one person writing after the same edit, the second reads, merges and writes
+            // again) and changed nothing: it writes no row, so the person's Activity holds one row per change.
+            match &r {
+                Ok(_) => {
+                    audit(hub, who, "settings.set", key, "ok");
+                }
+                Err(e) if e.code == ErrorCode::SettingsStale => {}
+                Err(_) if admit == crate::dispatch::Admit::Again => {}
+                Err(e) => {
+                    audit(hub, who, "settings.set", key, e.code.as_str());
+                }
+            }
+            r
+        }
+        _ => return None,
+    };
+    Some(match result {
+        Ok(value) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::UserSettings(value)),
             })),
         },
         Err(e) => error_response(&req.request_id, &e),

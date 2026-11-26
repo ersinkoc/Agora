@@ -22,20 +22,32 @@ use crate::users::{viewer_may, Access, Role};
 pub enum Route {
     /// Refused before any node hears of it (ADR-0049): a viewer's command that changes something, or a member's outside their
     /// projects. `auth.forbidden` with `action`; the audit trail names `action` against the request's `target_node`.
-    Forbidden { action: String },
+    Forbidden {
+        action: String,
+    },
     /// A command the hub answers itself was sent with a `target_node`: `protocol.invalid_message` (`field: target_node`).
     TargetNotAllowed,
     /// ADR-0053: the hub forgets a closed agent, named by its hub-wide key `node/agent` (`node` is its first part, for the audit).
-    ForgetAgent { agent_id: String, node: String },
+    ForgetAgent {
+        agent_id: String,
+        node: String,
+    },
     /// ADR-0073: the hub forgets an offline machine.
     ForgetNode {
         node_id: String,
         refuse_return: bool,
     },
     /// ADR-0073: `node.forget` from anyone but the owner. `auth.forbidden`, audited against the named machine.
-    ForgetNodeForbidden { node_id: String },
+    ForgetNodeForbidden {
+        node_id: String,
+    },
     /// ADR-0033: the hub answers from its own view and prices.
     UsageReport,
+    /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
+    ThemeCatalogList,
+    ThemeCatalogGet {
+        id: String,
+    },
     /// Everything else goes to the node the request names (the router still checks that it is known, connected and able).
     Forward,
 }
@@ -79,6 +91,11 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         },
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
+        Some(C::ThemeCatalogList(_) | C::ThemeCatalogGet(_)) if names_a_node => {
+            Route::TargetNotAllowed
+        }
+        Some(C::ThemeCatalogList(_)) => Route::ThemeCatalogList,
+        Some(C::ThemeCatalogGet(g)) => Route::ThemeCatalogGet { id: g.id.clone() },
         _ => Route::Forward,
     }
 }
@@ -87,6 +104,71 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
 pub const MAX_DISPATCHES: usize = 8;
 /// ADR-0095: the span [`MAX_DISPATCHES`] is counted over.
 pub const DISPATCH_WINDOW: Duration = Duration::from_secs(60);
+
+/// How a write was counted against its person's limit ([`WriteRates`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    Yes,
+    /// Over the limit, and the first refusal in this span: worth one audit row.
+    First,
+    /// Over the limit again in the same span: refused without a row, so a loop of refused writes cannot fill the audit trail.
+    Again,
+}
+
+/// ADR-0113 step 4 (and the plugin grants of ADR-0114): each person's recent writes of one kind (their settings value, their plugin
+/// grants), kept across all their windows, at most `max` in `window`. Only people who wrote in the last span are kept.
+#[derive(Debug)]
+pub struct WriteRates {
+    max: usize,
+    window: Duration,
+    seen: std::sync::Mutex<HashMap<String, (VecDeque<Instant>, bool)>>,
+}
+
+impl WriteRates {
+    pub fn new(max: usize, window: Duration) -> Self {
+        Self {
+            max,
+            window,
+            seen: std::sync::Mutex::default(),
+        }
+    }
+
+    pub fn max(&self) -> usize {
+        self.max
+    }
+
+    /// Counts one write of `user` at `now`, when it fits.
+    pub fn admit(&self, user: &str, now: Instant) -> Admit {
+        let mut g = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let window = self.window;
+        g.retain(|_, (recent, _)| {
+            while recent
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+            {
+                recent.pop_front();
+            }
+            !recent.is_empty()
+        });
+        let (recent, refused) = g.entry(user.to_string()).or_default();
+        if recent.len() >= self.max {
+            if std::mem::replace(refused, true) {
+                return Admit::Again;
+            }
+            return Admit::First;
+        }
+        *refused = false;
+        recent.push_back(now);
+        Admit::Yes
+    }
+}
+
+/// ADR-0113 step 4: the most writes of their own settings value one person may make in [`WRITE_WINDOW`] (a window writes once per
+/// change after 1.5 s, and again after a stale refusal).
+pub const MAX_SETTINGS_WRITES: usize = 60;
+/// ADR-0114: the most plugin grant changes (set or remove) one person may make in [`WRITE_WINDOW`].
+pub const MAX_GRANT_WRITES: usize = 30;
+pub const WRITE_WINDOW: Duration = Duration::from_secs(60);
 
 /// ADR-0095: the times of each person's recent dispatches, kept by the hub across all of that person's windows and connections (so
 /// reconnecting or opening another window does not reset the count). Only people who dispatched in the last minute are kept.
@@ -147,6 +229,27 @@ mod tests {
             projects: None,
             session: String::new(),
         }
+    }
+
+    /// A person's writes past the limit are refused until the span has passed; only the first refusal of a span is worth a row; other
+    /// people are counted apart.
+    #[test]
+    fn writes_are_limited_per_person_and_refusals_coalesce() {
+        let rates = WriteRates::new(3, Duration::from_secs(60));
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(rates.admit("eda", t0), Admit::Yes);
+        }
+        assert_eq!(rates.admit("eda", t0), Admit::First);
+        assert_eq!(rates.admit("eda", t0), Admit::Again);
+        assert_eq!(
+            rates.admit("eda", t0 + Duration::from_secs(30)),
+            Admit::Again
+        );
+        assert_eq!(rates.admit("bo", t0), Admit::Yes);
+        let later = t0 + Duration::from_secs(61);
+        assert_eq!(rates.admit("eda", later), Admit::Yes);
+        assert_eq!(rates.max(), 3);
     }
 
     fn req(target: &str, command: C) -> CommandRequest {
@@ -282,6 +385,51 @@ mod tests {
             route(&member, None, &req("n1", forget_node(false))),
             Route::TargetNotAllowed
         );
+    }
+
+    /// ADR-0113 decision 6: every signed-in person may read the theme catalog (whether it is on is the hub's answer, not a refusal), and
+    /// the hub answers it itself: one that names a machine is refused, never forwarded.
+    #[test]
+    fn everyone_may_ask_the_hub_for_the_theme_catalog_and_it_never_goes_to_a_node() {
+        let list = C::ThemeCatalogList(v1::ThemeCatalogList::default());
+        let get = C::ThemeCatalogGet(v1::ThemeCatalogGet {
+            id: "harbour".into(),
+        });
+        let member = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Member)
+        };
+        let scope = Scope::from_view(
+            member.projects.clone().unwrap(),
+            &crate::projection::View::default(),
+        );
+        let viewer = Access {
+            projects: Some(["n1/mine".to_string()].into()),
+            ..who(Role::Viewer)
+        };
+        for (person, scope) in [
+            (who(Role::Owner), None),
+            (member.clone(), Some(&scope)),
+            (viewer, Some(&scope)),
+            (who(Role::Viewer), None),
+        ] {
+            assert_eq!(
+                route(&person, scope, &req("", list.clone())),
+                Route::ThemeCatalogList
+            );
+            assert_eq!(
+                route(&person, scope, &req("", get.clone())),
+                Route::ThemeCatalogGet {
+                    id: "harbour".into()
+                }
+            );
+            for c in [list.clone(), get.clone()] {
+                assert_eq!(
+                    route(&person, scope, &req("n1", c)),
+                    Route::TargetNotAllowed
+                );
+            }
+        }
     }
 
     /// #1044: clients tell the hub's refusal for a person's role from a machine's refusal for a limited device by `action`: the hub names

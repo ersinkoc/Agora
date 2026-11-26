@@ -1,0 +1,8 @@
+{
+  "requestId": "r2",
+  "pluginFetch": {
+    "pluginId": "sample-agents",
+    "sha256": "4f9c2a7e1b0d5c3a8e6f2b1d9c7a5e3f1b8d6c4a2e0f9b7d5c3a1e8f6b4d2c0a",
+    "offset": "524288"
+  }
+}

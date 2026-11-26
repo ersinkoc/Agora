@@ -214,6 +214,9 @@ Focus + strip:
 ## The web window
 
 - **Layout menu** (title bar; each item is also a command in the palette, with keys of your choice, `keybindings.md`): the six presets, Maximize/Restore (the pane in focus), Save layout as…, Saved layouts…
+- **Theme packs** ([themes.md](themes.md#theme-packs)) carry saved layouts: importing one adds them to Saved layouts (a taken name gets a
+  number, never replacing one). A pack's layout names panels only (never an agent), and a plugin's panel in it shows the "unknown panel"
+  placeholder until that plugin is installed and allowed, which a pack never does.
   (use, rename, delete), Export (downloads `layout.json`), Import… (paste or choose a file; errors are shown, nothing changes),
   Reset layout.
 - **Pane bar**: a tab group shows its tabs (drag a tab, arrows/Home/End move, Delete closes), each agent's tab with its avatar,

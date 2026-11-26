@@ -4372,3 +4372,154 @@ async fn an_older_and_a_newer_node_with_two_cases_of_one_github_repository_are_o
         assert_eq!(&got, want, "{target}");
     }
 }
+
+/// A person of a team hub limited to one project, with the role the test sets.
+struct InOneProject(Arc<std::sync::Mutex<agora_hub::users::Role>>);
+
+impl ClientAuth for InOneProject {
+    fn check(&self, token: &str) -> bool {
+        token == "good-token"
+    }
+    fn access(&self, token: &str) -> Option<agora_hub::users::Access> {
+        self.check(token).then(|| agora_hub::users::Access {
+            role: *self.0.lock().unwrap(),
+            user: "eda".into(),
+            projects: Some(["n1/mine".to_string()].into()),
+            session: String::new(),
+        })
+    }
+}
+
+fn catalog_request(id: &str, target: &str, command: command_request::Command) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+/// ADR-0113 decision 6: a member or viewer limited to one project reads the theme catalog once the owner turned it on, and only then;
+/// while it is off the list says so (no refusal, so no row in the owner's Activity) and a theme is refused. The hub answers both itself.
+#[tokio::test]
+async fn members_and_viewers_read_the_theme_catalog_only_once_the_owner_turned_it_on() {
+    use agora_hub::theme_catalog::{save, set_on, Accepted, Entry};
+    use agora_hub::users::Role;
+    use command_request::Command as C;
+    let role = Arc::new(std::sync::Mutex::new(Role::Viewer));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(InOneProject(Arc::clone(&role))),
+        assets: None,
+        sessions: None,
+    });
+    let data = r#"{"agora-theme": 1, "name": "Harbour", "scheme": "dark", "tokens": {}}"#;
+    save(
+        st.hub.store(),
+        &[Accepted {
+            entry: Entry {
+                id: "harbour".into(),
+                name: "Harbour".into(),
+                version: 2,
+                author: "Ada".into(),
+                licence: "MIT".into(),
+                sha256: "a".repeat(64),
+                file: "themes/harbour.json".into(),
+            },
+            data: data.into(),
+        }],
+        None,
+        1_700_000_000_000,
+    )
+    .unwrap();
+    let addr = start(Arc::clone(&st)).await;
+    let list = || C::ThemeCatalogList(v1::ThemeCatalogList::default());
+    let get = |id: &str| C::ThemeCatalogGet(v1::ThemeCatalogGet { id: id.into() });
+    for who in [Role::Viewer, Role::Member] {
+        *role.lock().unwrap() = who;
+        set_on(st.hub.store(), false, 1).unwrap();
+        let mut client = dial(addr, Some("good-token")).await;
+        subscribe(&mut client, v1::Subscribe::default().encode_to_vec()).await;
+        while recv(&mut client).await.kind != kinds::SNAPSHOT {}
+
+        client
+            .send(&catalog_request("l1", "", list()))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        let Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::ThemeCatalogList(off)),
+        })) = r.result
+        else {
+            panic!("expected the list: {r:?}");
+        };
+        assert_eq!(off, v1::ThemeCatalogListResult::default(), "{who:?}");
+        client
+            .send(&catalog_request("g1", "", get("harbour")))
+            .await
+            .unwrap();
+        assert_eq!(err_code(&response(&mut client).await), "theme.catalog_off");
+
+        set_on(st.hub.store(), true, 2).unwrap();
+        client
+            .send(&catalog_request("l2", "", list()))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        let Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::ThemeCatalogList(on)),
+        })) = r.result
+        else {
+            panic!("expected the list: {r:?}");
+        };
+        assert!(on.on);
+        assert_eq!(on.updated_at_ms, 1_700_000_000_000);
+        assert_eq!(on.entries.len(), 1);
+        assert_eq!(
+            (
+                on.entries[0].id.as_str(),
+                on.entries[0].version,
+                on.entries[0].size as usize
+            ),
+            ("harbour", 2, data.len())
+        );
+        client
+            .send(&catalog_request("g2", "", get("harbour")))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        let Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::ThemeCatalogTheme(theme)),
+        })) = r.result
+        else {
+            panic!("expected the theme: {r:?}");
+        };
+        assert_eq!(theme.data, data);
+        client
+            .send(&catalog_request("g3", "", get("nope")))
+            .await
+            .unwrap();
+        assert_eq!(err_code(&response(&mut client).await), "theme.not_found");
+        // The hub answers it itself: one that names a machine is refused.
+        client
+            .send(&catalog_request("l3", "n1", list()))
+            .await
+            .unwrap();
+        assert_eq!(
+            err_code(&response(&mut client).await),
+            "protocol.invalid_message"
+        );
+    }
+    // Reading the catalog, on or off, wrote no refusal to the owner's Activity.
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some("eda"), 100)
+        .unwrap();
+    assert!(
+        rows.iter().all(|e| e.outcome != "auth.forbidden"),
+        "{rows:?}"
+    );
+}

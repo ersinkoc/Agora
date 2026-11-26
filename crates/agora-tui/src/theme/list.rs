@@ -70,8 +70,12 @@ pub fn entry_label(e: &Entry, t: Text<'_>) -> String {
         Source::File {
             read: Read::Ok { theme, .. },
             ..
+        }
+        | Source::Pack {
+            read: Read::Ok { theme, .. },
+            ..
         } => theme_label(theme, e.scheme, t),
-        Source::File { name, .. } => t(
+        Source::File { name, .. } | Source::Pack { name, .. } => t(
             key!("tui-theme-refused-row"),
             &[("file", Arg::Str(name.clone()))],
         ),
@@ -344,6 +348,26 @@ fn issue_sentence(i: &Issue, t: Text<'_>) -> String {
         ),
         Issue::Unreadable => t(key!("tui-theme-error-unreadable"), &[]),
         Issue::More(count) => t(key!("tui-theme-error-more"), &[("count", n(*count))]),
+        Issue::PackField(f) => t(key!("tui-theme-error-pack-field"), &[("field", s(f))]),
+        Issue::PackName => t(key!("tui-theme-error-pack-name"), &[("max", n(MAX_NAME))]),
+        Issue::PackPart(part) => t(key!("tui-theme-error-pack-part"), &[("part", s(part))]),
+        Issue::PackTooMany { part, max } => t(
+            if *part == "themes" {
+                key!("tui-theme-error-pack-too-many-themes")
+            } else {
+                key!("tui-theme-error-pack-too-many-layouts")
+            },
+            &[("max", n(*max))],
+        ),
+        Issue::PackThemeFormat(i) => t(key!("tui-theme-error-pack-theme-format"), &[("n", n(*i))]),
+        Issue::InPackTheme { n: i, problem } => t(
+            key!("tui-theme-error-in-pack-theme"),
+            &[("n", n(*i)), ("text", Arg::Str(issue_text(problem, t)))],
+        ),
+        Issue::PackNoThemes { layouts, keys } => t(
+            key!("tui-theme-error-pack-no-themes"),
+            &[("layouts", n(*layouts)), ("keys", n(*keys))],
+        ),
     }
 }
 
@@ -379,11 +403,42 @@ pub fn details(v: &ListView<'_>) -> Vec<String> {
     let Some(e) = v.entries.get(v.selected) else {
         return out;
     };
-    if let Source::File { name, .. } = &e.source {
-        out.push(t(
+    match &e.source {
+        Source::File { name, .. } => out.push(t(
             key!("tui-theme-in-file"),
             &[("file", Arg::Str(name.clone()))],
-        ));
+        )),
+        Source::Pack {
+            name, index, pack, ..
+        } => {
+            out.push(t(
+                key!("tui-theme-in-pack"),
+                &[
+                    ("pack", Arg::Str(pack.pack.chars().take(MAX_NAME).collect())),
+                    ("file", Arg::Str(name.clone())),
+                    ("n", n(index + 1)),
+                    ("count", n(pack.themes)),
+                ],
+            ));
+            // The parts of a pack this client has no use for, said rather than dropped (ADR-0113 decision 4).
+            let mut parts = Vec::new();
+            if pack.layouts > 0 {
+                parts.push(t(
+                    key!("tui-theme-pack-layouts"),
+                    &[("count", n(pack.layouts))],
+                ));
+            }
+            if pack.keys > 0 {
+                parts.push(t(key!("tui-theme-pack-keys"), &[("count", n(pack.keys))]));
+            }
+            if !parts.is_empty() {
+                out.push(t(
+                    key!("tui-theme-pack-unused"),
+                    &[("list", Arg::Str(parts.join("; ")))],
+                ));
+            }
+        }
+        _ => {}
     }
     if let Source::Starter(s) = &e.source {
         out.push(t(
@@ -422,6 +477,10 @@ pub fn details(v: &ListView<'_>) -> Vec<String> {
                 }
             }
             if let Source::File {
+                read: Read::Ok { warnings, .. },
+                ..
+            }
+            | Source::Pack {
                 read: Read::Ok { warnings, .. },
                 ..
             } = &e.source
@@ -650,6 +709,30 @@ mod tests {
             Issue::Unreadable,
             Issue::More(3),
             Issue::More(1),
+            Issue::PackField("script".into()),
+            Issue::PackName,
+            Issue::PackPart("layouts"),
+            Issue::PackTooMany {
+                part: "themes",
+                max: 20,
+            },
+            Issue::PackTooMany {
+                part: "layouts",
+                max: 50,
+            },
+            Issue::PackThemeFormat(2),
+            Issue::InPackTheme {
+                n: 1,
+                problem: Box::new(Issue::Unsafe("name".into()).into()),
+            },
+            Issue::PackNoThemes {
+                layouts: 1,
+                keys: 3,
+            },
+            Issue::PackNoThemes {
+                layouts: 2,
+                keys: 1,
+            },
         ]
         .into_iter()
         .map(Problem::from)
@@ -706,6 +789,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_pack_theme_says_which_pack_it_is_in_and_what_of_the_pack_is_not_used_here() {
+        let d =
+            std::env::temp_dir().join(format!("agora-tui-theme-pack-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let pack = format!(
+            r#"{{"agora-pack": 1, "name": "Harbour set", "themes": [{}],
+               "layouts": [{{"name": "A", "layout": {{"version": 1, "root": {{"type": "pane", "panel": "usage"}}}}}}, {{"name": "B", "layout": {{"version": 1, "root": {{"type": "pane", "panel": "plugin.clock.face"}}}}}}],
+               "keybindings": {{"version": 1, "bindings": [{{"command": "palette.open", "keys": ["ctrl+p"]}}]}}}}"#,
+            include_str!("testdata/harbour.json")
+        );
+        std::fs::write(d.join("set.json"), pack).unwrap();
+        let rows = entries(&d);
+        let cat = Catalog::english();
+        let t =
+            |id: &str, args: &[(&str, Arg)]| cat.render(id, args).unwrap_or_else(|| id.to_string());
+        let current = Choice::Terminal;
+        // The pack's first row comes after no theme, the built-in themes and the starter themes.
+        let first = rows
+            .iter()
+            .position(|e| matches!(e.source, Source::Pack { .. }))
+            .unwrap();
+        let v = ListView {
+            entries: &rows,
+            selected: first,
+            current: &current,
+            folder: "~/.agora/themes",
+            notice: "",
+            banner: "",
+            colors: ColorMode::Full,
+            t: &t,
+        };
+        assert_eq!(entry_label(&rows[first], &t), "Harbour · dark");
+        let about = details(&v).join("\n");
+        assert!(
+            about.contains("In the pack \"Harbour set\" (file set.json): theme 1 of 1."),
+            "{about}"
+        );
+        assert!(about.contains("Also in the pack, not used in the terminal client: 2 saved layouts; keys for 1 command."), "{about}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn screen(v: &ListView<'_>) -> (Vec<String>, ratatui::buffer::Buffer) {

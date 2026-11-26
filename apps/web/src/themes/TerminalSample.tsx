@@ -1,3 +1,4 @@
+// A few lines of a terminal, drawn in a theme's own palette: in the editor's preview and in the catalog's (ThemeCatalog.tsx).
 import { t } from '../i18n';
 import { terminalColour } from './file';
 import type { TerminalKey } from './look';
