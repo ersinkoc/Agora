@@ -1045,7 +1045,8 @@ impl MeshServer {
                 unavailable()
             }
         };
-        // A full store refuses before a number or a rate slot is used up.
+        // A full store, or a record of this delivery on disk that was not loaded, refuses before a number or a rate slot is used up.
+        handoffs.store.present(&id).map_err(refused)?;
         handoffs.store.room_for(&delivery).map_err(refused)?;
         let sender = AgentId::new(format!(
             "{}/{}",
@@ -2396,7 +2397,12 @@ mod tests {
 
     /// A node with its durable inbox open, ids reserved, and `agents` running in project `shared` (each agent's run is `[n; 16]`).
     fn handoff_node(dir: &Path, agents: &[(&str, u8)]) -> MeshServer {
-        let node = MeshServer::new(dir, Limits::default()).unwrap();
+        handoff_node_with(dir, agents, Limits::default())
+    }
+
+    /// [`handoff_node`] with the mesh's `limits`.
+    fn handoff_node_with(dir: &Path, agents: &[(&str, u8)], limits: Limits) -> MeshServer {
+        let node = MeshServer::new(dir, limits).unwrap();
         node.open_handoffs(dir).unwrap();
         node.mesh.lock().unwrap().reserve_ids(10_000, 20_000);
         for (agent, run) in agents {
@@ -2510,6 +2516,49 @@ mod tests {
         d.task_id = "x".repeat(MAX_HANDOFF_ID_BYTES);
         node.deliver_handoff(d, now).unwrap();
         assert_eq!(record_files(&guard.0).len(), 1);
+    }
+
+    /// Review of #1221 (F1640): a delivery whose record is on disk but was not loaded (here a directory in its place, made after the
+    /// store opened) is refused before a number or a rate slot is used up: with one message per window, the sender's next delivery
+    /// is still taken at the same moment, under the number the refused one did not use.
+    #[test]
+    fn a_delivery_whose_record_was_not_loaded_uses_no_number_or_rate_slot() {
+        let guard = TempDir::new("present");
+        let node = handoff_node_with(
+            &guard.0,
+            &[("receiver", 2)],
+            Limits {
+                messages_per_window: 1,
+                ..Limits::default()
+            },
+        );
+        let now = 1_000_000;
+        let blocked = guard
+            .0
+            .join("handoffs")
+            .join(format!("{}.handoff", "01".repeat(16)));
+        std::fs::create_dir(&blocked).unwrap();
+        let next = node.mesh.lock().unwrap().next_id();
+        for _ in 0..2 {
+            let e = node
+                .deliver_handoff(handoff(1, "receiver", 2, now + 1000), now)
+                .unwrap_err();
+            assert_eq!(e.code, agora_protocol::ErrorCode::MeshUnavailable);
+        }
+        assert_eq!(node.mesh.lock().unwrap().next_id(), next, "no number taken");
+        node.deliver_handoff(handoff(5, "receiver", 2, now + 1000), now)
+            .unwrap();
+        let number = node
+            .handoffs
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .store
+            .get(&[5; 16])
+            .unwrap()
+            .number;
+        assert_eq!(number, next);
     }
 
     /// Review of #1175 (B2): a full store (here 1,024 records of an ended run whose deadline has not passed) refuses a new delivery

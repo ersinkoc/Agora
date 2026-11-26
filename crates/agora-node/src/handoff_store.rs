@@ -261,20 +261,25 @@ impl Store {
         Ok(())
     }
 
-    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
-        let id = record.id().map_err(InsertError::Storage)?;
-        if self.records.contains_key(&id) {
+    /// Refuses a record under `id` that this store holds, or whose file is on disk although `open` did not load it (it could not be
+    /// read then): that file stays for the next start, so a retry is refused for now (F1640), never written over it as a second
+    /// entry. Only a proven absence passes. Like [`Self::room_for`], answered before a number is taken (review of #1221).
+    pub fn present(&self, id: &Id) -> Result<(), InsertError> {
+        if self.records.contains_key(id) {
             return Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into()));
         }
-        // A file under this id that `open` did not load (it could not be read then) stays for the next start: the retry is
-        // refused for now (F1640), never written over it as a second entry. Only a proven absence lets the write go on.
-        let path = self.root.join(filename(id));
-        match std::fs::symlink_metadata(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Ok(_) => return Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into())),
-            Err(e) => return Err(InsertError::Storage(e)),
+        match std::fs::symlink_metadata(self.root.join(filename(*id))) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into())),
+            Err(e) => Err(InsertError::Storage(e)),
         }
+    }
+
+    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
+        let id = record.id().map_err(InsertError::Storage)?;
+        self.present(&id)?;
         self.room_for(&record.delivery)?;
+        let path = self.root.join(filename(id));
         let bytes = record.bytes().map_err(InsertError::Storage)?;
         agora_platform::write_private(&path, &bytes).map_err(InsertError::Storage)?;
         self.records.insert(id, (record, bytes.len()));
