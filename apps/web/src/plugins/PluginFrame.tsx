@@ -58,6 +58,11 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
     let alive = true;
     const post = (msg: Outbound) => { if (alive) frame.current?.contentWindow?.postMessage(msg, '*'); };
     const answer = (id: number, data: unknown, first: boolean) => post(first ? { agora: 1, type: 'result', id, ok: true, data } : { agora: 1, type: 'update', id, data });
+    // A watch refused at its first answer is not running: the frame's loader forgets it without `unwatch`, so it keeps no slot (F1822).
+    const refuse = (id: number, w: Watch | undefined) => {
+      if (w && watches.get(id) === w) watches.delete(id);
+      post({ agora: 1, type: 'result', id, ok: false, error: 'unavailable' });
+    };
     const count = () => { const c = filter.counts; setDropped(c.type + c.size + c.rate); };
 
     // Sends what changed since the last answer of each watch. Changes come from the window's state (every render) and the theme.
@@ -78,24 +83,24 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
       const v = latest.current;
       const agent = v.pane.agent;
       if (w) w.key = v.changesKey;
-      if (!v.diff || !agent) { if (first) post({ agora: 1, type: 'result', id, ok: false, error: 'unavailable' }); return; }
+      if (!v.diff || !agent) { if (first) refuse(id, w); return; }
       try {
         const data = projectChanges(agent.id, await v.diff());
         if (w && !watches.has(id)) return;
         const s = JSON.stringify(data);
         if (w) { if (s === w.last) return; w.last = s; }
         answer(id, data, first);
-      } catch { if (first) post({ agora: 1, type: 'result', id, ok: false, error: 'unavailable' }); }
+      } catch { if (first) refuse(id, w); }
     };
     // The bound agent's conversation: a read takes the first batch and closes; a watch keeps the stream and sends each change.
     const readChat = (id: number, w: Watch | undefined) => {
       const v = latest.current;
       const agent = v.pane.agent;
-      if (!v.chat || !agent) { post({ agora: 1, type: 'result', id, ok: false, error: 'unavailable' }); return; }
+      if (!v.chat || !agent) { refuse(id, w); return; }
       let first = true;
       let lines: ChatLine[] = [];
       const give = () => { const data = projectChat(agent.id, lines); answer(id, data, first); first = false; };
-      const timeout = setTimeout(() => { if (first) { conn.close(); post({ agora: 1, type: 'result', id, ok: false, error: 'unavailable' }); first = false; } }, READ_TIMEOUT_MS);
+      const timeout = setTimeout(() => { if (first) { conn.close(); refuse(id, w); first = false; } }, READ_TIMEOUT_MS);
       const conn = v.chat.connect((batch, replace) => {
         lines = replace ? [...batch] : mergeLines(lines, batch);
         if (!w) { if (first) { clearTimeout(timeout); give(); queueMicrotask(() => conn.close()); } return; }

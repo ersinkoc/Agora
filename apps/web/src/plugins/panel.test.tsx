@@ -16,6 +16,9 @@ import { workspaceOf, type Workspace as WorkspaceState } from '../layout/engine'
 import type { PanelRegistry, PanelState } from '../layout/panels';
 import { LAYOUT_VERSION, type LayoutNode } from '../layout/tree';
 import { Workspace, panelName } from '../layout/Workspace';
+import { PluginFrame } from './PluginFrame';
+import { MAX_WATCHES } from './protocol';
+import { viewOf } from './projection';
 import { FRAME_POLICY, FRAME_SANDBOX, frameUrl } from './frameDoc';
 import { checkPackage } from './package';
 import { pluginPanels, withPlugins } from './registry';
@@ -196,5 +199,27 @@ describe('safe mode', () => {
     // The key is listened for before the theme and the plugins start.
     const main = readFileSync(join(__dirname, '../main.tsx'), 'utf8');
     expect(main.indexOf('installSafeKey();')).toBeLessThan(main.indexOf('initTheme();'));
+  });
+});
+
+describe('the bridge', () => {
+  // F1822: a watch the window refuses at once (`unavailable`) is not running: the frame's loader forgets it and never sends `unwatch`, so
+  // it takes none of the frame's MAX_WATCHES slots.
+  it('keeps no slot for a watch it refused', async () => {
+    const files = { 'panel.js': ENTRY };
+    const r = await checkPackage(bundle(files, { manifest: baseManifest(files, { capabilities: ['agents.read', 'chat.read', 'changes.read'] }) }), '0.3.39');
+    if (!r.ok) throw new Error(r.code);
+    // A global pane is bound to no agent: its conversation and changes are unavailable.
+    const view = viewOf({ pane: 'p1', kind: 'global', fleet, boards: [], now: 0 });
+    act(() => root.render(<PluginFrame plugin={r.plugin} panel={r.plugin.manifest.panels[0]!} granted={['agents.read', 'chat.read', 'changes.read']} view={view} dev />));
+    const win = (host.querySelector('iframe') as HTMLIFrameElement).contentWindow as Window;
+    const got: { id: number; ok?: boolean; error?: string }[] = [];
+    (win as unknown as { postMessage: (m: unknown) => void }).postMessage = (m) => { got.push(m as never); };
+    const send = (data: unknown) => act(() => { window.dispatchEvent(new MessageEvent('message', { source: win, data })); });
+    for (let id = 1; id <= MAX_WATCHES; id++) send({ agora: 1, type: 'watch', id, cap: id % 2 ? 'chat.read' : 'changes.read' });
+    await act(async () => { await Promise.resolve(); });
+    expect(got.filter((m) => m.error === 'unavailable')).toHaveLength(MAX_WATCHES);
+    send({ agora: 1, type: 'watch', id: 100, cap: 'agents.read' });
+    expect(got.find((m) => m.id === 100)).toMatchObject({ ok: true });
   });
 });
