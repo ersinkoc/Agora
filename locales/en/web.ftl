@@ -1030,6 +1030,103 @@ theme-catalog-refused = This theme can't be used:
 theme-catalog-gone = This theme is no longer in the catalog.
 theme-catalog-off = The catalog was turned off.
 theme-catalog-unavailable = The theme could not be fetched. Try again.
+pack-import = Import pack…
+pack-export = Export as pack…
+pack-export-title = Export as pack
+pack-export-hint = A pack is one file with themes, saved layouts and keys, to share or to use in another browser. Pick what goes in.
+pack-name = Pack name
+pack-name-default = My pack
+pack-themes = Themes
+pack-layouts = Saved layouts
+pack-keys = Keys
+pack-panes = { $count ->
+    [one] 1 pane
+   *[other] { $count } panes
+}
+pack-export-no-layouts = No saved layouts yet. Save one from the layout menu.
+pack-export-unbound = A pane that shows one of your agents is saved without it: the pack names panels only.
+pack-keys-own = Your keys
+pack-keys-none = You use the default keys.
+pack-keys-count = { $count ->
+    [one] 1 command with its own keys
+   *[other] { $count } commands with their own keys
+}
+pack-export-do = Export
+pack-import-title = Import pack
+pack-import-hint = You see what the pack holds before anything changes, and choose what to use.
+pack-import-paste = Paste a pack (JSON)
+pack-import-file = Or choose a file
+pack-import-refused = This pack can't be used:
+pack-preview-do = See what's in it
+pack-preview-title = Pack “{ $name }”
+pack-preview-hint = Tick what to use. Nothing changes until you do. Themes and layouts are added to yours; keys are merged after you see what they change.
+pack-theme-warnings = { $count ->
+    [one] 1 thing hard to see
+   *[other] { $count } things hard to see
+}
+pack-themes-room = You have room for { $count ->
+    [one] 1 more theme
+   *[other] { $count } more themes
+}. Delete one of yours or tick fewer.
+pack-layout-plugin = Needs a plugin to show { $panels }. A pack never installs plugins: until you install and allow it, the pane says it can't be shown.
+pack-layout-unknown = This window can't show { $panels }: the pane says so.
+pack-keys-theirs = The pack's keys
+pack-keys-unknown = { $count ->
+    [one] It names a command this window does not have. It is kept, and does nothing here.
+   *[other] It names { $count } commands this window does not have. They are kept, and do nothing here.
+}
+pack-back = Back
+pack-next = Next
+pack-apply = Use what's ticked
+pack-close = Close
+pack-keys-confirm-title = Merge the pack's keys?
+pack-keys-confirm-hint = { $count ->
+    [one] The pack sets the keys of 1 command. Your other keys stay as they are.
+   *[other] The pack sets the keys of { $count } commands. Your other keys stay as they are.
+}
+pack-keys-no-conflicts = Nothing you set yourself changes, and no key would do two things.
+pack-keys-replaced = Your keys these replace
+pack-keys-replaced-row = { $name }: { $mine } becomes { $theirs }
+pack-keys-clashes = Keys that would do two things
+pack-keys-clash-same = { $key } would be both { $a } and { $b }.
+pack-keys-clash-prefix = { $key } starts a key of both { $a } and { $b }.
+pack-keys-merge-do = Merge keys and use what's ticked
+pack-layout-copy = { $name } ({ $n })
+pack-done-themes = { $count ->
+    [one] 1 theme added to yours. Choose it above when you want it.
+   *[other] { $count } themes added to yours. Choose one above when you want it.
+}
+pack-done-layouts = { $count ->
+    [one] 1 layout saved: { $names }. Find it in the layout menu.
+   *[other] { $count } layouts saved: { $names }. Find them in the layout menu.
+}
+pack-done-keys = { $count ->
+    [one] Keys of 1 command merged.
+   *[other] Keys of { $count } commands merged.
+}
+pack-error-json = This is not valid JSON.
+pack-error-invalid = This is not a pack.
+pack-error-newer = This pack was made by a newer version. Update to use it.
+pack-error-empty = This pack holds nothing to use.
+pack-error-name = The pack needs a name of 1 to { $max } characters.
+pack-error-too-large = This pack is larger than { $max } KB.
+pack-error-unknown-field = “{ $field }” is not part of a pack.
+pack-error-part = “{ $part }” is not in the form a pack keeps it in.
+pack-error-too-many-themes = A pack holds at most { $max } themes.
+pack-error-too-many-layouts = A pack holds at most { $max } layouts.
+pack-error-theme-format = Theme { $n } is not a theme of the current format.
+pack-in-theme = Theme { $n }: { $text }
+pack-in-layout = Layout { $n }: { $text }
+pack-in-keys = Keys: { $text }
+pack-error-layout-entry = Layout { $n } is not a named layout.
+pack-error-layout-name = Layout { $n } needs a name of 1 to 60 characters.
+pack-error-layout-twice = Layout { $n }: the name “{ $name }” is used twice.
+pack-error-layout-field = Layout { $n }: “{ $field }” is not part of a layout.
+pack-error-layout-panel = Layout { $n }: “{ $panel }” is not a panel's name.
+pack-error-layout-agent = Layout { $n } shows one of someone's agents. A pack's layout names panels only.
+pack-error-layouts-full = You can keep at most { $max } saved layouts. Delete some or tick fewer.
+pack-error-keys-merge = The keys can't be merged: { $text }
+pack-error-more = …and { $count } more.
 theme-name-dark = Dark
 theme-name-light = Light
 theme-name-high-contrast = High contrast

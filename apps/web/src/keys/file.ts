@@ -80,9 +80,14 @@ export function readKeysValue(raw: unknown): ReadKeys {
   return { ok: true, file: { entries }, unknown };
 }
 
+/** The file as JSON data (a theme pack's `keybindings` part, ADR-0113 decision 5). */
+export function keysObject(file: KeyFile): { version: number; bindings: { command: string; keys: string[] }[] } {
+  return { version: KEYS_FORMAT, bindings: file.entries.map((e) => ({ command: e.command, keys: [...e.keys] })) };
+}
+
 /** The file's text: what is read back is the same file. Entries keep their order; keys are written in their one spelling. */
 export function writeKeys(file: KeyFile): string {
-  return `${JSON.stringify({ version: KEYS_FORMAT, bindings: file.entries.map((e) => ({ command: e.command, keys: [...e.keys] })) }, null, 2)}\n`;
+  return `${JSON.stringify(keysObject(file), null, 2)}\n`;
 }
 
 /** The file with one command's keys set (`undefined`: back to its defaults, the entry removed). Pure. */
@@ -95,6 +100,37 @@ export function withKeys(file: KeyFile, command: string, keys: readonly string[]
 }
 
 export const EMPTY_FILE: KeyFile = { entries: [] };
+
+/**
+ * Another file's keys merged over the person's own (a theme pack's keybindings, ADR-0113 decision 5): each command the other file names
+ * takes its keys from it, the rest stay. Pure; what it would change is said before anything is kept:
+ * - `replaced`: commands the person had set themselves that the other file sets differently (theirs are lost);
+ * - `clashes`: keys that would then belong to two commands and did not before;
+ * - `issues`: the merged file could not be kept as it is (over the entry or size cap), so it must not be stored: it would be refused on
+ *   the next load and the person's own keys with it.
+ */
+export interface Merge {
+  file: KeyFile;
+  unknown: string[];
+  replaced: { command: string; mine: readonly string[]; theirs: readonly string[] }[];
+  clashes: Conflict[];
+  issues: KeyIssue[];
+}
+export function mergeKeys(mine: KeyFile, mineUnknown: readonly string[], theirs: KeyFile, theirsUnknown: readonly string[]): Merge {
+  let file = mine;
+  const replaced: Merge['replaced'] = [];
+  for (const e of theirs.entries) {
+    const had = mine.entries.find((m) => m.command === e.command);
+    if (had && had.keys.join('\n') !== e.keys.join('\n')) replaced.push({ command: e.command, mine: had.keys, theirs: e.keys });
+    file = withKeys(file, e.command, e.keys);
+  }
+  const key = (c: Conflict) => `${c.kind} ${[c.a, c.b].sort().join(' ')} ${c.keys}`;
+  const before = new Set(conflicts(keymap(mine)).map(key));
+  const clashes = conflicts(keymap(file)).filter((c) => !before.has(key(c)));
+  const unknown = [...new Set([...mineUnknown, ...theirsUnknown])].filter((u) => file.entries.some((e) => e.command === u));
+  const again = readKeys(writeKeys(file));
+  return { file, unknown, replaced, clashes, issues: again.ok ? [] : again.issues };
+}
 
 // ---- The keys in force ----------------------------------------------------------------------------------------------------------------
 

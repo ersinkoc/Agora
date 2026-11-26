@@ -1002,6 +1002,103 @@ theme-catalog-refused = Bu tema kullanılamıyor:
 theme-catalog-gone = Bu tema artık katalogda değil.
 theme-catalog-off = Katalog kapatıldı.
 theme-catalog-unavailable = Tema getirilemedi. Yeniden deneyin.
+pack-import = Paket içe aktar…
+pack-export = Paket olarak dışa aktar…
+pack-export-title = Paket olarak dışa aktar
+pack-export-hint = Paket; temaları, kayıtlı yerleşimleri ve tuşları paylaşmak ya da başka bir tarayıcıda kullanmak için tek bir dosyadır. İçine neyin gireceğini seçin.
+pack-name = Paket adı
+pack-name-default = Paketim
+pack-themes = Temalar
+pack-layouts = Kayıtlı yerleşimler
+pack-keys = Tuşlar
+pack-panes = { $count ->
+    [one] 1 bölme
+   *[other] { $count } bölme
+}
+pack-export-no-layouts = Henüz kayıtlı yerleşim yok. Yerleşim menüsünden bir tane kaydedin.
+pack-export-unbound = Ajanlarınızdan birini gösteren bölme onsuz kaydedilir: paket yalnızca panelleri adlandırır.
+pack-keys-own = Tuşlarınız
+pack-keys-none = Varsayılan tuşları kullanıyorsunuz.
+pack-keys-count = { $count ->
+    [one] Kendi tuşları olan 1 komut
+   *[other] Kendi tuşları olan { $count } komut
+}
+pack-export-do = Dışa aktar
+pack-import-title = Paket içe aktar
+pack-import-hint = Bir şey değişmeden önce paketin içinde ne olduğunu görür ve neyi kullanacağınızı seçersiniz.
+pack-import-paste = Bir paket yapıştırın (JSON)
+pack-import-file = Ya da bir dosya seçin
+pack-import-refused = Bu paket kullanılamaz:
+pack-preview-do = İçinde ne var, gör
+pack-preview-title = “{ $name }” paketi
+pack-preview-hint = Kullanılacakları işaretleyin. Siz işaretleyene kadar hiçbir şey değişmez. Temalar ve yerleşimler sizinkilere eklenir; tuşlar, neyi değiştireceklerini gördükten sonra birleştirilir.
+pack-theme-warnings = { $count ->
+    [one] zor görünen 1 şey
+   *[other] zor görünen { $count } şey
+}
+pack-themes-room = { $count ->
+    [one] 1 tema daha
+   *[other] { $count } tema daha
+} için yeriniz var. Kendi temalarınızdan birini silin ya da daha azını işaretleyin.
+pack-layout-plugin = { $panels } için bir eklenti gerekir. Paket hiçbir zaman eklenti kurmaz: siz kurup izin verene kadar bölme gösterilemediğini söyler.
+pack-layout-unknown = Bu pencere { $panels } gösteremez: bölme bunu söyler.
+pack-keys-theirs = Paketin tuşları
+pack-keys-unknown = { $count ->
+    [one] Bu pencerede olmayan bir komutu adlandırıyor. Saklanır ve burada bir şey yapmaz.
+   *[other] Bu pencerede olmayan { $count } komutu adlandırıyor. Saklanırlar ve burada bir şey yapmazlar.
+}
+pack-back = Geri
+pack-next = İleri
+pack-apply = İşaretlileri kullan
+pack-close = Kapat
+pack-keys-confirm-title = Paketin tuşları birleştirilsin mi?
+pack-keys-confirm-hint = { $count ->
+    [one] Paket 1 komutun tuşlarını belirliyor. Diğer tuşlarınız olduğu gibi kalır.
+   *[other] Paket { $count } komutun tuşlarını belirliyor. Diğer tuşlarınız olduğu gibi kalır.
+}
+pack-keys-no-conflicts = Kendi belirlediğiniz hiçbir şey değişmez ve hiçbir tuş iki iş yapmaz.
+pack-keys-replaced = Bunların yerini aldığı tuşlarınız
+pack-keys-replaced-row = { $name }: { $mine } yerine { $theirs }
+pack-keys-clashes = İki iş yapacak tuşlar
+pack-keys-clash-same = { $key } hem { $a } hem { $b } olur.
+pack-keys-clash-prefix = { $key } hem { $a } hem { $b } tuşunu başlatır.
+pack-keys-merge-do = Tuşları birleştir ve işaretlileri kullan
+pack-layout-copy = { $name } ({ $n })
+pack-done-themes = { $count ->
+    [one] 1 tema sizinkilere eklendi. İstediğinizde yukarıdan seçin.
+   *[other] { $count } tema sizinkilere eklendi. İstediğinizde yukarıdan birini seçin.
+}
+pack-done-layouts = { $count ->
+    [one] 1 yerleşim kaydedildi: { $names }. Yerleşim menüsünde bulabilirsiniz.
+   *[other] { $count } yerleşim kaydedildi: { $names }. Yerleşim menüsünde bulabilirsiniz.
+}
+pack-done-keys = { $count ->
+    [one] 1 komutun tuşları birleştirildi.
+   *[other] { $count } komutun tuşları birleştirildi.
+}
+pack-error-json = Bu geçerli bir JSON değil.
+pack-error-invalid = Bu bir paket değil.
+pack-error-newer = Bu paket daha yeni bir sürümle yapılmış. Kullanmak için güncelleyin.
+pack-error-empty = Bu pakette kullanılacak bir şey yok.
+pack-error-name = Paketin 1 ile { $max } karakter arasında bir adı olmalı.
+pack-error-too-large = Bu paket { $max } KB'tan büyük.
+pack-error-unknown-field = “{ $field }” bir paketin parçası değil.
+pack-error-part = “{ $part }”, paketin onu tuttuğu biçimde değil.
+pack-error-too-many-themes = Bir pakette en çok { $max } tema olabilir.
+pack-error-too-many-layouts = Bir pakette en çok { $max } yerleşim olabilir.
+pack-error-theme-format = { $n }. tema güncel biçimde bir tema değil.
+pack-in-theme = { $n }. tema: { $text }
+pack-in-layout = { $n }. yerleşim: { $text }
+pack-in-keys = Tuşlar: { $text }
+pack-error-layout-entry = { $n }. yerleşim adlandırılmış bir yerleşim değil.
+pack-error-layout-name = { $n }. yerleşimin 1 ile 60 karakter arasında bir adı olmalı.
+pack-error-layout-twice = { $n }. yerleşim: “{ $name }” adı iki kez kullanılmış.
+pack-error-layout-field = { $n }. yerleşim: “{ $field }” bir yerleşimin parçası değil.
+pack-error-layout-panel = { $n }. yerleşim: “{ $panel }” bir panel adı değil.
+pack-error-layout-agent = { $n }. yerleşim birinin ajanlarından birini gösteriyor. Paketteki yerleşim yalnızca panelleri adlandırır.
+pack-error-layouts-full = En çok { $max } kayıtlı yerleşim tutabilirsiniz. Bazılarını silin ya da daha azını işaretleyin.
+pack-error-keys-merge = Tuşlar birleştirilemiyor: { $text }
+pack-error-more = …ve { $count } tane daha.
 theme-name-dark = Koyu
 theme-name-light = Açık
 theme-name-high-contrast = Yüksek karşıtlık

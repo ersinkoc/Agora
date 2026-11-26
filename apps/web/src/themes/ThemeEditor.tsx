@@ -20,6 +20,7 @@ import {
 } from './messages';
 import { type Saved, themeStore } from './store';
 import { ThemeCatalog } from './ThemeCatalog';
+import { ExportPack, ImportPack } from './PackDialogs';
 import { TerminalSample } from './TerminalSample';
 import {
   COLOR_TOKENS, type Look, MAX_NAME, type Scheme, type Theme, type ThemeIssue, type TokenName, chromeOf, hasScheme, kindOf, looksOf, pxOf,
@@ -32,6 +33,7 @@ export function ThemeEditor() {
   const scheme = themeStore.scheme();
   const [problems, setProblems] = useState<string[]>([]);
   const file = useRef<HTMLInputElement>(null);
+  const [pack, setPack] = useState<'export' | 'import' | undefined>();
   // An imported theme for the scheme not on screen has no Readability shown, so its warnings are said here; one on screen lists
   // them in its own Readability section.
   const report = (r: Saved) => setProblems(r.ok
@@ -66,6 +68,8 @@ export function ThemeEditor() {
       <div className="flex flex-wrap gap-2">
         <button type="button" className="button" onClick={() => file.current?.click()}>{t('theme-import')}</button>
         <button type="button" className="button" onClick={() => download(serialise(writeTheme(theme, themeName(theme))))}>{t('theme-export')}</button>
+        <button type="button" className="button" onClick={() => setPack('import')}>{t('pack-import')}</button>
+        <button type="button" className="button" onClick={() => setPack('export')}>{t('pack-export')}</button>
         {!theme.builtIn && <button type="button" className="button" onClick={() => { themeStore.remove(theme.id); setProblems([]); }}>{t('theme-delete')}</button>}
         <button type="button" className="button" onClick={() => { themeStore.reset(); setProblems([]); }}>{t('theme-reset')}</button>
         <input ref={file} type="file" accept=".json,application/json" className="hidden" aria-hidden tabIndex={-1}
@@ -77,6 +81,8 @@ export function ThemeEditor() {
           }} />
       </div>
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
+      {pack === 'export' && <ExportPack onClose={() => setPack(undefined)} />}
+      {pack === 'import' && <ImportPack onClose={() => setPack(undefined)} />}
       <ThemeCatalog />
     </section>
   );
