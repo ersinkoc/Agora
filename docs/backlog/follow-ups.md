@@ -26,15 +26,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   (`spawn.rs`); decided in that window, it is filed afterwards and never expires.
 - **Linked-worktree pinning and a rewritten `commondir`** (needs a proof): with git 2.53, refs (`HEAD`, `refs/heads/<wt>`) may still
   resolve through a rewritten `commondir`; the test checks config and hooks only.
-- **Board merge leftovers** (ADR-0115): no `TaskChanged` events on a merge; no `task_moved` notice for a renamed task's old id; the
-  board and its `board-merged.*` markers are written separately (a failed marker write merges again on restart, duplicating tasks under
-  new ids); a first board's lease whose holder no longer runs wins the path; overlapping but different lease paths are refused silently by
-  `import_leases`; owed board-merge notices live in the hub's memory and a hub restart drops them.
 - **Confinement on Linux, residuals of #1146:** a grant that leads below a closed path (anything inside the node's data folder) passes
   both checks (no no-follow walk like macOS's #545); where `/home` links into `/var` (Fedora Atomic), the default `/var` read grant holds
   the node's folder and every confined start is refused (needs a design: leave the home folder out of that grant).
-- **`.agent-project.json` written in place** (`directory.rs`): a kill between creating and writing it leaves an empty file that refuses the
-  folder; write beside it and link into place without replacing.
 - **Stop during a pending restart** (control.rs, needs a proof): may emit a second `AgentExited(i32::MIN)` and `TerminalClosed`.
 - **`pump`'s lag path** (control.rs, needs a proof): after a restart the resync can reach the next process's handle; likely needs a
   launch-id check.

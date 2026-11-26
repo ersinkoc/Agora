@@ -794,6 +794,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("cert-renew-join-again", _) => key!("doctor-cert-renew-join-again"),
             ("cert-renew-superseded", _) => key!("doctor-cert-renew-superseded"),
             ("cert-renew-rejected", _) => key!("doctor-cert-renew-rejected"),
+            ("cert-renew-clock", _) => key!("doctor-cert-renew-clock"),
             ("cert-renew-hub-old", _) => key!("doctor-cert-renew-hub-old"),
             ("cert-renew-pending", _) => key!("doctor-cert-renew-pending"),
             ("cert-hub", Status::Ok) => key!("doctor-cert-hub"),

@@ -232,6 +232,7 @@ doctor-cert-renew-superseded = Bu makinenin hub sertifikası, hub'ın onun için
    *[no] Yaklaşık günde bir yine sorulur.
 }
 doctor-cert-renew-rejected = Hub, bu makinenin sertifika yenileme isteğine doğrulanamayan bir sertifikayla karşılık verdi ({ $detail }); bu yüzden kullanılmadı ve kullanımdaki sertifika değişmedi. Bir saat sonra, art arda beş kezden sonra da yeni bir istekle yine sorulur. Tekrarlanırsa bu makinenin kaydolduğu hub'a ulaştığından emin ol.
+doctor-cert-renew-clock = Hub'ın bu makine için verdiği yeni sertifika, bu makinenin saatine göre bir günden daha sonra başlıyor ya da çoktan bitmiş; bu yüzden henüz kullanılmıyor. Bu makinenin saati yanlış olabilir: düzelt (ya da otomatik saati aç). İstek saklanır ve her saat yeniden sorulur; saat düzelir düzelmez sertifika alınır. Kullanımdaki sertifika değişmedi.
 doctor-cert-renew-hub-old = Bu makinenin bağlı olduğu hub sertifika yenilemeden eski, bu yüzden makinenin sertifikası kendini henüz yenileyemiyor. Hub'ı güncelle (yaklaşık saatte bir yine sorulur); o zamana kadar sertifikası bitmeden bu makineyi yeniden katıl.
 doctor-cert-renew-pending = Bu makine için yeni bir sertifika alınıyor; hub henüz yanıtlamadı. Makine elindeki sertifikayla çalışmaya devam eder ve kendisi yine sorar.
 doctor-cert-hub = Hub'ın kendi sertifikası { $detail ->

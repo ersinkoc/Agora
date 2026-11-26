@@ -95,7 +95,8 @@ What happens today. Kept only as the fallback for a machine that was offline pas
 
 ## Amendment A (Accepted, 2026-11-20): a node whose clock is behind keeps its answered request, and accepts a certificate that starts slightly in its future
 Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0094 ve ADR-0085 Ek A'yı kabul ediyorum"). The open questions' proposed answers stand.
-Nothing below is built yet (2026-11-21). The rest of ADR-0085 stays Accepted and unchanged.
+Built 2026-11-26 on `main` (decisions 1 to 5). Not built: the window's machine card (open question 2, waits for the "needs to join again"
+card). The rest of ADR-0085 stays Accepted and unchanged.
 
 Origin: evidence audit round 10, finding F1340 (#816 describes the proofs). Two Accepted rules of this ADR, each sound alone, contradict each other
 when the machine's clock is behind the hub's:

@@ -1077,9 +1077,14 @@ it has, so no code and no owner step is needed while it is still valid.
   `enroll.renew`, it makes a fresh key and request, **writes both to `<link dir>/renew-pending.pem` (private, whole-file replace) before it
   sends anything**, and sends the request over a one-shot certificate connection made with its current certificate. It keeps the file until the
   answer is stored; after a crash or a lost answer the next start sends the SAME request (the hub answers it again with the same
-  certificate). An answer is used only when it chains to the pinned CA, is valid now, lasts at most a year, is for client authentication
-  only and not a CA, names this node, carries the public key of the request and of the persisted key, and ends later than the certificate in
-  use; otherwise it is dropped, the pair in use is kept, and the same request is asked again after an hour. A good answer is stored in this
+  certificate). An answer is used only when it chains to the pinned CA, has not ended and has started or starts within 24 hours of the node's
+  clock (ADR-0085 Amendment A: a clock behind the hub's still renews; the chain is checked at the certificate's own start; pairing keeps
+  "valid now" with 10 minutes of slack), lasts at most a year, is for client authentication only and not a CA, names this node, carries the
+  public key of the request and of the persisted key, and ends later than the certificate in use; otherwise it is dropped, the pair in use
+  is kept, and the same request is asked again after an hour. Five answers in a row rejected for `node`, `key`, `usage` or `chain` give the
+  request up (its key goes with it, and the next due look makes a new one); answers rejected for `validity` (time) or `not_newer` never do,
+  because only the pending key can take the certificate the hub has already issued, and a new request would be answered `superseded`.
+  `agora doctor` says a `validity` rejection may be this machine's clock. A good answer is stored in this
   order: the pair in use to `previous.pem`, then `cert.pem`, then `key.pem`, then `renew-pending.pem` removed; a start that finds the
   certificate and key as two halves finishes the install from the pending file, or, when the key cannot be written, rolls back to
   `previous.pem` (only for the same node id as `node-id`; a link save removes `previous.pem`, `renew-pending.pem` and `renew-state` first);

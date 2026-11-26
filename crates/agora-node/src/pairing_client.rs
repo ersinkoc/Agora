@@ -359,10 +359,10 @@ pub fn ca_fingerprint(ca_pem: &str) -> Option<String> {
 
 /// The longest a certificate this machine will keep may last: the hub issues 90 days (`DEVICE_CERT_DAYS`); a year and a day leaves room for
 /// a hub that changes it and refuses one that lasts for decades.
-const MAX_CERT_SECONDS: i64 = 366 * 86_400;
+pub(crate) const MAX_CERT_SECONDS: i64 = 366 * 86_400;
 
 /// How far ahead a certificate's start may be (clock differences between two machines).
-const CLOCK_SLACK_SECONDS: i64 = 600;
+pub(crate) const CLOCK_SLACK_SECONDS: i64 = 600;
 
 /// What the hub delivered, and what this machine knows to check it against.
 pub struct Delivery<'a> {
@@ -379,7 +379,9 @@ pub struct Delivery<'a> {
 }
 
 /// The checks a certificate this machine is about to use must pass, whether it came from pairing or from a renewal (ADR-0085): it
-/// chains to `roots`, holds now (not starting later than the clock slack, lasting at most [`MAX_CERT_SECONDS`]), may authenticate a
+/// has not ended, starts no later than `ahead` seconds from now (at least the clock slack; pairing passes the slack, a renewal
+/// answer ADR-0085 Amendment A's bound), lasts at most [`MAX_CERT_SECONDS`], chains to `roots` at its own start when that is still
+/// ahead (at now otherwise), may authenticate a
 /// client and is not a CA, names `node_id`, and carries the public key of `csr_der` (this machine's own request: the private key never
 /// left, so a certificate for any other key is of no use and means the sender is not what it says).
 pub(crate) fn check_client_certificate(
@@ -388,37 +390,45 @@ pub(crate) fn check_client_certificate(
     node_id: &str,
     csr_der: &[u8],
     now_secs: i64,
+    ahead: i64,
 ) -> Result<(), PairError> {
     use rustls::server::WebPkiClientVerifier;
     let bad = PairError::CertificateInvalid;
     let at = |secs: i64| {
         UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(secs).unwrap_or(0)))
     };
-    let times = [
-        at(now_secs),
-        at(now_secs.saturating_add(CLOCK_SLACK_SECONDS)),
-    ];
     let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .next()
         .ok_or(bad("certificate"))?
         .map_err(|_| bad("certificate"))?;
-    let client = WebPkiClientVerifier::builder_with_provider(roots, provider())
-        .build()
-        .map_err(|_| bad("ca"))?;
-    if !times
-        .iter()
-        .any(|now| client.verify_client_cert(&der, &[], *now).is_ok())
-    {
-        return Err(bad("chain"));
-    }
     let (_, cert) =
         x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| bad("certificate"))?;
     let (from, to) = (
         cert.validity().not_before.timestamp(),
         cert.validity().not_after.timestamp(),
     );
-    if now_secs < from - CLOCK_SLACK_SECONDS || now_secs >= to || to - from > MAX_CERT_SECONDS {
+    // Time first, so a certificate that only starts later is never reported as one that does not chain.
+    let ahead = ahead.max(CLOCK_SLACK_SECONDS);
+    if now_secs < from.saturating_sub(ahead)
+        || now_secs >= to
+        || to.saturating_sub(from) > MAX_CERT_SECONDS
+    {
         return Err(bad("validity"));
+    }
+    let client = WebPkiClientVerifier::builder_with_provider(roots, provider())
+        .build()
+        .map_err(|_| bad("ca"))?;
+    // At now, within the clock slack, or at the certificate's own start when that is still ahead (and within `ahead`, checked above).
+    let times = [
+        at(now_secs),
+        at(now_secs.saturating_add(CLOCK_SLACK_SECONDS)),
+        at(from.max(now_secs)),
+    ];
+    if !times
+        .iter()
+        .any(|now| client.verify_client_cert(&der, &[], *now).is_ok())
+    {
+        return Err(bad("chain"));
     }
     let for_clients = cert
         .extended_key_usage()
@@ -513,7 +523,15 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
     }
 
     // The certificate this machine will use.
-    check_client_certificate(roots, d.cert_pem, d.node_id, d.csr_der, now_secs)?;
+    // Pairing keeps "valid now" with the clock slack (ADR-0085 Amendment A, decision 3).
+    check_client_certificate(
+        roots,
+        d.cert_pem,
+        d.node_id,
+        d.csr_der,
+        now_secs,
+        CLOCK_SLACK_SECONDS,
+    )?;
     let fingerprint = ca_fingerprint(d.ca_pem).ok_or(bad("ca"))?;
     Ok((d.ca_pem.to_string(), fingerprint))
 }

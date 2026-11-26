@@ -47,7 +47,8 @@ pub const STATE: &str = "renew-state";
 /// The capability a hub offers when it handles renewals.
 pub const CAPABILITY: &str = "enroll.renew";
 
-/// How many answers that did not check out are asked for again before the request is given up and a new one is made.
+/// How many answers in a row that can never be right for the request (`Rejected::gives_up`) are asked for again before the request is
+/// given up and a new one is made. Answers rejected for time never give it up (ADR-0085 Amendment A).
 pub const MAX_REJECTED: u32 = 5;
 
 /// The longest a state may hold a retry back, whatever the file says (a damaged or hostile file must not wedge a machine).
@@ -99,7 +100,8 @@ pub struct State {
     pub retry_at: i64,
     /// Seconds since 1970 when the hub was last asked.
     pub asked_at: i64,
-    /// How many answers in a row did not check out (`rejected`).
+    /// How many answers in a row could never be right for the request (`rejected` with a reason that gives it up); 0 for one rejected
+    /// for time.
     pub count: u32,
 }
 
@@ -718,12 +720,22 @@ impl Renewer {
             now,
         ) {
             // The pair in use is kept as it is. The request is kept too, and asked again after an hour: the hub answers it again with
-            // the same certificate. After MAX_REJECTED answers in a row that do not check out the request is given up (its key goes
-            // with it) and the next due look makes a new one.
-            let count = state(&self.dir, ends)
-                .filter(|s| s.code == "rejected")
-                .map_or(0, |s| s.count)
-                .saturating_add(1);
+            // the same certificate. After MAX_REJECTED answers in a row that can never be right for it (`Rejected::gives_up`) the
+            // request is given up (its key goes with it) and the next due look makes a new one. An answer rejected for time (this
+            // machine's clock is far behind) or for gaining nothing never gives it up and breaks the run (ADR-0085 Amendment A): the
+            // hub would answer a new request `superseded`, and only the pending key can take the certificate it already issued.
+            let count = if why.gives_up() {
+                state(&self.dir, ends)
+                    .filter(|s| {
+                        s.code == "rejected"
+                            && crate::cert_renew::Rejected::from_code(&s.detail)
+                                .is_some_and(|r| r.gives_up())
+                    })
+                    .map_or(0, |s| s.count)
+                    .saturating_add(1)
+            } else {
+                0
+            };
             let given_up = count >= MAX_REJECTED;
             let wait = if given_up {
                 self.drop_pending();
@@ -973,6 +985,22 @@ mod tests {
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         p.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(5);
         p.not_after = OffsetDateTime::now_utc() + TimeDuration::seconds(life);
+        let issuer = Issuer::new(ca.params.clone(), &ca.key);
+        csr.signed_by(&issuer).unwrap().pem()
+    }
+
+    /// [`issue`] as a hub whose clock is `ahead` seconds past this machine's (`node_now`): the certificate starts 5 minutes before
+    /// the hub's now.
+    fn issue_ahead(ca: &Ca, csr_pem: &str, node_now: i64, ahead: i64, life: i64) -> String {
+        let mut csr = CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+        let p = &mut csr.params;
+        p.distinguished_name = dn("m");
+        p.is_ca = IsCa::ExplicitNoCa;
+        p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let start = OffsetDateTime::from_unix_timestamp(node_now + ahead).unwrap();
+        p.not_before = start - TimeDuration::minutes(5);
+        p.not_after = start + TimeDuration::seconds(life);
         let issuer = Issuer::new(ca.params.clone(), &ca.key);
         csr.signed_by(&issuer).unwrap().pem()
     }
@@ -1825,6 +1853,70 @@ mod tests {
             assert_eq!(state(&j.dir, ends(&j)).unwrap().count, n);
             assert!(pending_exists(&j.dir), "given up after {n}");
         }
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// ADR-0085 Amendment A (F1340): this machine's clock is 6 hours behind the hub's. The hub's answer starts in this machine's
+    /// future; it is taken at once.
+    #[test]
+    fn a_clock_six_hours_behind_renews_at_once() {
+        let j = joined("behind6");
+        let ca = ca_of(&j);
+        let node_now = real_now() + DUE;
+        let ask: AskFn =
+            Box::new(move |_, csr| Ok(issue_ahead(&ca, csr, node_now, 6 * 3600, 90 * DAY)));
+        let r = renewer(&j, DUE, ask, Arc::new(Real));
+        assert_eq!(r.tick().0, Outcome::Renewed);
+        assert!(!pending_exists(&j.dir));
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// ADR-0085 Amendment A (F1340): 60 hours behind is past the bound (and stays past it while the test's clock runs 16 hours). The answer is rejected for `validity`, but the request (and
+    /// so the only key for the certificate the hub issued) is kept through more than five answers, and the same answer is taken once
+    /// the clock is right; asking anew would only be answered `superseded`.
+    #[test]
+    fn a_clock_far_behind_keeps_the_request_and_renews_once_the_clock_is_right() {
+        let j = joined("behind60");
+        let ca = ca_of(&j);
+        let clock = Arc::new(AtomicI64::new(DUE));
+        let issued = Arc::new(Mutex::new(None::<String>));
+        let csrs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let hub_now = real_now() + DUE + 60 * 3600;
+        let (i2, c2) = (Arc::clone(&issued), Arc::clone(&csrs));
+        // The hub issues once, then answers the same request with the same certificate.
+        let ask: AskFn = Box::new(move |_, csr| {
+            c2.lock().unwrap().push(csr.to_string());
+            let mut i = i2.lock().unwrap();
+            Ok(
+                i.get_or_insert_with(|| issue_ahead(&ca, csr, hub_now, 0, 90 * DAY))
+                    .clone(),
+            )
+        });
+        let r = renewer_clocked(&j, Arc::clone(&clock), ask, Arc::new(Real));
+        for n in 0..8 {
+            assert_eq!(r.tick().0, Outcome::Failed, "answer {n}");
+            let s = state(&j.dir, ends(&j)).unwrap();
+            assert_eq!(
+                (s.code.as_str(), s.detail.as_str(), s.count),
+                ("rejected", "validity", 0)
+            );
+            assert!(
+                pending_exists(&j.dir),
+                "the request was given up after {n} answers"
+            );
+            clock.fetch_add(2 * 3600, Ordering::Relaxed);
+        }
+        {
+            let c = csrs.lock().unwrap();
+            assert!(
+                c.iter().all(|x| *x == c[0]),
+                "the same request is asked for again"
+            );
+        }
+        // The clock is set right: the hub's start is now in this machine's past.
+        clock.store(DUE + 60 * 3600, Ordering::Relaxed);
+        assert_eq!(r.tick().0, Outcome::Renewed);
+        assert!(!pending_exists(&j.dir));
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 

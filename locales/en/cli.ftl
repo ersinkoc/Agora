@@ -243,7 +243,8 @@ doctor-cert-renew-superseded = This machine's hub certificate is no longer the n
     [yes] The hub was last asked on { $when }; it is asked again about once a day.
    *[no] It is asked again about once a day.
 }
-doctor-cert-renew-rejected = The hub answered this machine's certificate renewal with a certificate that did not check out ({ $detail }), so it was not used and the certificate in use is unchanged. It is asked again after an hour, and after five times in a row with a new request. If this repeats, make sure this machine reaches the hub it enrolled with.
+doctor-cert-renew-rejected = The hub answered this machine's certificate renewal with a certificate that did not check out ({ $detail }), so it was not used and the certificate in use is unchanged. It is asked again after an hour, and after five such answers in a row with a new request. If this repeats, make sure this machine reaches the hub it enrolled with.
+doctor-cert-renew-clock = The hub's new certificate for this machine starts more than a day after this machine's clock, or has already ended by it, so it is not used yet. This machine's clock may be wrong: set it right (or turn on automatic time). The request is kept and asked again every hour, and the certificate is taken as soon as the clock is right; the certificate in use is unchanged.
 doctor-cert-renew-hub-old = The hub this machine is connected to is older than certificate renewal, so this machine's certificate cannot renew itself yet. Update the hub (it is asked again about once an hour); until then, join this machine again before its certificate ends.
 doctor-cert-renew-pending = A new certificate for this machine is being fetched; the hub has not answered yet. This machine keeps working with the certificate it has, and asks again by itself.
 doctor-cert-hub = The hub's own certificate is valid for { $detail ->

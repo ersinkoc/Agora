@@ -201,8 +201,8 @@ Items already in M2 and M3 are not repeated here.
 
 - [ ] **M7.1 A helper on another machine** (ADR-0057): needs ADR-0119 (M0.3), then several **schema** steps
 - [x] **M7.2 Leases across a node restart** (ADR-0039): #1243, in 0.3.40
-- [ ] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead; the
-  "needs to join again" card (**schema** for the card)
+- [x] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead, and
+  `agora doctor` says the clock may be wrong. Left: the "needs to join again" card in the window (**schema** for the card)
 - [ ] **M7.4 Where am I signed in** (ADR-0067 rung 5): the session list with revoke; the rung-4 banner
 - [ ] **M7.5 Pairing leftovers** (ADR-0065): the owner's devices trusted in the same step, the push notice, discovery over IPv6
   (**schema**)

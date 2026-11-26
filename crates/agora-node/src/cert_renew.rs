@@ -12,6 +12,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::pairing_client::check_client_certificate;
 
+/// How far after this machine's clock a renewed certificate may start (ADR-0085 Amendment A): a clock up to a day behind the hub's
+/// still renews at once. The hub judges the certificate on its own clock at every connection. Pairing keeps "valid now".
+pub const RENEW_FUTURE_START: i64 = 24 * 3600;
+
 /// A machine asks for a new certificate when a third of the certificate's own life is left (30 of 90 days).
 pub const RENEW_AT_FRACTION: i64 = 3;
 
@@ -179,8 +183,12 @@ fn csr_matches_key(csr_pem: &str, key_pem: &str) -> bool {
 /// Why a certificate the hub sent was not accepted. A code for the log and the state file, never text for a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejected {
-    /// Not a certificate, or it does not chain to the pinned CA, or it is not valid now, or lasts longer than any the hub issues.
-    Certificate,
+    /// Not a certificate, or it does not chain to the pinned CA, or it lasts longer than any the hub issues. Never right for the
+    /// request: five in a row give it up.
+    Chain,
+    /// Time (ADR-0085 Amendment A): it has ended, or starts more than [`RENEW_FUTURE_START`] after this machine's clock. Keeps the
+    /// request: once the clock is right, the same answer is accepted.
+    Validity,
     /// It is not for client authentication only, or it is a CA.
     Usage,
     /// It names another node than this one.
@@ -192,9 +200,29 @@ pub enum Rejected {
 }
 
 impl Rejected {
+    /// Whether answers rejected for this reason count toward giving the request up ([`crate::link_renewal::MAX_REJECTED`] in a
+    /// row): only those that can never be right for it. Time (`validity`) and `not_newer` keep it (ADR-0085 Amendment A).
+    pub fn gives_up(self) -> bool {
+        matches!(self, Self::Chain | Self::Usage | Self::Node | Self::Key)
+    }
+
+    /// Reads a code remembered in `renew-state`; `certificate`, from a version before the split, is `chain`.
+    pub fn from_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "chain" | "certificate" => Self::Chain,
+            "validity" => Self::Validity,
+            "usage" => Self::Usage,
+            "node" => Self::Node,
+            "key" => Self::Key,
+            "not_newer" => Self::NotNewer,
+            _ => return None,
+        })
+    }
+
     pub fn code(self) -> &'static str {
         match self {
-            Self::Certificate => "certificate",
+            Self::Chain => "chain",
+            Self::Validity => "validity",
             Self::Usage => "usage",
             Self::Node => "node",
             Self::Key => "key",
@@ -204,7 +232,7 @@ impl Rejected {
 }
 
 /// Everything a renewed certificate must satisfy before it replaces the one in use: it chains to the pinned CA (`ca_pem`, every
-/// certificate in it), is valid now and lasts no more than a year, is for client authentication only and not a CA, names exactly
+/// certificate in it), has not ended and starts within [`RENEW_FUTURE_START`] of `now`, lasts no more than a year, is for client authentication only and not a CA, names exactly
 /// `node_id`, carries the public key of the request this machine sent (and so of the persisted key), and ends later than `current_pem`.
 pub fn check_renewed(
     ca_pem: &str,
@@ -217,27 +245,38 @@ pub fn check_renewed(
     use crate::pairing_client::PairError;
     let mut roots = rustls::RootCertStore::empty();
     for c in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
-        let c = c.map_err(|_| Rejected::Certificate)?;
-        roots.add(c).map_err(|_| Rejected::Certificate)?;
+        let c = c.map_err(|_| Rejected::Chain)?;
+        roots.add(c).map_err(|_| Rejected::Chain)?;
+    }
+    // Longer than any certificate the hub issues: never right, whatever the clock (pairing calls this `validity`).
+    let (starts, ends) = validity(cert_pem).ok_or(Rejected::Chain)?;
+    if ends.saturating_sub(starts) > crate::pairing_client::MAX_CERT_SECONDS {
+        return Err(Rejected::Chain);
     }
     let csr_der = x509_parser::pem::parse_x509_pem(pending.csr_pem.as_bytes())
         .map_err(|_| Rejected::Key)?
         .1
         .contents;
-    check_client_certificate(Arc::new(roots), cert_pem, node_id, &csr_der, now).map_err(
-        |e| match e {
-            PairError::CertificateInvalid("usage") => Rejected::Usage,
-            PairError::CertificateInvalid("subject") => Rejected::Node,
-            PairError::CertificateInvalid("key") => Rejected::Key,
-            _ => Rejected::Certificate,
-        },
-    )?;
+    check_client_certificate(
+        Arc::new(roots),
+        cert_pem,
+        node_id,
+        &csr_der,
+        now,
+        RENEW_FUTURE_START,
+    )
+    .map_err(|e| match e {
+        PairError::CertificateInvalid("usage") => Rejected::Usage,
+        PairError::CertificateInvalid("subject") => Rejected::Node,
+        PairError::CertificateInvalid("key") => Rejected::Key,
+        PairError::CertificateInvalid("validity") => Rejected::Validity,
+        _ => Rejected::Chain,
+    })?;
     // The persisted private key is the one the certificate was made for (the request carries its public half, checked above).
     if !pair_matches(cert_pem, &pending.key_pem) || cert_public_key(cert_pem).is_none() {
         return Err(Rejected::Key);
     }
-    let (_, ends) = validity(cert_pem).ok_or(Rejected::Certificate)?;
-    let (_, current_ends) = validity(current_pem).ok_or(Rejected::Certificate)?;
+    let (_, current_ends) = validity(current_pem).ok_or(Rejected::Chain)?;
     if ends <= current_ends {
         return Err(Rejected::NotNewer);
     }
@@ -499,7 +538,7 @@ mod tests {
         let (fresh, cert, current) = good(&ca2, "m");
         assert_eq!(
             check_renewed(&ca1.pem, &cert, "m", &fresh, &current, now()),
-            Err(Rejected::Certificate)
+            Err(Rejected::Chain)
         );
     }
 
@@ -517,7 +556,7 @@ mod tests {
         );
         assert_eq!(
             check_renewed(&ca.pem, &server, "m", &fresh, &current, now()),
-            Err(Rejected::Certificate)
+            Err(Rejected::Chain)
         );
         let as_ca = issue(
             &ca,
@@ -542,7 +581,10 @@ mod tests {
             ExtendedKeyUsagePurpose::ClientAuth,
             false,
         );
-        assert!(check_renewed(&ca.pem, &ended, "m", &fresh, &current, now()).is_err());
+        assert_eq!(
+            check_renewed(&ca.pem, &ended, "m", &fresh, &current, now()),
+            Err(Rejected::Validity)
+        );
         let decades = issue(
             &ca,
             &fresh,
@@ -553,7 +595,7 @@ mod tests {
         );
         assert_eq!(
             check_renewed(&ca.pem, &decades, "m", &fresh, &current, now()),
-            Err(Rejected::Certificate)
+            Err(Rejected::Chain)
         );
         // Ends no later than the certificate in use: pointless, kept out.
         let short = issue(
@@ -570,8 +612,65 @@ mod tests {
         );
         assert_eq!(
             check_renewed(&ca.pem, "garbage", "m", &fresh, &current, now()),
-            Err(Rejected::Certificate)
+            Err(Rejected::Chain)
         );
+    }
+
+    /// ADR-0085 Amendment A (F1340): a machine whose clock is behind the hub's takes a renewed certificate that starts up to a day in
+    /// its future, and calls one further ahead (or ended) `validity`, which keeps the request; pairing still wants "valid now".
+    #[test]
+    fn an_answer_that_starts_up_to_a_day_after_this_machines_clock_is_accepted() {
+        let other = ca("other");
+        let ca = ca("ca");
+        let (fresh, cert, current) = good(&ca, "m");
+        // The hub starts it 5 minutes before its own now.
+        for behind in [0, 15 * 60, 6 * 3600, 23 * 3600] {
+            assert_eq!(
+                check_renewed(&ca.pem, &cert, "m", &fresh, &current, now() - behind),
+                Ok(()),
+                "{behind} s behind"
+            );
+        }
+        for behind in [RENEW_FUTURE_START + 3600, 30 * 3600] {
+            assert_eq!(
+                check_renewed(&ca.pem, &cert, "m", &fresh, &current, now() - behind),
+                Err(Rejected::Validity),
+                "{behind} s behind"
+            );
+        }
+        // Another CA is still `chain` with the clock behind: the start is not what makes it fail.
+        let (o_fresh, o_cert, o_current) = good(&other, "m");
+        assert_eq!(
+            check_renewed(
+                &ca.pem,
+                &o_cert,
+                "m",
+                &o_fresh,
+                &o_current,
+                now() - 6 * 3600
+            ),
+            Err(Rejected::Chain)
+        );
+    }
+
+    #[test]
+    fn only_answers_that_can_never_be_right_give_the_request_up() {
+        for r in [
+            Rejected::Chain,
+            Rejected::Usage,
+            Rejected::Node,
+            Rejected::Key,
+        ] {
+            assert!(r.gives_up(), "{r:?}");
+            assert_eq!(Rejected::from_code(r.code()), Some(r));
+        }
+        for r in [Rejected::Validity, Rejected::NotNewer] {
+            assert!(!r.gives_up(), "{r:?}");
+            assert_eq!(Rejected::from_code(r.code()), Some(r));
+        }
+        // Remembered by a version before the split.
+        assert_eq!(Rejected::from_code("certificate"), Some(Rejected::Chain));
+        assert_eq!(Rejected::from_code("x"), None);
     }
 
     #[test]

@@ -96,10 +96,19 @@ fn renewal(link_dir: &Path, now: i64) -> Option<Check> {
             s.detail,
             s.asked_at,
         )),
+        // Rejected for time (ADR-0085 Amendment A): the request is kept, and this machine's clock is the likely cause.
+        Some(s) if s.code == "rejected" && s.detail == "validity" => {
+            Some(made("cert-renew-clock", Status::Warn, s.detail, s.asked_at))
+        }
         Some(s) if s.code == "rejected" => Some(made(
             "cert-renew-rejected",
             Status::Warn,
-            s.detail,
+            // `certificate`, remembered by a version before the split, is `chain`.
+            if s.detail == "certificate" {
+                "chain".to_string()
+            } else {
+                s.detail
+            },
             s.asked_at,
         )),
         // The hub this machine is connected to is older than renewal: nothing can be asked of it yet. Only a warning when the end is
@@ -245,7 +254,17 @@ mod tests {
             renewals(&d, secs_now()),
             [("cert-renew-rejected", Status::Warn, "key".to_string())]
         );
-        // Waiting out the hub's hour is not a problem to report.
+
+        state(&d, "rejected", "validity", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-clock", Status::Warn, "validity".to_string())]
+        );
+        state(&d, "rejected", "certificate", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-rejected", Status::Warn, "chain".to_string())]
+        ); // Waiting out the hub's hour is not a problem to report.
         state(&d, "too_frequent", "too_frequent", ends);
         assert!(renewals(&d, secs_now()).is_empty());
     }
