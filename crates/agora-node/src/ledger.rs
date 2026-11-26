@@ -406,6 +406,22 @@ fn bounded(s: &str) -> String {
 }
 
 impl Entry {
+    /// The project the node recorded for this agent when it started it, as a [`agora_core::ProjectId`] again: a Git identity
+    /// (`host/path#root`, `#root`) or a portable one (`id:…`), only when it prints back as the same project. `None` for anything else
+    /// (a folder identity, an empty or foreign id). The ledger is the node's own and owner-only, written before the agent ran.
+    pub fn recorded_project(&self) -> Option<agora_core::ProjectId> {
+        let id = self.project_id.as_str();
+        let parsed = if let Some(uuid) = id.strip_prefix("id:") {
+            agora_core::ProjectId::portable(uuid).ok()?
+        } else {
+            let (remote, root) = id.rsplit_once('#')?;
+            // A remote is kept as `host/path`; any scheme puts it back through the same normalisation.
+            let remote = (!remote.is_empty()).then(|| format!("https://{remote}"));
+            agora_core::ProjectId::new(remote.as_deref(), root).ok()?
+        };
+        agora_core::same_project(&parsed.to_string(), id).then_some(parsed)
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "agent_id": self.agent_id,
@@ -1283,6 +1299,32 @@ fn prune(st: &mut State, now: u64) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recorded_project_reads_back_as_the_same_project() {
+        let root = "0123456789abcdef0123456789abcdef01234567";
+        let entry = |id: &str| Entry {
+            project_id: id.into(),
+            ..Entry::default()
+        };
+        for p in [
+            agora_core::ProjectId::new(Some("https://github.com/Owner/Repo.git"), root).unwrap(),
+            agora_core::ProjectId::new(Some("git@example.com:a/b/c"), root).unwrap(),
+            agora_core::ProjectId::new(None, root).unwrap(),
+            agora_core::ProjectId::portable("0f8fad5b-d9cb-469f-a165-70867728950e").unwrap(),
+        ] {
+            assert_eq!(entry(&p.to_string()).recorded_project(), Some(p));
+        }
+        // ADR-0115: an id an older node wrote before folding names the same project.
+        let older = entry(&format!("github.com/Owner/Repo#{root}")).recorded_project();
+        assert_eq!(
+            older.map(|p| p.to_string()),
+            Some(format!("github.com/owner/repo#{root}"))
+        );
+        for id in ["", "folder:n:/x", "#nothex", "example.com/a", "id:nope"] {
+            assert_eq!(entry(id).recorded_project(), None, "{id}");
+        }
+    }
 
     fn temp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("agora-ledger-{}-{name}", std::process::id()));

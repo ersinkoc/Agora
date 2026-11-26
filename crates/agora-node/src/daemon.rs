@@ -3224,6 +3224,7 @@ fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
 /// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
 /// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
 /// folder or project is gone, and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
+/// An agent in a worktree the node made is taken up in the project the ledger recorded for it (T8b).
 /// Returns the agents taken up, each with the session id the ledger knew, for the events that say them up again.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
@@ -3255,7 +3256,12 @@ fn take_up_held(
                 .ok()
                 .map(|(_, p)| p)
         } else {
-            git::discover_checkout(&folder).ok().map(|c| c.project)
+            // T8b: in a worktree the node made, the project the node recorded before the agent ran, never one computed again from a
+            // HEAD the agent (or another agent of the repository) can move; a running agent is not ended over a branch that moved.
+            entry
+                .recorded_project()
+                .filter(|_| folder.is_dir())
+                .or_else(|| git::discover_checkout(&folder).ok().map(|c| c.project))
         };
         let Some(project) = project else {
             ended.push(h);
@@ -3349,7 +3355,12 @@ fn take_up_held(
                 .ok()
                 .map(|(_, p)| p)
         } else {
-            git::discover_checkout(&folder).ok().map(|c| c.project)
+            // T8b: in a worktree the node made, the project the node recorded before the agent ran, never one computed again from a
+            // HEAD the agent (or another agent of the repository) can move; a running agent is not ended over a branch that moved.
+            entry
+                .recorded_project()
+                .filter(|_| folder.is_dir())
+                .or_else(|| git::discover_checkout(&folder).ok().map(|c| c.project))
         };
         let Some(project) = project else {
             ended_pipes.push(p);

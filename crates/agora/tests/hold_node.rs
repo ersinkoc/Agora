@@ -6,7 +6,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -903,4 +903,108 @@ fn a_kept_agent_hears_the_mesh_after_its_node_restarts_through_the_cursor_it_car
         let id = last["message_id"].as_str().expect("id").to_string();
         assert!(read_after(&mut fb, &id).as_array().unwrap().is_empty());
     }
+}
+
+/// Plain git with an identity, none of a calling git's repository variables; its output.
+fn plain_git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// An agent started in a worktree the node made from a checkout, kept by the holder while no node runs, with `change` made to its
+/// worktree meanwhile; the next node, the agent's id and its process.
+fn next_node_finds_in_worktree(tag: &str, change: impl FnOnce(&Path)) -> (Rig, Node, String, u32) {
+    let rig = Rig::new(tag, &sh("echo up; sleep 600"));
+    let repo = rig.root.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo");
+    plain_git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").expect("file");
+    plain_git(&repo, &["add", "-A"]);
+    plain_git(&repo, &["commit", "-q", "-m", "first"]);
+    let cfg = NodeConfig {
+        projects: vec![repo],
+        ..rig.cfg()
+    };
+    let node = Node::start_with_holder(&cfg, Some(rig.setup())).expect("node");
+    let mut c = Client::connect(node.socket().unwrap()).expect("control");
+    let id = match c
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "k".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(Ok_::AgentStart(r)) => r.agent_id,
+        other => panic!("{other:?}"),
+    };
+    wait_for("the agent", || screen(&node, &id).contains("up"));
+    let pid = pid_of(&node, &id);
+    wait_for("the holder in the ledger", || {
+        node.ledger.get(&id).is_some_and(|e| e.holder_pid != 0)
+    });
+    let worktree = PathBuf::from(node.ledger.get(&id).expect("entry").folder);
+    drop(node);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(alive(pid));
+    // A node process that restarts has no record of the worktrees an earlier one made; this one is the same process.
+    agora_node::git::forget_made_worktree(&worktree);
+    change(&worktree);
+    let node = Node::start_with_holder(&cfg, Some(rig.setup())).expect("node");
+    (rig, node, id, pid)
+}
+
+#[test]
+fn a_held_agent_in_a_node_made_worktree_is_taken_up_again() {
+    let _serial = serial();
+    let (_rig, node, id, pid) = next_node_finds_in_worktree("wt-same", |_| {});
+    assert!(held(&node, &id), "not taken up");
+    assert_eq!(pid_of(&node, &id), pid);
+}
+
+/// T8b: a node-made worktree whose branch was given a root commit of its own while no node ran (by its agent, another agent of the
+/// repository, or an unrelated merge) does not make its running agent another project's, nor end it: it is taken up in the project the
+/// ledger recorded when the node started it.
+#[test]
+fn a_held_agent_whose_worktree_branch_moved_is_taken_up_in_its_recorded_project() {
+    let _serial = serial();
+    let mut before = String::new();
+    let (_rig, node, id, pid) = next_node_finds_in_worktree("wt-moved", |wt| {
+        before = plain_git(wt, &["rev-list", "--max-parents=0", "HEAD"]);
+        let tree = plain_git(wt, &["rev-parse", "HEAD^{tree}"]);
+        let root = plain_git(wt, &["commit-tree", &tree, "-m", "another root"]);
+        plain_git(wt, &["update-ref", "HEAD", &root]);
+    });
+    assert!(held(&node, &id), "not taken up");
+    assert_eq!(pid_of(&node, &id), pid);
+    assert!(alive(pid));
+    let views = node.supervisor.lock().unwrap().list();
+    let view = views
+        .iter()
+        .find(|v| v.id.as_str() == id)
+        .expect("the agent");
+    assert_eq!(
+        view.project,
+        format!("#{before}"),
+        "taken up as another project's"
+    );
 }
