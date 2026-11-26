@@ -1,0 +1,1 @@
+- A changed file's path reported by an adapter is cleaned and cut like other paths before it enters the chat: an over-long path no longer empties the conversation, control characters are removed, and a secret file's change shows no text. (#1221)
