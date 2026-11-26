@@ -707,7 +707,6 @@ theme-label = Renk düzeni
 theme-system = Sistemi izle
 theme-system-short = Sistem
 ide-shared = Paylaşılan
-ide-memory = Bu makinedeki ajanların kullandığı bellek
 network-hub = Agora'nız
 network-build = Bu makinede çalışan sürüm
 network-never = hiç

@@ -5,7 +5,7 @@ import { LimitChip } from './Quota';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { agentKind, endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
-import { bytesLabel, type MachineModel } from '../net/view';
+import type { MachineModel } from '../net/view';
 import { ago, agoShort } from '../net/time';
 import { Icon } from './Icon';
 import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
@@ -193,7 +193,6 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="min-w-0 flex-1 truncate">{name}{m && sharesName(m, machines) && <code className="ms-1.5 text-xs font-normal text-muted">{m.id}</code>}</span>
               {m && !m.online && <span className="flex-none truncate text-xs font-normal text-muted" data-last-seen>{t('explorer-offline-for', { when: agoShort(m.lastSeenMs, now) })}</span>}
-              {!!m?.memoryBytes && <span className="font-mono text-xs font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
               {(m?.online !== false || count > 0) && <span className="text-xs font-normal text-muted">{count}</span>}
             </button>
             {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}

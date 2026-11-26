@@ -729,7 +729,6 @@ theme-label = Colour scheme
 theme-system = Follow the system
 theme-system-short = System
 ide-shared = Shared
-ide-memory = Memory used by the agents on this machine
 network-hub = Your Agora
 network-build = Version running on this machine
 network-never = never
