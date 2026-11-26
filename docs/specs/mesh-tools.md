@@ -172,7 +172,8 @@ the TTL has passed since the call that last granted it was sent (by the node's c
 below 2 s is not renewed (it ends as asked; nothing is renewed more than once a second). A renewal the hub cannot answer (the node
 is offline, the call timed out, `board.unavailable`, `internal`) is tried again every second until the lease's end as the node
 reckons it; after that the lease is gone, and a node that reconnects later does not take it back. A renewal the board refuses
-(`lease.held`, or the project is no longer shared) ends it at once. Renewal stops when the agent releases the lease, when it ends
+(`lease.held`, `agent.not_found` when the hub no longer counts the agent as running and gave its leases back, or the project is no
+longer shared) ends it at once. Renewal stops when the agent releases the lease, when it ends
 (finished, stopped, crashed, given up: the node takes it off the mesh), and when `mesh.remote` is switched off. Each renewal gives the
 paths a new board lease id; the agent keeps the id it was given, and the node puts the current one into its `lease_release`. The
 agent's own lease calls and the node's renewals of its leases reach the board one at a time (a call waits up to 10 s for a renewal
