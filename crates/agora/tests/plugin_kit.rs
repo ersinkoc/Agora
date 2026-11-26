@@ -27,13 +27,11 @@ fn temp(name: &str) -> PathBuf {
 }
 
 fn agora(dir: &Path, args: &[&str]) -> Output {
+    // AGORA_LANG comes first of the locale variables (`agora_i18n::catalog::locale_from_env`): the sentences asserted are English.
     Command::new(AGORA)
         .args(args)
         .current_dir(dir)
-        .env("LANG", "en_US.UTF-8")
-        .env_remove("LC_ALL")
-        .env_remove("LC_MESSAGES")
-        .env_remove("AGORA_LANG")
+        .env("AGORA_LANG", "en")
         .output()
         .unwrap()
 }
@@ -59,6 +57,10 @@ fn mjs(dir: &Path, write_hashes: bool) -> Option<Vec<u8>> {
     }
     let out = c.stderr(Stdio::null()).output().ok()?;
     assert!(out.status.success(), "the mjs packs {}", dir.display());
+    assert!(
+        !out.stdout.is_empty(),
+        "the mjs ran as a script and printed the package"
+    );
     Some(out.stdout)
 }
 
@@ -419,7 +421,7 @@ fn watch_packs_again_on_every_save_and_keeps_going_past_a_refusal() {
             "--watch",
         ])
         .current_dir(&dir)
-        .env("LANG", "en_US.UTF-8")
+        .env("AGORA_LANG", "en")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

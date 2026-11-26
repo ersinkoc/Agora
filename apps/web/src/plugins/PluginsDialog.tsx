@@ -50,7 +50,8 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
   const load = async () => {
     if (!canWatchFiles()) { file.current?.click(); return; }
     const picked = await pickPackage(t('plugin-file-kind'));
-    if (picked) await choose(picked.file, picked.handle);
+    if (picked === 'failed') file.current?.click();
+    else if (picked) await choose(picked.file, picked.handle);
   };
   const save = (s: Extract<Screen, { at: 'grant' }>) => {
     if (s.text === undefined) { pluginStore.regrant(s.plugin.manifest.id, s.allow); setScreen({ at: 'list' }); return; }

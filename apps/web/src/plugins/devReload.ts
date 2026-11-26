@@ -114,15 +114,16 @@ export const canWatchFiles = (w: unknown = typeof window !== 'undefined' ? windo
 
 type Picker = (o: { types: { description: string; accept: Record<string, string[]> }[]; multiple: false }) => Promise<WatchedFile[]>;
 
-/** Asks the person for a package file with the picker that lets this page read it again; undefined when they cancel. */
-export async function pickPackage(description: string, w: unknown = window): Promise<{ file: File; handle: WatchedFile } | undefined> {
+/** Asks the person for a package file with the picker that lets this page read it again: undefined when they cancel, `failed` when
+ *  the picker would not open or read it (the window then offers the plain file input). */
+export async function pickPackage(description: string, w: unknown = window): Promise<{ file: File; handle: WatchedFile } | 'failed' | undefined> {
   const pick = (w as { showOpenFilePicker?: Picker }).showOpenFilePicker;
-  if (!pick) return undefined;
+  if (!pick) return 'failed';
   try {
     const [handle] = await pick.call(w, { types: [{ description, accept: { 'application/json': ['.json'] } }], multiple: false });
     if (!handle) return undefined;
     return { file: (await handle.getFile()) as File, handle };
-  } catch { return undefined; }
+  } catch (e) { return (e as { name?: unknown } | null)?.name === 'AbortError' ? undefined : 'failed'; }
 }
 
 export const devReload: DevReload = createDevReload(pluginStore);

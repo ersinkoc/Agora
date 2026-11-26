@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export const MANIFEST = 'agora-plugin.json';
 /** Files of a plugin's folder that are never packed: its README and the types for the author's editor. */
@@ -40,7 +41,8 @@ export function pack(dir, { writeHashes = false } = {}) {
   return JSON.stringify({ 'agora-plugin-bundle': 1, files });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run as a script (not imported): compared as file URLs, so a Windows path (a drive, backslashes) matches too.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [dir, ...rest] = process.argv.slice(2);
   if (!dir) { console.error('usage: node scripts/pack-plugin.mjs <folder> [--out <file>] [--write-hashes]'); process.exit(2); }
   try {

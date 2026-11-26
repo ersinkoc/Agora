@@ -139,9 +139,12 @@ describe('reload on save', () => {
     const w = { showOpenFilePicker: async (o: { types: { description: string }[] }) => { expect(o.types[0]?.description).toBe('Agora plugin package'); return [d.handle]; } };
     expect(canWatchFiles(w)).toBe(true);
     const picked = await pickPackage('Agora plugin package', w);
-    expect(picked?.handle).toBe(d.handle);
-    expect(picked?.file.size).toBe(d.f.bytes.length);
-    // Cancelled: nothing.
+    if (!picked || picked === 'failed') throw new Error('not picked');
+    expect(picked.handle).toBe(d.handle);
+    expect(picked.file.size).toBe(d.f.bytes.length);
+    // Cancelled: nothing. Any other failure: the window falls back to the plain file input.
     expect(await pickPackage('x', { showOpenFilePicker: async () => { throw new DOMException('', 'AbortError'); } })).toBeUndefined();
+    expect(await pickPackage('x', { showOpenFilePicker: async () => { throw new DOMException('', 'SecurityError'); } })).toBe('failed');
+    expect(await pickPackage('x', {})).toBe('failed');
   });
 });
