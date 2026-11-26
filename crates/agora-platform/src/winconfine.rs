@@ -1754,6 +1754,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Audit 15 follow-up: `agora node run` recovers before it takes the data-folder lock, so a second node started next to a running
+    /// one recovers while the first one's agents are confined. The running node's ledger names a live owner, so nothing of it is undone.
+    #[test]
+    fn recovery_leaves_a_running_nodes_permissions_alone() {
+        let root = scratch("live-owner");
+        let ledgers = root.join("ledgers");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let sandbox = Sandbox::new(vec![], vec![work.clone()]);
+        // This test process is the running node.
+        let c = Confinement::in_ledger_dir(&sandbox, &ledgers, None).unwrap();
+        let sid = Sid::from_string(&c.sid_text).unwrap();
+        assert!(has_explicit_label(&work) && has_explicit_ace_for(&work, sid.0));
+
+        // The second node's recovery.
+        recover_in(&ledgers);
+        assert!(has_explicit_label(&work), "the Low label was taken back");
+        assert!(
+            has_explicit_ace_for(&work, sid.0),
+            "the running agent's entry was taken back"
+        );
+        assert!(c.ledger.exists(), "the running node's ledger was dropped");
+
+        // The running node's own stop still undoes everything.
+        let ledger = c.ledger.clone();
+        drop(c);
+        assert!(!has_explicit_label(&work) && !has_explicit_ace_for(&work, sid.0));
+        assert!(!ledger.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Review of #273, 4: a NULL DACL lets everyone do everything, so it is refused like a `Users`/`Everyone` write grant.
     #[test]
     fn a_null_dacl_is_a_broad_write_grant() {
