@@ -316,10 +316,11 @@ export function createThemeSync(env: SyncEnv) {
     await push(attempt);
   }
 
+  // A change here is written once the changes settle; when the last read failed (the hub could not be reached), it reads first.
   const changed = () => {
-    if (applying || !active() || !remote) return;
+    if (applying || !active()) return;
     if (timer !== undefined) clearTimer(timer);
-    timer = setTimer(() => { timer = undefined; void run(() => push(0)); }, debounceMs);
+    timer = setTimer(() => { timer = undefined; void run(() => (remote ? push(0) : pull())); }, debounceMs);
   };
   env.themes.subscribe(changed);
   env.packs.subscribe(changed);

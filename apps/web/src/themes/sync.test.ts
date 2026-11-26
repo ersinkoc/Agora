@@ -257,12 +257,18 @@ describe('the engine', () => {
     await d.tick();
     expect(asked).toBe(1);
     expect(d.themes.state().user).toHaveLength(1);
-    // A hub that knows the commands but could not answer is not an older hub: it is tried again.
-    const flaky: SyncAsk = async () => { throw new CommandError('node.timeout'); };
+    // A hub that knows the commands but could not answer is not an older hub: it is tried again at the next change.
+    let down = true;
+    const flaky = fakeHub();
     const e = device();
-    e.sync.attach(flaky);
+    e.sync.attach(async (body) => { if (down) throw new CommandError('node.timeout'); return flaky.ask(body); });
     await e.tick();
     expect(e.sync.view().status).toBe('error');
+    down = false;
+    e.themes.import(night('After'));
+    await e.tick();
+    expect(e.sync.view().status).toBe('synced');
+    expect(flaky.h.calls).toEqual(['get', 'set']);
   });
 
   it('writes nothing over the cap, and never writes over a value from a newer window', async () => {
