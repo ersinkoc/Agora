@@ -176,6 +176,9 @@ pub struct EventSink {
     usage: Mutex<crate::usage_merge::UsageMerge>,
     /// #1147 (audit of #1157): the node's secret values, replaced in the agent's own words an event carries (see `redact_body`).
     secrets: std::sync::OnceLock<Arc<crate::transcript::Store>>,
+    /// F2041: the devices this node last said it trusts, said again by every announcement. Held while that is recorded, so an
+    /// announcement never records an older set after a newer one; `log` is taken under it, never the other way round.
+    trusted: Mutex<Option<v1::NodeTrustedDevices>>,
 }
 
 impl Drop for EventSink {
@@ -437,6 +440,7 @@ impl EventSink {
             ledger: std::sync::OnceLock::new(),
             usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
             secrets: std::sync::OnceLock::new(),
+            trusted: Mutex::new(None),
         })
     }
 
@@ -572,8 +576,8 @@ impl EventSink {
     }
 
     /// The present part of an announcement (see [`announce`](Self::announce) and [`resync`](Self::resync)): the folders this node
-    /// registered, then every agent in `views` that is running, in the order a launch reports it, then `waiting` approvals. For
-    /// [`Announce::Present`] also every agent in `views` that ended (`AgentExited` with the last exit code recorded for it, or the
+    /// registered, the devices it last said it trusts (F2041), then every agent in `views` that is running, in the order a launch
+    /// reports it, then `waiting` approvals. For [`Announce::Present`] also every agent in `views` that ended (`AgentExited` with the last exit code recorded for it, or the
     /// stop convention `i32::MIN`, and `TerminalClosed` if it had a terminal) and the last [`RESOLVED_KEPT`] resolved approvals.
     /// The callers' locks are already released: `views` and `waiting` are copies. The node passes no `waiting` and records its
     /// waiting approvals after this, under the queue's lock (see `node_announcer`): a copy can hold a request decided since.
@@ -590,6 +594,14 @@ impl EventSink {
             .clone();
         for w in known.workspaces.values() {
             self.restate(Body::WorkspaceRegistered(w.clone()));
+        }
+        // F2041: the devices this machine trusts. The hub keeps the last set it got (a `NodeOnline` does not clear it), and the node says
+        // it again only when it changes: one lost with the rest would stay wrong in every window until then.
+        {
+            let last = self.trusted.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = &*last {
+                self.restate(Body::NodeTrustedDevices(t.clone()));
+            }
         }
         for v in views {
             let id = v.id.as_str();
@@ -1107,9 +1119,10 @@ impl EventSink {
 
     /// ADR-0061: the devices this node trusts now (ids only, sorted).
     pub fn node_trusted_devices(&self, device_ids: Vec<String>) {
-        self.record(Body::NodeTrustedDevices(v1::NodeTrustedDevices {
-            device_ids,
-        }));
+        let mut last = self.trusted.lock().unwrap_or_else(|e| e.into_inner());
+        let said = v1::NodeTrustedDevices { device_ids };
+        *last = Some(said.clone());
+        self.record(Body::NodeTrustedDevices(said));
     }
 
     /// Recorded on a clean shutdown. A crash records nothing; the hub notices the dropped connection instead.
@@ -1830,6 +1843,39 @@ pub struct Node {
     keep_agents: bool,
     /// The control commands' context, for the stop to wait for the commands it lets finish (ADR-0104 O2).
     commands: Arc<ControlContext>,
+    /// F2040: the lock on [`HOME_LOCK_FILE`] that makes the data folder this node's; last, so it is let go after everything else.
+    _home_lock: fs::File,
+}
+
+/// In the node's data folder: the file a running node holds locked (F2040), so a second node on the same folder fails before it acts.
+/// Not the front door's `run/node.lock`, which names the node's supervisor and is not taken by `agora node run` itself.
+const HOME_LOCK_FILE: &str = "data.lock";
+
+/// F2040: how long a start waits for [`HOME_LOCK_FILE`]. A process forked from one whose node held it keeps that lock until it runs its
+/// own program (a moment), so a node started right after another stopped may find it still held; a running node holds it for good.
+const HOME_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// F2040: locks [`HOME_LOCK_FILE`] in `data_dir` for this node; `AddrInUse` while another node holds it (as a second bind of the control
+/// socket fails).
+fn own_data_dir(data_dir: &Path) -> io::Result<fs::File> {
+    let file = agora_platform::open_lock_private(&data_dir.join(HOME_LOCK_FILE))?;
+    let until = Instant::now() + HOME_LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Operational text, not UI text.
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "the node's data folder is in use by another node",
+                ))
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
 }
 
 impl Node {
@@ -1858,6 +1904,9 @@ impl Node {
         holder: Option<crate::holder::HolderSetup>,
     ) -> Result<Self, NodeError> {
         private_node_dir(&cfg.data_dir)?;
+        // F2040: this node owns its data folder before it reads or writes anything in it (the ledger, the event log, the mesh's files)
+        // or brings an agent back: a second node on the same home fails here, never after it acted for the running one.
+        let home_lock = own_data_dir(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.worktree_root)?;
         let events = Arc::new(EventSink::open_with_cap(
             &cfg.data_dir.join("events"),
@@ -2794,6 +2843,7 @@ impl Node {
             crashed: false,
             keep_agents: false,
             commands,
+            _home_lock: home_lock,
         })
     }
 
