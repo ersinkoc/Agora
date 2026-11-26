@@ -232,7 +232,7 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
       <button type="button" className={`phone-row${a.closed ? ' phone-row--closed' : ''}`} onClick={() => onOpen(a.id)}>
         <AgentAvatar accent={a.accent || 'var(--agent-slate)'} kind={kindOf({ kind: a.kind, name: a.name })} needsYou={a.state === 'needs-you' && !a.closed} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium text-ink">{a.name}</span>
+          <span className="phone-row__name block truncate font-medium text-ink">{a.name}</span>
           <span className="block truncate text-caption text-muted">{a.project || a.workspace}{a.branch ? ` · ${a.branch}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />

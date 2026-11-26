@@ -52,6 +52,7 @@ cli-usage =
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
       agora agent install AD --list DOSYA [--root-key HEX|DOSYA] [--go-back]
+      agora plugin new KİMLİK [KLASÖR] | check KLASÖR|DOSYA | pack KLASÖR [--out DOSYA] [--write-hashes] [--watch]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
       agora manual [KONU] [--json]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
@@ -84,6 +85,34 @@ cli-node-needs-token = Düğüm, yalnızca onu başlatan kullanıcının okuyabi
 cli-unknown-project = Bu düğümde { $project } adında kayıtlı proje yok.
 cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçin.
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
+cli-plugin-usage = Kullanım: agora plugin new KİMLİK [KLASÖR] | check KLASÖR|DOSYA | pack KLASÖR [--out DOSYA] [--write-hashes] [--watch]
+cli-plugin-new-done = { $id } eklentisi { $folder } içinde oluşturuldu. Sonra: "agora plugin pack { $folder } --out { $id }.json --write-hashes --watch", ardından pencerede Eklentiler, Dosyadan yükle… ile { $id }.json dosyasını seçin. Ayrıntılar { $folder }/README.md içinde.
+cli-plugin-new-bad-id = "{ $id }" bir eklenti kimliği olamaz: küçük harf, rakam ve "-" kullanın (en fazla 40, "-" ile başlamadan).
+cli-plugin-new-exists = { $folder } zaten var; hiçbir şey yazılmadı. Başka bir klasör seçin.
+cli-plugin-write-failed = { $path } yazılamadı: { $reason }
+cli-plugin-ok = { $path } pencerenin denetimlerinden geçiyor: { $name } { $version } ({ $id }), { $panels } panel, görmek istedikleri: { $capabilities }.
+cli-plugin-sees-nothing = hiçbir şey
+cli-plugin-refused = { $path } reddedilirdi ({ $code }): { $reason }
+cli-plugin-error-too-large = 2 MiB'tan büyük; bir eklenti en fazla bu kadar olabilir.
+cli-plugin-error-format = bir eklenti paketi değil.
+cli-plugin-error-newer-format = paket Agora'nın daha yeni bir sürümü için hazırlanmış.
+cli-plugin-error-too-many = bir eklentinin sahip olabileceğinden fazla dosya içeriyor (bildirim dışında 64).
+cli-plugin-error-path = bir dosyanın adında klasör, yol ya da baştaki nokta var ({ $detail }).
+cli-plugin-error-link = paket bir bağlantı ya da dosya baytı olmayan başka bir şey içeriyor ({ $detail }).
+cli-plugin-error-type = bir dosya eklentinin kullanamayacağı türde ({ $detail }); yalnızca betik, stil sayfası, görsel, yazı tipi, JSON ve metin.
+cli-plugin-error-manifest = bildirim (agora-plugin.json) eksik ya da "{ $detail }" alanında yanlış.
+cli-plugin-error-capability = bildirim pencerenin bilmediği bir yetenek istiyor ({ $detail }).
+cli-plugin-error-unlisted = bir dosya bildirimde listelenmemiş ({ $detail }).
+cli-plugin-error-missing = bildirimin listelediği bir dosya yok ({ $detail }).
+cli-plugin-error-hash = bir dosya bildirimin listelediği dosya değil ({ $detail }); karmasını yazmak için --write-hashes ile paketleyin.
+cli-plugin-error-newer = eklenti Agora { $detail } ya da daha yenisini istiyor; bu sürüm { $version }.
+cli-plugin-error-not-a-file = klasörde düz dosya olmayan bir şey var ({ $detail }): eklenti klasörleri düzdür ve bağlantılar izlenmez.
+cli-plugin-error-unreadable = okunamadı ({ $detail }).
+cli-plugin-watch-needs-out = --watch için --out DOSYA gerekir.
+cli-plugin-out-inside = Paket { $folder } klasörünün kendi içine yazılırdı ({ $out }); klasörün yanına yazın.
+cli-plugin-hashes-written = Dosyaların karmaları { $folder }/agora-plugin.json içine yazıldı.
+cli-plugin-packed = { $folder }, { $out } içine paketlendi ({ $bytes } bayt).
+cli-plugin-watching = { $folder } her değişiklikte yeniden paketleniyor. Durdurmak için Ctrl+C.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
 cli-manual-heading = Kılavuzun konuları bunlar. "agora manual KONU" birini yazdırır; "agora manual --json" konuları JSON olarak listeler.
 cli-manual-unknown = Kılavuzda "{ $topic }" adlı bir konu yok. Konuları: { $topics }.

@@ -6,7 +6,9 @@ a package from a local file for development. Storing plugins on the hub, install
 step 3; the reviewed catalog is step 4.
 
 The code is in `apps/web/src/plugins/`; the frame page and its loader are `apps/web/public/plugin-frame.html` and `plugin-frame.js`;
-the hub's headers for them are in `crates/agora-hub/src/web.rs`; a sample plugin is `apps/web/plugins/sample/`.
+the hub's headers for them are in `crates/agora-hub/src/web.rs`; a sample plugin is `apps/web/plugins/sample/`. The author kit (roadmap
+M5.7) is `agora plugin new | check | pack` (`crates/agora/src/pluginkit.rs`), the starter it copies (`apps/web/plugins/starter/`, with the
+types of `agora`) and reload on save (`apps/web/src/plugins/devReload.ts`); see [Writing a plugin](#writing-a-plugin).
 
 ## What a plugin is
 
@@ -70,8 +72,10 @@ whole package and nothing of it is kept or run: over 2 MiB (checked before the f
 (scripts, stylesheets, images, fonts, JSON and text only); a file not in the list; a listed file missing; a wrong hash; more than 64
 files. Each refusal has its own message (`plugin-error-*`).
 
-**Packing.** `node scripts/pack-plugin.mjs <folder> [--out <file>] [--write-hashes]` packs a flat folder and refuses a file not listed or
-a wrong hash, as the window would.
+**Packing.** `agora plugin pack <folder> [--out <file>] [--write-hashes] [--watch]` packs a flat folder, then runs the window's checks on
+the package (below, [Writing a plugin](#writing-a-plugin)). `node scripts/pack-plugin.mjs <folder> [--out <file>] [--write-hashes]` makes
+the same package byte for byte without the checks; both refuse a file not listed, a wrong hash and a link, and neither packs `README.md`
+or `agora-plugin.d.ts`.
 
 ## The frame
 
@@ -179,7 +183,8 @@ start again with it. In step 2 grants are kept in this browser's storage beside 
 `?safe` in the address, or the safe-mode key **Ctrl+Alt+Shift+S** (⌘⌥⇧S on a Mac, by the key's place), opens the window with no plugins
 and the built-in theme (`plugins/safe.ts`): neither the plugin store nor the theme store reads this browser's storage, so another tab's
 change cannot bring a stored theme back either, and a choice made in safe mode holds for that visit only. A note at the bottom says so,
-with **Leave safe mode**.
+with **Leave safe mode**. A pane that showed a plugin's panel stays where it was, named **Plugin panel**, and says that plugins are off in
+safe mode (never the panel's internal id).
 
 The key is heard by the window first, in the capture phase, before any handler of the page's own; no plugin, theme or keybinding can
 change it (it is a fixed key, `keybindings.md`, and in safe mode the keys are the defaults). **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
@@ -215,7 +220,62 @@ one, so a plugin that misbehaves can be taken out without running it.
 keeps it in this browser only, with the **development** marker wherever it shows. It works without the hub. At most four are loaded;
 each start checks every kept package again, exactly as a new file, and leaves out one that no longer passes. Nothing is sent anywhere.
 
+### Reload on save
+
+Where the browser has the file picker that lets a page read a file again (the File System Access API: Chrome, Edge and other
+Chromium-based browsers), **Load from a file…** uses it, and the plugin's file is watched for the rest of the visit (`plugins/devReload.ts`):
+
+- **About once a second** the file's time and size are looked at. A change is read once it has held for one look, so a package still
+  being written is not (`agora plugin pack --watch` also writes the package whole, by renaming).
+- **A package that passes** the checks, exactly as a new file, takes the old one's place with the grant the person gave, so its frames
+  start again: a new frame, booted afresh and inert until the person clicks into it. A capability the person was never shown **holds**
+  the plugin, as any new version does; nothing is granted by a reload.
+- **A package that fails**, or a file that now holds another plugin or can no longer be read, is not loaded: the last package that passed
+  keeps running, and the pane says why above the frame, in the window's words (and the plugins list too).
+- **Only development plugins** loaded through that picker are watched, never in safe mode, and never past the visit (the browser asks
+  again before a page reads a file it was given in an earlier visit). The plugins list says **Starts again when its file changes** for
+  each one watched.
+- **Elsewhere** (Firefox, Safari, the desktop app's WebKit) the file is chosen as before and the list says a changed plugin is loaded
+  again by hand: a file chosen with a file input cannot be read again once it changes (Chromium refuses with `NotReadableError`).
+
 ## Writing a plugin
+
+The author kit makes this a short loop, all on the author's own machine (`agora hub plugin …` is the hub owner's, for installing on a hub):
+
+```
+agora plugin new my-plugin                                                 # a folder from the starter
+agora plugin pack my-plugin --out my-plugin.json --write-hashes --watch    # pack on every save
+# in the window: Plugins, Load from a file…, my-plugin.json; edit panel.js and save
+agora plugin check my-plugin                                               # or check my-plugin.json
+```
+
+- **`agora plugin new ID [FOLDER]`** copies the starter (`apps/web/plugins/starter/`, built into the binary) into `FOLDER` (by default
+  `./ID`) with the manifest's `id` and `name` set to `ID`: `agora-plugin.json`, `panel.js`, `panel.css`, a `README.md` and the types
+  `agora-plugin.d.ts`. The new folder passes the window's checks before anything is written, and it never writes into anything that exists.
+  An id the window would refuse is refused.
+- **`agora plugin check FOLDER|FILE`** runs the window's own checks on a folder (packed in memory) or a package: the hub's Rust port of
+  `plugins/package.ts` (`agora_hub::plugin_package`), held to the window's by the shared packages in
+  `crates/agora-hub/tests/fixtures/plugin-packages/`. It says what passes, or what would be refused as a stable code (the window's
+  `plugin-error-*` codes, plus `not-a-file` and `unreadable`) and a sentence (`cli-plugin-error-*`).
+- **`agora plugin pack FOLDER [--out FILE] [--write-hashes] [--watch]`** makes the package `scripts/pack-plugin.mjs` makes, byte for byte,
+  then runs the same checks on it and writes nothing it refuses. `--write-hashes` writes each file's SHA-256 into the manifest first
+  (as `JSON.stringify(manifest, null, 2)`, only when that changes it); `--watch` (with `--out`) packs again on every change in the folder
+  and keeps going past a refusal. The package is never written into the folder itself.
+- **What is read** is bounded: at most 1,024 entries of the folder, each file opened without following a link (a link, a sub-folder or a
+  device is refused as `not-a-file`), and all files together within the package's 2 MiB. Only names the folder lists are read, never a
+  name from the manifest, so a manifest listing `../secret` is refused as `missing` without reading it. Names and fields from a package are
+  printed without control or invisible characters.
+- **Byte for byte:** `crates/agora/tests/fixtures/plugin-kit/` holds packages the mjs made (a manifest's own file order, its bytes as
+  written, a CRLF script, a PNG, `--write-hashes` rewriting a manifest with `files` in the middle); `crates/agora/tests/plugin_kit.rs` holds
+  the command to them, and runs the mjs itself where `node` is installed, and `apps/web/src/plugins/kit.test.ts` holds the mjs to them.
+
+**Types.** `agora-plugin.d.ts` (in the starter, and in every new folder) describes `agora`, what each capability answers, the read errors
+and the messages under them. With `// @ts-check` and `/// <reference path="agora-plugin.d.ts" />` at the top of a plain JavaScript entry
+(the starter has both), an editor checks every call. They cannot drift from the window: `apps/web/plugins/kit.check.ts` (`npm run
+typecheck`, `tsc -p plugins`) holds each of them to the window's own type, exactly (`Capability`, `ReadError`, the bridge's `Answers` in
+`plugins/projection.ts`, `Inbound` and `Outbound` in `plugins/protocol.ts`), and type-checks the starter's script against them;
+`apps/web/src/plugins/kit.test.ts` holds the members of `AgoraPlugin.Api` to the object the loader (`plugin-frame.js`, plain JavaScript)
+makes, and the message types to the ones it sends and takes.
 
 The sample (`apps/web/plugins/sample/`) lists the agents and their states in the theme's colours:
 
@@ -230,7 +290,12 @@ runs.
 ## Tests
 
 - Unit (`apps/web/src/plugins/*.test.ts*`): the package checks, the message filter by source, type, size and rate, grants, the store,
-  the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode.
+  the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode; reload on save (a
+  change read once it held, a refused change keeping the last package with the reason above the frame, a new capability held, a new
+  inert frame per package, nothing in safe mode) and the author kit (the mjs against the shared packages, the starter, the types' names).
+- Author kit (`crates/agora/tests/plugin_kit.rs`, `crates/agora/src/pluginkit.rs`): `new`, `check` and `pack` as the binary, byte for byte
+  against the mjs's packages, every refusal (a hash, an unlisted file, a sub-folder, a link, a kind of file, a name outside the folder,
+  over 2 MiB), and `--watch` packing again past a refusal; the types against the window's by `tsc -p plugins`.
 - Hub (`web.rs`): the exact headers of each path; only `/plugin-frame.html` has the frame page's.
 - Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium, and WebKit with `--engine webkit`, both in CI, under the hub's
   headers per path, read from `web.rs` by `scripts/hub-headers.mjs`; both hosts and the STUN and TURN listeners are first shown reachable
@@ -244,4 +309,8 @@ runs.
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
   package loads through the dialog.
+- Reload on save in a real browser (`scripts/screenshots-plugin-reload.mjs`, headless Chromium under the hub's headers per path, the
+  file picker stood in for): a plugin loaded through the picker is listed as watched, a changed package that passes starts a new frame
+  that draws the new version and is inert, and one that fails keeps the running frame with the reason above it; screenshots
+  `docs/screenshots/plugin-reload-dialog-{dark,light}.png` and `plugin-reload-refused-{dark,light}.png`.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).

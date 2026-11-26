@@ -146,7 +146,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
     <div className="flex-none p-2">
       <label className="flex items-center gap-2 rounded-xs border border-line bg-surface-0 px-2 text-muted focus-within:border-accent">
         <Icon name="search" className="size-3.5" />
-        <input type="search" value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('filter-placeholder')} aria-label={t('filter-placeholder')}
+        <input type="search" value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('filter-short')} aria-label={t('filter-placeholder')}
           className="min-w-0 flex-1 border-0 bg-transparent px-0 py-1.5 text-[0.8125rem] focus-visible:outline-none" />
       </label>
     </div>

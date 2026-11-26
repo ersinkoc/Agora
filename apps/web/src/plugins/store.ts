@@ -113,6 +113,17 @@ export function createPluginStore(env: PluginStoreEnv) {
       write(env.kv, GRANTS_KEY, Object.keys(g).length ? g : undefined);
       set(state.plugins.filter((p) => p.plugin.manifest.id !== id));
     },
+    /** A development plugin's file changed and its new package passed the checks (reload on save, devReload.ts): it takes the loaded
+     *  one's place with the grant the person gave, so its frames start again. A capability the person was never shown holds it, as
+     *  any new version does. False when no plugin of its id is loaded. */
+    replace(plugin: CheckedPlugin, text: string): boolean {
+      const p = state.plugins.find((x) => x.dev && x.plugin.manifest.id === plugin.manifest.id);
+      if (safe || !p) return false;
+      const plugins = state.plugins.map((x) => (x === p ? entry(plugin, text, p.grant) : x));
+      persist(plugins);
+      set(plugins);
+      return true;
+    },
   };
 }
 export type PluginStore = ReturnType<typeof createPluginStore>;

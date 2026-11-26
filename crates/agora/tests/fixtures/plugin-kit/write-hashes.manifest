@@ -1,0 +1,20 @@
+{
+  "id": "hash-case",
+  "files": {
+    "a.css": "15c42ab7768d955ec0667195e339104557827893b16cc3e7412c76e7c2fcd371",
+    "b.js": "88145e1b21b8beb959b72a026cfb0a2683947e10dd7db1dce3cb84c5171a170a",
+    "c.svg": "38faf4153750fdb3d8b4ac3c34650dce4c2128f5c7b1dce0c1f5efb5c2522809"
+  },
+  "name": "Hash case ç",
+  "version": "0.1.0",
+  "author": "Ünal / \"x\"",
+  "licence": "MIT",
+  "min_agora": "0.3.0",
+  "panels": [
+    {
+      "id": "p"
+    }
+  ],
+  "capabilities": [],
+  "entry": "b.js"
+}

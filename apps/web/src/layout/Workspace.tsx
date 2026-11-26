@@ -13,7 +13,7 @@ import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, panesOf } from './tree';
 import { Note } from './Note';
-import { safeAddress } from '../plugins/safe';
+import { SAFE, safeAddress } from '../plugins/safe';
 import { PANEL_INFO, type PanelActions, type PanelContext, type PanelDef, type PanelInfo, type PanelRegistry, type PanelSources, type PanelState } from './panels';
 import type { TerminalSource } from '../terminal/source';
 
@@ -48,8 +48,15 @@ function barBox(r: Rect): CSSProperties {
 export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'get'>, panel: string) => {
   const def = panels.get(panel);
   if (def?.plugin) return def.plugin.name;
-  return def ? t(def.label) : t('layout-panel-unknown', { id: panel });
+  if (def) return t(def.label);
+  return isPluginPanel(panel) ? t('layout-panel-plugin') : t('layout-panel-unknown', { id: panel });
 };
+
+// A plugin's panel this window does not have (safe mode, or a plugin no longer kept here) is named in plain words, never by its id
+// (`plugin.<id>.<panel>` is an internal name; visual-language.md, "UI vocabulary").
+const isPluginPanel = (panel: string) => panel.startsWith('plugin.');
+const missingNote = (panel: string) =>
+  (isPluginPanel(panel) ? t(SAFE ? 'layout-panel-plugin-safe' : 'layout-panel-plugin-missing') : t('layout-panel-unknown', { id: panel }));
 
 // The "plugin" marker the window draws beside a plugin panel's name, in its pane bar and its tab (ADR-0114 decision 4): the window's own
 // words, which no plugin can reach and no theme can restyle (the ADR-0113 floor, app.css `.plugin-mark`); "development" too for a plugin
@@ -258,7 +265,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
     const followed = followOf(p);
     const a = agentFor(p);
     const def = panels.get(p.panel);
-    const unknown = <Note>{t('layout-panel-unknown', { id: p.panel })}</Note>;
+    const unknown = <Note>{missingNote(p.panel)}</Note>;
     if (!def) return unknown;
     if (def.kind === 'chooser') return lone ? welcome : picker(p);
     if (def.binds === 'agent' && !a) {

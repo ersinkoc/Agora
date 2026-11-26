@@ -10,6 +10,7 @@ import {
 import { Rounds } from '../net/rounds';
 import { Icon } from './Icon';
 import { Resizer } from './Resizer';
+import { SegmentedControl } from './kit';
 
 // The review screen's body (docs/ux/review.md): the changed files on the left, grouped by folder and filterable; one file at a time
 // on the right, unified or side by side, with the unchanged lines between hunks folded and shown on request from the file as it is
@@ -212,12 +213,8 @@ export function ChangesView({ load, read, changed }: {
           <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('changes-search')} aria-label={t('changes-search')}
             className="w-44 min-w-0 rounded-xs bg-surface-0 py-1 ps-7 pe-2 text-xs placeholder:text-muted" />
         </label>
-        <div role="radiogroup" aria-label={t('changes-layout')} className="flex items-center rounded-xs border border-line">
-          {(['unified', 'split'] as const).map((l) => (
-            <button key={l} type="button" role="radio" aria-checked={layout === l} onClick={() => setLayout(l)}
-              className={`px-2 py-0.5 text-xs transition-colors duration-150 ${layout === l ? 'bg-surface-2 text-ink' : 'text-muted hover:text-ink'}`}>{t(`changes-layout-${l}`)}</button>
-          ))}
-        </div>
+        <SegmentedControl label={t('changes-layout')} value={layout} onChange={setLayout}
+          items={(['unified', 'split'] as const).map((l) => ({ value: l, label: t(`changes-layout-${l}`) }))} />
         {layout === 'unified' && <button type="button" className="ide-iconbtn w-auto px-2 text-xs disabled:opacity-50" aria-pressed={wrap && !windowed} disabled={windowed}
           title={windowed ? t('changes-wrap-long') : undefined} onClick={() => setWrap((w) => !w)}>{t('changes-wrap')}</button>}
         <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('changes-refresh')} title={t('changes-refresh')}><Icon name="restore" /></button>
@@ -392,7 +389,7 @@ export function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGa
       const label = count === undefined ? t('changes-gap-rest') : t('changes-gap', { count });
       drawn.push(canExpand && text !== 'stale'
         ? <button key={`g${i}`} type="button" onClick={() => onOpenGap(s.gap)} disabled={text === 'loading'}
-            className="flex w-full items-center gap-2 border-y border-line bg-surface-2 px-3 py-1 text-start font-sans text-xs text-muted transition-colors duration-150 hover:text-ink">
+            className="touch-row flex w-full items-center gap-2 border-y border-line bg-surface-2 px-3 py-1 text-start font-sans text-xs text-muted transition-colors duration-150 hover:text-ink">
             <span aria-hidden>⋯</span>{text === 'loading' ? t('start-loading') : label}
           </button>
         : <div key={`g${i}`} className="border-y border-line bg-surface-2 px-3 py-1 font-sans text-xs text-muted">⋯</div>);
@@ -529,7 +526,7 @@ function worthMarking(text: string, span: [number, number] | undefined): [number
   return kept >= 2 && kept >= 0.3 * (text.length - indent) ? span : undefined;
 }
 
-const gutter = 'select-none px-2 text-end text-muted/70';
+const gutter = 'select-none px-2 text-end text-muted';
 const codeCell = 'pe-4 whitespace-pre [[data-wrap=true]_&]:whitespace-pre-wrap [[data-wrap=true]_&]:[overflow-wrap:anywhere]';
 
 function UnifiedRow({ line, pairs, width, htmlOf }: { line: DiffLine; pairs: Map<DiffLine, DiffLine>; width: string; htmlOf: HtmlOf }) {

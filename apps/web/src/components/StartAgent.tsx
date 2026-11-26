@@ -259,7 +259,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                   </button></li>)}
                 </ul>
               </div>}
-              {!forTask && <label className="flex items-start gap-2 text-body"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-caption text-muted">{t('start-portable-explain')}</span>}</span></label>}
+              {!forTask && <label className="touch-row flex items-start gap-2 text-body"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-caption text-muted">{t('start-portable-explain')}</span>}</span></label>}
             </>}
           </div>
 

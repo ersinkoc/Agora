@@ -120,3 +120,30 @@ describe('the sample plugin (apps/web/plugins/sample)', () => {
     expect(compareVersions(r.plugin.manifest.minAgora, cargo)).toBeLessThanOrEqual(0);
   });
 });
+
+// ADR-0114 decision 6: the hub checks a package exactly as the window does (crates/agora-hub/src/plugin_package.rs). Both read the same
+// packages and the same expectations (crates/agora-hub/tests/fixtures/plugin-packages/expected.json; the Rust side is
+// tests/plugin_package_agreement.rs): the same packages pass, and the others are refused with the same code and detail.
+describe('the shared packages the hub checks too', () => {
+  const dir = join(__dirname, '../../../../crates/agora-hub/tests/fixtures/plugin-packages');
+  const expected = JSON.parse(readFileSync(join(dir, 'expected.json'), 'utf8')) as {
+    agoraVersion: string;
+    cases: { file: string; ok: boolean; id?: string; version?: string; capabilities?: string[]; code?: string; detail?: string }[];
+  };
+  it('has every case', () => { expect(expected.cases.length).toBeGreaterThanOrEqual(30); });
+  for (const c of expected.cases) {
+    it(`${c.file}: ${c.ok ? 'passes' : `refused, ${c.code}`}`, async () => {
+      const r = await checkPackage(new Uint8Array(readFileSync(join(dir, c.file))), expected.agoraVersion);
+      if (c.ok) {
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect({ id: r.plugin.manifest.id, version: r.plugin.manifest.version, capabilities: [...r.plugin.manifest.capabilities] })
+          .toEqual({ id: c.id, version: c.version, capabilities: c.capabilities });
+      } else {
+        expect(r.ok).toBe(false);
+        if (r.ok) return;
+        expect({ code: r.code, detail: r.detail }).toEqual({ code: c.code, detail: c.detail });
+      }
+    });
+  }
+});
