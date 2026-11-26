@@ -42,7 +42,7 @@ registers its rail. On Settings or on a phone, the window's commands are not on 
 | `language.system`, `language.en`, `language.tr` | Language | none |
 | `theme.editor`, `plugins.open` | Edit theme, Plugins | none |
 | `window.safe-mode` | Open in safe mode (**fixed**) | Ctrl+Alt+Shift+S, ⌘⌥⇧S |
-| `window.agents` | Show or hide the agent list | Ctrl+B, ⌘B |
+| `window.agents` | Show or hide the agent list | Ctrl+B, ⌘B, Ctrl+Shift+B |
 | `pane.tab-1` … `pane.tab-9` | Go to tab 1 … 9 | Alt+1 … Alt+9 |
 | `side.place-1` … `side.place-5` | Side panel, place 1 … 5 (in the palette: "Side panel: Needs you") | Alt+Shift+1 … Alt+Shift+5 |
 | `layout.preset-1x1` … `layout.preset-focus` | Layout: one of the six presets | none |
@@ -50,6 +50,18 @@ registers its rail. On Settings or on a phone, the window's commands are not on 
 
 The defaults are the shortcuts the window had before this rung. The side panel's keys stay by **place** (the third subject of the rail,
 whichever it is), because Board and Usage come and go.
+
+**What changed from before this rung**, with the defaults:
+
+- Modifiers match exactly. Before, Shift+N also went to the next agent, and K with Ctrl or ⌘ opened the palette whatever else was held
+  (Ctrl+Alt+K, ⌘⇧K). Ctrl+Shift+K and Ctrl+Shift+B are kept as default keys, since they acted before and are the ones that reach the
+  window from a terminal.
+- A key that ran a command no longer does what the browser would do with it (N included), and a key a part of the page already handled
+  (`preventDefault`) is not a command.
+- N is not taken from any text field: before, only inputs, text areas and selects kept it; now also an editable element and a text box role.
+- Digits are matched by their place, so on a Mac Option+1 picks a tab outside a text field (it typed `¡` and did nothing before), and
+  inside one it stays a character (Option+Shift+1 used to open the side panel from a text field).
+- On a Mac the side panel's tooltips show the Mac's symbols (`⌥⇧1`).
 
 **Not commands:** the palette's searchable objects (an agent, a machine, a project, a theme, a task to give, closing a named agent) stay
 rows of the palette, not commands with keys: they come and go with the fleet. **No command answers a request.** Allow, Deny and Allow
@@ -100,12 +112,13 @@ The safe-mode key is heard before all of this, by the window itself in the captu
 
 ## Fixed keys
 
-No binding may use these as any stroke of a chord, because something the person relies on needs them (`FIXED_KEYS`):
+No list of fixed keys existed before this rung; this is it. No binding may use these as any stroke of a chord, because something the
+person relies on needs them (`FIXED_KEYS`):
 
 | why | keys |
 | --- | --- |
 | Safe mode (ADR-0114) | Ctrl+Alt+Shift+S and ⌘⌥⇧S |
-| Moving around the window by keyboard (ADR-0024) | Tab, Shift+Tab, Esc, Enter, Space, the arrows |
+| Moving around the window by keyboard: focus, dialogs, lists, menus | Tab, Shift+Tab, Esc, Enter, Space, the arrows |
 | A terminal's copy, find and paste (`terminal-fidelity.md`) | Ctrl+Shift+C, Ctrl+Insert, Ctrl+Shift+F, Ctrl+Shift+V, Shift+Insert, ⌘C, ⌘F, ⌘V |
 | Editing text | Ctrl or ⌘ with A, X, Z, and Ctrl+C, Ctrl+V, Ctrl+Y, Ctrl+Shift+Z, ⌘⇧Z |
 

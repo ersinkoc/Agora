@@ -89,7 +89,7 @@ describe('the keys in force', () => {
   it('are the defaults with nothing changed, and those reproduce the shortcuts before this rung', () => {
     expect(shown(EMPTY_FILE, 'palette.open')).toEqual(['ctrl+k', 'meta+k', 'ctrl+shift+k']);
     expect(shown(EMPTY_FILE, 'attention.next')).toEqual(['n']);
-    expect(shown(EMPTY_FILE, 'window.agents')).toEqual(['ctrl+b', 'meta+b']);
+    expect(shown(EMPTY_FILE, 'window.agents')).toEqual(['ctrl+b', 'meta+b', 'ctrl+shift+b']);
     for (let i = 1; i <= 9; i++) expect(shown(EMPTY_FILE, `pane.tab-${i}`)).toEqual([`alt+${i}`]);
     for (let i = 1; i <= 5; i++) expect(shown(EMPTY_FILE, `side.place-${i}`)).toEqual([`alt+shift+${i}`]);
     expect(shown(EMPTY_FILE, 'go.home')).toEqual([]);

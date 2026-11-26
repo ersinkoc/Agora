@@ -76,7 +76,7 @@ describe('a key press', () => {
     const s = setup();
     expect(s.press('ctrl+alt+k').kind).toBe('none');
     expect(s.press('shift+n').kind).toBe('none');
-    expect(s.press('ctrl+shift+b').kind).toBe('none');
+    expect(s.press('ctrl+alt+b').kind).toBe('none');
   });
   it('a command that cannot act lets the key go on to the next command bound to it, or to the page', () => {
     const f: KeyFile = { entries: [{ command: 'layout.preset-2x2', keys: ['ctrl+b'] }] };

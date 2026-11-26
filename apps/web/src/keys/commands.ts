@@ -58,7 +58,7 @@ export const COMMANDS: readonly CommandDef[] = [
   // The safe-mode key (ADR-0114): heard by the window before anything else (plugins/safe.ts `installSafeKey`), never through this list,
   // and no keybinding can move it or take it (FIXED_KEYS).
   { id: 'window.safe-mode', label: 'palette-safe-mode', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: ['ctrl+alt+shift+s', 'alt+shift+meta+s'], fixed: true },
-  { id: 'window.agents', label: 'keys-cmd-agents', group: 'actions', icon: 'panelLeft', context: 'window', keys: ['ctrl+b', 'meta+b'] },
+  { id: 'window.agents', label: 'keys-cmd-agents', group: 'actions', icon: 'panelLeft', context: 'window', keys: ['ctrl+b', 'meta+b', 'ctrl+shift+b'] },
   ...n9.map((i): CommandDef => ({ id: `pane.tab-${i}`, label: 'keys-cmd-tab', args: { n: i }, group: 'go', icon: 'single', context: 'tabs', keys: [`alt+${i}`] })),
   ...n5.map((i): CommandDef => ({ id: `side.place-${i}`, label: 'keys-cmd-side', args: { n: i }, group: 'go', icon: 'panelRight', context: 'side', keys: [`alt+shift+${i}`] })),
   ...PRESETS.map((p): CommandDef => ({ id: `layout.preset-${p}`, label: 'keys-cmd-preset', args: { name: `layout-preset-${p}` }, group: 'actions', icon: 'layout', context: 'window', keys: [] })),
@@ -80,9 +80,10 @@ export const MESSAGE_ARGS = new Set(['name']);
 export type FixedReason = 'safe-mode' | 'navigation' | 'terminal' | 'editing';
 
 /**
- * Keys no binding may use, as a stroke of any chord. Fixed because something the person relies on needs them:
+ * Keys no binding may use, as a stroke of any chord. No such list existed before this rung; this is it. Fixed because something the
+ * person relies on needs them:
  * - `safe-mode`: the safe-mode key (ADR-0114, docs/ux/plugins.md), heard by the window before anything else, with Ctrl or ⌘;
- * - `navigation`: moving through the window by keyboard (Tab, Shift+Tab, Esc, Enter, Space and the arrows; ADR-0024's keyboard rules);
+ * - `navigation`: moving through the window by keyboard (Tab, Shift+Tab, Esc, Enter, Space and the arrows: focus, dialogs, lists, menus);
  * - `terminal`: a terminal's copy, find and paste (terminal-fidelity.md), so a terminal always has them;
  * - `editing`: cut, copy, paste, select all, undo and redo in a text field.
  */
@@ -98,7 +99,7 @@ export const fixedReason = (s: Stroke): FixedReason | undefined => FIXED.get(str
 
 /**
  * Commands no keybinding may name: answering a request (Allow, Deny, Allow always) is done by hand on its card, after the card has been
- * on screen long enough to read (T44), and never from a key bound in a file or from the palette (ADR-0020, ADR-0024). A file that names
+ * on screen long enough to read (T44, docs/ux/approvals.md), and never from a key bound in a file or from the palette. A file that names
  * one of these is refused, so a shared keybindings file cannot pose as one that answers for you.
  */
 export const NEVER_COMMAND = /^(request|approval|approve|deny|allow)(\.|$)/;

@@ -17,6 +17,8 @@ import { canRun, handlerOf, registeredCommands } from './registry';
 import { keyStore } from './store';
 import { shownKey } from './view';
 import { commandLabel } from './view';
+// The keys are shown as on Linux and Windows whatever system runs the test (a Mac shows its own symbols).
+vi.mock('./strokes', async (original) => ({ ...(await original<typeof import('./strokes')>()), IS_MAC: false }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const v1 = agora.v1;

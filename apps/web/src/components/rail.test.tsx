@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
 import { demoAgents } from '../fixtures';
@@ -10,6 +10,8 @@ import { commandById } from '../keys/commands';
 import { EMPTY_FILE, keymap } from '../keys/file';
 import { createDispatcher } from '../keys/registry';
 import { bindingLabel, parseBinding } from '../keys/strokes';
+// The keys are shown as on Linux and Windows whatever system runs the test (a Mac shows its own symbols).
+vi.mock('../keys/strokes', async (original) => ({ ...(await original<typeof import('../keys/strokes')>()), IS_MAC: false }));
 
 beforeEach(() => setLanguage('en'));
 

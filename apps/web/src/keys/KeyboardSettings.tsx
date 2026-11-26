@@ -148,8 +148,8 @@ export function KeyboardSettings({ store = keyStore, mac = IS_MAC }: { store?: K
           {live ? <span className="keys-live" aria-live="polite">{recording?.first ? t('keys-press-second', { key: strokeLabel(recording.first, mac) }) : t('keys-press')}</span>
             : keys.length ? <Keys labels={keys.map((b) => bindingLabel(b, mac))} /> : <span className="text-muted">{t('keys-no-keys')}</span>}
           {def.fixed ? <Pill tone="plain" icon={<Icon name="lock" className="size-3" />}>{t('keys-fixed')}</Pill> : <>
-            <Button size="sm" variant={live ? 'primary' : 'ghost'} aria-label={t('keys-change-named', { name: commandLabel(def) })} autoFocus={live}
-              onClick={() => { setRefused(undefined); setRecording(live ? undefined : { id: def.id }); }} onKeyDown={live ? record(def.id) : undefined} onBlur={() => { if (live) { window.clearTimeout(timer.current); setRecording(undefined); } }}>
+            <Button size="sm" variant={live ? 'primary' : 'ghost'} aria-label={t('keys-change-named', { name: commandLabel(def) })}
+              onClick={(e) => { setRefused(undefined); setRecording(live ? undefined : { id: def.id }); if (!live) e.currentTarget.focus(); }} onKeyDown={live ? record(def.id) : undefined} onBlur={() => { if (live) { window.clearTimeout(timer.current); setRecording(undefined); } }}>
               {live ? t('keys-recording') : t('keys-change')}
             </Button>
             {keys.length > 0 && <Button size="sm" variant="ghost" aria-label={t('keys-clear-named', { name: commandLabel(def) })} onClick={() => save(def.id, [])}>{t('keys-clear')}</Button>}
