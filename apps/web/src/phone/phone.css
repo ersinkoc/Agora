@@ -137,7 +137,8 @@ body {
   text-align: start;
 }
 .phone-row:hover, .phone-row:active { background: var(--surface-2); }
-.phone-row--closed { opacity: 0.7; }
+/* A closed agent reads quieter by its name in the secondary ink, not by fading the whole row (its words keep 4.5:1). */
+.phone-row--closed .phone-row__name { color: var(--muted); }
 /* An agent that waits on you with no request open: the needs tint and hairline, as its tile on Home (no outline, no bar). */
 .phone-list--needs { background: var(--tint-needs); border-color: var(--line-needs); }
 

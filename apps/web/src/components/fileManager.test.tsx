@@ -330,6 +330,6 @@ describe('words', () => {
     setLanguage('tr');
     for (const k of keys) expect(t(k, { what: 'a', name: 'b' }), k).not.toBe(k);
     expect(t('fm-count', { count: 2 })).toBe('2 öğe');
-    expect(t('fm-write-why')).not.toBe('Changing files needs your approval on the machine, and this window cannot ask for it yet.');
+    expect(t('fm-write-why')).not.toBe('Changing files needs your OK on the machine, and this window cannot ask for it yet.');
   });
 });

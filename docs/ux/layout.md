@@ -266,7 +266,8 @@ writes it back as the same JSON; the file the Rust writer makes was also read ba
 
   Every other panel (`conversation`, `changes`, `files`, `manager`, `tasks`, `messages`, `usage`, `theme`, a plugin's) is kept and drawn
   as a placeholder naming it: "Files: open in the window to see it." An id no client knows says "Unknown panel “…”: open in the
-  window to see it."
+  window to see it." A plugin's panel the window does not have is never named by its id: its bar says **Plugin panel** and the pane
+  says that plugins are off in safe mode, or that the plugin is not added in this browser.
 - **Keys** (in the agent list: from a pane, Ctrl-] or F12 first, since inside a pane every key is the program's). Digits are free in
   the list and the same on every keyboard layout (no AltGr); 1, 2, 4 and 6 are the number of panes:
 

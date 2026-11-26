@@ -68,9 +68,11 @@ fixes it.
   - [ ] the open Mac holder follow-up (#830) on **mac**
   - [ ] renderer measurement in a real browser (frame times with many panes), written to `docs/design/performance.md`
   - [ ] the same scenario on **win** (125 % and 150 % scale)
-- [ ] **M1.4 Visual pass** (ADR-0024)
-  - [ ] headless Chromium screenshots of every main screen in both themes, at phone and desktop width; a page that lists them
-  - [ ] fix what does not follow `docs/ux/visual-language.md` (tokens only, UI vocabulary, no internal terms)
+- [x] **M1.4 Visual pass** (ADR-0024; `docs/reviews/2026-11-26-visual-pass.md`)
+  - [x] headless Chromium screenshots of every main screen in both themes, at phone and desktop width; a page that lists them
+    (`scripts/screenshots-visual-pass.mjs`, `docs/screenshots/visual-pass-2026-11/`)
+  - [x] fix what does not follow `docs/ux/visual-language.md` (tokens only, UI vocabulary, no internal terms): eleven small fixes; the
+    larger ones are follow-ups in the review's findings table
 - [ ] **M1.5 Review debt**
   - [ ] Codex reviews still owed on merged PRs: list them, review, follow-up PRs for findings
   - [ ] the evidence audit task (#708): the scopes not yet covered

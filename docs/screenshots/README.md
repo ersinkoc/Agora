@@ -156,3 +156,7 @@ A chat agent after Stop turn with two messages waiting (#908): the step that ran
 waiting message is above its own answer, and the input no longer says it waits:
 
 ![](0908-stop-turn-queue-dark.png) ![](0908-stop-turn-queue-light.png)
+
+## The visual pass (M1.4)
+Every main screen in both themes at a phone and a desktop width (`visual-pass-2026-11/`, `scripts/screenshots-visual-pass.mjs`), listed
+with the findings in [the review](../reviews/2026-11-26-visual-pass.md).

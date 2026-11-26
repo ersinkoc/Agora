@@ -375,7 +375,7 @@ for (const [name, code, budget] of stopCases) {
   const frames = await safe.page.locator('iframe').count();
   const plain = await surface(safe.page);
   const placeholder = (await safe.page.locator('[data-pane="p1"]').textContent()) ?? '';
-  check(frames === 0 && placeholder.includes(`plugin.${id}.main`), `?safe loads no plugin; its pane shows the placeholder (frames: ${frames})`);
+  check(frames === 0 && placeholder.includes('Plugins are off in safe mode') && !placeholder.includes(`plugin.${id}`), `?safe loads no plugin; its pane says plugins are off, in plain words (frames: ${frames})`);
   check(themed !== plain && themed.toLowerCase() === '#0f1419', `?safe shows the built-in theme, not the chosen one (chosen ${themed}, safe ${plain})`);
   await safe.ctx.close();
 

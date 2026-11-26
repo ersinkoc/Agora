@@ -179,7 +179,8 @@ start again with it. In step 2 grants are kept in this browser's storage beside 
 `?safe` in the address, or the safe-mode key **Ctrl+Alt+Shift+S** (⌘⌥⇧S on a Mac, by the key's place), opens the window with no plugins
 and the built-in theme (`plugins/safe.ts`): neither the plugin store nor the theme store reads this browser's storage, so another tab's
 change cannot bring a stored theme back either, and a choice made in safe mode holds for that visit only. A note at the bottom says so,
-with **Leave safe mode**.
+with **Leave safe mode**. A pane that showed a plugin's panel stays where it was, named **Plugin panel**, and says that plugins are off in
+safe mode (never the panel's internal id).
 
 The key is heard by the window first, in the capture phase, before any handler of the page's own; no plugin, theme or keybinding can
 change it (it is a fixed key, `keybindings.md`, and in safe mode the keys are the defaults). **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
