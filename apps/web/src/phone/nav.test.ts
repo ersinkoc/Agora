@@ -18,6 +18,10 @@ describe('phone navigation (ADR-0067 rung 2)', () => {
     expect(phoneScreen('#/approvals/laptop%2Fp%201')).toEqual({ kind: 'approval', id: 'laptop/p 1' });
     expect(phoneScreen('#/machines')).toEqual({ kind: 'page' });
     expect(phoneScreen('#/theme')).toEqual({ kind: 'theme' });
+    // The side panel's deep subjects, each a screen of its own on a phone.
+    expect(phoneScreen('#/board')).toEqual({ kind: 'details', tab: 'board' });
+    expect(phoneScreen('#/messages')).toEqual({ kind: 'details', tab: 'messages' });
+    expect(phoneScreen('#/usage')).toEqual({ kind: 'details', tab: 'usage' });
     expect(phoneScreen('#/device')).toEqual({ kind: 'page' });
     // Anything unknown, or an address that does not decode, is the list.
     expect(phoneScreen('#/nope')).toEqual({ kind: 'home' });

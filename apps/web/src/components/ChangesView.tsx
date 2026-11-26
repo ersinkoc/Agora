@@ -416,7 +416,7 @@ export function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGa
 }
 
 const ROW_BG: Record<DiffLine['kind'], string> = { add: 'bg-finished/12', del: 'bg-removed/12', ctx: '', hunk: 'bg-surface-2 text-muted' };
-const MARK_BG: Record<'add' | 'del', string> = { add: 'bg-finished/30', del: 'bg-removed/30' };
+const MARK_BG: Record<'add' | 'del', string> = { add: 'diff-mark-add', del: 'diff-mark-del' };
 // The left bar of a changed line, with the +/- glyph in it: removal is shape and red, never colour alone and never amber.
 const ROW_BAR: Record<DiffLine['kind'], string> = { add: 'diff-bar-add', del: 'diff-bar-del', ctx: '', hunk: '' };
 
@@ -501,7 +501,7 @@ function Code({ line, pairs, htmlOf }: { line: DiffLine; pairs: Map<DiffLine, Di
   const span = (line.kind === 'add' || line.kind === 'del') && other && line.text.length < SPAN_LIMIT && other.text.length < SPAN_LIMIT
     ? worthMarking(line.text, changedSpan(line.text, other.text)) : undefined;
   const marked = !!span && span[1] > span[0] && (line.kind === 'add' || line.kind === 'del');
-  const markCls = `rounded-[2px] text-inherit ${line.kind === 'add' || line.kind === 'del' ? MARK_BG[line.kind] : ''}`;
+  const markCls = line.kind === 'add' || line.kind === 'del' ? MARK_BG[line.kind] : '';
   const html = htmlOf(line);
   const text = line.text || ' ';
   return (

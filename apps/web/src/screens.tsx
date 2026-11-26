@@ -320,7 +320,6 @@ export function Focus({ agent, approvals = [], onResolve, stale = false, source:
         <span className="flex-1" />
         {agent.tokens && agent.terminal !== false ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
         <CloseAgentMenu agent={agent} />
-        <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
@@ -349,7 +348,6 @@ function PageFrame({ title, onBack, children, wide, plainTitle }: { title: strin
         <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
         {plainTitle ? <span className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</span>
           : <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>}
-        <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <HeaderLinks />
       </header>

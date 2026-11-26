@@ -23,6 +23,17 @@ export function TabStrip({ tabs, onPick, children, trailing }: { tabs: readonly 
   const measure = useCallback(() => {
     const el = strip.current;
     if (!el) return;
+    // Shrinking the tabs pays only when it makes them all fit. When even at their floors they do not, every tab keeps its whole name
+    // (up to its largest width) and the strip scrolls, instead of names cut short beside a gap the cut-off tab leaves (visual pass
+    // 2026-11). Decided from the floors, which do not depend on this choice, so measuring again gives the same answer.
+    const floors = tabsRef.current.reduce((sum, x) => {
+      const n = document.getElementById(`tab-${x.id}`);
+      if (!n) return sum;
+      const width = n.getBoundingClientRect().width;
+      const floor = parseFloat(getComputedStyle(n).minWidth);
+      return sum + (x.active ? width : Math.min(width, Number.isFinite(floor) ? floor : 0));
+    }, 0);
+    el.toggleAttribute('data-crowded', floors > el.clientWidth + 1);
     const box = el.getBoundingClientRect();
     const spans = tabsRef.current.map((x) => { const r = document.getElementById(`tab-${x.id}`)?.getBoundingClientRect(); return { id: x.id, left: r?.left ?? 0, right: r?.right ?? 0 }; });
     const ids = hiddenTabs(box, spans);

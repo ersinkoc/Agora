@@ -1,4 +1,6 @@
-// #284 / LAN L19: change language in a real browser without losing a terminal, form or connection.
+// #284 / LAN L19: change language in a real browser without losing a terminal, form or connection. The window's title bar has no
+// language menu (visual pass 2026-11, finding 13): the choice is in Settings, in the command palette and on the sign-in page, and
+// every open tab follows it, so this page's own changes are made as another tab's are (the browser's storage event).
 // Uses a disposable hub/node and a shell, never a real coding agent or account.
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
@@ -10,11 +12,16 @@ try {
   stack = await startStack({ binary: process.env.AGORA_TEST_BINARY, ...(process.env.AGORA_TEST_EMBEDDED_WEB ? { web: '' } : {}) });
   const { page, start, errors, origin } = stack;
   page.setDefaultTimeout(10000);
-  const choice = () => page.getByRole('combobox', { name: /^(Language|Dil)$/ });
-  await choice().waitFor({ timeout: 2000 });
+  // A choice made in another tab of this browser, as Settings or the palette there makes it.
+  const choose = (lang) => page.evaluate((l) => {
+    if (l === 'system') localStorage.removeItem('ui.language'); else localStorage.setItem('ui.language', l);
+    window.dispatchEvent(new StorageEvent('storage', { key: 'ui.language' }));
+  }, lang);
+  assert.equal(await page.locator('header select').count(), 0, 'The title bar has no language menu');
   await start('Shell');
-  // Starting opens the agent full size; the checks below run on Home, where its pane is open.
+  // Starting opens the agent full size; the checks below run on Home with its pane open (a row of the Agents list opens it there).
   await page.goto(`${origin}/#/`);
+  await page.locator('[data-region="sidebar"]').getByText(/^shell · /).first().click();
   const xterm = page.locator('.xterm').first();
   await xterm.waitFor();
   await xterm.evaluate(el => { el.dataset.languageProbe = 'original-terminal'; });
@@ -24,7 +31,7 @@ try {
   // The start window is modal (#332), so the page's own language choice is out of reach while it is open: the language is
   // changed in a second tab, which every open tab follows.
   const other = await page.context().newPage();
-  await other.goto(origin);
+  await other.goto(`${origin}/#/device`);
   const fromOtherTab = async lang => {
     await other.getByRole('combobox', { name: /^(Language|Dil)$/ }).selectOption(lang);
     await page.waitForFunction(want => document.documentElement.lang === want, lang);
@@ -69,31 +76,32 @@ try {
   await shoot('home-tr-desktop');
   await page.setViewportSize({ width: 390, height: 844 });
   await shoot('home-tr-phone');
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Language selector must fit on a phone');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Home must fit on a phone');
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.reload();
-  await choice().waitFor();
-  assert.equal(await choice().inputValue(), 'tr');
+  await page.locator('.xterm').first().waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem('ui.language')), 'tr');
   assert.equal(await page.locator('html').getAttribute('lang'), 'tr');
 
   // Focus labels change without disposing the existing renderer either.
   await page.getByRole('button', { name: 'Tam boyut', exact: true }).first().click();
+  // The full-size view is drawn (its Back), so the terminal found is its own and not Home's pane on its way out.
+  await page.locator('header').getByRole('button', { name: /^Ana sayfa/ }).waitFor();
   const focusTerminal = page.locator('.xterm');
   await focusTerminal.waitFor();
   await focusTerminal.evaluate(el => { el.dataset.languageProbe = 'focused-terminal'; });
-  await choice().selectOption('en');
+  await choose('en');
   await page.getByRole('button', { name: 'Back to Home', exact: true }).waitFor();
   assert.equal(await focusTerminal.getAttribute('data-language-probe'), 'focused-terminal');
   await page.getByRole('button', { name: 'Back to Home', exact: true }).click();
   // Home is drawn: until then the first h1 is still the agent's name, which the timing below would wait on for ever (macOS).
   await page.waitForFunction(() => document.querySelector('h1')?.textContent === 'Home');
   await shoot('home-en-desktop');
-  await choice().selectOption('system');
+  await choose('system');
   assert.equal(await page.evaluate(() => localStorage.getItem('ui.language')), null);
   assert.equal(await page.locator('html').getAttribute('lang'), 'en');
 
   const samples = await page.evaluate(async () => {
-    const choice = document.querySelector('header select');
     const times = [];
     for (let i = 0; i < 20; i++) {
       const lang = i % 2 ? 'en' : 'tr';
@@ -107,8 +115,8 @@ try {
           }
         });
         observer.observe(document.getElementById('root'), { childList: true, subtree: true, characterData: true });
-        choice.value = lang;
-        choice.dispatchEvent(new Event('change', { bubbles: true }));
+        localStorage.setItem('ui.language', lang);
+        window.dispatchEvent(new StorageEvent('storage', { key: 'ui.language' }));
       });
       times.push(performance.now() - started);
     }
@@ -118,12 +126,14 @@ try {
 
   // Choices made in another tab are reflected without a page reload.
   const otherTab = await page.context().newPage();
-  await otherTab.goto(origin);
+  await otherTab.goto(`${origin}/#/device`);
   await otherTab.getByRole('combobox', { name: 'Language', exact: true }).selectOption('tr');
   await page.waitForFunction(() => document.documentElement.lang === 'tr');
   await otherTab.close();
 
-  // Browser storage can be blocked: still change the current page and explain that it will not be saved.
+  // Browser storage can be blocked: still change the current page and explain that it will not be saved (Settings' menu says so).
+  await page.goto(`${origin}/#/device`);
+  await page.getByRole('combobox', { name: /^(Language|Dil)$/ }).waitFor();
   await page.evaluate(() => {
     const original = Storage.prototype.setItem;
     Storage.prototype.setItem = function(key, value) {
@@ -131,7 +141,7 @@ try {
       return original.call(this, key, value);
     };
   });
-  await choice().selectOption('en');
+  await page.getByRole('combobox', { name: /^(Language|Dil)$/ }).selectOption('en');
   await page.getByRole('status').filter({ hasText: 'Your browser could not save the preference.' }).waitFor();
   assert.equal(await page.locator('html').getAttribute('lang'), 'en');
 

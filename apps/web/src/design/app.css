@@ -87,15 +87,16 @@
   :root[data-line-height] * { --tw-leading: var(--ui-line-height); }
   :root[data-ligatures='off'] body { font-variant-ligatures: none; }
   /* What needs the person keeps today's text whatever a theme's weight, line height or ligatures say (the floor, ADR-0113). */
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark),
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) * { --tw-leading: initial; font-variant-ligatures: normal; }
-  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { line-height: var(--text-sm--line-height); }
-  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { font-weight: 400; }
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold),
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) * { --tw-leading: initial; font-variant-ligatures: normal; }
+  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) { line-height: var(--text-sm--line-height); }
+  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) { font-weight: 400; }
   /* …and the window's own font (the floor rule at the end of this file sets the font variables there). In the base layer, so a utility on
      the same element (a mono code line) still wins. */
   :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
-  h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
+  /* A section title: sentence case at the strong step (visual-language.md type roles), never a small uppercase label. */
+  h2 { @apply font-semibold text-ink; font-size: var(--text-strong); line-height: var(--tw-leading, var(--text-xs--line-height)); }
   button { @apply cursor-pointer; }
   input, select { @apply rounded-s border border-input-line bg-input px-3 py-2 text-input-ink; font: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -126,6 +127,8 @@
      largest width or the strip's own, whichever is less. */
   .tab-strip .ide-tab[aria-selected='true'] { flex-shrink: 0; min-width: min(8.5rem, 100%); max-width: min(13.75rem, 100%); }
   .tab-strip .ide-tab[aria-selected='true']:has(> .kit-avatar) { min-width: min(11rem, 100%); }
+  /* Tabs that would not fit even at their floors keep their whole names and the strip scrolls (TabStrip.tsx `data-crowded`). */
+  .tab-strip[data-crowded] .ide-tab { flex-shrink: 0; }
   .ide-tab > :not(.truncate) { flex: none; }
   .ide-tab > .truncate { min-width: 6ch; }
   .ide-tab[aria-selected='true'] { @apply bg-tabbar text-tabbar-ink; box-shadow: inset 0 2px 0 var(--accent); }
@@ -165,7 +168,7 @@
   /* A sign's whole meaning, shown on hover, keyboard focus and tap (NoAskBadge): drawn over the page, above dialogs and menus, so a clipping
      row or the window's edge never cuts it. */
   .tip-bubble { @apply fixed z-60 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink; box-shadow: var(--shadow); }
-  .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
+  .ide-section { @apply px-3 pb-1 pt-3 font-semibold text-ink; font-size: var(--text-strong); }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
   .muted { @apply text-[0.8125rem] text-muted; }
@@ -288,6 +291,12 @@
   /* A changed line says so by shape as well as colour: a bar on its left edge (the +/- glyph sits in the line). Content colours, not states. */
   .diff-bar-add { box-shadow: inset 2px 0 0 var(--state-finished); }
   .diff-bar-del { box-shadow: inset 2px 0 0 var(--diff-removed); }
+  /* The changed words of a changed line: the role's soft tint (text keeps 4.5:1 on it, the muted syntax ink too) and an underline in the
+     role's colour, which says it by shape. A stronger fill took the code's ink under 4.5:1 (visual pass 2026-11, finding 17). The underline
+     runs on across the highlighter's spans and never changes the row's height. */
+  .diff-mark-add, .diff-mark-del { @apply rounded-[2px] text-inherit; text-decoration-line: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+  .diff-mark-add { background: var(--tint-finished); text-decoration-color: var(--state-finished); }
+  .diff-mark-del { background: var(--tint-danger); text-decoration-color: var(--diff-removed); }
 
   /* A picture in a menu (the layout presets): a tile with room for a finger; the chosen one is marked in the accent. */
   .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
@@ -801,8 +810,8 @@
   .set-page { @apply grid items-start gap-6 md:grid-cols-[13.5rem_minmax(0,1fr)] md:gap-9; }
   .set-nav { @apply sticky top-10 z-[5] -mx-4 flex gap-x-1 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-0.5 md:overflow-visible md:border-b-0 md:p-0; }
   .set-nav__group { @apply flex flex-none items-center gap-1 md:grid md:items-stretch md:gap-0.5; }
-  /* The one uppercase label on the page (sidebar group labels, visual-language.md §2). */
-  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold uppercase tracking-wider text-muted md:block; font-size: 0.6875rem; }
+  /* The side index's group labels: sentence case at the strong step, as every section title (visual-language.md §2). */
+  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold text-ink md:block; font-size: var(--text-strong); }
   .set-nav__row { @apply w-auto flex-none whitespace-nowrap text-muted hover:text-ink md:w-full; font-size: var(--text-body); }
   .set-nav__row[aria-current='true'] { @apply text-ink; }
   .set-nav__row[aria-current='true'] .set-nav__icon { @apply text-accent; }
