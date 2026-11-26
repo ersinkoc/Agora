@@ -2044,7 +2044,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         let _ = out.write_all(agora_tui::backend::RESET);
                         let _ = out.flush();
                     }
-                    eprint!("{message}{eol}");
+                    crate::err_text(&format!("{message}{eol}"));
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));

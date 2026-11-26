@@ -186,6 +186,30 @@ mod trustcli;
 mod tuicmd;
 mod update;
 
+/// Everything `agora` prints for people goes out here (#1150). A reader that went away (`agora … | head -1`, `2>&1 | head`, a
+/// closed terminal) is never a panic, as `println!` and `eprintln!` would make it, and never takes a running hub or node down: the
+/// text is dropped and the command ends with its own exit code. `false` when the text could not be written, so a loop stops.
+pub(crate) fn out_line(text: &str) -> bool {
+    put(&mut std::io::stdout().lock(), text, b"\n")
+}
+
+/// [`out_line`] for stderr.
+pub(crate) fn err_line(text: &str) -> bool {
+    put(&mut std::io::stderr().lock(), text, b"\n")
+}
+
+/// [`err_line`] without the line break the caller brings its own of (`\r\n` while the keyboard is in raw mode).
+pub(crate) fn err_text(text: &str) -> bool {
+    put(&mut std::io::stderr().lock(), text, b"")
+}
+
+fn put(w: &mut impl std::io::Write, text: &str, end: &[u8]) -> bool {
+    w.write_all(text.as_bytes())
+        .and_then(|()| w.write_all(end))
+        .and_then(|()| w.flush())
+        .is_ok()
+}
+
 pub(crate) struct Say(Catalog);
 
 impl Say {
@@ -194,13 +218,11 @@ impl Say {
     }
 
     fn out(&self, id: &str, args: &[(&str, Arg)]) {
-        // A reader that went away (a closed pipe) must not take a running hub or node down with a panic.
-        use std::io::Write;
-        let _ = writeln!(std::io::stdout(), "{}", self.text(id, args));
+        out_line(&self.text(id, args));
     }
 
     fn err(&self, id: &str, args: &[(&str, Arg)]) {
-        eprintln!("{}", self.text(id, args));
+        err_line(&self.text(id, args));
     }
 
     /// A refused request whose `field` names something the person can act on has a sentence of its own
@@ -217,7 +239,7 @@ impl Say {
     }
 
     fn remote_error(&self, e: &v1::ErrorInfo) {
-        eprintln!("{}", self.remote_error_text(e));
+        err_line(&self.remote_error_text(e));
     }
 
     fn remote_error_text(&self, e: &v1::ErrorInfo) -> String {
@@ -908,7 +930,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     let node = match Node::start_with_holder(&cfg, hold::setup_for_node(&h)) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("{e}");
+            err_line(&e.to_string());
             return ExitCode::from(1);
         }
     };
@@ -917,7 +939,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // An earlier run's link state is never read as this run's; a node without a hub has none.
     agora_node::link_state::LinkState::clear(&cfg.data_dir);
     for (path, reason) in &node.manifest_problems {
-        eprintln!("{}: {reason}", path.display());
+        err_line(&format!("{}: {reason}", path.display()));
     }
     // ADR-0059: a policy line the node did not understand forbids starting agents that do not ask, until it is fixed.
     for line in &node.policy_problems {
@@ -1020,7 +1042,7 @@ fn call(say: &Say, c: &mut Client, cmd: Cmd) -> Result<v1::CommandOk, ExitCode> 
             Err(ExitCode::from(1))
         }
         Err(e) => {
-            eprintln!("{e}");
+            err_line(&e.to_string());
             Err(ExitCode::from(1))
         }
     }
@@ -1153,7 +1175,9 @@ fn agent_list(say: &Say, o: &Opts) -> ExitCode {
                 say.out(key!("cli-agent-list-empty"), &[]);
             }
             for line in lines {
-                println!("{line}");
+                if !out_line(&line) {
+                    break;
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1236,12 +1260,15 @@ fn agent_kinds(say: &Say, o: &Opts) -> ExitCode {
                 say.out(key!("cli-agent-kinds-empty"), &[]);
             }
             for k in &list.kinds {
-                println!(
+                let line = format!(
                     "{}\t{}\t{}",
                     k.kind,
                     k.display_name,
                     if k.installed { "installed" } else { "missing" }
                 );
+                if !out_line(&line) {
+                    break;
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1354,7 +1381,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         }
         Err(e) => {
             drop(raw);
-            eprintln!("{e}");
+            err_line(&e.to_string());
             return ExitCode::from(1);
         }
     }
@@ -1440,7 +1467,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         .and_then(|()| stdout.write_all(DETACH_RESET))
         .and_then(|()| stdout.flush());
     drop(raw);
-    println!();
+    out_line("");
     say.out(
         key!("cli-terminal-detached"),
         &[("agent_id", agent.as_str().into())],
