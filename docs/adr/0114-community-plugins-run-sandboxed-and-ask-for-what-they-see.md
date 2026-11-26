@@ -3,6 +3,7 @@ Status: Accepted
 Date: 2026-11-25
 
 Accepted: 2026-11-25 (the maintainer, in the merger chat, chose "Sandboxed" for decision 1, the trade-off). The open questions were not answered; the proposed answers stand.
+Amended: 2026-11-26 (Amendment A below: the frame is a page the hub serves under its own header policy).
 
 Answers ADR-0068's open question on custom panels ("the contract first, the loader later, or a plugin system now?"). Touches
 ADR-0020 and ADR-0028 (approvals are signed by a device key in the window), ADR-0048 (the desktop app), ADR-0097 (Proposed: the hub
@@ -56,15 +57,22 @@ The maintainer wants community plugins next to community themes, "like herdr".
      - It is `sandbox="allow-scripts"` and never `allow-same-origin`. So it has an opaque origin and cannot reach the window's
        storage, its IndexedDB key, its cookies or its connection to the hub.
      - It has no `allow-forms`, `allow-popups`, `allow-modals`, `allow-top-navigation` or `allow-downloads`.
-   - **Loading:** the frame is built from the plugin's checked files (decision 5). Every file is a blob made from those bytes,
-     never loaded from a URL.
-   - **The frame's own page policy:**
-     - It is put first in the frame and combines with the window's: `default-src 'none'; script-src blob:; style-src blob:
-       'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none';
-       base-uri 'none'`.
-     - No network at all, including WebSocket. The window's own policy allows `ws:`/`wss:` anywhere, so this one must not
-       inherit that.
-   - **The window's policy** gains only `frame-src blob:`.
+   - **The frame's page (Amendment A):** one page the hub serves beside the window's files (`/plugin-frame.html`), under a
+     header policy of its own, never a page the window makes:
+     - `sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob:
+       data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block';
+       frame-ancestors 'self'`, with `X-Frame-Options: SAMEORIGIN`.
+     - The `sandbox` directive keeps the page opaque even when it is opened on its own.
+     - No connection to any other origin: no fetch, WebSocket, image, font or page from anywhere else, and no WebRTC (the loader takes
+       its constructors away before the plugin runs, as not every engine enforces `webrtc 'block'`). Towards the hub itself it can
+       only make credential-less GET requests for the hub's own paths (a script, a stylesheet, its own frame going to a hub page),
+       whose answers it cannot read.
+     - It runs only the window's loader (`/plugin-frame.js`).
+   - **Loading:** the frame is built from the plugin's checked files (decision 5). The window sends the bytes to its own frame by
+     message; the loader makes every file a blob inside the frame's opaque origin and runs the entry. Nothing is loaded from a
+     plugin's URL.
+   - **The window's policy** is not loosened: it gains only `frame-src 'self'`, and every other page of the hub still refuses to be
+     framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
    - **The desktop app:** its webview grants the hub's page nothing (ADR-0048 decision 2), so a frame inside it has nothing to
      reach either.
 3. **The interface: a small, versioned message set over `postMessage`, and capabilities the person grants.**
@@ -157,7 +165,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
 1. **The panel registry** (ADR-0068 rung 3): built-in panels move onto it. Plugins need it. Done: `docs/ux/layout.md`, "The
    panel registry (rung 3)".
 2. **The sandbox host:** the frame, the page policy, the message set with the read capabilities, the host-drawn header, safe
-   mode, and local development loading.
+   mode, and local development loading. Done: `docs/ux/plugins.md`.
 3. **Storage on the hub,** install and remove, and per-person grants (schema messages, fixtures).
 4. **The catalog:** repository, review rules, signatures, `agora hub plugin` commands.
 5. **Further capabilities,** each by amendment.
@@ -169,7 +177,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
   - `fetch` to the hub and to an outside host, `new WebSocket` to both, an image or font from an outside host;
   - navigating the top window, `window.open`, a form post;
   - reading `parent.document`;
-  - `postMessage` of an unknown type or an oversized message (ignored and counted).
+  - `postMessage` of an unknown type or an oversized message (ignored and counted; since build step 2 the frame is stopped too).
 - **Grants:** a capability not granted answers "not granted". A version that adds a capability is held until granted.
 - **Containment:**
   - In a screenshot test the plugin header is drawn above the frame, and the frame cannot cover it or the approvals area.
@@ -185,3 +193,36 @@ The maintainer wants community plugins next to community themes, "like herdr".
 - **Should a plugin panel be allowed in a theme pack's layout** before the plugin is installed? Proposed: yes, as the "unknown
   panel" placeholder (ADR-0113 decision 5).
 - **Node-side automations on events:** a separate ADR when wanted.
+
+## Amendment A (accepted by the maintainer 2026-11-26, in the merger chat): the frame is a page the hub serves under its own header policy; the window's policy is not loosened
+
+Accepted: 2026-11-26 (the maintainer, in the merger chat, chose the hub-served frame page over loosening the window's `script-src`).
+Decision 2 is worded with it.
+
+**Why.** Found while building step 2, in Chromium 156:
+
+- **The window's policy stacks on a blob frame.** A frame whose page is a blob the window made keeps the window's page policy as well as
+  its own (local-scheme pages inherit their maker's policy container). The window has no `script-src`, so `default-src 'self'` governs
+  scripts in the frame, while the frame allowed scripts only from `blob:`: no script could run in it. Making it run would have meant
+  `blob:` in the window's own `script-src`.
+- **An opaque frame cannot load the window's blobs.** A script blob the window made is refused in an opaque frame ("Not allowed to load
+  local resource": blob addresses are partitioned by origin), so the plugin's files could not be blobs of the window's either.
+
+**Decided.**
+
+1. **The frame's page is served by the hub** at `/plugin-frame.html`, from the web app's files, with headers of its own: the policy in
+   decision 2 (with `sandbox allow-scripts`, so the page is opaque even on its own, `webrtc 'block'` and `frame-ancestors 'self'`) and
+   `X-Frame-Options: SAMEORIGIN`. A page from the network keeps only its own policy, so the window's does not stack on it.
+2. **The window's loader** (`/plugin-frame.js`) is the one script of that page. The window sends the plugin's checked files to that
+   frame only, by message; the loader makes them into blobs inside the frame's opaque origin and runs the entry.
+3. **The window's policy** gains only `frame-src 'self'` (it was to gain `frame-src blob:`). Every other path of the hub keeps today's
+   headers exactly, `X-Frame-Options: DENY` and `frame-ancestors 'none'` included, so the frame page is the only page that can be
+   framed, and only by the hub's own pages. `web.rs` tests the headers of each path.
+
+**What it costs.** `script-src 'self'` in the frame page also allows the hub's other scripts there; they run in the frame's opaque
+origin with no connections, like the plugin. `'self'` in `script-src` and `style-src`, and `frame-src 'self'` in the window, let the
+frame make credential-less GET requests for the hub's own paths, whose answers it cannot read. A frame can navigate itself only to the hub's own pages (`frame-src 'self'`), which refuse to
+be framed. The frame page is one more file the hub serves with headers of its own.
+
+**Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's headers per path (read from
+`web.rs`), the frame page opened on its own included; the real hub binary serves the same headers and the sample plugin draws in it.

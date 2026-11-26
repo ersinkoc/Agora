@@ -43,6 +43,10 @@ export interface PanelInfo {
   readonly streams: boolean;
   /** Alone in the window it is drawn without a pane bar (Home, the empty pane). Every other panel always has the host's bar. */
   readonly lone?: boolean;
+  /** A plugin's panel (ADR-0114): its name as plain text from the plugin's manifest, shown as it is and never looked up as a Fluent key,
+   *  and whether it was loaded for development. The window's pane bar draws the "plugin" marker beside the name. Set by the plugin
+   *  bridge (plugins/registry.tsx), never by a plugin. */
+  readonly plugin?: { readonly name: string; readonly dev: boolean };
 }
 
 // The built-in panels, in the order the window lists them: Show… lists the global ones then the tools, the empty pane's chooser the

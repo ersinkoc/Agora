@@ -1,0 +1,23 @@
+{
+  "id": "sample-agents",
+  "name": "Agent list",
+  "version": "0.1.0",
+  "author": "The Agora authors",
+  "licence": "Apache-2.0",
+  "min_agora": "0.3.0",
+  "panels": [
+    {
+      "id": "list",
+      "kind": "global"
+    }
+  ],
+  "capabilities": [
+    "agents.read",
+    "theme.read"
+  ],
+  "entry": "panel.js",
+  "files": {
+    "panel.css": "6ec5f18d18be200571559f369c906c6060e4feb2ecc9c5a5b7933e8fb756266a",
+    "panel.js": "b320820dac5334f4b55a513e190c12e786cdd93a10e16d84b378046e4030ce0f"
+  }
+}

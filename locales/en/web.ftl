@@ -1803,3 +1803,64 @@ palette-group-appearance = Appearance
 palette-key-move = Move
 palette-key-open = Open
 palette-key-close = Close
+
+# Plugins (ADR-0114 build step 2, docs/ux/plugins.md): sandboxed panels loaded from a local file for development, the install screen
+# with what a plugin asks to see, the marker beside a plugin panel's name, and safe mode.
+palette-plugins = Plugins
+plugin-panel = Plugin
+plugin-marker = Plugin
+plugin-development = development
+plugin-frame-title = { $name } (plugin)
+plugins-title = Plugins
+plugins-intro = Plugins you load from a file run in this browser only, each in its own sandboxed pane. They see only what you allow, and never your keys, the network or what needs you. Show one in a pane from the pane's Show… menu.
+plugins-safe = Safe mode: no plugin runs and the built-in theme is on. Leave safe mode to use your plugins again.
+plugins-done = Done
+plugin-load = Load from a file…
+plugin-version-by = { $version } by { $author }
+plugin-licence = Licence: { $licence }
+plugin-held = This version asks to see more than you allowed. Its panes stay closed until you look again.
+plugin-sees = { $count ->
+    [0] It sees nothing of yours.
+    [one] It sees one thing you allowed.
+   *[other] It sees { $count } things you allowed.
+}
+plugin-review = Look again
+plugin-change = What it can see
+plugin-remove = Remove
+plugin-added = { $name } was added. Show it in a pane from the pane's Show… menu.
+plugin-added-visit = { $name } was added for this visit only: this browser could not keep it.
+plugin-grant-title = Add { $name }?
+plugin-grant-never = It draws only inside its own pane. It cannot reach the network, your keys, your terminals or what needs you, and it cannot do anything for you.
+plugin-grant-asks = It asks to see:
+plugin-grant-nothing = It asks to see nothing of yours.
+plugin-cancel = Cancel
+plugin-add = Add plugin
+plugin-save = Save
+plugin-cap-agents-read = The names, kinds and states of your agents, with their machines and projects
+plugin-cap-usage-read = How many tokens, how much context and how much time your agents have used
+plugin-cap-tasks-read = The shared tasks of your projects
+plugin-cap-changes-read = The changed files, and what changed in them, in the folder of the agent its pane shows
+plugin-cap-chat-read = The conversation of the agent its pane shows, with secrets hidden
+plugin-cap-theme-read = The colours of your theme, so it can match them
+plugin-cap-pane-context = Which agent its pane shows, or what the pane follows
+plugin-error-too-large = This file is larger than 2 MB, the most a plugin can be.
+plugin-error-format = This file is not a plugin package.
+plugin-error-newer-format = This plugin package was made for a newer version.
+plugin-error-too-many = This package holds more files than a plugin may have.
+plugin-error-path = This package names a file with a folder or path in it ({ $detail }), so nothing of it was loaded.
+plugin-error-link = This package holds a link or something else that is not a file ({ $detail }), so nothing of it was loaded.
+plugin-error-type = This package holds a kind of file a plugin cannot use ({ $detail }), so nothing of it was loaded.
+plugin-error-manifest = The package's description (agora-plugin.json) is missing or wrong at "{ $detail }".
+plugin-error-capability = This plugin asks to see something this window does not know ({ $detail }), so it was not loaded.
+plugin-error-unlisted = This package holds a file its description does not list ({ $detail }), so nothing of it was loaded.
+plugin-error-missing = A file the package's description lists is missing ({ $detail }), so nothing of it was loaded.
+plugin-error-hash = A file in this package is not the one its description lists ({ $detail }), so nothing of it was loaded.
+plugin-error-newer = This plugin needs version { $detail } or newer.
+plugin-error-full = Four plugins are loaded already. Remove one first.
+safe-mode-on = Safe mode: no plugins, the built-in theme.
+safe-mode-leave = Leave safe mode
+plugin-frame-use = { $name } (plugin): click or press Enter to use it
+safe-mode-open = Open in safe mode
+palette-safe-mode = Open in safe mode (no plugins, the built-in theme)
+plugin-stopped = { $name } was stopped: it sent the window too many messages.
+plugin-restart = Start it again

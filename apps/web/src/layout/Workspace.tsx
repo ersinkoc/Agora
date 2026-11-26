@@ -12,6 +12,7 @@ import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, panesOf } from './tree';
 import { Note } from './Note';
+import { safeAddress } from '../plugins/safe';
 import { PANEL_INFO, type PanelActions, type PanelContext, type PanelDef, type PanelInfo, type PanelRegistry, type PanelSources, type PanelState } from './panels';
 import type { TerminalSource } from '../terminal/source';
 
@@ -42,10 +43,23 @@ function barBox(r: Rect): CSSProperties {
 }
 
 // The name the user sees for a panel id (UI vocabulary, not internal terms), from the registry; an id it does not have is named as unknown.
-export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'label'>, panel: string) => {
-  const key = panels.label(panel);
-  return key ? t(key) : t('layout-panel-unknown', { id: panel });
+// A plugin's panel is named by the plugin's own name as plain text, never looked up as a Fluent key (ADR-0114; the marker says whose it is).
+export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'get'>, panel: string) => {
+  const def = panels.get(panel);
+  if (def?.plugin) return def.plugin.name;
+  return def ? t(def.label) : t('layout-panel-unknown', { id: panel });
 };
+
+// The "plugin" marker the window draws beside a plugin panel's name, in its pane bar and its tab (ADR-0114 decision 4): the window's own
+// words, which no plugin can reach and no theme can restyle (the ADR-0113 floor, app.css `.plugin-mark`); "development" too for a plugin
+// loaded from a local file.
+export function PluginMark({ dev }: { dev: boolean }) {
+  return (
+    <span className="plugin-mark" data-plugin-mark="" title={dev ? `${t('plugin-marker')} · ${t('plugin-development')}` : t('plugin-marker')}>
+      <Icon name="puzzle" className="size-3" />{t('plugin-marker')}{dev && <>{' '}<span className="plugin-mark__dev">{t('plugin-development')}</span></>}
+    </span>
+  );
+}
 export const panelLabel = (panel: string) => panelName(PANEL_INFO, panel);
 
 export interface WorkspaceProps {
@@ -112,6 +126,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
     { label: t('layout-move-to'), disabled: others(p).length === 0, items: others(p).map((o) => ({ label: label(o), items: places.map(([place, key]) => ({ label: t(key), run: () => dispatch({ type: 'move', pane: p.id, target: o.id, place }) })) })) },
     { label: t('layout-swap-with'), disabled: others(p).length === 0, items: others(p).map((o) => ({ label: label(o), run: () => dispatch({ type: 'swap', a: p.id, b: o.id }) })) },
     ...(f.tabs && f.panes.length > 1 && !narrow ? [{ label: t('layout-move-out'), run: () => dispatch({ type: 'detach', pane: p.id }) }] : []),
+    // A plugin's pane offers the way out by the mouse too: the window again with no plugins and the built-in theme (ADR-0114).
+    ...(panels.get(p.panel)?.plugin ? [{ label: t('safe-mode-open'), divider: true, run: () => location.assign(safeAddress(location.href)) }] : []),
     { label: t('layout-close-pane'), divider: true, run: () => dispatch({ type: 'close', pane: p.id }) },
   ];
 
@@ -183,6 +199,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <AgentAvatar accent={pa.accent} kind={agentKind(pa)} size="s" /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <PaneName text={label(p)} />
+                  {panels.get(p.panel)?.plugin && <PluginMark dev={!!panels.get(p.panel)?.plugin?.dev} />}
                   {pa && <NoAskBadge agent={pa} nested bare />}
                   {pa && <StatusMark state={pa.state} failed={endedWithError(pa)} />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
@@ -191,7 +208,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
             })}
           </TabStrip>
         ) : (
-          <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
+          <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} data-pane-label="" {...dragProps(front)}>
             {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
             <PaneName text={label(front)} className="font-medium" />
             {a && <NoAskBadge agent={a} bare />}
@@ -201,8 +218,19 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
           </div>
         )}
         {f.tabs && followOf(front) && <span className="ide-chip mx-1 flex-none self-center">{t(`layout-follows-${followOf(front)}`)}</span>}
-        {barTools(front, f)}
-        {!f.tabs && !lone && <button type="button" className="ide-iconbtn me-1 self-center" onClick={() => dispatch({ type: 'close', pane: front.id })} aria-label={t('layout-close-pane')} title={t('layout-close-pane')}><Icon name="close" /></button>}
+        {(() => {
+          const tools = <>
+            {barTools(front, f)}
+            {!f.tabs && !lone && <button type="button" className="ide-iconbtn me-1 self-center" onClick={() => dispatch({ type: 'close', pane: front.id })} aria-label={t('layout-close-pane')} title={t('layout-close-pane')}><Icon name="close" /></button>}
+          </>;
+          // A plugin's pane: the marker keeps its whole width in any pane; the name gives way first, then the pane's own buttons, which are
+          // cut at the end rather than drawn over it (they are all in the ⋯ menu, and the pane can be widened).
+          const plugin = !f.tabs ? panels.get(front.panel)?.plugin : undefined;
+          return plugin ? <>
+            <span className="flex flex-none items-center pe-1"><PluginMark dev={plugin.dev} /></span>
+            <div className="flex min-w-0 items-stretch overflow-hidden" data-pane-tools="">{tools}</div>
+          </> : tools;
+        })()}
       </div>
     );
   };

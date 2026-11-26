@@ -62,6 +62,8 @@ import { TOOL_PANELS } from './net/paneTools';
 import { decodeHash, isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
+import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
+import { SAFE, safeAddress } from './plugins/safe';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -88,6 +90,8 @@ export function App() {
   // ADR-0067 rung 2: a phone gets one column (the list, then one agent); a tablet and a desktop keep the window.
   const phone = usePhone();
   const [palette, setPalette] = useState(false);
+  // Plugins loaded from a local file, for development (ADR-0114): the palette opens the list, the loading and the install screen.
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
@@ -555,6 +559,8 @@ export function App() {
     // The language, here too: on a phone the title bar has no room for its picker.
     ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); }, group: 'appearance' as const, icon: 'globe' as const })),
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme, group: 'appearance', icon: 'pencil' },
+    { id: 'plugins', label: t('palette-plugins'), run: () => setPluginsOpen(true), group: 'appearance', icon: 'puzzle' },
+    ...(SAFE ? [] : [{ id: 'safe-mode', label: t('palette-safe-mode'), run: () => location.assign(safeAddress(location.href)), group: 'appearance' as const, icon: 'puzzle' as const }]),
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
@@ -620,6 +626,8 @@ export function App() {
       {/* The demo Settings page shows Settings only: no demo requests over it. */}
       <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={answerRequest} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
+      {pluginsOpen && <PluginsDialog onClose={() => setPluginsOpen(false)} />}
+      {SAFE && <SafeModeNote />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
       {hub && live && changes && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}
