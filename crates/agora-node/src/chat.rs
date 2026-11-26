@@ -402,7 +402,7 @@ pub fn describe(item: &ChatItem) -> (ChatKind, String, String) {
         ChatItem::Plan(lines) => (ChatKind::Plan, lines.join("\n"), String::new()),
         ChatItem::Diff { path, unified_diff } => {
             // ADR-0080: what a secret file's change says is not shown, only that it changed and where.
-            let text = if agora_core::secrets::is_secret_path(path) {
+            let text = if is_secret_file(path) {
                 String::new()
             } else {
                 unified_diff.clone()
@@ -583,6 +583,19 @@ fn json_string(s: &str) -> String {
 
 /// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
 /// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
+/// ADR-0080: whether `path` names a secret file, also with each of its parts trimmed: cleaning turns a line break or a tab into a
+/// space (`cfg/.env\n` becomes `cfg/.env `), and the name is still the secret one (review of #1221).
+fn is_secret_file(path: &str) -> bool {
+    agora_core::secrets::is_secret_path(path)
+        || agora_core::secrets::is_secret_path(
+            &path
+                .split(['/', '\\'])
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
+}
+
 fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
     let (out, cut, _) = tidy_cuts(text, max, style);
     (out, cut)
@@ -1963,7 +1976,7 @@ impl ChatBoard {
                             Style::Label,
                             &reported(cuts, &CutField::DiffPath),
                         );
-                        if agora_core::secrets::is_secret_path(&path) {
+                        if is_secret_file(&path) {
                             text.clear();
                         }
                         (path, at)
@@ -2054,10 +2067,9 @@ impl ChatBoard {
                 .collect()
         });
         let path_cuts = paths.as_ref().map(|_| path_cuts);
-        let secret_path = paths.as_ref().is_some_and(|p| {
-            p.iter()
-                .any(|p| agora_core::secrets::is_secret_path(&p.path))
-        });
+        let secret_path = paths
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|p| is_secret_file(&p.path)));
         let (output, output_cuts) = match item.output.as_ref() {
             Some(o) => {
                 let (o, truncated, c) = tidy_cuts_at(
@@ -2107,11 +2119,7 @@ impl ChatBoard {
                 e.output_truncated = truncated;
             }
             // What a tool printed about a secret file is not shown, whatever order the pieces arrived in.
-            if secret_path
-                || e.paths
-                    .iter()
-                    .any(|p| agora_core::secrets::is_secret_path(&p.path))
-            {
+            if secret_path || e.paths.iter().any(|p| is_secret_file(&p.path)) {
                 e.output.clear();
                 e.output_truncated = false;
             }
@@ -3014,6 +3022,56 @@ mod tests {
         // A plan step is never failed.
         assert_eq!(plan_status("failed"), ToolStatus::Unspecified);
         accounted(&b, &a);
+    }
+
+    /// Review of #1221: a path whose end is a line break or a tab is cleaned to a trailing space, and is still known as a secret file's:
+    /// a diff of it keeps no text, and a tool call naming it keeps no output (in one piece, or with the output after the location).
+    #[test]
+    fn a_secret_path_with_trailing_whitespace_is_still_secret() {
+        for (i, path) in ["cfg/.env\n", "cfg/.env\t", "cfg/id_rsa\r\n"]
+            .into_iter()
+            .enumerate()
+        {
+            let b = ChatBoard::new();
+            let a = AgentId::new("a");
+            b.push_item(
+                &a,
+                &ChatItem::Diff {
+                    path: path.into(),
+                    unified_diff: "+KEY=v".into(),
+                },
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    locations: Some(vec![(path.into(), 1)]),
+                    output: Some("KEY=v".into()),
+                    ..tool(&format!("one-{i}"))
+                }),
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    locations: Some(vec![(path.into(), 1)]),
+                    ..tool(&format!("two-{i}"))
+                }),
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some("KEY=v".into()),
+                    ..tool(&format!("two-{i}"))
+                }),
+                0,
+            );
+            let s = b.snapshot(&a);
+            assert_eq!(s.len(), 3, "{path:?}");
+            assert_eq!(s[0].text, "", "{path:?}: {:?}", s[0].path);
+            assert!(s.iter().all(|e| e.output.is_empty()), "{path:?}: {s:?}");
+        }
     }
 
     #[test]
