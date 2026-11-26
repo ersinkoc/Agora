@@ -283,6 +283,8 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
 ![Gruvbox on the window, dark](../screenshots/starter-theme-gruvbox-dark.png)
 ![Gruvbox, light, from the same file](../screenshots/starter-theme-gruvbox-light.png)
 ![Catppuccin Mocha](../screenshots/starter-theme-catppuccin-mocha-dark.png)
+![Dracula](../screenshots/starter-theme-dracula-dark.png)
+![Rosé Pine](../screenshots/starter-theme-rose-pine-dark.png)
 ![Tokyo Night](../screenshots/starter-theme-tokyo-night-dark.png)
 
 Well-known palettes, ported (roadmap M5.2). Each is an ordinary format-2 file in `apps/web/src/themes/starter/` (no other field, no
@@ -304,23 +306,34 @@ How a palette becomes a theme (the same for each):
 - **Only the palette's published colour values** (hex) are used, never a theme file of the project, and no colour is mixed, lightened
   or made up. The notices are in `THIRD_PARTY.md`.
 - **Each slot takes the palette's own colour for it**: the background, panels and raised surfaces from its background shades, text
-  and secondary text from its text shades, the accent and the five states from its accents (working blue, needs you yellow or
-  orange, finished green), the terminal's 16 colours from the project's own terminal colours, code colours from its syntax roles.
+  and secondary text from its text shades, the accent and the five states from its accents (mostly working blue, needs you yellow,
+  finished green; Rosé Pine, which has no green, has Iris for working and Foam for finished, Dracula has cyan for working). The
+  terminal's 16 colours are the project's own terminal colours where it publishes them (Catppuccin's `palette.json`, Tokyo Night's
+  generated extras, Dracula's Alacritty port), else the palette's colour of that hue (Gruvbox's normal and bright shades, Rosé Pine's
+  roles). Code colours follow the palette's own roles where it names them, else its colour of a similar hue.
 - **When that colour does not pass a rule, the next colour of the same palette that does is used** (for example a lighter grey for
   "bright black", the text colour for secondary text on Rosé Pine, Dracula's darker `#21222c` for the panels). When none does, the
   slot is left out of the file and Agora's own colour stands in, as for any theme: Tokyo Night's and Dracula's comment colour in code,
   Gruvbox light's "finished" and four of its code colours.
-- **A variant whose own colours cannot be made readable this way is left out**, rather than bending a rule:
-  - **Catppuccin Latte**: its accents and states are below the minimum on its own backgrounds (green 2.9:1, yellow 2.3:1, blue 4.3:1
-    on Base), so the states and most terminal colours would all be Agora's.
-  - **Tokyo Night Day**: its text is 4.5:1 only on its main background (3.9:1 on its sidebar colour), and no secondary text or
-    accent of the palette reaches 4.5:1 on its surfaces.
-  - **Nord**: the fixed red is below 4.5:1 on every Nord background but its darkest (3.6:1 on Polar Night 1), and with every
-    surface its darkest the red on its error background is 3.6:1 and Frost blue as "working" on its own background 3.7:1.
-  - **Rosé Pine Dawn**: its secondary text (Subtle, 4.0:1) and three of the five state colours (Gold 2.0:1, Foam 3.1:1, Love 3.8:1)
-    are below the minimum on its base.
-  - **Solarized**: light: no accent reaches 4.5:1 on Base3 (orange 4.2:1 at best) and its body text is 4.1:1; dark: the fixed red on
-    its error background is 4.4:1 even on Base03, its darkest.
+- **A variant is left out when it cannot pass with no warning this way**, rather than bending a rule. For each, what its own colours
+  miss, and what is still short with Agora's colours standing in for those (as the readers report it):
+  - **Catppuccin Latte**: no accent of the palette but Mauve and Red reaches 4.5:1 on its backgrounds (Green 2.9:1, Yellow 2.3:1,
+    Blue 4.3:1 on Base), so every state colour and most terminal colours would be Agora's; even then Agora's bright green and bright
+    yellow are 2.9:1 and 2.5:1 on Base, and "needs you" on its own background 3.8:1.
+  - **Tokyo Night Day**: its text is 4.5:1 on its main background only (3.9:1 on its sidebar colour) and no secondary text or accent
+    of the palette reaches 4.5:1 on its surfaces; with Agora's standing in, secondary text on raised surfaces is still 4.0:1 and the
+    accent on the panels 4.2:1.
+  - **Nord**: Agora's fixed red is below 4.5:1 on every Nord background but its darkest (3.6:1 on Polar Night 1); with every surface
+    Polar Night 0, the red on its error background is 3.6:1 and Frost blue as "working" on its own background 3.7:1.
+  - **Rosé Pine Dawn**: its secondary text (Subtle, 4.0:1) and three of the five states (Gold 2.0:1, Foam 3.1:1, Love 3.8:1) are
+    below the minimum on Base; with Agora's standing in, Agora's bright yellow is 2.6:1 on Base and "needs you" on its own background
+    4.4:1.
+  - **Solarized dark**: Agora's fixed red on its error background is 4.4:1 even with every surface Base03, its darkest; its accents
+    on their own backgrounds are 4.4:1 or less, and secondary text on them 4.3:1.
+  - **Solarized light**: no accent reaches 4.5:1 on Base3 (Orange 4.2:1 at best) and its body text is 4.1:1 (Base01, its emphasised
+    text, 4.9:1 on Base3 but 4.3:1 on Base2); with Agora's standing in, "needs you" on its own background is 4.2:1.
+
+  So only one light theme (Gruvbox light) ships: the light variants of these palettes are lower in contrast than the rules allow.
 
 `scripts/screenshots-starter-themes.mjs` takes the shots above from the demo window (the picker's list is shown in the page by giving
 the select a size for the shot: a browser cannot capture the list the system draws).

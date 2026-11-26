@@ -1,5 +1,5 @@
 // Screenshots for the starter themes (roadmap M5.2, docs/ux/themes.md "Starter themes"): the theme picker with its "Starter themes"
-// group in both schemes, and starter themes applied to the window (Gruvbox dark and light, Catppuccin Mocha, Tokyo Night), from the
+// group in both schemes, and every starter theme applied to the window (Gruvbox in dark and light, the others in dark), from the
 // built web app's demo window (`#/demo`, no hub). Needs a built web app and playwright-core with a Chromium:
 //   cd apps/web && npm run build
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/screenshots-starter-themes.mjs [dist] [outdir]
@@ -59,8 +59,11 @@ for (const scheme of ['dark', 'light']) {
   await shot(page, `starter-themes-picker-${scheme}`);
   await ctx.close();
 }
-// Starter themes on the window: Gruvbox in both schemes (one file), Catppuccin Mocha and Tokyo Night (dark).
-for (const [name, scheme, file] of [['Gruvbox', 'dark', 'gruvbox'], ['Gruvbox', 'light', 'gruvbox'], ['Catppuccin Mocha', 'dark', 'catppuccin-mocha'], ['Tokyo Night', 'dark', 'tokyo-night']]) {
+// Every starter theme on the window: Gruvbox in both schemes (one file), the others in dark (the only scheme they have).
+for (const [name, scheme, file] of [
+  ['Gruvbox', 'dark', 'gruvbox'], ['Gruvbox', 'light', 'gruvbox'], ['Catppuccin Mocha', 'dark', 'catppuccin-mocha'], ['Dracula', 'dark', 'dracula'],
+  ['Rosé Pine', 'dark', 'rose-pine'], ['Tokyo Night', 'dark', 'tokyo-night'],
+]) {
   const { page, ctx } = await open(scheme, pick(name));
   await shot(page, `starter-theme-${file}-${scheme}`);
   await ctx.close();

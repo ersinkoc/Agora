@@ -54,6 +54,19 @@ impl StarterFile {
     pub fn read(&self) -> Read {
         read_text(self.text)
     }
+
+    /// The starter theme, when the reader accepts the file.
+    fn starter(&self) -> Option<Starter> {
+        match self.read() {
+            Read::Ok { theme, .. } => Some(Starter {
+                id: self.id,
+                project: self.project,
+                licence: self.licence,
+                theme: *theme,
+            }),
+            Read::Refused(_) => None,
+        }
+    }
 }
 
 /// A starter theme the reader accepted.
@@ -68,23 +81,12 @@ pub struct Starter {
 /// Every starter theme, read once by the caller (the theme list holds them while it is open). A file the reader refuses is left out;
 /// a test holds every file to no problems and no warnings, so none is.
 pub fn starters() -> Vec<Starter> {
-    FILES
-        .iter()
-        .filter_map(|f| match f.read() {
-            Read::Ok { theme, .. } => Some(Starter {
-                id: f.id,
-                project: f.project,
-                licence: f.licence,
-                theme: *theme,
-            }),
-            Read::Refused(_) => None,
-        })
-        .collect()
+    FILES.iter().filter_map(StarterFile::starter).collect()
 }
 
-/// One starter theme by id, and the scheme to show: the one asked for when the theme has it, else its first.
+/// One starter theme by id (only its file is read), and the scheme to show: the one asked for when the theme has it, else its first.
 pub fn starter(id: &str, scheme: Scheme) -> Option<(Starter, Scheme)> {
-    let s = starters().into_iter().find(|s| s.id == id)?;
+    let s = FILES.iter().find(|f| f.id == id)?.starter()?;
     let shown = if s.theme.look(scheme).is_some() {
         scheme
     } else {
