@@ -17,3 +17,5 @@ manifests/agents/registry/** -text
 crates/agora-adapters/tests/fixtures/registry/** -text
 # A plugin's files are listed by their SHA-256 in its manifest (ADR-0114): a rewritten line ending would be a wrong hash.
 apps/web/plugins/** -text
+# `agora manual` prints docs/manual as it is, and its tests read the examples byte for byte (a plugin's hash among them).
+docs/manual/*.md text eol=lf

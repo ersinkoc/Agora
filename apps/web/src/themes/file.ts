@@ -31,7 +31,7 @@ export type ThemeData = Required<Pick<Theme, 'looks' | 'chrome' | 'text'>> & Pic
 export type ReadTheme = { ok: true; theme: ThemeData; warnings?: ThemeIssue[] } | { ok: false; issues: ThemeIssue[] };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const cleanName = (v: unknown) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '').trim() : '');
+export const cleanName = (v: unknown) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '').trim() : '');
 const shortKey = (k: string) => cleanName(k).slice(0, 40);
 const HEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
 function readColour(v: unknown): string | undefined {
@@ -49,7 +49,7 @@ function readPx(v: unknown, min: number, max: number): number | undefined {
 // 1 accepts stays one format 2 accepts (the name never reaches CSS; it is text on the page).
 const UNSAFE_ALL = UNSAFE.map((r) => new RegExp(r.source, `${r.flags}g`));
 // A name of nothing but those pieces becomes a dash (a mark, not a word: no language's text lives in code).
-const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''), name).replace(/\s+/g, ' ').trim() || '—';
+export const safeName = (name: string) => UNSAFE_ALL.reduce((n, r) => n.replace(r, ''), name).replace(/\s+/g, ' ').trim() || '—';
 
 // ---- Reading --------------------------------------------------------------------------------------------------------------------
 

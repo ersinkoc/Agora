@@ -134,6 +134,9 @@ agora events --json --agent agent-1                                       # one 
   `event`, `agent_id`, `kind`, `state`, `running`, `restarts`, `time_ms` and, for `state`, `previous`; the words are fixed tokens. It runs
   until interrupted, exits with 1 when the node goes away, and with 0 at its next line after the reader did (`| head -1`).
 
+`agora manual scripting` prints this for a coding agent, with the other topics an agent needs to customize Agora for you (`agora
+manual` lists them).
+
 The control socket has no event stream, so these commands ask for the node's agent list every 200 ms: a state the agent held for
 less than that may not be seen, and `events` lines have no sequence numbers. After a prompt, an agent still showing the state it had
 before (its turn too quick to see, or not shown yet) counts as finished after 5 s; a prompt sent while the agent was working (queued, or

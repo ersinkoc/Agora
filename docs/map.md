@@ -45,6 +45,7 @@ Closing, killing or freezing an interface changes nothing below it. A node keeps
 | a tool with its own protocol | an adapter program speaking the adapter protocol | L3 |
 | a new way to look at things | a client of the hub protocol (the web window, TUI and desktop are the same kind of thing) | client |
 | a new rule on a machine | the node's policy file (what it allows; the hub can never widen it) | node |
+| a theme, a layout, a keybindings file or a plugin for a person | the file the format says; a coding agent reads `agora manual` (`docs/manual/`) | data |
 
 ## Rules that keep it simple
 

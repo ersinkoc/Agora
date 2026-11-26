@@ -144,11 +144,13 @@ fixes it.
 Built: theme format 2 and its editor (#1206), the terminal client's themes (#1222), the panel registry (#1214), the sandboxed plugin
 frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#1239). The catalogs and sync are M0.1.
 
-- [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2, in
-  the editor and as `agora theme import`; **decision**: which formats first
+- [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2
+  - [x] in the web window's editor: all five formats ([themes](../ux/themes.md#import-from-another-app))
+  - [ ] as `agora theme import` (not built: the maintainer asked for the web window only)
 - [x] **M5.2 Starter themes**: well-known palettes ported after a licence check: Catppuccin Mocha, Dracula, Gruvbox (dark and light),
   Rosé Pine and Tokyo Night, in both clients ([themes](../ux/themes.md#starter-themes)); Catppuccin Latte, Tokyo Night Day, Nord,
-  Rosé Pine Dawn and Solarized were left out because their own colours do not reach the readability rules
+  Rosé Pine Dawn and Solarized were left out: with their own colours (and Agora's in the slots they have none for) they cannot pass
+  the readability rules without a warning ([why, per variant](../ux/themes.md#starter-themes))
 - [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the
   wrong machine
 - [ ] **M5.4 Plugins can act** (ADR-0114 amendments, **decision** on the order; each one its own amendment, then built)
@@ -172,8 +174,10 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   table runs
 - [ ] **M6.3 A plain terminal shows its agent** (G3): M3.4
 - [ ] **M6.4 A pushed event stream and a published API description** (G9, **decision**): `agora events` polls every 200 ms today
-- [ ] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
+- [x] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
   agent can write a theme, a layout or a plugin for its person
+  - [x] `agora manual [TOPIC] [--json]`: `scripting`, `themes`, `layouts`, `keys`, `plugins`, `mesh`, `files` (`docs/manual/`); every
+    command line, example and limit in it is checked against the product by tests
 - [ ] **M6.6 Images in terminals** (G11, **decision**): kitty graphics and sixel
 - [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications
 

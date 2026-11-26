@@ -1020,6 +1020,59 @@ theme-export = Export
 theme-delete = Delete theme
 theme-reset = Reset to defaults
 theme-import-hint = Themes are kept in this browser. Export one to use it in another browser; Reset brings back Light and Dark and keeps your themes.
+theme-import-other = Import from another app…
+theme-import-title = Import from another app
+theme-import-intro = Reads the colours of iTerm2 (.itermcolors), Alacritty (.toml or .yml), Ghostty (a theme file), Windows Terminal (a colour scheme) and VS Code (a colour theme). Nothing is added until you choose Add theme.
+theme-import-from = From { $format }: { $name }
+theme-import-palette = The terminal's colours
+theme-import-notes = What changed on the way
+theme-import-refused = This theme can't be added:
+theme-import-warnings = It can be added, but some text or controls would be hard to see in places:
+theme-import-add = Add theme
+theme-import-cancel = Cancel
+theme-import-default-name = Imported theme
+theme-import-and-more = { $list } and { $count } more
+theme-import-format-iterm2 = iTerm2
+theme-import-format-alacritty = Alacritty
+theme-import-format-ghostty = Ghostty
+theme-import-format-windows-terminal = Windows Terminal
+theme-import-format-vscode = VS Code
+theme-import-error-too-large = This file is larger than { $max } KiB; a colour file is far smaller.
+theme-import-error-unknown-format = This is not a colour file from iTerm2, Alacritty, Ghostty, Windows Terminal or VS Code.
+theme-import-error-unreadable = This file looks like a colour file but can't be read.
+theme-import-error-entities = This file declares XML entities of its own, which a colour file never needs, so it was not read.
+theme-import-error-no-colours = No terminal colours were found in this file.
+theme-import-note-scheme = { $scheme ->
+    [light] It has a light background, so it becomes your light theme. Your dark theme stays as it is.
+   *[dark] It has a dark background, so it becomes your dark theme. Your light theme stays as it is.
+  }
+theme-import-note-derived = The window's colours (backgrounds, text, accent and states) were made from the terminal's colours, each checked to be easy to read.
+theme-import-note-derived-kept = The window's colours could not be made easy to read from these colours, so the window keeps Agora's own; the terminal takes the file's.
+theme-import-note-missing = Not in the file, so Agora's own are used: { $keys }.
+theme-import-note-ignored = Left out, a theme has no place for them: { $keys }.
+theme-import-note-unreadable = These colours could not be read, so Agora's own are used: { $keys }.
+theme-import-note-alpha = See-through in the file, so mixed over the background: { $keys }.
+theme-import-note-background-alpha = The background is see-through in the file; the window draws it solid.
+theme-import-note-selection-alpha = The selection's transparency was dropped: Agora draws the selection see-through itself.
+theme-import-note-colour-space = { $space ->
+    [p3] The colours were converted from Display P3 to sRGB.
+   *[other] Some colours are in a colour space other than sRGB or Display P3 and were read as sRGB, so they may look slightly different.
+  }
+theme-import-note-variant = { $used ->
+    [light] The file has separate light and dark colours; its light ones were used.
+   *[dark] The file has separate light and dark colours; its dark ones were used.
+  }
+theme-import-note-first-scheme = The file has { $count } colour schemes; the first was imported.
+theme-import-note-window-colours = { $count ->
+    [one] One of VS Code's window colours was left out: the window's colours are made from the terminal's.
+   *[other] { $count } of VS Code's window colours were left out: the window's colours are made from the terminal's.
+  }
+theme-import-note-include = This theme builds on another file (include), which was not read: only the colours in this file were used.
+theme-import-note-fallback = The file has no { $key }, so it was taken from { $from }.
+theme-import-note-syntax = { $count ->
+    [one] One code colour was taken from the theme's token colours.
+   *[other] { $count } code colours were taken from the theme's token colours.
+  }
 theme-name-dark = Dark
 theme-name-light = Light
 theme-name-high-contrast = High contrast

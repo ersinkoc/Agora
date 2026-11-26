@@ -53,6 +53,7 @@ cli-usage =
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
       agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
+      agora manual [TOPIC] [--json]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-node-events-set-aside = Events recorded before this machine was linked as { $node_id } (under { $old_id }) were set aside and will not be sent to the hub: { $path }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -84,6 +85,17 @@ cli-unknown-project = No project named { $project } is registered on this node.
 cli-ambiguous-project = More than one project is registered; choose one with --project.
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
+# `agora manual` (G10): how to drive and customize Agora, written for coding agents. The topics themselves are in docs/manual/
+# (English; see crates/agora/src/manualcmd.rs for why they are not here).
+cli-manual-heading = The manual has these topics. "agora manual TOPIC" prints one; "agora manual --json" lists them as JSON.
+cli-manual-unknown = The manual has no topic named "{ $topic }". Its topics: { $topics }.
+cli-manual-topic-scripting = Start, prompt, wait for and stop agents from a shell; exit codes and events.
+cli-manual-topic-themes = Write a theme file for the web window and the terminal client.
+cli-manual-topic-layouts = Write a layout file: splits, tab groups and panes.
+cli-manual-topic-keys = Write a keybindings file for the web window.
+cli-manual-topic-plugins = Write a plugin: a sandboxed panel for the web window.
+cli-manual-topic-mesh = The mesh tools an agent inside Agora can call.
+cli-manual-topic-files = Where each file lives in the Agora folder, and how it is read.
 cli-error = Error { $code }: { $message }
 cli-invalid-directory-identity_changed = This folder's project identity changed since an agent last started here. Add --accept-project-id-change to start one anyway.
 

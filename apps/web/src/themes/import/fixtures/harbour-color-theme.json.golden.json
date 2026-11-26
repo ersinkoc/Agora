@@ -1,0 +1,93 @@
+{
+  "format": "vscode",
+  "scheme": "dark",
+  "name": "Harbour",
+  "file": {
+    "agora-theme": 2,
+    "name": "Harbour",
+    "dark": {
+      "tokens": {
+        "surface-0": "#0b1016",
+        "surface-1": "#151a21",
+        "surface-2": "#20252b",
+        "border": "#30363c",
+        "text": "#d8e1ea",
+        "text-muted": "#a5adb5",
+        "accent": "#9fd0ff",
+        "on-accent": "#000000",
+        "state-working": "#6fb3f2",
+        "state-needs-you": "#e8c46a",
+        "state-finished": "#8fd18a",
+        "state-idle": "#a5adb5",
+        "state-unknown": "#9098a0"
+      },
+      "terminal": {
+        "background": "#0b1016",
+        "foreground": "#d8e1ea",
+        "cursor": "#5cc8c2",
+        "selection": "#5cc8c2",
+        "black": "#1b2430",
+        "red": "#f2777a",
+        "green": "#8fd18a",
+        "yellow": "#e8c46a",
+        "blue": "#6fb3f2",
+        "magenta": "#c99cf0",
+        "cyan": "#5cc8c2",
+        "white": "#c8d3de",
+        "bright-black": "#637387",
+        "bright-red": "#ff9c9e",
+        "bright-green": "#b4ecb0",
+        "bright-yellow": "#f5dc98",
+        "bright-blue": "#9fd0ff",
+        "bright-magenta": "#e0c4ff",
+        "bright-cyan": "#93e3de",
+        "bright-white": "#f3f7fb"
+      },
+      "syntax": {
+        "keyword": "#f2777a",
+        "string": "#8fd18a",
+        "comment": "#7f8c99",
+        "number": "#e8c46a",
+        "function": "#6fb3f2",
+        "type": "#5cc8c2"
+      }
+    }
+  },
+  "notes": [
+    {
+      "code": "scheme",
+      "scheme": "dark"
+    },
+    {
+      "code": "derived"
+    },
+    {
+      "code": "fallback",
+      "key": "background",
+      "from": "editor.background"
+    },
+    {
+      "code": "fallback",
+      "key": "foreground",
+      "from": "editor.foreground"
+    },
+    {
+      "code": "window-colours",
+      "count": 2
+    },
+    {
+      "code": "selection-alpha"
+    },
+    {
+      "code": "ignored",
+      "keys": [
+        "semanticHighlighting"
+      ],
+      "more": 0
+    },
+    {
+      "code": "syntax",
+      "count": 6
+    }
+  ]
+}
