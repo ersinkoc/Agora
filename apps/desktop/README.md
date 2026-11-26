@@ -21,6 +21,12 @@ identity, so the permission the user grants never applies to it.
 
 The window's title follows the page's, so the number of approvals waiting that the hub's page puts in its title shows in the taskbar.
 
+Safe mode (no plugins, the built-in theme; `docs/ux/plugins.md`): **Open in Safe Mode** in the app's Help menu (the Mac menu bar's;
+on Windows and Linux a menu bar of the window's own with that one menu, no shortcuts), and `--safe` at start (`cargo run -- --safe`;
+on a Mac `open -a Agora --args --safe`). Both are the shell's, not the page's, so they work when a plugin has frozen the page: in WebKit
+a plugin's frame runs on the page's own thread (threat model T63). The menu item starts the app again with `--safe` (a frozen page
+never loads another address), and the hub opens at its start page with `?safe`. The menu's words are in `locales/<lang>/desktop.ftl`.
+
 An unsigned Windows installer (NSIS) is built by the `windows-installer` job in `.github/workflows/desktop.yml` and kept as that run's
 artifact; locally: `cargo tauri build --bundles nsis --config '{"bundle":{"active":true}}'` (tauri-cli 2.12). Windows SmartScreen warns
 about it because it is not signed.

@@ -20,6 +20,8 @@ windows-sys = { version = "0.61", features = [
   "Wdk_Foundation",
   "Wdk_Storage_FileSystem",
   "Win32_Foundation",
+  # The node's hidden window that hears the session end (herdr G11, `windows::catch_session_end`): WNDCLASSW holds a brush handle.
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
@@ -32,7 +34,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
   "Win32_System_JobObjects",
+  # `GetModuleHandleW` for the session-end window's class.
+  "Win32_System_LibraryLoader",
   "Win32_System_Pipes",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
+  # The session-end window and its message loop (herdr G11: WM_QUERYENDSESSION / WM_ENDSESSION reach only a process with a window).
+  "Win32_UI_WindowsAndMessaging",
 ] }
