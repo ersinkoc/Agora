@@ -77,7 +77,8 @@ model T22) when this was built; `Origin` is now checked in the same place (a req
 refused), which covers both. Threat model T27. A port that cannot be saved is reported (`cli-panel-port-unsaved`).
 Built later (roadmap M7.6): the command opens the address in the browser through `agora_platform::open_url` when a person is at a
 terminal on a machine with a screen (not without a terminal, in CI, over SSH, on Linux without a display, or with `AGORA_NO_BROWSER`
-set), and prints it in any case; `agora web` on a machine that only joined a hub runs the panel. The forwarder's port, and the desktop
+set), and prints it in any case; `agora web` keeps the same gates except the terminal (a desktop launcher or shortcut runs it with
+none), and on a machine that only joined a hub runs the panel. The forwarder's port, and the desktop
 app's tunnel port, are bound exclusively (`agora_platform::bind_loopback_exclusive`: `SO_EXCLUSIVEADDRUSE` on Windows; no
 `SO_REUSEPORT` on Linux and macOS, checked), so no other program can bind beside it while it runs. Not built: the desktop app's own use
 of a stored port, and plain `agora` on such a machine opening the panel by itself (it would hold the terminal for the forwarder).

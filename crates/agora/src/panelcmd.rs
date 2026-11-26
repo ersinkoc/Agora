@@ -118,7 +118,8 @@ pub fn panel(say: &Say) -> ExitCode {
     run_to_end(rt, async {
         match start(&link_dir(), PREFERRED_PORT).await {
             Ok(p) => {
-                let browser: Option<&Opener<'_>> = if crate::frontdoor::may_open_browser_here() {
+                let browser: Option<&Opener<'_>> = if crate::frontdoor::may_open_browser_here(true)
+                {
                     Some(&agora_platform::open_url)
                 } else {
                     None
