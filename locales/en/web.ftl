@@ -1964,3 +1964,7 @@ finished-unseen = Finished while you were away. Open it to clear this mark.
 finished-unseen-short = New
 palette-sounds-on = Turn sounds on
 palette-sounds-off = Turn sounds off
+keys-cmd-sounds = Turn sounds on or off
+keys-cmd-mute-agent = Mute or unmute the focused agent's sounds
+palette-agent-mute = Mute the sounds of { $name }
+palette-agent-unmute = Unmute the sounds of { $name }

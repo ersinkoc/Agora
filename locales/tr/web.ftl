@@ -1869,3 +1869,7 @@ finished-unseen = Siz bakmıyorken bitti. Açınca bu işaret kalkar.
 finished-unseen-short = Yeni
 palette-sounds-on = Sesleri aç
 palette-sounds-off = Sesleri kapat
+keys-cmd-sounds = Sesleri aç ya da kapat
+keys-cmd-mute-agent = Odaktaki ajanın seslerini kapat ya da aç
+palette-agent-mute = { $name } için sesleri kapat
+palette-agent-unmute = { $name } için sesleri aç

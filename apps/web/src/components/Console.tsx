@@ -36,6 +36,9 @@ import { useCommands } from '../keys/registry';
 import { shownKey, useKeymap } from '../keys/view';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { useOnScreen } from '../net/onScreen';
+import { soundPrefs } from '../net/sounds';
+import { canPlaySounds } from './chime';
+import { useSoundPrefs } from './SoundSettings';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
@@ -268,6 +271,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // gives them some in Settings > Keyboard.
   const tabTargets = (!narrow && !ws.zoom ? tabsOf(ws.layout, ws.focus) : undefined) ?? (narrow ? panesOf(ws.layout.root) : visiblePanes(ws, narrow));
   const paneCount = panesOf(ws.layout.root).length;
+  const soundsOn = useSoundPrefs().on && canPlaySounds();
   useCommands({
     'window.agents': { run: () => setShowAgents((v) => !v) },
     ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => {
@@ -280,6 +284,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     'layout.split-down': { run: () => { if (ws.focus) dispatch({ type: 'split', pane: ws.focus, direction: 'column' }); }, available: !!ws.focus && !narrow },
     'layout.close-pane': { run: () => { if (ws.focus) dispatch({ type: 'close', pane: ws.focus }); }, available: !!ws.focus },
     'layout.reset': { run: () => resetLayout() },
+    // The focused pane's agent's sounds, muted or not, while sounds are on (the agent's menu has the same choice).
+    'agent.mute-sounds': { run: () => { if (current) soundPrefs.setMuted(current.id, !soundPrefs.isMuted(current.id)); }, available: soundsOn && !!current && !current.closed,
+      label: current ? t(soundPrefs.isMuted(current.id) ? 'palette-agent-unmute' : 'palette-agent-mute', { name: current.name }) : undefined },
   });
   const keymap = useKeymap();
   const paletteKey = shownKey(keymap, 'palette.open', ' ');

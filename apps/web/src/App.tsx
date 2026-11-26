@@ -55,6 +55,8 @@ import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
 import { AgentAlerts } from './components/AgentAlerts';
+import { canPlaySounds, unlockSounds } from './components/chime';
+import { soundPrefs } from './net/sounds';
 import { useOnScreen } from './net/onScreen';
 import { AnswerHoldsProvider } from './components/useAnswerGuard';
 import { attentionList } from './net/fleet';
@@ -577,6 +579,9 @@ export function App() {
     // so its command is here for the palette and its keys are fixed.
     'plugins.open': { run: () => setPluginsOpen(true) },
     'window.safe-mode': SAFE ? false : { run: () => location.assign(safeAddress(location.href)) },
+    // Sounds on or off for this browser (never in safe mode or where the browser makes no sound); turning them on is the person's act, so
+    // the audio may start.
+    'sounds.toggle': { run: () => { const on = !soundPrefs.get().on; if (on) unlockSounds(); soundPrefs.set({ on }); }, available: canPlaySounds(), label: t(soundPrefs.get().on ? 'palette-sounds-off' : 'palette-sounds-on') },
   });
   const keymap = useKeymap();
   const commandsVersion = useCommandsVersion();
