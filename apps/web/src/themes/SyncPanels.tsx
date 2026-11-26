@@ -19,7 +19,7 @@ export function ThemeSyncSetting({ sync = themeSync }: { sync?: ThemeSync }) {
   const view = useSyncExternalStore(sync.subscribe, sync.view, sync.view);
   const s = view.status;
   // Off and disabled where it cannot sync at all: safe mode, no hub, an older hub.
-  const cannot = s === 'safe' || s === 'local' || s === 'older';
+  const cannot = s === 'safe' || s === 'local' || s === 'older' || s === 'paused';
   return (
     <SettingRow label={t('theme-sync-label')} hint={syncHint(s)}>
       {(labelId, hintId) => <Toggle checked={!cannot && sync.enabled()} disabled={cannot} labelledBy={labelId} describedBy={hintId} onChange={(on) => sync.setEnabled(on)} />}

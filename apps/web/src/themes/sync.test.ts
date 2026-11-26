@@ -428,6 +428,80 @@ describe('one browser, two people (security review F1)', () => {
   });
 });
 
+describe('two tabs, two people at once (security re-review F1)', () => {
+  const names = (hub: ReturnType<typeof fakeHub>) => (hub.h.value.length ? (hub.json().themes as { file: { name: string } }[]).map((t) => t.file.name) : []);
+  // Two tabs of one browser: one storage. `heard` is the browser telling a tab what the other wrote (its storage events): the stores
+  // reload, and the engine hears the tag.
+  function tab(kv: ReturnType<typeof memory>) {
+    const d = device({ kv });
+    const heard = async () => { d.themes.reload(); d.packs.reload(); await d.tick(); };
+    return { ...d, heard };
+  }
+
+  it('the tab signed in first stops once another tab signs in as someone else; neither person gets the other\'s themes', async () => {
+    const kv = memory();
+    const t1 = tab(kv);
+    const t2 = tab(kv);
+    const a = fakeHub();
+    const b = fakeHub();
+    t1.sync.attach(a.ask);
+    await t1.tick();
+    t1.themes.import(night('A secret'));
+    await t1.tick();
+    await t2.heard();
+    // B's account already has a theme from B's laptop.
+    const laptop = device();
+    laptop.sync.attach(b.ask);
+    await laptop.tick();
+    laptop.themes.import(night('B own'));
+    await laptop.tick();
+    // Tab 2 signs in as B: the browser's store is B's now.
+    t2.sync.attach(b.ask);
+    await t2.tick();
+    expect(t2.themes.state().user.map((u) => u.name)).toEqual(['B own']);
+    // Tab 1 hears what tab 2 wrote; it writes nothing, reads nothing, applies nothing, and says why.
+    await t1.heard();
+    expect(t1.sync.view().status).toBe('paused');
+    await t1.sync.refresh();
+    await t1.tick();
+    t1.themes.import(night('typed in tab 1 after B signed in'));
+    await t1.tick();
+    await t2.heard();
+    await t2.sync.refresh();
+    await t2.tick();
+    await t1.heard();
+    expect(names(a)).toEqual(['A secret']);
+    expect(names(b)).not.toContain('A secret');
+    expect(names(b)).toContain('B own');
+    expect(t1.sync.view().status).toBe('paused');
+    // Signing in again in tab 1 claims the browser back for A, and then tab 2 stops.
+    t1.sync.attach(undefined, false);
+    t1.sync.attach(a.ask);
+    await t1.tick();
+    expect(t1.themes.state().user.map((u) => u.name)).toEqual(['A secret']);
+    t2.sync.tagChanged();
+    expect(t2.sync.view().status).toBe('paused');
+    expect(names(a)).toEqual(['A secret']);
+  });
+
+  it('two tabs of the same person keep syncing', async () => {
+    const kv = memory();
+    const t1 = tab(kv);
+    const t2 = tab(kv);
+    const a = fakeHub();
+    t1.sync.attach(a.ask);
+    t2.sync.attach(a.ask);
+    await t1.tick();
+    await t2.tick();
+    t1.themes.import(night('One'));
+    await t1.tick();
+    await t2.heard();
+    t2.sync.tagChanged();
+    expect(t2.sync.view().status).not.toBe('paused');
+    expect(names(a)).toEqual(['One']);
+  });
+});
+
 describe('times from a clock that is ahead (security review F2)', () => {
   it('a choice or an edit dated in the future is cut back to the hub\'s now, so a later pick wins once the slack has passed', async () => {
     let clock = 1_795_600_000_000;

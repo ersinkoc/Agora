@@ -4,6 +4,7 @@ import { App } from './App';
 import './design/app.css';
 import { initTheme } from './themes/store';
 import { initKeptPacks } from './themes/kept';
+import { initThemeSync } from './themes/sync';
 import { installSafeKey } from './plugins/safe';
 import { pluginStore } from './plugins/store';
 
@@ -12,6 +13,7 @@ import { pluginStore } from './plugins/store';
 installSafeKey();
 initTheme();
 initKeptPacks();
+initThemeSync();
 void pluginStore.start();
 
 const root = document.getElementById('root');

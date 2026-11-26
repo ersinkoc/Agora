@@ -255,7 +255,8 @@ export type SyncStatus =
   | 'synced'
   | 'too-large' // more than 256 KiB: nothing written, this browser keeps everything
   | 'newer' // the hub's value was written by a newer window: not read, never written over
-  | 'error'; // the hub could not be reached or refused; tried again at the next change or visit
+  | 'error' // the hub could not be reached or refused; tried again at the next change or visit
+  | 'paused'; // another tab of this browser signed in as someone else: this window writes nothing until it is signed in again
 export interface SyncView { status: SyncStatus; waiting: Merged['waiting']; invalid: Invalid[] }
 
 type KV = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -294,6 +295,18 @@ export function createThemeSync(env: SyncEnv) {
   const writeTag = (tag: string) => { try { env.kv?.setItem(TAG_KEY, tag); } catch { /* holds for this visit */ } };
   // Set by a read whose value is another person's: the next write takes the hub's value as it is and merges nothing of this browser's.
   let foreign = false;
+  // The tag of the value this engine last read (`undefined` before its first read since `attach`), and whether it stopped because
+  // another tab of this browser claimed the browser's store for another person (the last to sign in owns it).
+  let mine: string | undefined;
+  let paused = false;
+  const claimedElsewhere = () => { const stored = readTag(); return mine !== undefined && stored !== undefined && stored !== mine; };
+  const pauseIfClaimed = () => {
+    if (paused || !claimedElsewhere()) return paused;
+    paused = true;
+    if (timer !== undefined) { clearTimer(timer); timer = undefined; }
+    show({ status: 'paused', waiting: [], invalid: [] });
+    return true;
+  };
   const readSetting = () => { try { return env.kv?.getItem(SETTING_KEY) !== 'off'; } catch { return true; } };
   let enabled = readSetting();
   let ask: SyncAsk | undefined;
@@ -309,7 +322,7 @@ export function createThemeSync(env: SyncEnv) {
   let chain: Promise<void> = Promise.resolve();
   const listeners = new Set<() => void>();
   const show = (next: Partial<SyncView>) => { view = { ...view, ...next }; listeners.forEach((l) => l()); };
-  const active = () => !env.safe && enabled && !!ask && !older;
+  const active = () => !env.safe && enabled && !!ask && !older && !paused;
   // Where it stands before a read: why it does not sync, or that it is about to.
   const standing = (): SyncStatus => (env.safe ? 'safe' : !enabled ? 'off' : !hub ? 'local' : older ? 'older' : 'syncing');
   const local = () => ({ themes: env.themes.syncSnapshot(), packs: env.packs.syncSnapshot() });
@@ -317,7 +330,7 @@ export function createThemeSync(env: SyncEnv) {
 
   // Merges with what the hub last said, keeps the result here when it changes anything, and writes the value when it differs.
   async function push(attempt: number): Promise<void> {
-    if (!active() || !remote || !ask) return;
+    if (!active() || !remote || !ask || pauseIfClaimed()) return;
     // Another person's value (this browser last synced with someone else): their themes, marks, choice and packs replace this browser's,
     // and nothing of the previous person's goes up (theirs is in their own value already).
     const replace = foreign;
@@ -349,7 +362,7 @@ export function createThemeSync(env: SyncEnv) {
   }
 
   async function pull(attempt = 0): Promise<void> {
-    if (!active() || !ask) return;
+    if (!active() || !ask || pauseIfClaimed()) return;
     show({ status: 'syncing' });
     let r: agora.v1.IUserSettingsValue | null | undefined;
     try { r = (await ask({ userSettingsGet: { key: 'themes' } })).userSettings; } catch (e) {
@@ -366,16 +379,23 @@ export function createThemeSync(env: SyncEnv) {
     remote = read.remote;
     // Whose value it is: a browser that synced with another person before (or a value with no tag after one with a tag) merges nothing of
     // its own into this one. A browser's first sync (no tag kept yet) merges, as when the person first turns this on.
-    const tag = typeof r?.tag === 'string' ? r.tag : '';
-    const kept = readTag();
-    foreign = kept !== undefined && kept !== tag;
-    if (tag) writeTag(tag);
+    // A value with no tag (a hub from before tags) is kept as `untagged`, so it too is told apart from a tagged person's.
+    const tag = typeof r?.tag === 'string' && r.tag ? r.tag : 'untagged';
+    // Another tab signed in as someone else while this read was on its way: this window stops (nothing applied, nothing written).
+    if (pauseIfClaimed()) return;
+    if (mine === undefined) {
+      // The first read since this window signed in claims the browser's store for this person.
+      const kept = readTag();
+      foreign = kept !== undefined && kept !== tag;
+      writeTag(tag);
+    }
+    mine = tag;
     await push(attempt);
   }
 
   // A change here is written once the changes settle; when the last read failed (the hub could not be reached), it reads first.
   const changed = () => {
-    if (applying || !active()) return;
+    if (applying || !active() || pauseIfClaimed()) return;
     if (timer !== undefined) clearTimer(timer);
     timer = setTimer(() => { timer = undefined; void run(() => (remote ? push(0) : pull())); }, debounceMs);
   };
@@ -395,10 +415,14 @@ export function createThemeSync(env: SyncEnv) {
       remote = undefined;
       remoteText = undefined;
       version = 0;
+      mine = undefined;
+      paused = false;
       if (timer !== undefined) { clearTimer(timer); timer = undefined; }
       show({ status: standing(), waiting: [], invalid: [] });
       if (active()) void run(() => pull());
     },
+    /** Another tab changed whose store this browser is (`TAG_KEY`): this window stops when it is no longer this person's. */
+    tagChanged() { pauseIfClaimed(); },
     /** Reads again (the window came back into view): another device may have changed something. */
     refresh() { if (active()) void run(() => pull()); return chain; },
     setEnabled(on: boolean) {
@@ -406,6 +430,7 @@ export function createThemeSync(env: SyncEnv) {
       enabled = on;
       try { if (on) env.kv?.removeItem(SETTING_KEY); else env.kv?.setItem(SETTING_KEY, 'off'); } catch { /* holds for this visit */ }
       if (!on) { remote = undefined; remoteText = undefined; if (timer !== undefined) { clearTimer(timer); timer = undefined; } }
+      if (paused) return;
       show({ status: standing(), waiting: [], invalid: [] });
       if (active()) void run(() => pull());
     },
@@ -422,3 +447,8 @@ function storage(): KV | undefined {
 }
 // Safe mode (ADR-0114) never syncs: nothing is read from the hub and nothing is written to it.
 export const themeSync: ThemeSync = createThemeSync({ themes: themeStore, packs: packStore, kv: SAFE ? undefined : storage(), safe: SAFE });
+
+/** Another tab of this browser signing in as someone else stops this window's syncing at once (the last to sign in owns the store). */
+export function initThemeSync() {
+  window.addEventListener('storage', (e) => { if (e.key === null || e.key === TAG_KEY) themeSync.tagChanged(); });
+}

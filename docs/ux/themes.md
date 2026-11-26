@@ -351,7 +351,10 @@ read writes none, and neither does a stale write (it changed nothing). Removing 
 - **One browser, two people.** The hub sends each person's random **tag** with their value, and the browser keeps the tag it last
   synced with (`agora.themes.sync.tag.v1`). When someone else signs in to the same browser and their value has another tag (or none),
   the browser merges **nothing** of its own into it: their themes, removals, choice and packs replace what this browser held (the
-  previous person's are in their own value already) and nothing goes up. **What remains:** the first time a browser syncs at all (no
+  previous person's are in their own value already) and nothing goes up. **Two tabs at once:** the last to sign in owns the browser's
+  store. A tab signed in as someone else that sees the browser claimed for another tag (its storage event, or before any read, write or
+  change it would apply) stops: it reads, writes and applies nothing, and Settings says "Theme sync paused: another person signed in to
+  this browser in another tab" until that tab is signed in again or reloaded. **What remains:** the first time a browser syncs at all (no
   tag kept yet, for example the first sign-in after updating), what it held is merged into the value of whoever signs in, as when one
   person turns this on; a browser two people used before this version merges into whoever signs in first.
 - **Packs.** A pack imported with **Import pack…** is kept as the file it was (`agora.packs.v1`, the 8 most recent; a ninth replaces the

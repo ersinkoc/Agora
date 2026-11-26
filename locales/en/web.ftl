@@ -1045,6 +1045,7 @@ theme-sync-older = Your Agora can't keep themes yet, so they stay in this browse
 theme-sync-too-large = Your themes and packs are too large to keep in your Agora (at most { $max } KB), so they stay in this browser. Delete a theme or forget a pack.
 theme-sync-newer = The themes kept in your Agora were saved by a newer version. Update this window to use them; until then yours stay in this browser.
 theme-sync-error = Couldn't reach your Agora just now. Your themes are kept here and will be saved at your next change.
+theme-sync-paused = Theme sync paused: another person signed in to this browser in another tab. Sign in again here to sync.
 theme-synced-title = Your packs and devices
 theme-synced-hint = Packs you imported, here and on your other devices. Opening one shows what it holds; nothing changes until you pick its parts.
 theme-synced-packs = Your packs

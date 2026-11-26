@@ -1017,6 +1017,7 @@ theme-sync-older = Agora'nız henüz temaları saklayamıyor, bu yüzden bu tara
 theme-sync-too-large = Temalarınız ve paketleriniz Agora'nızda saklanamayacak kadar büyük (en fazla { $max } KB), bu yüzden bu tarayıcıda kalıyorlar. Bir temayı silin ya da bir paketi unutun.
 theme-sync-newer = Agora'nızda saklanan temalar daha yeni bir sürümle kaydedilmiş. Kullanmak için bu pencereyi güncelleyin; o zamana kadar sizinkiler bu tarayıcıda kalır.
 theme-sync-error = Agora'nıza şu an ulaşılamadı. Temalarınız burada duruyor ve bir sonraki değişikliğinizde kaydedilecek.
+theme-sync-paused = Tema eşitleme duraklatıldı: bu tarayıcının başka bir sekmesinde başka biri oturum açtı. Eşitlemek için burada yeniden oturum açın.
 theme-synced-title = Paketleriniz ve cihazlarınız
 theme-synced-hint = Burada ve diğer cihazlarınızda içe aktardığınız paketler. Birini açmak içinde ne olduğunu gösterir; parçalarını seçene kadar hiçbir şey değişmez.
 theme-synced-packs = Paketleriniz
