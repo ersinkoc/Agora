@@ -762,6 +762,76 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
     });
 }
 
+/// P2-16: a structured agent the holder kept in a mode that skips permissions (switched under `allow`) is stopped by a node that now
+/// starts under `forbid` when it takes it up: what the last node recorded is judged as a report is, though no report repeats it. Its
+/// process ends, nothing restarts it, and its conversation says why.
+#[test]
+fn a_kept_agent_in_a_mode_that_skips_is_stopped_by_a_node_whose_policy_now_forbids_it() {
+    let _serial = serial();
+    let rig = Rig::with_args("skipforbid", &["--modes"]);
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    prompt(&node, &id, "mode:bypassPermissions");
+    wait_for("the mode in the kept session", || {
+        node.ledger
+            .kept_session(&id)
+            .options
+            .is_some_and(|o| o.current_mode == "bypassPermissions")
+    });
+    let pid = pid_of(&node, &id);
+    node.mesh.unregister(&agent);
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    std::fs::write(rig.root.join("data/policy"), "skip_permissions = forbid\n").expect("policy");
+
+    let node = rig.node();
+    wait_for("the kept agent to be stopped", || {
+        node.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .any(|v| v.id == agent && !v.running)
+    });
+    let notices = || -> Vec<_> {
+        node.chat
+            .snapshot(&agent)
+            .into_iter()
+            .filter(|e| e.code == agora_node::chat::SKIP_REFUSED)
+            .collect()
+    };
+    // The conversation is told after the tick that stopped it, outside the supervisor's lock.
+    wait_for("the notice", || !notices().is_empty());
+    std::thread::sleep(Duration::from_millis(300));
+    let notices = notices();
+    assert_eq!(notices.len(), 1, "said once: {notices:?}");
+    assert_eq!(
+        notices[0].params.get("policy").map(String::as_str),
+        Some("forbid")
+    );
+    assert_eq!(
+        notices[0].params.get("setting").map(String::as_str),
+        Some("mode")
+    );
+    assert!(!node
+        .supervisor
+        .lock()
+        .unwrap()
+        .skips_permissions_now(&agent));
+    wait_for("its process to end", || !alive(pid));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        node.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .any(|v| v.id == agent && !v.running),
+        "it was started again"
+    );
+}
+
 /// The current mode and the value of `auto_approve` in the kept session file (`kept-<id>.pb`), as the node wrote it.
 fn kept_on_disk(rig: &Rig, id: &str) -> (Option<String>, Option<String>) {
     use prost::Message;

@@ -762,11 +762,38 @@ fn config_skips(config: &[ConfigOption]) -> bool {
     })
 }
 
+/// P2-16: a config option's value in use is one a switch to it would be held to the policy for (`adapter_set_config`): a select's
+/// choice that skips, or a boolean's value that `perm::boolean_value_skips` judges risky. A boolean whose words say which value
+/// protects is judged by that (`ask_for_approval` off skips, on does not); one whose words do not say counts as skipping at either
+/// value, as a switch of it does (the unknown case is never read as safe).
+fn config_in_use_skips(config: &[ConfigOption]) -> bool {
+    config.iter().any(|o| {
+        if o.boolean {
+            let on = match o.current.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return false,
+            };
+            perm::boolean_value_skips(
+                Category::from_acp(Some(o.category.as_str())),
+                (&o.id, &o.name),
+                &o.description,
+                o.skips_permissions,
+                on,
+            )
+        } else {
+            o.choices
+                .iter()
+                .any(|c| c.id == o.current && c.skips_permissions)
+        }
+    })
+}
+
 /// P2-16 (ADR-0090): whether the node's `skip_permissions` policy refuses an adapter agent for what it reported in use: its current
-/// mode, or a config option in use, that makes it act without asking (judged as a switch the user asks for is, [`policy_refusal`] by
-/// how its process was launched). `Some((policy, setting))` with the refusing policy and `mode` or `config`; `None` when the policy
-/// allows it or nothing in use skips. A launch option is not judged here: a start is decided before any process exists
-/// (`launch_choice`).
+/// mode, or a config option's value in use, that a switch to would be held to the policy for (`adapter_set_option`,
+/// `adapter_set_config`; [`policy_refusal`] by how its process was launched). `Some((policy, setting))` with the refusing policy and
+/// `mode` or `config`; `None` when the policy allows it or nothing in use skips. A launch option is not judged here: a start is decided
+/// before any process exists (`launch_choice`).
 pub fn skip_in_use_refused(
     policy: SkipPermissions,
     confinement: Confinement,
@@ -776,7 +803,7 @@ pub fn skip_in_use_refused(
     let refusal = policy_refusal(policy, confinement)?;
     if mode_skips(options) {
         Some((refusal, "mode"))
-    } else if config_skips(config) {
+    } else if config_in_use_skips(config) {
         Some((refusal, "config"))
     } else {
         None
@@ -6186,6 +6213,43 @@ mod adapter_option_tests {
             skip_in_use_refused(Forbid, Unknown, &asks, &[boolean("false")]),
             None
         );
+        // A boolean whose protective value is ON (`ask_for_approval`): off skips, on does not, as a switch to either is judged; one
+        // whose words do not say which value protects counts as skipping at both, as a switch does.
+        let named = |id: &str, current: &str| {
+            bounded_config(vec![ConfigOption {
+                id: id.into(),
+                name: id.into(),
+                category: "mode".into(),
+                boolean: true,
+                current: current.into(),
+                ..ConfigOption::default()
+            }])
+        };
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &named("ask_for_approval", "false")),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &named("ask_for_approval", "true")),
+            None
+        );
+        for v in ["true", "false"] {
+            assert_eq!(
+                skip_in_use_refused(Forbid, Unknown, &asks, &named("permissions", v)),
+                Some(("forbid", "config")),
+                "{v}"
+            );
+        }
+        // A plain boolean that is not about permissions is never refused.
+        let plain = bounded_config(vec![ConfigOption {
+            id: "extended".into(),
+            name: "Extended thinking".into(),
+            category: "thought_level".into(),
+            boolean: true,
+            current: "true".into(),
+            ..ConfigOption::default()
+        }]);
+        assert_eq!(skip_in_use_refused(Forbid, Unknown, &asks, &plain), None);
         let select = |current: &str| {
             bounded_config(vec![config("approvals", "mode", current, &["ask", "yolo"])])
         };

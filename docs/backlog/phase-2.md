@@ -157,7 +157,8 @@ cross-review by Codex of all Phase 2 PRs (AGENTS.md).
 - **Status: done for a refusing policy.** On every tick the node judges each report of the mode or the config options, and what an
   agent taken up from the holder has in use (`adopt_held_pipe` puts back what the last node recorded), with the rule a switch is judged
   by (`skip_in_use_refused` in `supervisor.rs`: `policy_refusal`, so `confined_only` refuses an agent whose launch was not recorded as
-  confined, and the node's own `perm` flag counts). A refused report is neither kept nor passed on; the agent is **stopped** (no safe
+  confined, the node's own `perm` flag counts, and a boolean is judged by its value as a switch to it is: one whose words do not say
+  which value protects counts as skipping at either value). A refused report is neither kept nor passed on; the agent is **stopped** (no safe
   mode is chosen for it: the node cannot know which of an agent's modes asks, and a stop needs no trust in the adapter): no restart, no
   prompt taken from that tick, its process ended off the supervisor's lock, it leaves the mesh, what its adapter asked is withdrawn, and
   its conversation gets the node's notice `agent.skip_permissions_refused` (`policy`, `setting` `mode` or `config`). This also stops an

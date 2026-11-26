@@ -435,6 +435,24 @@ fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
             .to_string();
         let mut c = Client::connect(&home.join("node.sock")).unwrap();
         if refused {
+            // Stopped: it takes no prompt. Its conversation, read only after that, says why.
+            let end = Instant::now() + Duration::from_secs(15);
+            loop {
+                let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
+                if code != 0 {
+                    break;
+                }
+                assert!(Instant::now() < end, "the agent still takes prompts: {out}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            loop {
+                let (_, out) = agora(&home, &["agent", "list"]);
+                if out.lines().any(|l| l.contains(&id) && l.contains("done")) {
+                    break;
+                }
+                assert!(Instant::now() < end, "{id} never ended: {out}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             c.call_on(
                 3,
                 Cmd::ChatSubscribe(v1::ChatSubscribe {
@@ -478,16 +496,6 @@ fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
                 notice.params.get("setting").map(String::as_str),
                 Some("mode")
             );
-            // Stopped: it takes no prompt.
-            let end = Instant::now() + Duration::from_secs(15);
-            loop {
-                let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
-                if code != 0 {
-                    break;
-                }
-                assert!(Instant::now() < end, "the agent still takes prompts: {out}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
             // An agent that starts in a mode that asks runs under the same policy.
             let normal = started_agent_of(&home, "acp-fake");
             std::thread::sleep(Duration::from_millis(600));
