@@ -1412,7 +1412,10 @@ fn proof_f444_explain_escapes_manifest_diagnostic_paths() {
     println!("CONTROL OK");
 
     let bad_name = "bad\x1b[2J.toml";
-    std::fs::write(dir.join(bad_name), "not toml").unwrap();
+    // Windows refuses a file name with a control character: there is no such path to show.
+    if std::fs::write(dir.join(bad_name), "not toml").is_err() {
+        return;
+    }
     let actual = explain_run(&dir, "codex", &explain_fixture(), &[]);
     let stderr = String::from_utf8_lossy(&actual.stderr);
     let exposed = stderr.contains('\x1b');
@@ -1511,7 +1514,8 @@ fn verify_f443_hidden_screen_text_across_bidi_zero_width_and_fillers() {
 #[test]
 fn verify_f444_diagnostics_escape_path_content_and_unknown_kind_text() {
     let dir = explain_audit_dir("verify-f444");
-    std::fs::write(dir.join("bad\x1b[2J.toml"), "not toml").unwrap();
+    // Windows refuses a file name with a control character; the content case below still runs there.
+    let _ = std::fs::write(dir.join("bad\x1b[2J.toml"), "not toml");
     std::fs::write(dir.join("content.toml"), "bad\x1b[2J toml").unwrap();
     let path_and_content = explain_run(&dir, "codex", &explain_fixture(), &[]);
     let stderr = String::from_utf8_lossy(&path_and_content.stderr);
