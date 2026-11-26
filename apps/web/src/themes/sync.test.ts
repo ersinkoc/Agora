@@ -4,7 +4,7 @@ import { CommandError } from '../net/live';
 import { writeTheme } from './file';
 import { createPackStore } from './kept';
 import { writePack } from './pack';
-import { MAX_USER_THEMES, createThemeStore } from './store';
+import { CHOICE_AT_KEY, CHOICE_KEY, MAX_USER_THEMES, createThemeStore } from './store';
 import { EMPTY, MAX_SYNC_BYTES, SETTING_KEY, type SyncAsk, createThemeSync, merge, readSync, serialiseSync } from './sync';
 import { BUILT_IN, serialiseTheme } from './tokens';
 
@@ -131,6 +131,7 @@ describe('merging', () => {
     const at = a.themes.syncSnapshot().choiceAt;
     expect(at).toBeGreaterThan(0);
     expect(merge(local(a), remoteOf({ choice: { dark: 'large-text', light: 'sand', at: at + 1 } })).themes.choice).toEqual({ dark: 'large-text', light: 'sand' });
+    expect(merge(local(a), remoteOf({ choice: { dark: 'large-text', light: 'sand', at } })).themes.choice).toEqual({ dark: 'large-text', light: 'sand' }); // a tie: the hub's
     expect(merge(local(a), remoteOf({ choice: { dark: 'large-text', light: 'sand', at: at - 1 } })).themes.choice).toBeUndefined();
     expect(merge(local(a), remoteOf({ choice: { dark: 'large-text', light: 'sand', at: at - 1 } })).value.choice).toMatchObject({ dark: 'slate', at });
   });
@@ -211,6 +212,36 @@ describe('the engine', () => {
     expect(d.sync.view().invalid).toEqual([]);
   });
 
+  it('agrees on the choice: one made before this version wins over a device that never chose, and a tie writes nothing', async () => {
+    const hub = fakeHub();
+    // The laptop chose Slate before choices had a time; the phone never chose.
+    const laptop = device({ kv: memory({ [CHOICE_KEY]: JSON.stringify({ dark: 'slate', light: 'sand' }) }) });
+    const phone = device();
+    phone.sync.attach(hub.ask);
+    await phone.tick();
+    laptop.sync.attach(hub.ask);
+    await laptop.tick();
+    await phone.sync.refresh();
+    expect(phone.themes.state().choice).toEqual({ dark: 'slate', light: 'sand' });
+    expect(laptop.themes.state().choice).toEqual({ dark: 'slate', light: 'sand' });
+    // Two devices whose choices have the same time take the hub's, and reading again writes nothing.
+    const at = 1_795_600_000_000;
+    const a = device({ kv: memory({ [CHOICE_KEY]: JSON.stringify({ dark: 'slate', light: 'light' }), [CHOICE_AT_KEY]: String(at) }) });
+    const b = device({ kv: memory({ [CHOICE_KEY]: JSON.stringify({ dark: 'large-text', light: 'light' }), [CHOICE_AT_KEY]: String(at) }) });
+    const tie = fakeHub();
+    a.sync.attach(tie.ask);
+    await a.tick();
+    b.sync.attach(tie.ask);
+    await b.tick();
+    const writes = () => tie.h.calls.filter((c) => c === 'set').length;
+    const before = writes();
+    await a.sync.refresh();
+    await b.sync.refresh();
+    await a.sync.refresh();
+    expect(writes()).toBe(before);
+    expect(b.themes.state().choice.dark).toBe(a.themes.state().choice.dark);
+  });
+
   it('keeps a newer choice it cannot show here for the devices that can, and its own choice on screen', async () => {
     const bad = { uid: uid(5), edited: 1, file: { 'agora-theme': 9, name: 'Newer' } };
     const hub = fakeHub({ 'agora-theme-sync': 1, themes: [bad], choice: { dark: `u:${uid(5)}`, light: 'sand', at: Date.now() + 60_000 } });
@@ -248,7 +279,7 @@ describe('the engine', () => {
 
     // An older hub refuses a command it cannot name; the window keeps its themes here and asks no more on this connection.
     let asked = 0;
-    const older: SyncAsk = async () => { asked++; throw new CommandError('auth.forbidden', { action: '' }); };
+    const older: SyncAsk = async () => { asked++; throw new CommandError('auth.forbidden', { action: 'None' }); };
     const d = device();
     d.sync.attach(older);
     await d.tick();

@@ -2155,7 +2155,7 @@ pub(crate) fn plugin_command(
 /// ADR-0113 decision 6 (step 4): a person's own settings value, answered here; `None` for any other command. Every signed-in person,
 /// owner, member or viewer, reads and writes only their own: the value is keyed by the session's person (`who.user`), and nothing in
 /// the request names a person. The hub keeps the value as opaque bytes and never reads it. A write is an audit row of the person
-/// (`settings.set`, its `node` the key) with its outcome, and nothing of the value; a read writes no row. A request that names a node
+/// (`settings.set`, its `node` the key) with its outcome, and nothing of the value; a read and a stale write write none. A request that names a node
 /// is refused, as for the device and plugin commands.
 pub(crate) fn settings_command(
     hub: &Hub,
@@ -2173,11 +2173,17 @@ pub(crate) fn settings_command(
             let r = settings.set(&who.user, s, now_ms());
             // The key when it is one the hub keeps (anything else a window sent is not written into the trail).
             let key = crate::user_settings::known_key(&s.key).unwrap_or("");
-            let outcome = match &r {
-                Ok(_) => "ok",
-                Err(e) => e.code.as_str(),
-            };
-            audit(hub, who, "settings.set", key, outcome);
+            // A stale write is routine (two windows of one person writing after the same edit, the second reads, merges and writes
+            // again) and changed nothing: it writes no row, so the person's Activity holds one row per change.
+            match &r {
+                Ok(_) => {
+                    audit(hub, who, "settings.set", key, "ok");
+                }
+                Err(e) if e.code == ErrorCode::SettingsStale => {}
+                Err(e) => {
+                    audit(hub, who, "settings.set", key, e.code.as_str());
+                }
+            }
             r
         }
         _ => return None,

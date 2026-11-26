@@ -1438,7 +1438,7 @@ ADR-0113 decision 6, build step 4: the hub keeps each person's own settings valu
 person's themes, kept packs and theme choice, `docs/ux/themes.md` "Keeping themes the same on your devices"). New messages in
 `schema/agora/v1/settings.proto` and new arms of `CommandRequest` (`user_settings_get` 118, `user_settings_set` 119) and `CommandOk`
 (`user_settings` 38); nothing published changed. No capability: a window sends them to any hub, and an older hub refuses them (it cannot
-name the command: `auth.forbidden` with no `action`), which the window takes as "this hub keeps nothing; themes stay in this browser".
+name the command: `auth.forbidden` with the `action` `None`, the name of a request with no command), which the window takes as "this hub keeps nothing; themes stay in this browser".
 Answered by the hub itself, for any signed-in person (owner, member or viewer alike, ahead of the routing that limits a viewer or a
 member's projects); one that names a node (`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node
 never receives them (refused as unsupported).
@@ -1454,7 +1454,8 @@ never receives them (refused as unsupported).
   writes another person's. `key` is a closed set (`themes`); any other is `protocol.invalid_message` (`key`). Removing a person forgets
   their values. The hub keeps them in its database (schema 17, table `user_settings`).
 - **Audit.** A write is a row of the person (`settings.set`, its `node` the key, `themes`) with the outcome (`ok`, `settings.stale`,
-  `settings.too_large`, ...) and nothing of the value; a read writes no row.
+  `settings.too_large`, ...) and nothing of the value; a read writes no row, nor does a stale write (it changed nothing, and the client
+  writes again after merging).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.UserSettings*` and `schema/fixtures/user-settings/`
   (`crates/agora-protocol/tests/user_settings.rs`).
 ### Plugins (ADR-0114)

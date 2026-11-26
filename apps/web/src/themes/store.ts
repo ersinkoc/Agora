@@ -138,7 +138,9 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
   const loaded = loadMeta(env.kv, state.user);
   let meta = loaded.meta;
   let removed = removedOf(json(read(env.kv, REMOVED_KEY)));
-  let choiceAt = timeOf(Number(read(env.kv, CHOICE_AT_KEY)));
+  // A choice stored before it had a time counts as made at time 1 (any later choice is newer); the defaults, never chosen, as 0.
+  const choiceTime = () => timeOf(Number(read(env.kv, CHOICE_AT_KEY))) || (read(env.kv, CHOICE_KEY) ? 1 : 0);
+  let choiceAt = choiceTime();
   const now = () => Date.now();
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((l) => l());
@@ -215,7 +217,7 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
       const next = loadState(env.kv);
       meta = loadMeta(env.kv, next.user).meta;
       removed = removedOf(json(read(env.kv, REMOVED_KEY)));
-      choiceAt = timeOf(Number(read(env.kv, CHOICE_AT_KEY)));
+      choiceAt = choiceTime();
       set(next);
     },
     // A new snapshot, so views that show which theme is on screen draw again.

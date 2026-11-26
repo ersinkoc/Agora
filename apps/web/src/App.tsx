@@ -365,9 +365,17 @@ export function App() {
   useEffect(() => { themeSync.attach(api && viewed ? (body) => api.command('', body) : undefined, !!hub); }, [api, viewed, hub]);
   useEffect(() => {
     const back = () => { if (document.visibilityState === 'visible') void themeSync.refresh(); };
+    // (A link that drops and comes back reads again too: below.)
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);
   }, []);
+  // Only a return: the first time the link is live, the sign-in read above runs.
+  const linkWas = useRef<'never' | 'live' | 'down'>('never');
+  useEffect(() => {
+    if (link === 'live' && linkWas.current === 'down' && viewed) void themeSync.refresh();
+    if (link === 'live') linkWas.current = 'live';
+    else if (linkWas.current === 'live') linkWas.current = 'down';
+  }, [link, viewed]);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.

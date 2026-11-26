@@ -50,7 +50,7 @@ describe('Keep my themes the same on my devices', () => {
   it('is off and disabled with an older hub, and in safe mode, saying why', async () => {
     const older = parts();
     act(() => root.render(<ThemeSyncSetting sync={older.sync} />));
-    await act(async () => { older.sync.attach(async () => { throw new CommandError('auth.forbidden', { action: '' }); }); await older.sync.settled(); });
+    await act(async () => { older.sync.attach(async () => { throw new CommandError('auth.forbidden', { action: 'None' }); }); await older.sync.settled(); });
     expect(toggle().disabled).toBe(true);
     expect(toggle().getAttribute('aria-checked')).toBe('false');
     expect(hint()).toBe(t('theme-sync-older'));

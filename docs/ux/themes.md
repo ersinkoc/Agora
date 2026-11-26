@@ -310,7 +310,7 @@ every device they sign in to on the same hub, so the phone and the laptop agree.
 (`settings.too_large` over that), keyed by the session's person, so nobody reads or writes another person's. Each write raises the
 value's **version**; a write based on an older version is refused (`settings.stale`), so two windows never overwrite each other unseen.
 Writes are rows of the person's Activity ("Kept their themes the same on their devices") with the outcome and nothing of the value; a
-read writes none. Removing a person forgets their value. The hub's database moves to schema 17 for it.
+read writes none, and neither does a stale write (it changed nothing). Removing a person forgets their value. The hub's database moves to schema 17 for it.
 
 **In the window.**
 
@@ -319,13 +319,14 @@ read writes none. Removing a person forgets their value. The hub's database move
 
 - **Settings > This device > Appearance**, "**Keep my themes the same on my devices**": on by default (a switch per browser,
   `agora.themes.sync.v1`). Under it, where it stands: kept the same; off; this browser only, because the window has no hub (the demo)
-  or an **older hub** that does not know the messages (it refuses them, and the window asks no more on that connection); too large;
+  or an **older hub** that does not know the messages (it refuses one as `auth.forbidden` with the action `None`, and the window asks
+  no more on that connection); too large;
   saved by a newer version; or the hub could not be reached (tried again at the next change). The switch is off and disabled without a
   hub, with an older hub, and in **safe mode**, which never syncs: nothing is read from the hub and nothing is written.
 - **When.** On sign-in (once the window has its first view), the window reads the value, checks it, merges it with this browser and
   writes the result when it differs. A change here (a theme made, edited, imported, installed, added from a pack or deleted; a pack
   kept or forgotten; a theme chosen) is written **1.5 seconds** after the last one. The window reads again whenever it **comes back
-  into view**, which is when another device's change shows. A write refused as stale reads again, merges and writes again (three times
+  into view** and when its connection comes back, which is when another device's change shows. A write refused as stale reads again, merges and writes again (three times
   at most).
 - **Checked on load.** Every theme in the value goes through the theme file's reader (`readTheme`, the rules on this page), every pack
   through the pack reader (`readPack`). **Something the window cannot read is not applied**: the theme editor's **Your packs and
@@ -340,7 +341,8 @@ read writes none. Removing a person forgets their value. The hub's database move
   - A theme that does not fit this browser's **20** waits: it is listed in Your packs and devices ("doesn't fit here"), stays in the
     value for the devices that have room, and arrives here once one of yours is deleted.
   - **The choice** (each scheme's theme, a built-in by its id or one of yours by its lasting id) takes the newer one
-    (`agora.theme.choice.at.v1`). A newer choice naming a theme this browser cannot show keeps this browser's choice on screen and stays
+    (`agora.theme.choice.at.v1`), and the hub's on a tie, so two devices never keep writing their own over each other's. A choice made
+    before this version counts as made at time 1, the defaults (never chosen) as 0, so a new device takes an existing one's choice. A newer choice naming a theme this browser cannot show keeps this browser's choice on screen and stays
     the newer one for the devices that can.
   - Times are each device's clock; a clock far off can make an older edit look newer.
 - **Packs.** A pack imported with **Import pack…** is kept as the file it was (`agora.packs.v1`, the 8 most recent; a ninth replaces the

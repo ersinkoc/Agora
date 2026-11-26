@@ -14,7 +14,8 @@
 //
 // Merging (`merge`), on every read: the union by lasting id. A theme both sides have takes the newer edit (this browser's on a tie). A
 // removal mark removes a theme only when it is newer than the theme's last edit, so nothing edited here since is lost. A theme that does
-// not fit this browser's 20 waits (it stays in the value for the devices that have room) and is shown. The choice is the newer one.
+// not fit this browser's 20 waits (it stays in the value for the devices that have room) and is shown. The choice is the newer one, the
+// hub's on a tie; a choice made before this step counts as made at time 1, one never made (the defaults) as 0.
 import type { agora } from '../gen/agora';
 import { type ThemeData, readTheme, writeTheme } from './file';
 import { SAFE } from '../plugins/safe';
@@ -151,8 +152,8 @@ export function merge(local: { themes: SyncSnapshot; packs: { packs: KeptPack[];
   // ---- What this window cannot read: written back unless removed since, never applied ----
   const invalid = remote.invalid.filter((i) => !(i.kind === 'theme' ? localUids.has(i.uid) || removedSince(i.uid, i.edited) : localPackUids.has(i.uid) || packRemoved(i.uid, i.edited)));
 
-  // ---- The choice: the newer one ----
-  const remoteNewer = !!remote.choice && remote.choice.at > local.themes.choiceAt;
+  // ---- The choice: the newer one; on a tie the hub's, so two devices never write their own over each other's ----
+  const remoteNewer = !!remote.choice && remote.choice.at >= local.themes.choiceAt;
   const choice = remoteNewer && remote.choice ? remote.choice : { ...local.themes.choice, at: local.themes.choiceAt };
 
   // ---- The value, in one order whatever the order on each device ----
@@ -236,12 +237,13 @@ export interface SyncEnv {
 const num = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : typeof v === 'object' && v !== null && 'toNumber' in v ? (v as { toNumber: () => number }).toNumber() : 0);
 const codeOf = (e: unknown) => (typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : '');
 const paramsOf = (e: unknown) => ((e as { params?: Record<string, string> })?.params ?? {});
-/** An older hub does not know the commands: one with no command it knows is refused as such (its routing refuses a command it cannot
- *  name: `auth.forbidden` with no `action`), or as an unsupported message. Anything else is a hub that knows them but could not answer. */
+/** An older hub does not know the commands: it decodes one as a request with no command, which its routing refuses before anything
+ *  else as `auth.forbidden` naming the action `None` (crates/agora-hub/tests/user_settings.rs checks the answer), or as an unsupported
+ *  message. Anything else is a hub that knows them but could not answer. */
 export function isOlderHub(e: unknown): boolean {
   const code = codeOf(e);
   const p = paramsOf(e);
-  return (code === 'auth.forbidden' && !p.action) || (code === 'protocol.invalid_message' && p.field === 'command') || code === 'protocol.capability_missing';
+  return (code === 'auth.forbidden' && (p.action === 'None' || !p.action)) || (code === 'protocol.invalid_message' && p.field === 'command') || code === 'protocol.capability_missing';
 }
 
 export function createThemeSync(env: SyncEnv) {

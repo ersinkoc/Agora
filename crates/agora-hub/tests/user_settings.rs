@@ -245,7 +245,8 @@ async fn a_stale_write_and_a_value_over_the_cap_change_nothing_and_writes_are_au
         4
     );
 
-    // Each write is an audit row of its person naming the key and the outcome; nothing of the value; a read writes none.
+    // Each write is an audit row of its person naming the key and the outcome; nothing of the value; a read and a stale write (which
+    // changed nothing) write none.
     let rows = agora_hub::audit::Audit::new(st.hub.store())
         .list(0, None, 100)
         .unwrap();
@@ -272,7 +273,6 @@ async fn a_stale_write_and_a_value_over_the_cap_change_nothing_and_writes_are_au
     let mut want = vec![
         row("ok"),
         row("ok"),
-        row("settings.stale"),
         row("ok"),
         row("settings.too_large"),
         row("ok"),
@@ -288,5 +288,39 @@ async fn a_stale_write_and_a_value_over_the_cap_change_nothing_and_writes_are_au
                 "{r:?}"
             );
         }
+    }
+}
+
+/// What an older hub answers a window's settings request: it decodes one as a request with no command (an arm it does not know), which
+/// its routing refuses first as `auth.forbidden` naming the action `None`, whoever asks. The window takes exactly that as "this hub keeps
+/// nothing" (`apps/web/src/themes/sync.ts` `isOlderHub`). This hub answers such a request the same way.
+#[tokio::test]
+async fn a_request_with_no_command_is_refused_as_an_older_hub_refuses_an_unknown_one() {
+    let (_st, addr) = start().await;
+    for token in ["owner-token", "member-token", "viewer-token"] {
+        let mut c = window(addr, token).await;
+        let req = v1::CommandRequest {
+            request_id: "r".into(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: None,
+        };
+        c.send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let r = loop {
+            let fr = next(&mut c).await;
+            if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+                break v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            }
+        };
+        assert_eq!(err(&r), "auth.forbidden", "{token}");
+        assert_eq!(
+            param(&r, "action"),
+            Some(v1::ParamValue {
+                value: Some(v1::param_value::Value::Str("None".into()))
+            }),
+            "{token}"
+        );
     }
 }
