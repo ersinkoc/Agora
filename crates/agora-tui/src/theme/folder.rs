@@ -154,7 +154,12 @@ pub fn load(path: &Path) -> Loaded {
         // that is not UTF-8 becomes U+FFFD, so a file is accepted or refused alike in both clients (audit F1800).
         Ok(bytes) => {
             let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
-            match serde_json::from_str::<Value>(&String::from_utf8_lossy(body)) {
+            let text = String::from_utf8_lossy(body);
+            // The decoded text is held to the cap too, as `read_text` holds it: a byte that is not UTF-8 grows to three.
+            if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+                return theme(Issue::TooLarge);
+            }
+            match serde_json::from_str::<Value>(&text) {
                 Ok(v) if is_pack(&v) => Loaded::Pack(read_pack(&v)),
                 Ok(v) => Loaded::Theme(read_value(&v)),
                 Err(_) => theme(Issue::Json),
