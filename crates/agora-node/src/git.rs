@@ -3076,12 +3076,18 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         let cd = admin.join("commondir");
         let orig = fs::read(&cd).expect("commondir");
         let fifo = admin.join("fifo-probe");
+        // No FIFOs on this system. Git for Windows' `mkfifo` succeeds but writes a `fifo-probe.lnk` shortcut that the system's own
+        // calls never see as `fifo-probe`, so there the swap below never happened and the test only spun.
         if !Command::new("mkfifo")
             .arg(&fifo)
             .status()
             .is_ok_and(|s| s.success())
+            || fs::symlink_metadata(&fifo).is_err()
         {
-            return; // no FIFOs on this system
+            let _ = fs::remove_file(admin.join("fifo-probe.lnk"));
+            let _ = remove_worktree(&r.dir, &wt, true);
+            let _ = fs::remove_dir_all(&wt);
+            return;
         }
         let _ = fs::remove_file(&fifo);
         let stop = Arc::new(AtomicBool::new(false));

@@ -3368,9 +3368,9 @@ mod idempotency_tests {
     /// F1500: a subscriber that fell behind a process that crashed is resynced from that process's terminal, never repainted with the
     /// screen of the process the restart started since (it gets the unknown exit: the crashed terminal is gone).
     ///
-    /// Unix only: the lag is made by flooding the terminal with output, and through ConPTY on a Windows runner that flood can take
-    /// minutes (it timed out on main after the merge of #1176). A Windows variant that lags without a flood is tracked on #1150.
-    #[cfg(unix)]
+    /// The lag is made by output the subscribers never read. On Unix a 6 MB flood does it; through ConPTY that flood took minutes on a
+    /// Windows runner (#1176), but a pseudoconsole hands its output over in many small chunks, so a few seconds of output fill the
+    /// subscriber queue there.
     #[test]
     fn a_lagged_subscriber_of_a_crashed_process_is_never_repainted_with_the_restarted_one() {
         if !agora_platform::PTY_SUPPORTED
@@ -3388,11 +3388,17 @@ mod idempotency_tests {
         git(&repo, &["commit", "-q", "-m", "init"]);
         // Quoted and with forward slashes, so `sh` reads the same folder on every platform.
         let d = format!("'{}'", dir.to_string_lossy().replace('\\', "/"));
-        // First run: waits for `go`, floods 6 MB (more than 256 chunks of at most 16 KiB, so a subscriber that reads nothing lags),
-        // then crashes. The restarted run prints a marker and stays.
+        // First run: waits for `go`, floods (more than 256 chunks, so a subscriber that reads nothing lags), then crashes. The
+        // restarted run prints a marker and stays. Unix: 6 MB, in chunks of at most 16 KiB. Windows: 8 s of output, since the
+        // pseudoconsole sends what changed on its screen tens of times a second.
+        let flood = if std::env::consts::OS == "windows" {
+            "timeout 8 yes 0123456789abcdef"
+        } else {
+            "yes 0123456789abcdef | head -c 6000000"
+        };
         let script = format!(
             "if [ -f {d}/second ]; then echo NEWPROC; exec cat; fi; : > {d}/second; \
-             until [ -f {d}/go ]; do sleep 0.02; done; yes 0123456789abcdef | head -c 6000000; exit 3"
+             until [ -f {d}/go ]; do sleep 0.02; done; {flood}; exit 3"
         );
         let manifest = format!(
             "kind = \"crashy\"\ndisplay_name = \"C\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", '''{script}''']\n"

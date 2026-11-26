@@ -62,8 +62,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   only `cmd`; Windows PowerShell 5.1 and `cmd` children are inside). So the job's limits (`make_job`: process memory, CPU time) do not
   reach them. A stop still ends them: closing the pseudoconsole ended `pwsh` + `claude` after 1.3 s and `pwsh` + the `codex` tree after
   23 ms. Find out why (packaged-app activation) and whether a nested job or a per-process limit can hold them.
-- **F1500 test variant:** `a_lagged_subscriber_of_a_crashed_process_is_never_repainted_with_the_restarted_one` is Unix-only; a Windows
-  variant should fall behind without a flood (a smaller subscriber queue in a test).
 - **Performance budgets missed on Windows 11** (ADR-0022, tracked, not relaxed): node cold start 2 760 ms cold / 197 ms warm against
   200 ms (mostly serial `git.exe` spawns; the side-by-side identity queries are merged, not measured on Windows yet); keystroke → echo p95
   18.21 / 17.45 ms against 16 ms (likely the ~15.6 ms timer tick in ConPTY, not measured alone).
