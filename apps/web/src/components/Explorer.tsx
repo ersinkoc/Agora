@@ -139,7 +139,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // never less than its tools and a few rows) and its agents scroll inside it, so the panes' tab bar never slides over its rows (#1069).
   return <aside data-region="sidebar" className="flex min-h-0 flex-col border-sidebar-line bg-sidebar text-sidebar-ink max-lg:max-h-[max(35dvh,16rem)] max-lg:flex-none max-lg:border-b lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
-      <h2 className="m-0 flex-1 text-xs">{t('console-agents')}</h2>
+      <h2 className="m-0 flex-1">{t('console-agents')}</h2>
       {!watching && <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>}
       <button type="button" className="ide-iconbtn" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelLeft" /></button>
     </div>

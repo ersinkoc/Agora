@@ -67,7 +67,7 @@ export function ToolChooser({ panel, fleet, onPick, onNewTerminal }: { panel: To
         {groups.length === 0 && <EmptyState icon={ICON[panel]} title={t(panel === 'terminal' ? 'pane-no-terminals-title' : 'pane-no-folders-title')} hint={t(panel === 'terminal' ? 'pane-no-terminals-hint' : 'pane-no-folders-hint')} />}
         {groups.map((g) => (
           <section key={g.project} className="grid gap-0.5" aria-label={g.project || undefined}>
-            {g.project && <h3 className="m-0 truncate text-xs font-semibold tracking-wider text-muted uppercase">{g.project}</h3>}
+            {g.project && <h3 className="m-0 truncate text-xs font-semibold text-muted">{g.project}</h3>}
             <ul className="m-0 grid list-none gap-0.5 p-0">
               {g.folders.map((f) => (
                 <li key={f.key}>

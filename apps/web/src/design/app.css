@@ -95,7 +95,8 @@
      the same element (a mono code line) still wins. */
   :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
-  h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
+  /* A section title: sentence case at the strong step (visual-language.md type roles), never a small uppercase label. */
+  h2 { @apply font-semibold text-ink; font-size: var(--text-strong); }
   button { @apply cursor-pointer; }
   input, select { @apply rounded-s border border-input-line bg-input px-3 py-2 text-input-ink; font: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -165,7 +166,7 @@
   /* A sign's whole meaning, shown on hover, keyboard focus and tap (NoAskBadge): drawn over the page, above dialogs and menus, so a clipping
      row or the window's edge never cuts it. */
   .tip-bubble { @apply fixed z-60 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink; box-shadow: var(--shadow); }
-  .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
+  .ide-section { @apply px-3 pb-1 pt-3 font-semibold text-ink; font-size: var(--text-strong); }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
   .muted { @apply text-[0.8125rem] text-muted; }
@@ -801,8 +802,8 @@
   .set-page { @apply grid items-start gap-6 md:grid-cols-[13.5rem_minmax(0,1fr)] md:gap-9; }
   .set-nav { @apply sticky top-10 z-[5] -mx-4 flex gap-x-1 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-0.5 md:overflow-visible md:border-b-0 md:p-0; }
   .set-nav__group { @apply flex flex-none items-center gap-1 md:grid md:items-stretch md:gap-0.5; }
-  /* The one uppercase label on the page (sidebar group labels, visual-language.md §2). */
-  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold uppercase tracking-wider text-muted md:block; font-size: 0.6875rem; }
+  /* The side index's group labels: sentence case at the strong step, as every section title (visual-language.md §2). */
+  .set-nav__overline { @apply hidden px-2 pb-1.5 pt-3.5 font-semibold text-ink md:block; font-size: var(--text-strong); }
   .set-nav__row { @apply w-auto flex-none whitespace-nowrap text-muted hover:text-ink md:w-full; font-size: var(--text-body); }
   .set-nav__row[aria-current='true'] { @apply text-ink; }
   .set-nav__row[aria-current='true'] .set-nav__icon { @apply text-accent; }

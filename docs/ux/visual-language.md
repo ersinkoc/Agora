@@ -131,7 +131,9 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
   rows carry the avatar and a tinted selection with no bar (PR 7). The chat view, the board and the Usage panel are on the kit
   (PR 12; `docs/ux/screens/polish-redesign-*`): one status pill, the agent avatar in each turn, the acts-freely sign as a red-tinted tag
   beside Mode, board columns with a mark and hue, Usage stat tiles. Until the rest follow, existing overlays (except the command
-  palette) use the older `--shadow`, other screens keep their selection bars, and the global `h2` is still an uppercase label. Amber
+  palette) use the older `--shadow` and other screens keep their selection bars. No section title is an uppercase label any more: the
+  global `h2`, the theme editor's sections, the Agents list's title and Settings' side index are sentence case at the strong step
+  (visual pass 2026-11, finding 12). Amber
   means only "needs you" everywhere (PR 3).
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
