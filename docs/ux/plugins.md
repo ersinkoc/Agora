@@ -308,4 +308,8 @@ runs.
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
   package loads through the dialog.
+- Reload on save in a real browser (`scripts/screenshots-plugin-reload.mjs`, headless Chromium under the hub's headers per path, the
+  file picker stood in for): a plugin loaded through the picker is listed as watched, a changed package that passes starts a new frame
+  that draws the new version and is inert, and one that fails keeps the running frame with the reason above it; screenshots
+  `docs/screenshots/plugin-reload-dialog-{dark,light}.png` and `plugin-reload-refused-{dark,light}.png`.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).

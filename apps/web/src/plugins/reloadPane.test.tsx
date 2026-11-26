@@ -107,7 +107,8 @@ describe('reload on save in the window', () => {
   it('loads through the picker that can read the file again, and says the plugin is watched', async () => {
     let bytes = pkg('1.0.0');
     let at = 5;
-    const handle: WatchedFile = { getFile: async () => { const b = bytes; return new File([b.slice()], 'demo.json', { lastModified: at }); } };
+    // Read at once (a jsdom File reads on a later turn, which `act` does not wait for).
+    const handle: WatchedFile = { getFile: async () => { const b = bytes; return { size: b.length, lastModified: at, arrayBuffer: async () => b.slice().buffer }; } };
     let asked = '';
     (window as { showOpenFilePicker?: unknown }).showOpenFilePicker = async (o: { types: { description: string }[] }) => { asked = o.types[0]?.description ?? ''; return [handle]; };
     act(() => root.render(<PluginsDialog onClose={() => {}} />));

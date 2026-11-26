@@ -77,13 +77,9 @@ types of `agora` and of each capability's answer (`// @ts-check` in `panel.js` l
 writes each file's hash into the manifest (`--write-hashes`), packs the folder, and refuses what the window would, saying why; with
 `--watch` it packs again on every save. `agora plugin check` runs the window's checks on a folder or a package. A refusal names a
 code (`hash`, `unlisted`, `manifest`, `not-a-file`, …) and the file or field. `README.md` and `agora-plugin.d.ts` are never packed, and
-the package is never written into the folder itself.
-
-```sh
-agora plugin new agents-list
-agora plugin pack agents-list --out agents-list.json --write-hashes --watch
-agora plugin check agents-list.json
-```
+the package is never written into the folder itself. For example: `agora plugin new agents-list`, then
+`agora plugin pack agents-list --out agents-list.json --write-hashes --watch`, then load `agents-list.json` in the window;
+`agora plugin check agents-list.json` says what the window would refuse.
 
 By hand, without the command: put the files in one flat folder and run this there. It writes each file's hash into the manifest,
 then the package, `agents-plugin.json`. List every file but the manifest in `names`.
