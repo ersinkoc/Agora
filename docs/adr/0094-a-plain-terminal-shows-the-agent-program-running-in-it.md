@@ -18,7 +18,7 @@ keeps its own name and avatar (`docs/ux/main-window.md`).
 The registry's names (the second open question, 2026-11-27): rather than the converter writing them (its golden outputs are never
 edited), the node takes a kind's ACP program as its name when the kind lists none and that program is a plain file name of its own
 (`docs/specs/agent-manifest.md`).
-Not built: the Windows lookup (step 3, measured on Windows first).
+Step 3 (2026-11-27): the Windows lookup, measured first and built per Amendment A (`agora-platform`'s `winproc.rs`). Every step is built.
 
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
 user-visible viewport". Touches the threat model (a program name is untrusted data).
