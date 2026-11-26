@@ -75,7 +75,8 @@ files. Each refusal has its own message (`plugin-error-*`).
 **The same checks on the hub.** The hub checks a package with the same rules, in the same order and with the same codes
 (`crates/agora-hub/src/plugin_package.rs`, a port of `package.ts`), so it refuses at install what a window would refuse at load. It reads
 the JSON as the window does: one leading byte-order mark is dropped, a key given twice keeps its last value, `1.0` is `1`, base64 bits left
-over are ignored, and texts are measured in UTF-16 units. A text with a lone surrogate (`"\ud800"`) is refused by both. The two are held
+over are ignored, and texts are measured in UTF-16 units. A text with a lone surrogate (`"\ud800"`) is refused by both, and so is JSON with more than 64 objects and arrays open at once
+(counted on the text, so even a deep value under a key given twice, which `JSON.parse` would drop, refuses the package in both). The two are held
 in agreement by shared packages that both test suites check against one list (`crates/agora-hub/tests/fixtures/plugin-packages/`).
 
 **Packing.** `node scripts/pack-plugin.mjs <folder> [--out <file>] [--write-hashes]` packs a flat folder and refuses a file not listed or

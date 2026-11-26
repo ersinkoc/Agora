@@ -396,7 +396,9 @@ pub fn fleet_allowed(store: &SqliteStore) -> bool {
 }
 
 /// What a viewer may still do: everything that only reads. The command names are the schema's, so a new command is refused to
-/// viewers until it is listed here.
+/// viewers until it is listed here. Answered before this check, for every person: the device commands (ADR-0061) and the plugin
+/// commands (ADR-0114, `server::plugin_command`), so a viewer may also set and remove their own plugin grants. Those are the hub's
+/// alone: a grant is the person's own row on the hub and nothing reaches a node.
 pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> bool {
     use agora_protocol::v1::command_request::Command as C;
     matches!(

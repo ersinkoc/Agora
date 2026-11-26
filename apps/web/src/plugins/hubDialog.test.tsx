@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { agora } from '../gen/agora.js';
 import { setLanguage } from '../i18n';
 import type { CommandBody } from '../net/live';
+import { checkPackage } from './package';
 import { PluginsDialog } from './PluginsDialog';
 import { pluginStore } from './store';
 import { ENTRY, baseManifest, bundle } from './testPackage';
@@ -63,5 +64,25 @@ describe('a plugin installed on the hub in the plugins dialog', () => {
     await settle();
     expect(sent.some((b) => b.pluginGrantRemove)).toBe(true);
     expect(pluginStore.state().plugins[0]?.state).toBe('new');
+  });
+
+  it('lists a hub plugin a development plugin of its id replaces here, and says so on the install screen', async () => {
+    grant = undefined;
+    await pluginStore.attachHub(hub);
+    const devFiles = { 'panel.js': `${ENTRY}//dev` };
+    const r = await checkPackage(bundle(devFiles, { manifest: baseManifest(devFiles, { id: 'agents', name: 'Agent list (mine)', version: '2.0.0' }) }), '0.3.39');
+    if (!r.ok) throw new Error(r.code);
+    pluginStore.install(r.plugin, 'x', []);
+    act(() => root.render(<PluginsDialog onClose={() => {}} />));
+    const rows = [...document.querySelectorAll('[data-plugin-row="agents"]')];
+    expect(rows.length).toBe(2);
+    const shadowed = document.querySelector('[data-plugin-replaced]');
+    expect(shadowed?.textContent).toContain('Agent list');
+    expect(shadowed?.textContent).toContain('Replaced in this browser');
+    expect(shadowed?.querySelector('button')).toBeNull();
+    act(() => button('What it can see')?.click());
+    expect(document.querySelector('[data-plugin-replaces]')?.textContent).toContain("Replaces the hub's Agent list in this browser");
+    act(() => button('Cancel')?.click());
+    pluginStore.remove('agents');
   });
 });

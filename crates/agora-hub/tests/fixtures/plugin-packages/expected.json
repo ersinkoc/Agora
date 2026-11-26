@@ -248,6 +248,35 @@
    "ok": false,
    "code": "newer",
    "detail": "99.0.0"
+  },
+  {
+   "file": "deep-duplicate-files.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "ok-nesting-64-duplicate-files.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "deep-duplicate-name.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "agora-plugin.json"
+  },
+  {
+   "file": "ok-nesting-64-duplicate-name.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
   }
  ]
 }

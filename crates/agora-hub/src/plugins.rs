@@ -80,8 +80,10 @@ fn internal() -> Error {
     Error::new(ErrorCode::Internal).with("incident_id", "plugins")
 }
 
+/// `plugin.not_found` naming the id the window sent, cut to what a manifest id can be (40 characters): the id comes from the request.
 fn not_found(id: &str) -> Error {
-    Error::new(ErrorCode::PluginNotFound).with("plugin_id", id)
+    let id: String = id.chars().take(40).collect();
+    Error::new(ErrorCode::PluginNotFound).with("plugin_id", id.as_str())
 }
 
 pub struct Plugins<'a> {
@@ -202,7 +204,8 @@ impl<'a> Plugins<'a> {
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
-    /// A piece of an installed package from `offset`, at most [`PIECE`] bytes; only the piece is read. `plugin.not_found` unless
+    /// A piece of an installed package from `offset`, at most [`PIECE`] bytes. SQLite reads the whole blob under the store
+    /// lock to cut the piece out (at most 2 MiB, the largest package); only the piece is copied out and sent. `plugin.not_found` unless
     /// `plugin_id` is installed with the package `sha256`.
     pub fn piece(
         &self,
@@ -224,7 +227,7 @@ impl<'a> Plugins<'a> {
             return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "offset"));
         }
         let len = (total - offset).min(PIECE as u64);
-        // SQLite's substr counts a blob's bytes from 1.
+        // SQLite's substr counts a blob's bytes from 1; it loads the whole blob (at most 2 MiB) to cut the piece.
         let data: Vec<u8> = conn
             .query_row(
                 "SELECT substr(package, ?3, ?4) FROM plugins WHERE id = ?1 AND sha256 = ?2",
@@ -524,10 +527,45 @@ mod tests {
             p.piece("nope", &sha, 0).unwrap_err().code,
             ErrorCode::PluginNotFound
         );
+        // The id echoed back is cut to what a manifest id can be.
+        let long = p.piece(&"x".repeat(5000), &sha, 0).unwrap_err();
+        assert_eq!(
+            long.params.get("plugin_id"),
+            Some(&agora_protocol::ParamValue::Str("x".repeat(40)))
+        );
         assert_eq!(
             p.piece("big", &sha, big.len() as u64 + 1).unwrap_err().code,
             ErrorCode::ProtocolInvalidMessage
         );
+    }
+
+    /// Removing a person forgets their plugin grants, and nobody else's.
+    #[test]
+    fn removing_a_person_forgets_their_plugin_grants() {
+        use crate::users::{Role, Users};
+        let s = store();
+        let p = Plugins::new(&s);
+        let bytes = package("demo", "1.0.0", &["agents.read"], 0);
+        p.add(&bytes, "0.3.0", 1).unwrap();
+        let users = Users::new(&s);
+        let eda = users.add("Eda", Role::Viewer, 2).unwrap();
+        let bo = users.add("Bo", Role::Member, 3).unwrap();
+        for who in [&eda.id, &bo.id] {
+            p.set_grant(
+                who,
+                &PluginGrantSet {
+                    plugin_id: "demo".into(),
+                    version: "1.0.0".into(),
+                    granted: vec!["agents.read".into()],
+                    sha256: hex(&Sha256::digest(&bytes)),
+                },
+                4,
+            )
+            .unwrap();
+        }
+        assert!(users.remove(&eda.id).unwrap());
+        assert!(p.grants_of(&eda.id).unwrap().is_empty());
+        assert_eq!(p.grants_of(&bo.id).unwrap().len(), 1);
     }
 
     #[test]

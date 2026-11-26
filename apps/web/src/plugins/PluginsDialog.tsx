@@ -23,7 +23,9 @@ type Screen =
   | { at: 'grant'; plugin: CheckedPlugin; text?: string; allow: Capability[]; dev: boolean; fresh?: boolean };
 
 export function PluginsDialog({ onClose }: { onClose: () => void }) {
-  const { plugins, safe } = usePlugins();
+  const { plugins, safe, replaced } = usePlugins();
+  // The hub plugin a development plugin of this id stands in for (or would), by its name.
+  const hubTwin = (id: string) => [...replaced, ...plugins].find((p) => !p.dev && p.plugin.manifest.id === id)?.plugin.manifest.name;
   const [screen, setScreen] = useState<Screen>({ at: 'list' });
   const file = useRef<HTMLInputElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -94,6 +96,20 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                 );
               })}
             </ul>}
+            {/* A hub plugin a development plugin stands in for here: still listed, marked as replaced in this browser, never run. */}
+            {replaced.length > 0 && <ul className="m-0 grid list-none gap-2 p-0">
+              {replaced.map((p) => (
+                <li key={`hub:${p.plugin.manifest.id}`} className="grid gap-1.5 rounded-m border border-line p-3" data-plugin-row={p.plugin.manifest.id} data-plugin-replaced="">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="min-w-0 truncate font-medium text-ink">{p.plugin.manifest.name}</span>
+                    <PluginMark dev={false} />
+                    <span className="text-xs text-muted">{t('plugin-version-by', { version: p.plugin.manifest.version, author: p.plugin.manifest.author })}</span>
+                    <span className="text-xs text-muted">{t('plugin-from-hub')}</span>
+                  </div>
+                  <p className="m-0 text-xs text-muted">{t('plugin-replaced')}</p>
+                </li>
+              ))}
+            </ul>}
             {screen.error && <p role="alert" className="m-0 text-danger">{screen.error}</p>}
             {screen.note && <p role="status" className="m-0">{screen.note}</p>}
             <div className="mt-1 flex flex-wrap justify-end gap-2">
@@ -102,7 +118,7 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                   <Button onClick={() => file.current?.click()}>{t('plugin-load')}</Button></>}
               <Button variant="primary" onClick={onClose}>{t('plugins-done')}</Button>
             </div>
-          </> : <Grant titleId={titleId} screen={screen} onChange={(allow) => setScreen({ ...screen, allow })} onCancel={() => setScreen({ at: 'list' })} onSave={() => void save(screen)} />}
+          </> : <Grant titleId={titleId} screen={screen} onChange={(allow) => setScreen({ ...screen, allow })} onCancel={() => setScreen({ at: 'list' })} onSave={() => void save(screen)} twin={screen.dev ? hubTwin(screen.plugin.manifest.id) : undefined} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -110,7 +126,7 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
 }
 
 // The install screen: who made it, that it was loaded for development, what it can never do, and each thing it asks to see.
-function Grant({ titleId, screen, onChange, onCancel, onSave }: { titleId: string; screen: Extract<Screen, { at: 'grant' }>; onChange: (allow: Capability[]) => void; onCancel: () => void; onSave: () => void }) {
+function Grant({ titleId, screen, onChange, onCancel, onSave, twin }: { titleId: string; screen: Extract<Screen, { at: 'grant' }>; onChange: (allow: Capability[]) => void; onCancel: () => void; onSave: () => void; twin?: string }) {
   const m = screen.plugin.manifest;
   const toggle = (c: Capability, on: boolean) => onChange(m.capabilities.filter((x) => (x === c ? on : screen.allow.includes(x))));
   return <>
@@ -121,6 +137,7 @@ function Grant({ titleId, screen, onChange, onCancel, onSave }: { titleId: strin
       <span>{t('plugin-version-by', { version: m.version, author: m.author })}</span>
       <span>{t('plugin-licence', { licence: m.licence })}</span>
     </div>
+    {twin !== undefined && <p className="m-0" role="note" data-plugin-replaces="">{t('plugin-replaces-hub', { name: twin })}</p>}
     <p className="m-0 text-muted">{t('plugin-grant-never')}</p>
     {m.capabilities.length === 0 ? <p className="m-0">{t('plugin-grant-nothing')}</p> : <fieldset className="m-0 grid gap-2 border-0 p-0" data-plugin-grants="">
       <legend className="mb-1 p-0 font-medium text-ink">{t('plugin-grant-asks')}</legend>

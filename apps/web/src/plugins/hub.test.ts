@@ -184,6 +184,8 @@ describe('plugins installed on the hub', () => {
     s.install(r.plugin, 'x', []);
     expect(ids(s)).toEqual(['agents@2.0.0:dev:ready']);
     expect(s.state().plugins[0]?.granted).toEqual([]);
+    // The hub's is kept apart, listed as replaced, never run.
+    expect(s.state().replaced.map((p) => `${p.plugin.manifest.id}@${p.plugin.manifest.version}`)).toEqual(['agents@1.0.0']);
     // Its grant is this browser's; the hub's record is untouched.
     await s.regrant('agents', ['agents.read']);
     expect(hub.sent.filter((k) => k === 'pluginGrantSet').length).toBe(1);
@@ -191,5 +193,6 @@ describe('plugins installed on the hub', () => {
     // Removed from this browser: the hub plugin is back, with the person's hub grant.
     s.remove('agents');
     expect(ids(s)).toEqual(['agents@1.0.0:hub:ready']);
+    expect(s.state().replaced).toEqual([]);
   });
 });

@@ -92,6 +92,26 @@ function base64(s: string): Uint8Array | undefined {
   } catch { return undefined; }
 }
 
+/** The most objects and arrays open at once in a package's JSON (the hub's `MAX_DEPTH`, plugin_package.rs). */
+export const MAX_JSON_DEPTH = 64;
+
+/** `JSON.parse`, refusing (by throwing) text with more than MAX_JSON_DEPTH objects and arrays open at once. Counted on the text, before
+ *  parsing: a deep value under a key given twice is refused although `JSON.parse` would keep only the last one, as the hub refuses it. */
+export function parseJson(text: string): unknown {
+  let open = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i++; // a backslash: the next character is escaped
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) inString = true;
+    else if (c === 0x5b || c === 0x7b) { if (++open > MAX_JSON_DEPTH) throw new SyntaxError('too deep'); }
+    else if (c === 0x5d || c === 0x7d) open--;
+  }
+  return JSON.parse(text);
+}
+
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>));
   return [...d].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -145,7 +165,7 @@ export function readManifest(v: unknown): { ok: true; manifest: PluginManifest }
 export async function checkPackage(bytes: Uint8Array, agoraVersion: string): Promise<PackageResult> {
   if (bytes.length > MAX_PACKAGE_BYTES) return { ok: false, code: 'too-large' };
   let top: unknown;
-  try { top = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return { ok: false, code: 'format' }; }
+  try { top = parseJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return { ok: false, code: 'format' }; }
   if (!isObject(top) || !own(top, 'agora-plugin-bundle') || !own(top, 'files') || Object.keys(top).length !== 2) return { ok: false, code: 'format' };
   const ver = top['agora-plugin-bundle'];
   if (typeof ver === 'number' && Number.isInteger(ver) && ver > BUNDLE_VERSION) return { ok: false, code: 'newer-format' };
@@ -165,7 +185,7 @@ export async function checkPackage(bytes: Uint8Array, agoraVersion: string): Pro
   const raw = files.get(MANIFEST);
   if (!raw) return { ok: false, code: 'manifest', detail: MANIFEST };
   let json: unknown;
-  try { json = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); } catch { return { ok: false, code: 'manifest', detail: MANIFEST }; }
+  try { json = parseJson(new TextDecoder('utf-8', { fatal: true }).decode(raw)); } catch { return { ok: false, code: 'manifest', detail: MANIFEST }; }
   const m = readManifest(json);
   if (!m.ok) return m;
   files.delete(MANIFEST);

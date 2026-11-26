@@ -31,7 +31,13 @@ export interface LoadedPlugin {
   /** What the frame is answered for. */
   readonly granted: readonly Capability[];
 }
-export interface PluginState { readonly plugins: readonly LoadedPlugin[]; readonly safe: boolean; readonly ready: boolean }
+export interface PluginState {
+  readonly plugins: readonly LoadedPlugin[];
+  readonly safe: boolean;
+  readonly ready: boolean;
+  /** Hub plugins a development plugin of the same id stands in for in this browser: listed as replaced, never run. */
+  readonly replaced: readonly LoadedPlugin[];
+}
 
 function read(kv: KV | undefined, key: string): unknown {
   try { const s = kv?.getItem(key); return s ? JSON.parse(s) : undefined; } catch { return undefined; }
@@ -45,7 +51,7 @@ export interface PluginStoreEnv { kv?: KV; version: string; safe?: boolean }
 
 export function createPluginStore(env: PluginStoreEnv) {
   const safe = !!env.safe;
-  let state: PluginState = Object.freeze({ plugins: Object.freeze([]), safe, ready: safe });
+  let state: PluginState = Object.freeze({ plugins: Object.freeze([]), safe, ready: safe, replaced: Object.freeze([]) });
   const listeners = new Set<() => void>();
   // The development plugins and the hub's, kept apart; what is shown is both, a development one standing in for a hub one of its id.
   let devs: readonly LoadedPlugin[] = [];
@@ -57,7 +63,8 @@ export function createPluginStore(env: PluginStoreEnv) {
   // Each hub plugin's package hash: a grant names the package the person was shown.
   let hubSha = new Map<string, string>();
   const show = () => {
-    state = Object.freeze({ plugins: Object.freeze([...devs, ...hubs.filter((h) => !devs.some((d) => d.plugin.manifest.id === h.plugin.manifest.id))]), safe, ready: started });
+    const shadowed = (h: LoadedPlugin) => devs.some((d) => d.plugin.manifest.id === h.plugin.manifest.id);
+    state = Object.freeze({ plugins: Object.freeze([...devs, ...hubs.filter((h) => !shadowed(h))]), safe, ready: started, replaced: Object.freeze(hubs.filter(shadowed)) });
     listeners.forEach((l) => l());
   };
   const set = (plugins: readonly LoadedPlugin[]) => { devs = Object.freeze([...plugins]); show(); };

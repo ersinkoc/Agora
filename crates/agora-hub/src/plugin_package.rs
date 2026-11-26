@@ -548,8 +548,9 @@ fn get<'a>(o: &'a [(JStr, J)], key: &str) -> Option<&'a J> {
     o.iter().find(|(k, _)| k.is(key)).map(|(_, v)| v)
 }
 
-/// How deep the reader goes. The window's reader has no such limit, but nothing a package may hold nests deeper than three, so a deeper
-/// value is refused either way (only the code may differ).
+/// The most objects and arrays open at once. The window refuses the same text before `JSON.parse` (`MAX_JSON_DEPTH` in `package.ts`,
+/// counted on the text, so a deep value under a key given twice is refused even though `JSON.parse` would drop it): the two agree on
+/// every package, with the same code. Nothing a package may hold nests deeper than three.
 const MAX_DEPTH: usize = 64;
 
 /// `JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))`, or `None` where that throws.
@@ -584,12 +585,11 @@ impl Parser<'_> {
             .starts_with(word)
             .then(|| self.at += word.len())
     }
+    /// A value inside `depth` open objects and arrays; one more would make more than [`MAX_DEPTH`].
     fn value(&mut self, depth: usize) -> Option<J> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
         self.space();
         match self.peek()? {
+            b'{' | b'[' if depth >= MAX_DEPTH => None,
             b'{' => self.object(depth),
             b'[' => self.array(depth),
             b'"' => self.string().map(J::Str),
@@ -819,6 +819,11 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(matches!(decode_json(many.as_bytes()), Some(J::Obj(o)) if o.len() == 200_000));
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // 64 open at once are read; 65 are refused, as by the window.
+        let nest = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        assert!(decode_json(nest(64).as_bytes()).is_some());
+        assert_eq!(decode_json(nest(65).as_bytes()), None);
+        assert!(decode_json(format!("{}1{}", "[".repeat(64), "]".repeat(64)).as_bytes()).is_some());
         // Nesting past the reader's depth is refused, never a stack overflow.
         let deep = "[".repeat(100_000);
         assert_eq!(decode_json(deep.as_bytes()), None);
