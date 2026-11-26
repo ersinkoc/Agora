@@ -289,6 +289,12 @@
   /* A changed line says so by shape as well as colour: a bar on its left edge (the +/- glyph sits in the line). Content colours, not states. */
   .diff-bar-add { box-shadow: inset 2px 0 0 var(--state-finished); }
   .diff-bar-del { box-shadow: inset 2px 0 0 var(--diff-removed); }
+  /* The changed words of a changed line: the role's soft tint (text keeps 4.5:1 on it, the muted syntax ink too) and an underline in the
+     role's colour, which says it by shape. A stronger fill took the code's ink under 4.5:1 (visual pass 2026-11, finding 17). The underline
+     runs on across the highlighter's spans and never changes the row's height. */
+  .diff-mark-add, .diff-mark-del { @apply rounded-[2px] text-inherit; text-decoration-line: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+  .diff-mark-add { background: var(--tint-finished); text-decoration-color: var(--state-finished); }
+  .diff-mark-del { background: var(--tint-danger); text-decoration-color: var(--diff-removed); }
 
   /* A picture in a menu (the layout presets): a tile with room for a finger; the chosen one is marked in the accent. */
   .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }

@@ -57,7 +57,9 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   `--diff-removed` (red, `#f87171` on dark and `#a82117` on light, in `tokens.css`) is fixed and not a theme token, so a theme file
   cannot set it. A deleted line is red, an added line is green (the Finished green), amber stays "needs you" and is never used
   for a deletion. A changed line says so by shape as well as colour: a `-` or `+` glyph and a 2 px bar on its left edge. The red
-  reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. This documents a
+  reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. The changed words inside a changed line
+  are the role's soft tint (`--tint-finished`, `--tint-danger`) with a 2 px underline in the role's colour, so the code's ink, the muted
+  one too, keeps 4.5:1 on them. This documents a
   content-colour exception to "colour is reserved for state"; it does not change the state-colour rule.
   The same fixed red also names a chrome role, **risk** (`--color-risk` in `app.css`, the same colour as `--danger` below), for the sign of an agent that acts without asking
   (ADR-0059, ADR-0090 Amendment A), a lightning bolt with no words whose meaning is its tooltip and accessible name. It is never amber, so
