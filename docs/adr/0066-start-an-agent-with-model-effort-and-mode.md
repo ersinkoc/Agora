@@ -41,6 +41,13 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
 - **Remembered choices (web window):** the start window remembers the last model and effort per kind per machine on this device (localStorage; checked against what the machine lists now, so a value it no longer takes is dropped and never sent) and shows what an agent was started with, read-only, in its header. The agent never reports an effort (the adapter protocol carries modes and models only), so there is no effort menu.
 - **`options` on `agent_start` (built, ADR-0059 decision 5):** an agent may name launch options (`skip-permissions`); the card lists them
   with the confirmation, and the decision is signed over `agora-approval-start-v3` (settings, then option ids, before the hash). No grant.
-- **Not built yet:** the TUI's start picker (the card is done, the picker in the TUI's own start flow is not), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
+- **The TUI's start picker (built, #1242):** "Start an agent in a folder" (`f`) asks, after how the agent acts, the kind's settings one
+  at a time in the manifest's order (`crates/agora-tui/src/launch.rs`: a numbered list whose first line keeps the tool's default, a typed
+  value for a setting without values, held to the node's rule for a value so what is shown is what is signed, an arrow typing
+  nothing there; Enter keeps the default, Backspace goes back, Esc cancels the start), signs the chosen pairs in that
+  order with the launch (`directory-action-v4`) and sends them in `AgentLaunch.settings`; nothing chosen sends none. `Session::kind_settings`
+  reads them from the machine's kind list. The quick start (`s`, an unsigned `AgentStart` through the hub) carries no settings, and the
+  TUI does not remember the last choice per kind per machine.
+- **Not built yet:** remembering the TUI's last choice, the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
   does not specify the policy key's place or the catalog lookup closely enough for a small change), `mode` as a shipped setting, and
   keeping the settings across a resume after a node restart.
