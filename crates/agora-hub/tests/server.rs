@@ -4489,6 +4489,8 @@ async fn members_and_viewers_read_the_theme_catalog_only_once_the_owner_turned_i
                 licence: "MIT".into(),
                 sha256: "a".repeat(64),
                 file: "themes/harbour.json".into(),
+                added: String::new(),
+                popularity: 0,
             },
             data: data.into(),
         }],

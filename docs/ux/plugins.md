@@ -306,12 +306,15 @@ agora-plugins/
 
 | Field | Rule |
 | --- | --- |
-| `agora-plugin-catalog` | `1`; a hub refuses a newer format |
+| `agora-plugin-catalog` | `1` or `2` (ADR-0120: adds `added`, `popularity` and `screenshots` below); a hub refuses a newer format, and a hub before ADR-0120 refuses `2` |
 | `serial` | a whole number from 1 that only grows: one more on every signed release |
 | `id`, `version`, `name`, `author`, `licence`, `capabilities` | exactly the archive's manifest (the hub refuses an archive whose manifest differs); `licence` is an SPDX identifier and required |
 | `description` | optional (empty is the same as missing), one line of at most 300 characters, no control or invisible characters |
 | `sha256`, `size` | of the archive file exactly as served; at most 2 MiB |
 | `file` | the archive's path under the index's folder: letters, digits, `.`, `_`, `-` and `/`, ending in `.json`, no `.` or `..` part |
+| `added` | format 2 only, optional (ADR-0120): the day the catalog first listed it, `YYYY-MM-DD`; a day after the update's (UTC) refuses the entry |
+| `popularity` | format 2 only, optional: a whole number from 0 to 1 000 000 000 the catalog publishes (for example the source repository's stars at release); Agora never counts installs |
+| `screenshots` | format 2 only, optional: at most 4 `{ "file", "sha256", "size", "alt" }`: a path as for `file` but ending in `.png` or `.webp`, the SHA-256 and size (at most 512 KiB) of the image as served, and an optional one-line `alt` of at most 200 characters. The hub fetches each one during `update` and keeps it only when its size and SHA-256 are the entry's, its first bytes are a PNG or WebP of the kind its name says, and it is at most 2560 × 1600 pixels (at most 32 MiB of screenshots per catalog); one that fails is named (`cli-hub-plugins-shot-refused`) and dropped, and the plugin is kept |
 
 **Review.** Every addition and every update is a pull request reviewed by a person; the licence is required; minified or obfuscated code
 is refused (the source in `plugins/<id>/src/` is what is reviewed, and the archive must be what `pack-plugin.mjs` makes of it); and CI

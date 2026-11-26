@@ -448,6 +448,13 @@ cli-hub-plugins-refused = Refused { $id }: { $reason }
 cli-hub-plugins-refused-field = its entry in the index has no valid { $field }.
 cli-hub-plugins-refused-unknown-field = its entry in the index has a field this version does not know: { $field }.
 cli-hub-plugins-refused-duplicate = another plugin in the index has the same id.
+cli-hub-plugins-shot-refused = Screenshot { $number } of { $id } was not kept ({ $reason ->
+    [fetch] it could not be fetched
+    [size] its size is not the one the index gives, or it is too large
+    [hash] its SHA-256 is not the one the index gives
+    [kind] it is not a PNG or WebP image of the kind its name says
+   *[pixels] it is larger than 2560 × 1600 pixels
+}); the plugin is kept.
 cli-hub-plugins-index = the index { $reason }
 cli-hub-plugins-signature-fetch = the index's signature (index.json.sig) { $reason }
 cli-hub-plugins-fetch-address = has no usable address: it must be https:// (plain http:// only to this machine).

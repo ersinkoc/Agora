@@ -436,6 +436,13 @@ cli-hub-plugins-refused = { $id } reddedildi: { $reason }
 cli-hub-plugins-refused-field = dizindeki kaydında geçerli bir { $field } yok.
 cli-hub-plugins-refused-unknown-field = dizindeki kaydında bu sürümün bilmediği bir alan var: { $field }.
 cli-hub-plugins-refused-duplicate = dizindeki başka bir eklentinin kimliği aynı.
+cli-hub-plugins-shot-refused = { $id } eklentisinin { $number }. ekran görüntüsü saklanmadı ({ $reason ->
+    [fetch] indirilemedi
+    [size] boyutu dizinin verdiği boyut değil ya da çok büyük
+    [hash] SHA-256 değeri dizinin verdiği değer değil
+    [kind] adının söylediği türde bir PNG ya da WebP görseli değil
+   *[pixels] 2560 × 1600 pikselden büyük
+}); eklenti saklandı.
 cli-hub-plugins-index = dizin: { $reason }
 cli-hub-plugins-signature-fetch = dizinin imzası (index.json.sig): { $reason }
 cli-hub-plugins-fetch-address = kullanılabilir bir adresi yok: https:// olmalı (düz http:// yalnızca bu makineye).

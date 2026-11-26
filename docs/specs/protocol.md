@@ -1556,6 +1556,18 @@ remove ID`, docs/ux/plugins.md).
   receives it; no capability, an older hub refuses it and the window shows no catalog). No message installs, upgrades or fetches a
   catalog archive: the owner does, on the hub's machine (`agora hub plugins install|upgrade ID`). Golden fixtures:
   `schema/fixtures/plugin-catalog/` (`crates/agora-protocol/tests/plugin_catalog.rs`).
+- **The gallery's fields** (ADR-0120, additive). `ThemeCatalogEntry` gains `added` (8, `YYYY-MM-DD`, the day the catalog first listed
+  it; empty when its index is format 1 or gives none) and `popularity` (9, the number the catalog publishes, 0 to 1 000 000 000; 0 when
+  none; never counted by Agora). `PluginCatalogEntry` gains the same as `added` (10) and `popularity` (11), and `screenshots` (12), one
+  alt text per screenshot the hub kept (an empty string for one without), in the index's order.
+- **`PluginCatalogScreenshot { plugin_id, index }`** (ADR-0120; `CommandRequest.plugin_catalog_screenshot` 121,
+  `CommandOk.plugin_catalog_screenshot` 40) → `PluginCatalogScreenshotResult { media_type, data, alt }`: screenshot `index` (from 0,
+  as `PluginCatalogEntry.screenshots` lists them) exactly as the hub fetched and checked it, `image/png` or `image/webp`, at most 512 KiB
+  and 2560 × 1600 pixels. Refused with `plugin.catalog_off` while the catalog is off and `plugin.not_found` (`plugin_id`) for a plugin
+  or index it does not have (none with no key pinned, or one pinned since the last update). Answered like `PluginCatalogList` (any
+  signed-in person; `target_node` refused; a node never receives it). A window checks the first bytes again and shows it only as an
+  image (a `data:` address with the fixed media type). Golden fixtures: `schema/fixtures/catalog-gallery/`
+  (`crates/agora-protocol/tests/catalog_gallery.rs`).
 
 ## Durable cross-node task handoffs (ADR-0109)
 

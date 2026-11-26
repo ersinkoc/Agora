@@ -2108,7 +2108,8 @@ pub(crate) fn plugin_command(
             | C::PluginGrantList(_)
             | C::PluginGrantSet(_)
             | C::PluginGrantRemove(_)
-            | C::PluginCatalogList(_),
+            | C::PluginCatalogList(_)
+            | C::PluginCatalogScreenshot(_),
         ) if !req.target_node.is_empty() => (
             "",
             Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
@@ -2126,6 +2127,12 @@ pub(crate) fn plugin_command(
             crate::plugin_catalog::list(hub.store())
                 .map(command_ok::Result::PluginCatalogList)
                 .map_err(internal),
+        ),
+        // ADR-0120: one screenshot of a catalog plugin, as the hub fetched and checked it.
+        Some(C::PluginCatalogScreenshot(c)) => (
+            "",
+            crate::plugin_catalog::screenshot(hub.store(), &c.plugin_id, c.index)
+                .map(command_ok::Result::PluginCatalogScreenshot),
         ),
         Some(C::PluginFetch(f)) => (
             "",

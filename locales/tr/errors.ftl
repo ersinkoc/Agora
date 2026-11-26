@@ -137,6 +137,7 @@ agent-program_missing = { $kind } başlamadı: bu makine { $program } programın
 theme-catalog_off = Bu hub'da topluluk tema kataloğu kapalı. Sahibi agora hub themes on ile açabilir.
 theme-not_found = Tema kataloğunda { $id } adlı bir tema yok. Son güncellemede kaldırılmış olabilir.
 plugin-not_found = { $plugin_id } eklentisi bu hub'da kurulu değil ya da bu sürümüyle kurulu değil.
+plugin-catalog_off = Bu hub'da topluluk eklenti kataloğu kapalı. Sahibi agora hub plugins on ile açabilir.
 settings-too_large = Temalarınız Agora'nızda saklanamayacak kadar büyük (en fazla { $max } bayt). Bu tarayıcıda kalıyorlar.
 rate-limited = Bir dakikada çok fazla değişiklik (en fazla { $limit }). Hiçbir şey değişmedi; biraz bekleyip yeniden deneyin.
 settings-stale = Temalarınız az önce başka bir cihazda değişti (sürüm { $version }). Birleştirilip yeniden kaydedilecek.

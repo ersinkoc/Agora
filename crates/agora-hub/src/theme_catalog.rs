@@ -31,7 +31,10 @@ use crate::store::{EventStore, SqliteStore, StoreError};
 pub const DEFAULT_INDEX_URL: &str = "https://themes.agora.invalid/index.json";
 /// The field that marks an index, and the only format this hub reads.
 pub const INDEX_FORMAT_KEY: &str = "agora-theme-catalog";
-pub const INDEX_FORMAT: u64 = 1;
+/// The newest index format this hub reads: 2 adds the optional `added` and `popularity` of each entry (ADR-0120); 1 is still read.
+pub const INDEX_FORMAT: u64 = 2;
+/// The largest `popularity` an index may give (ADR-0120).
+pub const MAX_POPULARITY: u64 = 1_000_000_000;
 /// The largest index read.
 pub const MAX_INDEX_BYTES: usize = 256 * 1024;
 /// The largest theme file read (the theme rules' own cap, `docs/ux/themes.md`).
@@ -68,6 +71,10 @@ pub struct Entry {
     pub sha256: String,
     /// The file's path, relative to the index's folder.
     pub file: String,
+    /// ADR-0120 (format 2): the day the catalog first listed it, `YYYY-MM-DD`; empty when not given.
+    pub added: String,
+    /// ADR-0120 (format 2): the popularity the catalog publishes, 0 when not given. Never counted here.
+    pub popularity: u64,
 }
 
 /// Why the index could not be used; nothing was changed.
@@ -207,9 +214,14 @@ pub fn index_url(s: &str) -> Option<Url> {
 /// A theme file's address: `file` is a relative path under the index's folder (letters, digits, `.`, `_`, `-` and `/`, ending in
 /// `.json`; no empty, `.` or `..` part), on the same scheme, host and port. `None` for anything else.
 pub fn file_url(index: &Url, file: &str) -> Option<Url> {
+    file_url_ending(index, file, &[".json"])
+}
+
+/// [`file_url`] for a file that ends in one of `endings` (ADR-0120: a screenshot's `.png` or `.webp`).
+pub(crate) fn file_url_ending(index: &Url, file: &str, endings: &[&str]) -> Option<Url> {
     if file.is_empty()
         || file.len() > MAX_FILE
-        || !file.ends_with(".json")
+        || !endings.iter().any(|e| file.ends_with(e))
         || !file
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
@@ -278,13 +290,65 @@ pub(crate) fn valid_sha256(s: &str) -> bool {
 const ENTRY_FIELDS: [&str; 7] = [
     "id", "name", "version", "author", "licence", "sha256", "file",
 ];
+/// What format 2 adds to an entry (ADR-0120).
+const ENTRY_FIELDS_2: [&str; 2] = ["added", "popularity"];
 
-/// Reads one entry of the index; `Err` names the first problem.
-fn read_entry<P>(v: &Value) -> Result<Entry, Refusal<P>> {
+/// The day number (days since 1970-01-01) of a `YYYY-MM-DD` that names a real day from 1970 to 9999; `None` for anything else.
+pub(crate) fn day_number(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        s.get(r)
+            .filter(|t| t.bytes().all(|c| c.is_ascii_digit()))?
+            .parse()
+            .ok()
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1970..=9999).contains(&y)
+        || !(1..=12).contains(&m)
+        || d < 1
+        || d > days_in[(m - 1) as usize]
+    {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm), March-based years.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// Today's day number at `now_ms` (UTC).
+pub(crate) fn today(now_ms: u64) -> i64 {
+    i64::try_from(now_ms / 86_400_000).unwrap_or(i64::MAX)
+}
+
+/// Reads one entry of the index (`format` 1 or 2); `Err` names the first problem.
+fn read_entry<P>(v: &Value, format: u64) -> Result<Entry, Refusal<P>> {
     let Some(o) = v.as_object() else {
         return Err(Refusal::Entry("entry"));
     };
-    if let Some(k) = o.keys().find(|k| !ENTRY_FIELDS.contains(&k.as_str())) {
+    let known = |k: &str| ENTRY_FIELDS.contains(&k) || (format >= 2 && ENTRY_FIELDS_2.contains(&k));
+    if let Some(k) = o.keys().find(|k| !known(k.as_str())) {
         return Err(Refusal::UnknownField(printable(
             &k.chars().take(MAX_ID).collect::<String>(),
         )));
@@ -308,6 +372,17 @@ fn read_entry<P>(v: &Value) -> Result<Entry, Refusal<P>> {
     let licence = text("licence", &valid_licence)?;
     let sha256 = text("sha256", &valid_sha256)?;
     let file = text("file", &|s| !s.is_empty())?;
+    let added = match o.get("added") {
+        None => String::new(),
+        Some(_) => text("added", &|s| day_number(s).is_some())?,
+    };
+    let popularity = match o.get("popularity") {
+        None => 0,
+        Some(p) => p
+            .as_u64()
+            .filter(|p| *p <= MAX_POPULARITY)
+            .ok_or(Refusal::Entry("popularity"))?,
+    };
     Ok(Entry {
         id,
         name,
@@ -316,6 +391,8 @@ fn read_entry<P>(v: &Value) -> Result<Entry, Refusal<P>> {
         licence,
         sha256,
         file,
+        added,
+        popularity,
     })
 }
 
@@ -354,7 +431,7 @@ pub fn read_index<P>(text: &str) -> Result<(Vec<Entry>, Vec<(String, Refusal<P>)
     }
     let (mut entries, mut refused): (Vec<Entry>, Vec<_>) = (Vec::new(), Vec::new());
     for (i, v) in list.iter().enumerate() {
-        match read_entry(v) {
+        match read_entry(v, format) {
             Ok(e) if entries.iter().any(|x: &Entry| x.id == e.id) => {
                 refused.push((e.id, Refusal::Duplicate))
             }
@@ -463,8 +540,19 @@ pub fn save(
     for a in accepted {
         let e = &a.entry;
         tx.execute(
-            "INSERT INTO theme_catalog (id, name, version, author, licence, sha256, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![e.id, e.name, e.version, e.author, e.licence, e.sha256, a.data],
+            "INSERT INTO theme_catalog (id, name, version, author, licence, sha256, data, added, popularity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                e.id,
+                e.name,
+                e.version,
+                e.author,
+                e.licence,
+                e.sha256,
+                a.data,
+                e.added,
+                i64::try_from(e.popularity).unwrap_or(i64::MAX)
+            ],
         )?;
     }
     tx.execute(
@@ -494,6 +582,20 @@ pub fn update<P>(
     let result = index_url(url)
         .ok_or(UpdateError::Index(IndexError::Address))
         .and_then(|u| fetch(&u, limits, check))
+        .map(|mut f| {
+            // ADR-0120: a day after today's (UTC) is not one the catalog can have listed it on.
+            let today = today(now_ms);
+            let (later, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut f.accepted)
+                .into_iter()
+                .partition(|a| day_number(&a.entry.added).is_some_and(|d| d > today));
+            f.accepted = kept;
+            f.refused.extend(
+                later
+                    .into_iter()
+                    .map(|a| (a.entry.id, Refusal::Entry("added"))),
+            );
+            f
+        })
         .and_then(|f| {
             save(store, &f.accepted, Some(url), now_ms)?;
             Ok(f)
@@ -578,6 +680,8 @@ fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<v1::ThemeCatalogEntry> {
         licence: r.get(4)?,
         sha256: r.get(5)?,
         size: r.get(6)?,
+        added: r.get(7)?,
+        popularity: u64::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
     })
 }
 
@@ -589,7 +693,8 @@ pub fn list(store: &SqliteStore) -> Result<v1::ThemeCatalogListResult, StoreErro
     let updated_at_ms = status(store)?.updated_ms;
     let conn = store.lock()?;
     let mut stmt = conn.prepare(
-        "SELECT id, name, version, author, licence, sha256, length(CAST(data AS BLOB)) FROM theme_catalog ORDER BY name, id",
+        "SELECT id, name, version, author, licence, sha256, length(CAST(data AS BLOB)), added, popularity FROM theme_catalog
+         ORDER BY name, id",
     )?;
     let entries = stmt
         .query_map([], entry_of)?
@@ -619,9 +724,10 @@ pub fn get(store: &SqliteStore, id: &str) -> Result<v1::ThemeCatalogTheme, Error
     let conn = store.lock().map_err(internal)?;
     let found = conn
         .query_row(
-            "SELECT id, name, version, author, licence, sha256, length(CAST(data AS BLOB)), data FROM theme_catalog WHERE id = ?1",
+            "SELECT id, name, version, author, licence, sha256, length(CAST(data AS BLOB)), added, popularity, data FROM theme_catalog
+             WHERE id = ?1",
             [id],
-            |r| Ok((entry_of(r)?, r.get::<_, String>(7)?)),
+            |r| Ok((entry_of(r)?, r.get::<_, String>(9)?)),
         )
         .optional()
         .map_err(|_| Error::new(ErrorCode::Internal))?;
@@ -725,6 +831,64 @@ mod tests {
         );
     }
 
+    /// ADR-0120: format 2 adds an entry's `added` day and `popularity`; format 1 still refuses them as unknown fields.
+    #[test]
+    fn format_2_gives_a_day_and_a_popularity() {
+        let mut e = entry("harbour");
+        e["added"] = "2026-11-20".into();
+        e["popularity"] = 42.into();
+        let index = |format: u64, list: Vec<serde_json::Value>| {
+            serde_json::json!({"agora-theme-catalog": format, "themes": list}).to_string()
+        };
+        let (kept, refused) = read_index::<()>(&index(2, vec![e.clone()])).unwrap();
+        assert!(refused.is_empty());
+        assert_eq!(
+            (kept[0].added.as_str(), kept[0].popularity),
+            ("2026-11-20", 42)
+        );
+        let (kept, refused) = read_index::<()>(&index(1, vec![e.clone(), entry("plain")])).unwrap();
+        assert_eq!(kept.len(), 1, "the format-1 entry without them is kept");
+        assert!(
+            matches!(&refused[0].1, Refusal::UnknownField(f) if f == "added" || f == "popularity")
+        );
+        for (field, bad) in [
+            ("added", serde_json::json!("2026-13-01")),
+            ("added", serde_json::json!("26-11-20")),
+            ("added", serde_json::json!(20261120)),
+            ("popularity", serde_json::json!(MAX_POPULARITY + 1)),
+            ("popularity", serde_json::json!(-1)),
+            ("popularity", serde_json::json!("7")),
+        ] {
+            let mut x = entry("x");
+            x[field] = bad.clone();
+            let (_, refused) = read_index::<()>(&index(2, vec![x])).unwrap();
+            assert!(
+                matches!(refused[0].1, Refusal::Entry(f) if f == field),
+                "{field} {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_day_number_is_a_real_day_from_1970() {
+        assert_eq!(day_number("1970-01-01"), Some(0));
+        assert_eq!(day_number("2026-11-26"), Some(20_783));
+        assert_eq!(day_number("2024-02-29"), Some(19_782));
+        for bad in [
+            "2023-02-29",
+            "1900-03-01",
+            "1969-12-31",
+            "2026-00-10",
+            "2026-04-31",
+            "2026-1-01",
+            "２０２６-11-26",
+            "",
+        ] {
+            assert_eq!(day_number(bad), None, "{bad}");
+        }
+        assert_eq!(today(1_795_651_200_000), 20_783);
+    }
+
     #[test]
     fn an_index_that_is_not_one_is_refused_whole() {
         let r = |s: &str| read_index::<()>(s).map(|_| ()).unwrap_err();
@@ -732,7 +896,7 @@ mod tests {
         assert_eq!(r("{"), IndexError::Json);
         assert_eq!(r(r#"{"themes": []}"#), IndexError::Format);
         assert_eq!(
-            r(r#"{"agora-theme-catalog": 2, "themes": []}"#),
+            r(r#"{"agora-theme-catalog": 3, "themes": []}"#),
             IndexError::Newer
         );
         assert_eq!(
@@ -753,6 +917,8 @@ mod tests {
                 licence: "MIT".into(),
                 sha256: "a".repeat(64),
                 file: format!("{id}.json"),
+                added: String::new(),
+                popularity: 0,
             },
             data: format!("{{\"agora-theme\": 2, \"name\": \"{id}\"}}"),
         }

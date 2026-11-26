@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -500,6 +500,42 @@ impl SqliteStore {
                  PRAGMA user_version = 18;
                  COMMIT;",
             )?;
+        }
+        if version < 19 {
+            // ADR-0120: the day a catalog first listed an entry and the popularity it publishes (both catalogs), and the plugins'
+            // screenshots as the hub fetched and checked them. Replaced with their catalog in one transaction by each update. A
+            // column already there (a database whose version number was set back) is not added again.
+            let mut script = String::new();
+            for table in ["theme_catalog", "plugin_catalog"] {
+                for (name, kind) in [
+                    ("added", "TEXT NOT NULL DEFAULT ''"),
+                    ("popularity", "INTEGER NOT NULL DEFAULT 0"),
+                ] {
+                    let has: i64 = conn.query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"
+                        ),
+                        [name],
+                        |r| r.get(0),
+                    )?;
+                    if has == 0 {
+                        script.push_str(&format!(" ALTER TABLE {table} ADD COLUMN {name} {kind};"));
+                    }
+                }
+            }
+            conn.execute_batch(&format!(
+                "BEGIN;{script}
+                 CREATE TABLE IF NOT EXISTS plugin_catalog_screenshot (
+                     id         TEXT NOT NULL,
+                     n          INTEGER NOT NULL,
+                     media_type TEXT NOT NULL,
+                     data       BLOB NOT NULL,
+                     alt        TEXT NOT NULL,
+                     PRIMARY KEY (id, n)
+                 );
+                 PRAGMA user_version = 19;
+                 COMMIT;"
+            ))?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1239,13 +1275,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// ADR-0113 (schema 15), ADR-0114 (schema 16), ADR-0113 step 4 (schema 17), then ADR-0114 step 4 (schema 18): a fresh database is at
-    /// 18 with every table; one at 14 gains the theme catalog, the plugin tables, the settings table and the plugin catalog, in that
-    /// order; one at 15 keeps its catalog rows, one at 16 its plugins too, and each gains what came after. Its events stay.
+    /// ADR-0113 (schema 15), ADR-0114 (schema 16), ADR-0113 step 4 (schema 17), ADR-0114 step 4 (schema 18), then ADR-0120 (schema
+    /// 19): a fresh database is at 19 with every table; one at 14 gains the theme catalog, the plugin tables, the settings table, the
+    /// plugin catalog and the gallery's columns and screenshots, in that order; one at 15 keeps its catalog rows (their date and
+    /// popularity empty), one at 16 its plugins too, and each gains what came after. Its events stay.
     #[test]
-    fn databases_at_14_to_17_upgrade_to_the_plugin_catalog_table() {
+    fn databases_at_14_to_18_upgrade_to_the_gallery_columns() {
         let all = [
             "plugin_catalog",
+            "plugin_catalog_screenshot",
             "plugin_grants",
             "plugins",
             "theme_catalog",
@@ -1255,7 +1293,7 @@ mod tests {
         let tables = |s: &SqliteStore| -> Vec<String> {
             let conn = s.lock().unwrap();
             let mut st = conn
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants', 'user_settings', 'user_settings_tags', 'plugin_catalog') ORDER BY name")
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('theme_catalog', 'plugins', 'plugin_grants', 'user_settings', 'user_settings_tags', 'plugin_catalog', 'plugin_catalog_screenshot') ORDER BY name")
                 .unwrap();
             let names = st.query_map([], |r| r.get(0)).unwrap();
             names.collect::<Result<_, _>>().unwrap()
@@ -1273,9 +1311,14 @@ mod tests {
                 .unwrap()
         };
         let fresh = store();
-        assert_eq!(version(&fresh), 18);
+        assert_eq!(version(&fresh), 19);
         assert_eq!(tables(&fresh), all);
+        // What schema 19 added, taken out first (its columns are on tables an older database has).
+        let gallery = "DROP TABLE plugin_catalog_screenshot; ALTER TABLE theme_catalog DROP COLUMN added; \
+                       ALTER TABLE theme_catalog DROP COLUMN popularity; ALTER TABLE plugin_catalog DROP COLUMN added; \
+                       ALTER TABLE plugin_catalog DROP COLUMN popularity;";
         for (from, undo) in [
+            (18, "PRAGMA user_version = 18;"),
             (14, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; DROP TABLE theme_catalog; PRAGMA user_version = 14;"),
             (15, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; DROP TABLE plugins; DROP TABLE plugin_grants; PRAGMA user_version = 15;"),
             (16, "DROP TABLE plugin_catalog; DROP TABLE user_settings; DROP TABLE user_settings_tags; PRAGMA user_version = 16;"),
@@ -1287,6 +1330,7 @@ mod tests {
                 let s = SqliteStore::open(&path).unwrap();
                 s.append("n1", 1, 5, b"a").unwrap();
                 let conn = s.lock().unwrap();
+                conn.execute_batch(gallery).unwrap();
                 conn.execute_batch(undo).unwrap();
                 if from >= 15 {
                     conn.execute(
@@ -1305,13 +1349,24 @@ mod tests {
             }
             assert!(verify(&path).is_ok(), "an older database is a valid backup");
             let s = SqliteStore::open(&path).unwrap();
-            assert_eq!(version(&s), 18, "from {from}");
+            assert_eq!(version(&s), 19, "from {from}");
             assert_eq!(tables(&s), all, "from {from}");
             assert_eq!(s.acked("n1").unwrap(), 1);
             assert_eq!(count(&s, "theme_catalog"), i64::from(from >= 15), "from {from}");
             assert_eq!(count(&s, "plugin_grants"), i64::from(from >= 16), "from {from}");
             assert_eq!(count(&s, "user_settings"), 0, "from {from}");
             assert_eq!(count(&s, "plugin_catalog"), 0, "from {from}");
+            assert_eq!(count(&s, "plugin_catalog_screenshot"), 0, "from {from}");
+            if from >= 15 {
+                let kept: (String, i64) = s
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT added, popularity FROM theme_catalog", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap();
+                assert_eq!(kept, (String::new(), 0), "from {from}");
+            }
             drop(s);
             let _ = std::fs::remove_dir_all(&d);
         }

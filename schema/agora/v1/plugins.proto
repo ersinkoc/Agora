@@ -126,10 +126,32 @@ message PluginCatalogEntry {
   string sha256 = 8;
   // The archive's size in bytes (at most 2 MiB).
   uint64 size = 9;
+  // ADR-0120: the day the catalog first listed it, `YYYY-MM-DD`; empty when its index gives none (format 1).
+  string added = 10;
+  // ADR-0120: the popularity the signed index publishes for it (0 to 1 000 000 000; 0 when it gives none). Never counted by Agora.
+  uint64 popularity = 11;
+  // ADR-0120: one alt text per screenshot the hub kept, in the index's order (an empty string for one without). `PluginCatalogScreenshot`
+  // fetches screenshot `i` by its position here.
+  repeated string screenshots = 12;
 }
 
 // `on` is false while the owner has not turned the catalog on; `entries` is then empty. With no catalog key pinned, or a key pinned
 // since the last fetch, it is on with no entry. `updated_at_ms` is when the hub last fetched an index it could verify (0: never).
+// ADR-0120: screenshot `index` (from 0, in `PluginCatalogEntry.screenshots`) of catalog plugin `plugin_id`. Refused with
+// `plugin.catalog_off` while the catalog is off and `plugin.not_found` for a plugin or index the catalog does not have.
+message PluginCatalogScreenshot {
+  string plugin_id = 1;
+  uint32 index = 2;
+}
+
+// The screenshot exactly as the hub fetched and checked it: `image/png` or `image/webp`, at most 512 KiB, at most 2560 x 1600 pixels.
+// A window checks the first bytes again and shows it only as an image.
+message PluginCatalogScreenshotResult {
+  string media_type = 1;
+  bytes data = 2;
+  string alt = 3;
+}
+
 message PluginCatalogListResult {
   bool on = 1;
   // Ordered by name, then `plugin_id`.

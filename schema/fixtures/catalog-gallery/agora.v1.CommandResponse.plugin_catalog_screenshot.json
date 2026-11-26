@@ -1,0 +1,10 @@
+{
+  "requestId": "r2",
+  "ok": {
+    "pluginCatalogScreenshot": {
+      "mediaType": "image/png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "alt": "The agent list in the dark theme"
+    }
+  }
+}

@@ -138,6 +138,7 @@ agent-program_missing = { $kind } did not start: this machine cannot find { $pro
 theme-catalog_off = The community theme catalog is off on this hub. Its owner can turn it on with agora hub themes on.
 theme-not_found = The theme catalog has no theme { $id }. It may have been removed at the last update.
 plugin-not_found = The plugin { $plugin_id } is not installed on this hub, or not in this version.
+plugin-catalog_off = The community plugin catalog is off on this hub. Its owner can turn it on with agora hub plugins on.
 settings-too_large = Your themes are too large to keep in your Agora (at most { $max } bytes). They stay in this browser.
 rate-limited = Too many changes in a minute (at most { $limit }). Nothing changed; wait a moment and try again.
 settings-stale = Your themes changed on another device just now (version { $version }). They will be merged and saved again.

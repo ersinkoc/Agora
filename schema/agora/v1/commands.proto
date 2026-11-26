@@ -124,6 +124,8 @@ message CommandRequest {
     // ADR-0114 decision 7 (step 4): the community plugin catalog, read only (plugins.proto). Answered by the hub for any signed-in
     // person; it names no node.
     PluginCatalogList plugin_catalog_list = 120;
+    // ADR-0120: one screenshot of a plugin in the community catalog (plugins.proto). Answered by the hub for any signed-in person.
+    PluginCatalogScreenshot plugin_catalog_screenshot = 121;
   }
 }
 
@@ -188,6 +190,8 @@ message CommandOk {
     UserSettingsValue user_settings = 38;
     // ADR-0114 decision 7 (step 4): the answer to `PluginCatalogList`.
     PluginCatalogListResult plugin_catalog_list = 39;
+    // ADR-0120: the answer to `PluginCatalogScreenshot`.
+    PluginCatalogScreenshotResult plugin_catalog_screenshot = 40;
   }
 }
 
@@ -955,6 +959,10 @@ message ThemeCatalogEntry {
   string sha256 = 6;
   // The theme file's size in bytes.
   uint32 size = 7;
+  // ADR-0120: the day the catalog first listed it, `YYYY-MM-DD`; empty when its index gives none (format 1).
+  string added = 8;
+  // ADR-0120: the popularity the catalog publishes for it (0 to 1 000 000 000; 0 when its index gives none). Never counted by Agora.
+  uint64 popularity = 9;
 }
 
 // `on` is false while the owner has not turned the catalog on; `entries` is then empty. `updated_at_ms` is when the hub last fetched

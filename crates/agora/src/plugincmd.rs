@@ -200,6 +200,20 @@ pub(crate) fn run_update(say: &Say, store: &SqliteStore, url: &str, limits: Limi
             for (id, r) in &f.refused {
                 eprintln!("{}", refusal_line(say, id, r));
             }
+            // ADR-0120: a screenshot not kept leaves its plugin in the catalog; it is said, and does not change the exit status.
+            for (id, n, r) in &f.shots_refused {
+                eprintln!(
+                    "{}",
+                    say.text(
+                        key!("cli-hub-plugins-shot-refused"),
+                        &[
+                            ("id", printable(id).into()),
+                            ("number", (*n as i64 + 1).into()),
+                            ("reason", r.code().into()),
+                        ],
+                    )
+                );
+            }
             say.out(
                 key!("cli-hub-plugins-updated"),
                 &[

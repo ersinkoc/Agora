@@ -131,6 +131,8 @@ pub enum ErrorCode {
     ThemeNotFound,
     /// ADR-0114: no plugin with that id is installed on the hub (at the version or package asked for).
     PluginNotFound,
+    /// ADR-0120: the hub's owner has not turned the community plugin catalog on (`agora hub plugins on`).
+    PluginCatalogOff,
     /// ADR-0113 decision 6 (step 4): a person's settings value is larger than the hub keeps (262144 bytes).
     SettingsTooLarge,
     /// ADR-0113 decision 6 (step 4): a settings write was based on an older version than the hub's; read again, merge and write again.
@@ -251,6 +253,7 @@ impl ErrorCode {
         ErrorCode::ThemeCatalogOff,
         ErrorCode::ThemeNotFound,
         ErrorCode::PluginNotFound,
+        ErrorCode::PluginCatalogOff,
         ErrorCode::SettingsTooLarge,
         ErrorCode::SettingsStale,
         ErrorCode::RateLimited,
@@ -364,6 +367,7 @@ impl ErrorCode {
             ErrorCode::ThemeCatalogOff => "theme.catalog_off",
             ErrorCode::ThemeNotFound => "theme.not_found",
             ErrorCode::PluginNotFound => "plugin.not_found",
+            ErrorCode::PluginCatalogOff => "plugin.catalog_off",
             ErrorCode::SettingsTooLarge => "settings.too_large",
             ErrorCode::SettingsStale => "settings.stale",
             ErrorCode::RateLimited => "rate.limited",
@@ -489,6 +493,7 @@ impl ErrorCode {
             ErrorCode::ThemeCatalogOff => &[],
             ErrorCode::ThemeNotFound => &["id"],
             ErrorCode::PluginNotFound => &["plugin_id"],
+            ErrorCode::PluginCatalogOff => &[],
             ErrorCode::SettingsTooLarge => &["max"],
             ErrorCode::SettingsStale => &["version"],
             ErrorCode::RateLimited => &["limit"],

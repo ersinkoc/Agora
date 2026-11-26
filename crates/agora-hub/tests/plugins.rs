@@ -444,8 +444,13 @@ async fn the_catalog_is_listed_to_everyone_only_while_it_is_on() {
             sha256: "a".repeat(64),
             size: 1000,
             file: "plugins/demo.json".into(),
+            added: String::new(),
+            popularity: 0,
+            screenshots: Vec::new(),
         }],
         refused: Vec::new(),
+        shots: Vec::new(),
+        shots_refused: Vec::new(),
     };
     plugin_catalog::save(store, &fetched, "http://127.0.0.1:9/index.json", &key, 50).unwrap();
     let list = || cr::Command::PluginCatalogList(v1::PluginCatalogList {});

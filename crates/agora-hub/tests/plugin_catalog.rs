@@ -882,3 +882,170 @@ fn an_index_signed_by_ssh_keygen_verifies() {
         Err(SigError::Invalid)
     );
 }
+
+// ---- ADR-0120: the gallery's date, popularity and screenshots ----
+
+/// The first bytes of a PNG of `w` x `h` pixels (all the hub reads; only a browser decodes an image).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    b.extend_from_slice(&w.to_be_bytes());
+    b.extend_from_slice(&h.to_be_bytes());
+    b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b
+}
+
+/// The first bytes of an extended WebP of `w` x `h` pixels.
+fn webp(w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"RIFF\x20\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+    b.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
+    b.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
+    b
+}
+
+fn shot(file: &str, bytes: &[u8], alt: &str) -> serde_json::Value {
+    serde_json::json!({"file": file, "sha256": hex(&Sha256::digest(bytes)), "size": bytes.len(), "alt": alt})
+}
+
+fn index2(serial: u64, entries: Vec<serde_json::Value>) -> Vec<u8> {
+    serde_json::json!({"agora-plugin-catalog": 2, "serial": serial, "plugins": entries})
+        .to_string()
+        .into_bytes()
+}
+
+#[test]
+fn a_format_2_index_gives_dates_popularity_and_checked_screenshots() {
+    let key = Key::new();
+    let cat = Catalog::new();
+    let a = package("demo", "1.0.0", &["agents.read"]);
+    let (light, dark, huge, wrong) = (png(1280, 800), webp(800, 600), png(4000, 800), png(10, 10));
+    cat.set("/cat/shots/light.png", ok(light.clone()));
+    cat.set("/cat/shots/dark.webp", ok(dark.clone()));
+    cat.set("/cat/shots/huge.png", ok(huge.clone()));
+    // A PNG named as a WebP, and one whose bytes are not the index's.
+    cat.set("/cat/shots/named.webp", ok(wrong.clone()));
+    cat.set("/cat/shots/other.png", ok(png(20, 20)));
+    let mut e = entry("demo", "1.0.0", &["agents.read"], &a);
+    e["added"] = "2026-11-20".into();
+    e["popularity"] = 128.into();
+    e["screenshots"] = serde_json::json!([
+        shot("shots/light.png", &light, "Light"),
+        shot("shots/huge.png", &huge, "Too big"),
+        shot("shots/dark.webp", &dark, "Dark"),
+        shot("shots/named.webp", &wrong, ""),
+    ]);
+    let mut second = entry("plain", "1.0.0", &["agents.read"], &a);
+    second["screenshots"] = serde_json::json!([
+        shot("shots/other.png", &png(30, 30), ""),
+        shot("shots/gone.png", &light, "")
+    ]);
+    cat.publish(&key, &index2(5, vec![e, second]));
+    let s = store_with(&key);
+    // 2026-11-26, so 2026-11-20 is in the past.
+    let f = plugin_catalog::update(&s, &cat.url, roomy(), 1_795_651_200_000).unwrap();
+    assert!(f.refused.is_empty(), "{:?}", f.refused);
+    let mut why: Vec<(String, usize, &str)> = f
+        .shots_refused
+        .iter()
+        .map(|(id, n, r)| (id.clone(), *n, r.code()))
+        .collect();
+    why.sort();
+    assert_eq!(
+        why,
+        [
+            ("demo".to_string(), 1, "pixels"),
+            ("demo".to_string(), 3, "kind"),
+            ("plain".to_string(), 0, "hash"),
+            ("plain".to_string(), 1, "fetch"),
+        ]
+    );
+    let list = plugin_catalog::list(&s).unwrap();
+    let demo = list.entries.iter().find(|e| e.plugin_id == "demo").unwrap();
+    assert_eq!((demo.added.as_str(), demo.popularity), ("2026-11-20", 128));
+    assert_eq!(
+        demo.screenshots,
+        ["Light", "Dark"],
+        "the kept ones, renumbered in order"
+    );
+    let plain = list
+        .entries
+        .iter()
+        .find(|e| e.plugin_id == "plain")
+        .unwrap();
+    assert!(plain.screenshots.is_empty() && plain.added.is_empty() && plain.popularity == 0);
+    let first = plugin_catalog::screenshot(&s, "demo", 0).unwrap();
+    assert_eq!(
+        (
+            first.media_type.as_str(),
+            first.data.as_slice(),
+            first.alt.as_str()
+        ),
+        ("image/png", light.as_slice(), "Light")
+    );
+    let second = plugin_catalog::screenshot(&s, "demo", 1).unwrap();
+    assert_eq!(
+        (second.media_type.as_str(), second.data.as_slice()),
+        ("image/webp", dark.as_slice())
+    );
+    assert_eq!(
+        plugin_catalog::screenshot(&s, "demo", 2).unwrap_err().code,
+        agora_protocol::ErrorCode::PluginNotFound
+    );
+    assert_eq!(
+        plugin_catalog::screenshot(&s, "nope", 0).unwrap_err().code,
+        agora_protocol::ErrorCode::PluginNotFound
+    );
+    plugin_catalog::set_on(&s, false, 3).unwrap();
+    assert_eq!(
+        plugin_catalog::screenshot(&s, "demo", 0).unwrap_err().code,
+        agora_protocol::ErrorCode::PluginCatalogOff
+    );
+    // The next update replaces them with its catalog: one without screenshots leaves none.
+    plugin_catalog::set_on(&s, true, 4).unwrap();
+    cat.publish(
+        &key,
+        &index2(6, vec![entry("demo", "1.0.0", &["agents.read"], &a)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 1_795_651_200_000).unwrap();
+    assert!(plugin_catalog::list(&s).unwrap().entries[0]
+        .screenshots
+        .is_empty());
+    assert_eq!(
+        plugin_catalog::screenshot(&s, "demo", 0).unwrap_err().code,
+        agora_protocol::ErrorCode::PluginNotFound
+    );
+}
+
+#[test]
+fn format_1_knows_no_gallery_field_and_a_date_after_today_is_refused() {
+    let key = Key::new();
+    let cat = Catalog::new();
+    let a = package("demo", "1.0.0", &["agents.read"]);
+    let mut e = entry("demo", "1.0.0", &["agents.read"], &a);
+    e["popularity"] = 3.into();
+    cat.publish(&key, &index(7, vec![e.clone()]));
+    let s = store_with(&key);
+    let f = plugin_catalog::update(&s, &cat.url, roomy(), 1_795_651_200_000).unwrap();
+    assert_eq!(f.refused.len(), 1);
+    assert_eq!(f.refused[0].1.code(), "unknown-field");
+    // Format 2: a day after the update's (UTC) is refused, today's is kept.
+    let mut later = e.clone();
+    later["added"] = "2026-11-27".into();
+    let mut today = entry("today", "1.0.0", &["agents.read"], &a);
+    today["added"] = "2026-11-26".into();
+    let mut bad = entry("bad", "1.0.0", &["agents.read"], &a);
+    bad["added"] = "2026-02-30".into();
+    cat.publish(&key, &index2(8, vec![later, today, bad]));
+    let f = plugin_catalog::update(&s, &cat.url, roomy(), 1_795_651_200_000 + 3_600_000).unwrap();
+    let mut refused: Vec<(String, &str)> = f
+        .refused
+        .iter()
+        .map(|(id, r)| (id.clone(), r.code()))
+        .collect();
+    refused.sort();
+    assert_eq!(
+        refused,
+        [("bad".to_string(), "field"), ("demo".to_string(), "field")]
+    );
+    assert_eq!(f.entries.len(), 1);
+    assert_eq!(f.entries[0].id, "today");
+}

@@ -42,8 +42,8 @@ use crate::plugins::{AddError, Added, Plugins};
 use crate::sshsig::{self, KeyError, PublicKey, SigError};
 use crate::store::{write_tx, EventStore, SqliteStore, StoreError};
 use crate::theme_catalog::{
-    file_url, index_url as checked_url, io_error, plain_text, printable, valid_id, valid_licence,
-    valid_sha256, IndexError,
+    day_number, file_url, file_url_ending, index_url as checked_url, io_error, plain_text,
+    printable, today, valid_id, valid_licence, valid_sha256, IndexError, MAX_POPULARITY,
 };
 
 /// The catalog's address until the owner gives one with `--url`: a placeholder that can never resolve (`.invalid`, RFC 6761), since
@@ -51,7 +51,16 @@ use crate::theme_catalog::{
 pub const DEFAULT_INDEX_URL: &str = "https://plugins.agora.invalid/index.json";
 /// The field that marks an index, and the only format this hub reads.
 pub const INDEX_FORMAT_KEY: &str = "agora-plugin-catalog";
-pub const INDEX_FORMAT: u64 = 1;
+/// The newest index format this hub reads: 2 adds each entry's optional `added`, `popularity` and `screenshots` (ADR-0120); 1 is still
+/// read.
+pub const INDEX_FORMAT: u64 = 2;
+/// ADR-0120: at most this many screenshots per plugin, each at most [`MAX_SCREENSHOT_BYTES`] and [`MAX_SCREENSHOT_PIXELS`], at most
+/// [`MAX_SCREENSHOTS_TOTAL`] of them per catalog, each with an alt text of at most [`MAX_ALT`] characters.
+pub const MAX_SCREENSHOTS: usize = 4;
+pub const MAX_SCREENSHOT_BYTES: usize = 512 * 1024;
+pub const MAX_SCREENSHOT_PIXELS: (u32, u32) = (2560, 1600);
+pub const MAX_SCREENSHOTS_TOTAL: usize = 32 * 1024 * 1024;
+pub const MAX_ALT: usize = 200;
 /// The namespace the index is signed for (`ssh-keygen -Y sign -n`): a signature made for anything else does not verify here.
 pub const SIG_NAMESPACE: &str = "agora-plugin-catalog";
 /// The largest index read.
@@ -96,6 +105,100 @@ pub struct Entry {
     pub size: u64,
     /// The archive's path, relative to the index's folder.
     pub file: String,
+    /// ADR-0120 (format 2): the day the catalog first listed it, `YYYY-MM-DD`; empty when not given.
+    pub added: String,
+    /// ADR-0120 (format 2): the popularity the signed index publishes, 0 when not given. Never counted here.
+    pub popularity: u64,
+    /// ADR-0120 (format 2): its screenshots as the index lists them (empty for an entry read back from storage: [`list`] reads the
+    /// kept ones' alt texts).
+    pub screenshots: Vec<Shot>,
+}
+
+/// One screenshot as a signed index lists it (ADR-0120).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shot {
+    /// Its path under the index's folder, ending in `.png` or `.webp`.
+    pub file: String,
+    pub sha256: String,
+    pub size: u64,
+    /// One line for people who cannot see it; empty when not given.
+    pub alt: String,
+}
+
+/// A screenshot the hub fetched and checked, ready to keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptShot {
+    pub id: String,
+    /// Its place among the plugin's kept screenshots, from 0.
+    pub n: u32,
+    pub media_type: &'static str,
+    pub data: Vec<u8>,
+    pub alt: String,
+}
+
+/// Why one screenshot was not kept; the plugin and its other screenshots are (ADR-0120).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotRefusal {
+    /// It could not be fetched in time, or its server answered another status than 200.
+    Fetch,
+    /// Larger than the index says or than [`MAX_SCREENSHOT_BYTES`], or the catalog's screenshots together over [`MAX_SCREENSHOTS_TOTAL`].
+    Size,
+    /// Its SHA-256 is not the index's.
+    Hash,
+    /// Not a PNG or WebP image, or not the kind its name says.
+    Kind,
+    /// Larger than [`MAX_SCREENSHOT_PIXELS`] by its header.
+    Pixels,
+}
+
+impl ShotRefusal {
+    /// The stable code the command line words (`cli-hub-plugins-shot-<code>`).
+    pub fn code(self) -> &'static str {
+        match self {
+            ShotRefusal::Fetch => "fetch",
+            ShotRefusal::Size => "size",
+            ShotRefusal::Hash => "hash",
+            ShotRefusal::Kind => "kind",
+            ShotRefusal::Pixels => "pixels",
+        }
+    }
+}
+
+/// The media type and size in pixels of a PNG or WebP image, read from its first bytes only; `None` for anything else. Nothing here
+/// decodes the image: only a browser does (ADR-0120).
+pub fn image_header(b: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let be = |i: usize| Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?));
+    let le16 = |i: usize| {
+        Some(u32::from(u16::from_le_bytes(
+            b.get(i..i + 2)?.try_into().ok()?,
+        )))
+    };
+    let le24 = |i: usize| -> Option<u32> {
+        let x = b.get(i..i + 3)?;
+        Some(u32::from(x[0]) | u32::from(x[1]) << 8 | u32::from(x[2]) << 16)
+    };
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") && b.get(12..16) == Some(b"IHDR".as_slice()) {
+        return Some(("image/png", be(16)?, be(20)?));
+    }
+    if b.get(0..4) == Some(b"RIFF".as_slice()) && b.get(8..12) == Some(b"WEBP".as_slice()) {
+        return match b.get(12..16)? {
+            b"VP8 " if b.get(23..26) == Some([0x9d, 0x01, 0x2a].as_slice()) => {
+                Some(("image/webp", le16(26)? & 0x3fff, le16(28)? & 0x3fff))
+            }
+            b"VP8L" if b.get(20) == Some(&0x2f) => {
+                let x = b.get(21..25)?;
+                let w = 1 + (u32::from(x[0]) | (u32::from(x[1]) & 0x3f) << 8);
+                let h = 1
+                    + (u32::from(x[1]) >> 6
+                        | u32::from(x[2]) << 2
+                        | (u32::from(x[3]) & 0x0f) << 10);
+                Some(("image/webp", w, h))
+            }
+            b"VP8X" => Some(("image/webp", 1 + le24(24)?, 1 + le24(27)?)),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Why one entry of the index was refused; the others are kept.
@@ -176,6 +279,9 @@ pub struct Fetched {
     pub sha256: String,
     pub entries: Vec<Entry>,
     pub refused: Vec<(String, EntryRefusal)>,
+    /// ADR-0120: the screenshots fetched and checked, and those not kept (plugin id, place in its index entry from 0, why).
+    pub shots: Vec<KeptShot>,
+    pub shots_refused: Vec<(String, usize, ShotRefusal)>,
 }
 
 /// Time limits of one fetch (tests make them short).
@@ -213,6 +319,10 @@ pub fn signature_url(index: &Url) -> Url {
     }
 }
 
+/// What format 2 adds to an entry (ADR-0120), and the fields of one of its screenshots.
+const ENTRY_FIELDS_2: [&str; 3] = ["added", "popularity", "screenshots"];
+const SHOT_FIELDS: [&str; 4] = ["file", "sha256", "size", "alt"];
+
 const ENTRY_FIELDS: [&str; 10] = [
     "id",
     "name",
@@ -230,11 +340,49 @@ fn cut(s: &str) -> String {
     printable(&s.chars().take(40).collect::<String>())
 }
 
-fn read_entry(v: &Value) -> Result<Entry, EntryRefusal> {
+fn read_shot(v: &Value) -> Option<Shot> {
+    let o = v.as_object()?;
+    if o.keys().any(|k| !SHOT_FIELDS.contains(&k.as_str())) {
+        return None;
+    }
+    let file = o.get("file")?.as_str()?.to_string();
+    let probe = Url {
+        https: true,
+        host: "h".into(),
+        port: 443,
+        path: "/index.json".into(),
+    };
+    file_url_ending(&probe, &file, &[".png", ".webp"])?;
+    let sha256 = o
+        .get("sha256")?
+        .as_str()
+        .filter(|s| valid_sha256(s))?
+        .to_string();
+    let size = o
+        .get("size")?
+        .as_u64()
+        .filter(|n| (1..=MAX_SCREENSHOT_BYTES as u64).contains(n))?;
+    let alt = match o.get("alt") {
+        None => String::new(),
+        Some(a) => a
+            .as_str()
+            .filter(|a| a.is_empty() || plain_text(a, MAX_ALT))?
+            .to_string(),
+    };
+    Some(Shot {
+        file,
+        sha256,
+        size,
+        alt,
+    })
+}
+
+fn read_entry(v: &Value, format: u64) -> Result<Entry, EntryRefusal> {
     let Some(o) = v.as_object() else {
         return Err(EntryRefusal::Field("entry"));
     };
-    if let Some(k) = o.keys().find(|k| !ENTRY_FIELDS.contains(&k.as_str())) {
+    let known = |k: &str| ENTRY_FIELDS.contains(&k) || (format >= 2 && ENTRY_FIELDS_2.contains(&k));
+    if let Some(k) = o.keys().find(|k| !known(k.as_str())) {
         return Err(EntryRefusal::UnknownField(cut(k)));
     }
     let text = |k: &'static str, ok: &dyn Fn(&str) -> bool| -> Result<String, EntryRefusal> {
@@ -285,6 +433,30 @@ fn read_entry(v: &Value) -> Result<Entry, EntryRefusal> {
     if file_url(&probe, &file).is_none() {
         return Err(EntryRefusal::Field("file"));
     }
+    let added = match o.get("added") {
+        None => String::new(),
+        Some(_) => text("added", &|s| day_number(s).is_some())?,
+    };
+    let popularity = match o.get("popularity") {
+        None => 0,
+        Some(p) => p
+            .as_u64()
+            .filter(|p| *p <= MAX_POPULARITY)
+            .ok_or(EntryRefusal::Field("popularity"))?,
+    };
+    let screenshots = match o.get("screenshots") {
+        None => Vec::new(),
+        Some(list) => {
+            let list = list
+                .as_array()
+                .filter(|l| l.len() <= MAX_SCREENSHOTS)
+                .ok_or(EntryRefusal::Field("screenshots"))?;
+            list.iter()
+                .map(read_shot)
+                .collect::<Option<Vec<_>>>()
+                .ok_or(EntryRefusal::Field("screenshots"))?
+        }
+    };
     Ok(Entry {
         id,
         name,
@@ -296,6 +468,9 @@ fn read_entry(v: &Value) -> Result<Entry, EntryRefusal> {
         sha256,
         size,
         file,
+        added,
+        popularity,
+        screenshots,
     })
 }
 
@@ -331,7 +506,7 @@ pub fn read_index(text: &str) -> Result<Fetched, IndexError> {
     }
     let (mut entries, mut refused): (Vec<Entry>, Vec<_>) = (Vec::new(), Vec::new());
     for (i, v) in list.iter().enumerate() {
-        match read_entry(v) {
+        match read_entry(v, format) {
             Ok(e) if entries.iter().any(|x: &Entry| x.id == e.id) => {
                 refused.push((e.id, EntryRefusal::Duplicate))
             }
@@ -350,7 +525,65 @@ pub fn read_index(text: &str) -> Result<Fetched, IndexError> {
         sha256: hex(&Sha256::digest(text.as_bytes())),
         entries,
         refused,
+        shots: Vec::new(),
+        shots_refused: Vec::new(),
     })
+}
+
+/// ADR-0120: fetches and checks every screenshot `fetched`'s entries list, within `deadline`: the size and SHA-256 its signed entry
+/// gives, a PNG or WebP header matching its name, at most [`MAX_SCREENSHOT_PIXELS`], at most [`MAX_SCREENSHOTS_TOTAL`] in all. A
+/// screenshot that fails is not kept and is named; the plugin stays.
+fn fetch_shots(fetched: &mut Fetched, index: &Url, limits: Limits, deadline: Instant) {
+    let mut total = 0usize;
+    for e in &fetched.entries {
+        let mut n = 0u32;
+        for (i, shot) in e.screenshots.iter().enumerate() {
+            let checked = (|| -> Result<(&'static str, Vec<u8>), ShotRefusal> {
+                let at = file_url_ending(index, &shot.file, &[".png", ".webp"])
+                    .ok_or(ShotRefusal::Kind)?;
+                let body = match get_within(&at, MAX_SCREENSHOT_BYTES, limits.step, deadline) {
+                    Ok((200, body)) => body,
+                    Err(e) if io_error(&e) == IndexError::TooLarge => {
+                        return Err(ShotRefusal::Size)
+                    }
+                    _ => return Err(ShotRefusal::Fetch),
+                };
+                if body.len() as u64 != shot.size || total + body.len() > MAX_SCREENSHOTS_TOTAL {
+                    return Err(ShotRefusal::Size);
+                }
+                if hex(&Sha256::digest(&body)) != shot.sha256 {
+                    return Err(ShotRefusal::Hash);
+                }
+                let (media, w, h) = image_header(&body).ok_or(ShotRefusal::Kind)?;
+                let named = if shot.file.ends_with(".png") {
+                    "image/png"
+                } else {
+                    "image/webp"
+                };
+                if media != named {
+                    return Err(ShotRefusal::Kind);
+                }
+                if w == 0 || h == 0 || w > MAX_SCREENSHOT_PIXELS.0 || h > MAX_SCREENSHOT_PIXELS.1 {
+                    return Err(ShotRefusal::Pixels);
+                }
+                Ok((media, body))
+            })();
+            match checked {
+                Ok((media_type, data)) => {
+                    total += data.len();
+                    fetched.shots.push(KeptShot {
+                        id: e.id.clone(),
+                        n,
+                        media_type,
+                        data,
+                        alt: shot.alt.clone(),
+                    });
+                    n += 1;
+                }
+                Err(r) => fetched.shots_refused.push((e.id.clone(), i, r)),
+            }
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -445,8 +678,9 @@ pub fn fetch(
     let sig = String::from_utf8(sig).map_err(|_| UpdateError::Signature(SigError::Malformed))?;
     sshsig::verify(key, SIG_NAMESPACE, &body, &sig).map_err(UpdateError::Signature)?;
     let text = String::from_utf8(body).map_err(|_| UpdateError::Index(IndexError::Json))?;
-    let fetched = read_index(&text).map_err(UpdateError::Index)?;
+    let mut fetched = read_index(&text).map_err(UpdateError::Index)?;
     above(floor, &fetched)?;
+    fetch_shots(&mut fetched, url, limits, deadline);
     Ok(fetched)
 }
 
@@ -484,8 +718,9 @@ pub fn save(
     tx.execute("DELETE FROM plugin_catalog", [])?;
     for e in &fetched.entries {
         tx.execute(
-            "INSERT INTO plugin_catalog (id, name, version, author, licence, description, capabilities, sha256, size, file)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO plugin_catalog (id, name, version, author, licence, description, capabilities, sha256, size, file, added,
+             popularity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 e.id,
                 e.name,
@@ -496,9 +731,20 @@ pub fn save(
                 e.capabilities.join(" "),
                 e.sha256,
                 i64::try_from(e.size).unwrap_or(i64::MAX),
-                e.file
+                e.file,
+                e.added,
+                i64::try_from(e.popularity).unwrap_or(i64::MAX)
             ],
         )?;
+    }
+    tx.execute("DELETE FROM plugin_catalog_screenshot", [])?;
+    for k in &fetched.shots {
+        if fetched.entries.iter().any(|e| e.id == k.id) {
+            tx.execute(
+                "INSERT INTO plugin_catalog_screenshot (id, n, media_type, data, alt) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![k.id, k.n, k.media_type, k.data, k.alt],
+            )?;
+        }
     }
     put(&tx, UPDATED_SETTING, now_ms.to_string().as_bytes())?;
     put(&tx, URL_SETTING, url.as_bytes())?;
@@ -530,7 +776,18 @@ pub fn update(
         let key = key(store)?.ok_or(UpdateError::NoKey)?;
         let at = index_url(url).ok_or(UpdateError::Index(IndexError::Address))?;
         let floor = floor_in(&*store.lock()?, &key)?;
-        let fetched = fetch(&at, &key, floor.as_ref(), limits)?;
+        let mut fetched = fetch(&at, &key, floor.as_ref(), limits)?;
+        // ADR-0120: a day after today's (UTC) is not one the catalog can have listed it on.
+        let today = today(now_ms);
+        let (later, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut fetched.entries)
+            .into_iter()
+            .partition(|e| day_number(&e.added).is_some_and(|d| d > today));
+        fetched.entries = kept;
+        fetched.refused.extend(
+            later
+                .into_iter()
+                .map(|e| (e.id, EntryRefusal::Field("added"))),
+        );
         save(store, &fetched, url, &key, now_ms)?;
         Ok(fetched)
     })();
@@ -665,11 +922,14 @@ fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         sha256: r.get(7)?,
         size: u64::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
         file: r.get(9)?,
+        added: r.get(10)?,
+        popularity: u64::try_from(r.get::<_, i64>(11)?).unwrap_or(0),
+        screenshots: Vec::new(),
     })
 }
 
 const COLUMNS: &str =
-    "id, name, version, author, licence, description, capabilities, sha256, size, file";
+    "id, name, version, author, licence, description, capabilities, sha256, size, file, added, popularity";
 
 /// The stored entries, by name then id, when they were verified under the key pinned now; none otherwise.
 pub fn entries(store: &SqliteStore) -> Result<Vec<Entry>, StoreError> {
@@ -696,11 +956,27 @@ pub fn list(store: &SqliteStore) -> Result<v1::PluginCatalogListResult, StoreErr
     } else {
         0
     };
+    // ADR-0120: the kept screenshots' alt texts, by plugin, in order.
+    let mut alts: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    if !entries.is_empty() {
+        let conn = store.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT id, alt FROM plugin_catalog_screenshot ORDER BY id, n")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, alt) = row?;
+            alts.entry(id).or_default().push(alt);
+        }
+    }
     Ok(v1::PluginCatalogListResult {
         on: true,
         entries: entries
             .into_iter()
             .map(|e| v1::PluginCatalogEntry {
+                screenshots: alts.remove(&e.id).unwrap_or_default(),
+                added: e.added,
+                popularity: e.popularity,
                 plugin_id: e.id,
                 name: e.name,
                 version: e.version,
@@ -714,6 +990,40 @@ pub fn list(store: &SqliteStore) -> Result<v1::PluginCatalogListResult, StoreErr
             .collect(),
         updated_at_ms,
     })
+}
+
+/// `PluginCatalogScreenshot` (ADR-0120): screenshot `n` of catalog plugin `id`, as kept. `plugin.catalog_off` while the catalog is
+/// off; `plugin.not_found` for a plugin, or a place, the catalog does not have (with no key pinned, or one pinned since the last
+/// update, it has none).
+pub fn screenshot(
+    store: &SqliteStore,
+    id: &str,
+    n: u32,
+) -> Result<v1::PluginCatalogScreenshotResult, agora_protocol::Error> {
+    use agora_protocol::{Error, ErrorCode};
+    let internal = |_| Error::new(ErrorCode::Internal).with("incident_id", "plugin_catalog");
+    if !is_on(store).map_err(internal)? {
+        return Err(Error::new(ErrorCode::PluginCatalogOff));
+    }
+    let not_found = || Error::new(ErrorCode::PluginNotFound).with("plugin_id", id);
+    if bound(store).map_err(internal)?.is_none() {
+        return Err(not_found());
+    }
+    let conn = store.lock().map_err(internal)?;
+    conn.query_row(
+        "SELECT media_type, data, alt FROM plugin_catalog_screenshot WHERE id = ?1 AND n = ?2",
+        params![id, n],
+        |r| {
+            Ok(v1::PluginCatalogScreenshotResult {
+                media_type: r.get(0)?,
+                data: r.get(1)?,
+                alt: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| internal(StoreError::from(e)))?
+    .ok_or_else(not_found)
 }
 
 /// Installing a plugin that is not installed, or upgrading one that is.
@@ -1059,6 +1369,38 @@ mod tests {
             "capabilities": ["agents.read"], "sha256": "0".repeat(64), "size": 10, "file": format!("plugins/{id}.json")})
     }
 
+    /// ADR-0120: the type and size come from the first bytes of a PNG or of each WebP kind (lossy, lossless, extended); anything else
+    /// is not an image here.
+    #[test]
+    fn an_image_header_gives_its_type_and_pixels() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend_from_slice(&1280u32.to_be_bytes());
+        png.extend_from_slice(&800u32.to_be_bytes());
+        assert_eq!(image_header(&png), Some(("image/png", 1280, 800)));
+        // Lossy: the frame tag, the start code 9d 01 2a, then 14-bit width and height.
+        let mut lossy = b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0\x9d\x01\x2a".to_vec();
+        lossy.extend_from_slice(&640u16.to_le_bytes());
+        lossy.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(image_header(&lossy), Some(("image/webp", 640, 480)));
+        // Lossless: 0x2f, then 14 bits each of width - 1 and height - 1.
+        let (w, h) = (300u32 - 1, 200u32 - 1);
+        let bits = w | (h << 14);
+        let mut lossless = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f".to_vec();
+        lossless.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(image_header(&lossless), Some(("image/webp", 300, 200)));
+        let mut extended = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0".to_vec();
+        extended.extend_from_slice(&[0xff, 0x09, 0x00, 0x3f, 0x06, 0x00]);
+        assert_eq!(image_header(&extended), Some(("image/webp", 2560, 1600)));
+        for not in [
+            &b"GIF89a\x01\0\x01\0"[..],
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            &png[..20],
+            b"",
+        ] {
+            assert_eq!(image_header(not), None);
+        }
+    }
+
     #[test]
     fn the_index_is_read_strictly_and_a_bad_entry_is_refused_alone() {
         let mut extra = entry("extra");
@@ -1128,7 +1470,7 @@ mod tests {
             "no serial"
         );
         assert_eq!(
-            r(r#"{"agora-plugin-catalog": 2, "serial": 1, "plugins": []}"#),
+            r(r#"{"agora-plugin-catalog": 3, "serial": 1, "plugins": []}"#),
             IndexError::Newer
         );
         assert_eq!(

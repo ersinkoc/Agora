@@ -832,6 +832,14 @@ agora-themes/
 - `file`: the relative path described above.
 - No other field in an entry; an entry with one, or with a field missing or of the wrong kind, is refused alone.
 
+**Format 2** (ADR-0120, read by this version and later; an older hub refuses a format-2 index whole) is `"agora-theme-catalog": 2` with
+two optional fields per entry, for the gallery's sorting:
+
+- `added`: the day the catalog first listed the theme, `YYYY-MM-DD` (a real day from 1970); not changed by later versions. A day after
+  the day of the update (UTC) refuses that entry.
+- `popularity`: a whole number from 0 to 1 000 000 000 that the catalog's maintainers set when they publish (for example the stars of
+  the theme's source repository at release time). Agora never counts installs and never reports anything; this number is the catalog's.
+
 The repository's CI should run the same checks before merging: the index's rules above, each file's SHA-256, and the theme rules,
 for example with `agora tui`'s reader or the web window's (`apps/web/src/themes/file.ts`), so a merged theme is never refused by a hub.
 

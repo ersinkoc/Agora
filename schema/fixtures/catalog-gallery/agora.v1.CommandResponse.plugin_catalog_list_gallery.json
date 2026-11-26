@@ -1,0 +1,25 @@
+{
+  "requestId": "r1",
+  "ok": {
+    "pluginCatalogList": {
+      "on": true,
+      "entries": [
+        {
+          "pluginId": "sample-agents",
+          "name": "Agent list",
+          "version": "0.2.0",
+          "author": "The Agora authors",
+          "licence": "Apache-2.0",
+          "description": "Lists the agents and their states in the theme's colours.",
+          "capabilities": ["agents.read", "theme.read"],
+          "sha256": "4f9c2a7e1b0d5c3a8e6f2b1d9c7a5e3f1b8d6c4a2e0f9b7d5c3a1e8f6b4d2c0a",
+          "size": "1834",
+          "added": "2026-11-20",
+          "popularity": "128",
+          "screenshots": ["The agent list in the light theme", "The agent list in the dark theme"]
+        }
+      ],
+      "updatedAtMs": "1764150000000"
+    }
+  }
+}
