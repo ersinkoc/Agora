@@ -72,7 +72,7 @@ session). The log is size-capped (oldest events dropped first). If the hub asks 
 has (unacknowledged events dropped by the cap, or a hub restored from a backup older than what the node has trimmed), the
 node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer, sends
 `SnapshotRequired`, and replays from its oldest retained event. The announcement states facts (ADR-0055): the
-`CheckoutDiscovered` and `WorkspaceRegistered` it knows; for each agent running now `AgentWorkspaceBound` where it applies,
+`CheckoutDiscovered` and `WorkspaceRegistered` it knows; `NodeTrustedDevices` with the devices it last said it trusts (audit F2041); for each agent running now `AgentWorkspaceBound` where it applies,
 `AgentStarted`, `AgentStateChanged` with its current state and where it came from, `AgentSessionReported` when known and
 `TerminalOpened` when it has one; for each agent of this process that has ended `AgentExited` with the last exit code the node recorded for it
 (`i32::MIN` when none was) and `TerminalClosed` when it had a terminal; `ApprovalResolved` again for the last 256 approvals
@@ -936,7 +936,7 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   hex digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Every client shows it wherever a device is named, computed by the client
   from the key itself, never taken from the hub.
 - **Trusted devices.** Event `NodeTrustedDevices` (`Event` field 13: `device_ids[]`, sorted, never keys), produced by a node when it
-  starts and whenever the set changes; the hub keeps the last one per node in `NodeSnapshot.trusted_device_ids` (10), so a window can
+  starts, whenever the set changes, and again in every announcement that restates the node (section 1); the hub keeps the last one per node in `NodeSnapshot.trusted_device_ids` (10), so a window can
   tell which machines trust its device. Node capability `device.trust`: the node verifies `DeviceEndorse` and `DeviceRevoke` and reports
   `NodeTrustedDevices`; the hub never sends either message to a node without it.
 

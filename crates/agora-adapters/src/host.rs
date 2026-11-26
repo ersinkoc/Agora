@@ -1203,7 +1203,7 @@ impl Adapter {
             writer: None,
             pending: Arc::default(),
             events,
-            next_id: Arc::new(AtomicU64::new(1)),
+            next_id: Arc::new(AtomicU64::new(held_id_base())),
             ignored: Arc::new(AtomicUsize::new(0)),
             read: Arc::new(AtomicUsize::new(0)),
             reader: None,
@@ -1646,6 +1646,22 @@ pub fn replay(lines: &[Vec<u8>], session_id: &str) -> Replay {
         }
     }
     out
+}
+
+/// F2100: the first request id of a node that takes up a held adapter. The process and its output outlive the node (ADR-0093), so an
+/// answer to a call an earlier node let go ([`HostError::Detached`]) can reach the next node's reader; ids that start at 1 again would
+/// hand it to that node's call with the same id. Each attach starts at its own unpredictable place below 2^52, so the ids stay exact
+/// in a JSON number (2^53) for any adapter and two nodes' ids meet only by a vanishing chance.
+fn held_id_base() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    // `RandomState` holds keys the standard library draws at random (from the OS once per thread, then stepped for each new one).
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    (h.finish() & ((1 << 52) - 1)) + 1
 }
 
 fn read_loop<R: Read>(
@@ -2113,6 +2129,93 @@ mod tests {
         assert!(written.lock().unwrap().is_empty());
         // #1150: a failed write is not counted.
         assert_eq!(a.lines_written(), 0);
+    }
+
+    /// F2100: the answer to a call an earlier node let go (`Detached`) can come after the next node took the adapter up, through the
+    /// same holder. It is no answer to that node's own call, whatever the order: each node that takes up a held adapter asks with ids
+    /// of its own. Ordered by channels (the adapter sees each line before it answers) and the pipe.
+    #[test]
+    fn a_late_answer_to_a_call_an_earlier_node_let_go_is_not_taken_as_the_next_nodes() {
+        struct ToAdapter(Sender<Value>, Vec<u8>);
+        impl Write for ToAdapter {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.1.extend_from_slice(b);
+                while let Some(i) = self.1.iter().position(|c| *c == b'\n') {
+                    let line: Vec<u8> = self.1.drain(..=i).collect();
+                    let _ = self.0.send(serde_json::from_slice(&line).unwrap());
+                }
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Ended;
+        impl agora_platform::HeldControl for Ended {
+            fn signal(&self, _: agora_platform::HeldSignal) -> io::Result<()> {
+                Ok(())
+            }
+            fn exit_status(&self) -> io::Result<Option<agora_platform::ExitStatus>> {
+                Ok(Some(agora_platform::ExitStatus {
+                    code: Some(0),
+                    signal: None,
+                }))
+            }
+        }
+        let attach = || {
+            let (to_adapter, lines) = channel();
+            let (output, out) = io::pipe().unwrap();
+            let a = Adapter::attach_held(
+                HeldIo {
+                    pid: 1,
+                    input: Box::new(ToAdapter(to_adapter, Vec::new())),
+                    output: Box::new(output),
+                    control: Arc::new(Ended),
+                    stop: Arc::default(),
+                    dropped: Arc::default(),
+                    ready: Arc::new(AtomicBool::new(true)),
+                    exit: Arc::default(),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+            (a, lines, out)
+        };
+        let call = |a: &Adapter, method: &'static str| {
+            let caller = a.caller();
+            std::thread::spawn(move || caller.call(method, json!({}), Duration::from_secs(10)))
+        };
+        let say = |out: &mut io::PipeWriter, v: Value| {
+            out.write_all(format!("{v}\n").as_bytes()).unwrap();
+        };
+        let line = |r: &Receiver<Value>| r.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let (mut a, a_lines, a_out) = attach();
+        let a_call = call(&a, "session/prompt");
+        let a_id = line(&a_lines)["id"].clone();
+        assert!(a.let_go());
+        drop(a_out);
+        assert!(a.reader_ended_by(std::time::Instant::now() + DETACH_WAIT));
+        assert!(matches!(a_call.join().unwrap(), Err(HostError::Detached)));
+        drop(a);
+
+        let (b, b_lines, mut b_out) = attach();
+        let b_call = call(&b, "approval/resolve");
+        let b_id = line(&b_lines)["id"].clone();
+        say(
+            &mut b_out,
+            json!({"jsonrpc": "2.0", "id": a_id, "error": {"code": -32000, "message": "late"}}),
+        );
+        say(
+            &mut b_out,
+            json!({"jsonrpc": "2.0", "id": b_id, "result": {"own": true}}),
+        );
+        let got = b_call.join().unwrap();
+        assert!(matches!(&got, Ok(v) if v["own"] == true), "{got:?}");
+        assert_ne!(
+            a_id, b_id,
+            "the next node asks with an id the earlier one used"
+        );
     }
 
     /// ADR-0104 O2: a read of the holder that does not come back (a holder that does not answer) never keeps a detach, and so a

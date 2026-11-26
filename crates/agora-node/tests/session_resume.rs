@@ -1153,6 +1153,86 @@ fn the_policy_file_always_wins_over_resume_auto() {
     }
 }
 
+/// Audit F2040: a second node started on a home another node runs (`agora node run --resume auto` again) fails, and before it fails
+/// it touches nothing of that home: it resumes none of the running node's interrupted agents (which would run on under no node, on
+/// the same session), and the ledger does not say one was brought back by itself.
+#[test]
+fn a_second_node_on_a_home_in_use_resumes_nothing_before_it_fails() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("second-node");
+    let p = e.launch("probe");
+    e.wait("the probe's session", |e| !e.session(&p).is_empty());
+    e.start();
+    assert!(e.node().ledger.get(&p).unwrap().interrupted());
+    // Only this test's agents: the file's other tests run beside it in this process, and theirs start and end meanwhile.
+    let root = std::fs::canonicalize(&e.root).unwrap_or_else(|_| e.root.clone());
+    let fakes = || -> std::collections::HashSet<u32> {
+        agora_platform::process_children(std::process::id())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pid| {
+                agora_platform::process_identity(*pid).is_ok_and(|i| i.name.contains("agora-fake"))
+                    && agora_platform::process_cwd(*pid)
+                        .is_ok_and(|c| std::fs::canonicalize(&c).unwrap_or(c).starts_with(&root))
+            })
+            .collect()
+    };
+    let before = fakes();
+    e.doing("starting a second node on the same home");
+    let second = Node::start(&NodeConfig {
+        resume_all: true,
+        node_id: "node-resume".into(),
+        socket: e.root.join("n.sock"),
+        data_dir: e.root.join("data"),
+        worktree_root: e.root.join("worktrees"),
+        manifests_dir: e.root.join("manifests"),
+        projects: vec![],
+        limits: NodeLimits::default(),
+    });
+    let leaked: Vec<u32> = fakes().difference(&before).copied().collect();
+    // What a failed start left is ended here, before anything is asserted, so a failure leaves no agent behind.
+    for pid in &leaked {
+        if let Ok(id) = agora_platform::process_identity(*pid) {
+            let _ = agora_platform::kill_process_if_same(&id);
+        }
+    }
+    match second {
+        Err(agora_node::daemon::NodeError::Io(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}")
+        }
+        Err(other) => panic!("refused for another reason: {other}"),
+        Ok(_) => panic!("a second node started on a home in use"),
+    }
+    assert!(
+        leaked.is_empty(),
+        "a node that did not start resumed {leaked:?}"
+    );
+    let ledger: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            e.root
+                .join("data")
+                .join(agora_node::ledger::LEDGER_DIR)
+                .join(agora_node::ledger::LEDGER_FILE),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let entry = ledger["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["agent_id"] == p.as_str())
+        .unwrap();
+    assert_eq!(entry["auto_resumed_at_ms"].as_u64(), Some(0), "{entry}");
+    // The running node is undisturbed: it still offers the agent, and it can resume it.
+    assert!(e.node().ledger.get(&p).unwrap().interrupted());
+    assert!(!e.running(&p));
+    e.resume(&p, false).unwrap();
+    assert!(e.running(&p));
+}
+
 /// ADR-0060 Amendment A, a real restart: the node brings back by itself an agent that was working, and its resume carries the kind's
 /// sentence as one argument; the ledger says it was sent and a second start does not send it again.
 #[test]

@@ -1293,6 +1293,66 @@ async fn a_mesh_post_to_a_node_whose_link_died_or_ended_is_answered_node_offline
     );
 }
 
+/// Audit F2060: what the hub adds to a command on its way (its own request id, a post's `origin`) can take one that arrived at the
+/// frame limit over it. That one is refused to whoever sent it; the node it was for keeps its connection (it used to be ended).
+#[tokio::test]
+async fn a_command_the_hub_enlarges_past_the_frame_limit_is_refused_and_its_target_keeps_its_link()
+{
+    use agora_protocol::frame::DEFAULT_MAX_PAYLOAD;
+    let post = |id: &str, to: &str, origin: &str, body: String| v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::MeshPost(v1::MeshPost {
+            to: to.into(),
+            body,
+            origin: origin.into(),
+            from_agent: String::new(),
+            refs: Vec::new(),
+        })),
+    };
+    let st = state(None);
+    let mut nodes = Vec::new();
+    for name in ["n1", "n2"] {
+        let (mut c, t) = node_conn(&st, name).await;
+        handshake(&mut c).await;
+        c.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event(name, 1, online(name)),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut c).await;
+        nodes.push((c, t));
+    }
+    let (mut n2, t2) = nodes.pop().unwrap();
+    let (mut n1, _t1) = nodes.pop().unwrap();
+
+    // The largest post n1 can send; forwarded with the hub's id and n1's name as its origin, it no longer fits one frame.
+    let mut k = DEFAULT_MAX_PAYLOAD - post("", "n2/b", "", String::new()).encoded_len();
+    while post("", "n2/b", "", "x".repeat(k)).encoded_len() > DEFAULT_MAX_PAYLOAD {
+        k -= 1;
+    }
+    assert!(post("h0", "b", "n1", "x".repeat(k)).encoded_len() > DEFAULT_MAX_PAYLOAD);
+    let at_limit = post("", "n2/b", "", "x".repeat(k)).encode_to_vec();
+    n1.send(&f(STREAM_COMMANDS, 0, at_limit)).await.unwrap();
+    let r = response(&mut n1).await;
+    assert_eq!(err_code(&r), "protocol.invalid_message");
+
+    // n2 is still connected and gets the next post.
+    n1.send(&mesh_post("p2", "n2/b1", "")).await.unwrap();
+    let got = recv(&mut n2).await;
+    assert_eq!((got.stream_id, got.kind), (STREAM_COMMANDS, 0));
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    assert!(matches!(
+        forwarded.command,
+        Some(command_request::Command::MeshPost(p)) if p.body == "hi"
+    ));
+    assert!(!t2.is_finished(), "n2's link is still served");
+    assert!(st.hub.view().0.nodes["n2"].online);
+}
+
 struct Switch(Arc<std::sync::atomic::AtomicBool>);
 
 impl ClientAuth for Switch {

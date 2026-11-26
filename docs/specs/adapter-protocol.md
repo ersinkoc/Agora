@@ -3,6 +3,10 @@
 An adapter is a process, in any language, that connects one agent kind to Agora. The node starts it and talks
 JSON-RPC 2.0 over stdio (newline-delimited). Message types come from `schema/` (ADR-0010).
 
+Request ids are JSON integers: an adapter echoes each one back unchanged and assumes nothing about where they start. An adapter the
+node runs itself sees 1, 2, 3, …; one kept by the agent keeper (ADR-0093) sees, after each node that takes it up, ids from a random
+start below 2^52 (exact in a JSON number), so an answer to an earlier node's call is never taken for the next node's (audit F2100).
+
 ## Lifecycle
 
 ```

@@ -1034,6 +1034,9 @@ struct AdapterRich {
     /// applied to another.
     epoch: u64,
     queue: VecDeque<Queued>,
+    /// Audit F2020: a waiting prompt that became the turn when a prompt sent at once failed ([`Supervisor::adapter_send_failed`],
+    /// outside the tick); the next poll sends it.
+    due: Option<Next>,
 }
 
 impl AdapterRich {
@@ -1149,7 +1152,15 @@ impl AdapterRich {
             *cancel_by = Some(now + CANCEL_GRACE);
         }
         if drop_queue {
-            self.queue.drain(..).map(|q| q.tag).collect()
+            // Audit F2020 review: a prompt that became the turn after a failed send but is not sent yet still waits: it goes too, and
+            // the turn it would have been is free at once (nothing of it reached the adapter).
+            let due = self.due.take().map(|(q, _)| q.tag);
+            if due.is_some() {
+                self.turn = Turn::Idle;
+            }
+            due.into_iter()
+                .chain(self.queue.drain(..).map(|q| q.tag))
+                .collect()
         } else {
             Vec::new()
         }
@@ -1181,7 +1192,10 @@ impl AdapterRich {
         self.turn = Turn::Idle;
         self.generation += 1;
         self.epoch += 1;
-        self.queue.drain(..).map(|q| q.tag).collect()
+        let due = self.due.take().map(|(q, _)| q.tag);
+        due.into_iter()
+            .chain(self.queue.drain(..).map(|q| q.tag))
+            .collect()
     }
 }
 
@@ -2878,6 +2892,12 @@ impl Supervisor {
             if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
                 continue;
             }
+            // Audit F2020: the prompt that became the turn when a prompt sent at once failed.
+            if !letting_go {
+                if let Some(next) = e.rich.due.take() {
+                    sends.push((id.clone(), next));
+                }
+            }
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now).filter(|_| !letting_go) {
                 sends.push((id.clone(), next));
@@ -3379,13 +3399,15 @@ impl Supervisor {
         }
     }
 
-    /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free (and what waits goes next, at
-    /// the next poll's `idle`: nothing waits when a prompt was sent at once).
+    /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free, and a prompt queued behind it while
+    /// the call was made becomes the turn and is sent by the next poll (audit F2020).
     /// `generation` is the call's ([`AdapterCall::generation`]): a failure that comes back after the adapter restarted, or after
     /// another turn began, changes nothing.
     pub fn adapter_send_failed(&mut self, id: &AgentId, generation: u64) {
         if let Some(e) = self.adapters.get_mut(id) {
-            let _ = e.rich.send_result(false, generation, Instant::now());
+            if let (_, Some(next)) = e.rich.send_result(false, generation, Instant::now()) {
+                e.rich.due = Some(next);
+            }
         }
     }
 
@@ -7464,6 +7486,18 @@ mod adapter_option_tests {
         let _ = queued(&mut r, "c", 6);
         assert_eq!(r.cancelled(gen(&r), t0, true), [5, 6]);
         assert!(r.expire(t0 + CANCEL_GRACE).is_none());
+        assert_eq!(r.turn, Turn::Idle);
+        // A prompt that became the turn after a failed send, not sent yet (audit F2020): dropped with the queue, and the agent is free.
+        let mut r = AdapterRich::default();
+        let Ok(Route::Send(g0)) = queued(&mut r, "a", 0) else {
+            panic!()
+        };
+        let _ = queued(&mut r, "b", 5);
+        let _ = queued(&mut r, "c", 6);
+        let (_, next) = r.send_result(false, g0, t0);
+        r.due = next;
+        assert_eq!(r.cancelled(gen(&r), t0, true), [5, 6]);
+        assert!(r.due.is_none());
         assert_eq!(r.turn, Turn::Idle);
         // An adapter that does end the cancelled turn (the normal case) needs no grace.
         let mut r = AdapterRich::default();

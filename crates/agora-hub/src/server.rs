@@ -599,6 +599,13 @@ where
                         load.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
+                        // Audit F2060: what the hub added on the way (its request id, a post's `origin`) can take a request that
+                        // arrived at the frame limit over it. Refused to whoever asked; it is no reason to end this node's link.
+                        if payload.len() > DEFAULT_MAX_PAYLOAD {
+                            let too_big = Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "payload");
+                            let _ = reply.send(error_response(&request.request_id, &too_big));
+                            continue;
+                        }
                         waiting.insert(request.request_id.clone(), reply);
                         load.unanswered.store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         put(conn, &frame(stream, 0, payload), silence).await?;
@@ -2835,7 +2842,8 @@ where
     }
 }
 
-/// Accepts connections until the listener fails; each runs on its own task.
+/// Accepts connections for as long as the hub runs; each runs on its own task. A failed accept is waited out, never the end (see
+/// [`run_with`]).
 pub async fn run(
     listener: tokio::net::TcpListener,
     state: Arc<ServerState>,
@@ -2860,12 +2868,44 @@ pub async fn run_slot(
 
 type Chosen = Option<(tokio_rustls::TlsAcceptor, Option<[u8; 32]>)>;
 
+/// The first and the longest wait after a failed accept.
+const ACCEPT_RETRY_FIRST: Duration = Duration::from_millis(10);
+const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(1);
+
 async fn run_with(
     listener: tokio::net::TcpListener,
     state: Arc<ServerState>,
     tls: impl Fn() -> Chosen,
 ) {
-    while let Ok((tcp, _)) = listener.accept().await {
+    let mut retry = ACCEPT_RETRY_FIRST;
+    loop {
+        // Audit F2061: a failed accept is not the listener's end: the process out of file descriptors for a moment (a flood of
+        // connections), or a connection that failed before it was taken (accept(2) says to retry those). Ending here dropped the
+        // listener and `agora hub` exited 0, which nothing restarts (ADR-0062). The wait keeps a connection that cannot be taken
+        // yet from spinning this loop; it doubles while accepts keep failing and starts again after one that works.
+        let tcp = match listener.accept().await {
+            Ok((tcp, _)) => {
+                retry = ACCEPT_RETRY_FIRST;
+                tcp
+            }
+            // One connection that failed before it was taken: the next is taken at once (no wait, so a burst of them holds nobody).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
+            Err(e) => {
+                eprintln!("hub accept failed: {e}");
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(ACCEPT_RETRY_MAX);
+                continue;
+            }
+        };
         // Small frames (a keystroke, an echo) must leave at once: without this, Nagle's algorithm plus the peer's delayed
         // ACK holds one back for up to 40 ms.
         let _ = tcp.set_nodelay(true);

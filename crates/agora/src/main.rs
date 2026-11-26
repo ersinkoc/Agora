@@ -980,6 +980,14 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // ADR-0079: agents start through the terminal holder where there is one, so they outlive this node.
     let node = match Node::start_with_holder(&cfg, hold::setup_for_node(&h)) {
         Ok(n) => n,
+        // Audit F2040: another node holds this data folder (or its control socket); nothing was read or written.
+        Err(agora_node::daemon::NodeError::Io(e)) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            say.err(
+                key!("cli-node-in-use"),
+                &[("dir", cfg.data_dir.display().to_string().into())],
+            );
+            return ExitCode::from(1);
+        }
         Err(e) => {
             err_line(&e.to_string());
             return ExitCode::from(1);
