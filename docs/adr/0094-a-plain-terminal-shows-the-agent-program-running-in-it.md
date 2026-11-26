@@ -5,6 +5,13 @@ Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR
 
 Accepted by the maintainer (see the Accepted line above): this may now be built.
 
+Built (2026-11-26, on `main`): build step 1 and the node side of step 2 without the schema field. The names live in the existing
+`[process] names` (documented as foreground process names and already set by the shipped manifests) rather than a new `[match]` table, so
+no engine version was needed; they are now validated. The node looks every 2 s at a watched or not-idle `shell` agent's foreground program
+and reads it with the matched kind's screen rules, so state and needs-you work for a hand-started agent; the mark ends with the program.
+Not built: the snapshot field and the window's "X in Shell" label (step 2's schema part, which waits for the maintainer's OK), the
+Windows lookup (step 3, measured on Windows first), the TUI line, and filling names from the ACP registry.
+
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
 user-visible viewport". Touches the threat model (a program name is untrusted data).
 

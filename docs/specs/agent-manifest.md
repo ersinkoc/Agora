@@ -47,7 +47,7 @@ version = "2026.11.06.1"        # manifest version
 min_engine = 2                  # 6 with `[structured] allow_always` (ADR-0101), 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
-names = ["example-agent", "exa"]        # foreground process names
+names = ["example-agent", "exa"]        # foreground process names (ADR-0094): a plain terminal running one runs this kind
 launch = ["example-agent"]              # default argv
 env = { EXAMPLE_NO_UPDATE_CHECK = "1" }
 
@@ -146,6 +146,15 @@ priority = 800
 region = "title"
 regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 ```
+
+`[process] names` (ADR-0094) are the program names this kind runs as, the executable's file name the system reports for a process
+(`claude`, `claude.exe`): at most 8, each 1 to 64 bytes with no `/`, `\\`, space, control or hidden character, and not `.` or `..`
+(`process.names` otherwise). When a person starts one by hand in a plain terminal (a `shell` agent), the node sees it as that
+terminal's foreground program (its foreground process group, looked at every 2 s while the terminal is watched or not idle; never its
+screen, its arguments or its path) and reads the terminal with this kind's screen rules until it ends; the shell stays a shell (same
+id, kind, ledger entry and resume) and the mark grants nothing (skip-permissions rules apply only to agents started as a kind). Linux
+reports at most 15 characters of a name. A renamed program is not recognised. Not yet on Windows (a pseudoconsole has no foreground
+group), and the windows do not show the mark yet (it needs a snapshot field).
 
 Common validation: `kind` is at most 64 ASCII characters and `min_engine` starts at 1. `display_name` is non-empty visible text on
 one line (no terminal controls or hidden formatting). A terminal manifest has a non-empty `process.launch`; only a manifest driven

@@ -83,8 +83,34 @@ pub struct Rule {
     pub not: Vec<Condition>,
 }
 
+/// The most `[process] names` a manifest may list, and the longest one in bytes.
+pub const MAX_PROCESS_NAMES: usize = 8;
+pub const MAX_PROCESS_NAME_BYTES: usize = 64;
+
+/// `[process] names` (ADR-0094): file names, never paths or text to show: 1 to [`MAX_PROCESS_NAME_BYTES`] bytes with no separator,
+/// space, control or hidden character, and at most [`MAX_PROCESS_NAMES`] of them.
+fn foreground_names(names: &[String]) -> bool {
+    names.len() <= MAX_PROCESS_NAMES
+        && names.iter().all(|n| {
+            !n.is_empty()
+                && n.len() <= MAX_PROCESS_NAME_BYTES
+                && n != "."
+                && n != ".."
+                && !n.chars().any(|c| {
+                    c == '/'
+                        || c == '\\'
+                        || c.is_whitespace()
+                        || c.is_control()
+                        || agora_core::text::is_hidden(c)
+                })
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct Process {
+    /// ADR-0094: the program names this kind runs as (the executable's file name the system reports for a process, `claude`,
+    /// `claude.exe`). A plain terminal whose foreground program has one of them runs this kind inside it, and this kind's screen
+    /// rules read it. Compared exactly, never with arguments or a path.
     #[serde(default)]
     pub names: Vec<String>,
     #[serde(default)]
@@ -682,6 +708,9 @@ impl Manifest {
         if !spawnable_env(&self.process.env) {
             return Err(invalid("process.env"));
         }
+        if !foreground_names(&self.process.names) {
+            return Err(invalid("process.names"));
+        }
         if let Some(r) = &self.resume {
             r.validate()?;
         }
@@ -1197,6 +1226,46 @@ mod launch_tests {
             .replace("display_name = \"K\"", "display_name = \"Çözüm 工具\"");
         assert!(Manifest::parse(&unicode).is_ok());
         println!("FIX VERIFIED: F450 display names are visible inert text");
+    }
+
+    #[test]
+    fn process_names_are_plain_file_names() {
+        let with = |names: &str| {
+            Manifest::parse(&format!(
+                "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"k\"]\nnames = {names}\n"
+            ))
+        };
+        for ok in [
+            "[]",
+            "[\"claude\"]",
+            "[\"claude\", \"claude.exe\", \"wstack\"]",
+        ] {
+            assert!(with(ok).is_ok(), "{ok}");
+        }
+        let long = format!("[\"{}\"]", "a".repeat(MAX_PROCESS_NAME_BYTES + 1));
+        let many = format!(
+            "[{}]",
+            (0..=MAX_PROCESS_NAMES)
+                .map(|i| format!("\"n{i}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for bad in [
+            "[\"\"]",
+            "[\"bin/claude\"]",
+            "[\"a\\\\b\"]",
+            "[\"two words\"]",
+            "[\"cl\\u001baude\"]",
+            "[\"cl\\u202eaude\"]",
+            "[\"..\"]",
+            long.as_str(),
+            many.as_str(),
+        ] {
+            assert!(
+                matches!(with(bad), Err(ManifestError::Invalid { field }) if field == "process.names"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -124,8 +124,10 @@ fixes it.
   - [ ] schema: "accepted by a person", parent link, links to conversation, workspace and branch
   - [ ] the Review column; a person moves a task to Done or back; subtasks with their limits
 - [ ] **M3.3 Chat history survives the node** (ADR-0089, **schema**): node writer and paging, resume and purge, pages in the window
-- [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3): Unix lookup (`Pty::foreground_pid` exists, nothing
-  calls it), manifest `[match]`, **win** lookup, the label
+- [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3)
+  - [x] Unix lookup and the node's mark: a program a manifest's `[process] names` lists, started by hand in a `shell` agent, is read
+    with its kind's screen rules (state, needs you) until it ends
+  - [ ] the snapshot field and the "X in Shell" label in the windows (**schema**); the **win** lookup; the TUI line
 - [ ] **M3.5 The diff names every changed file** (ADR-0071, **schema**): `GitDiffResult.paths`, the review screen says what is not shown
 - [ ] **M3.6 A reply keeps its link across machines** (ADR-0074, **schema**): `MeshPost.message_id` / `reply_to`, the broker and hub checks
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap

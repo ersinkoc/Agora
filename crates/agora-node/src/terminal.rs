@@ -529,6 +529,18 @@ impl TerminalHandle {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "terminal stopped"))
     }
 
+    /// ADR-0094: the name of the program in the terminal's foreground (its foreground process group's leader) when that is not the
+    /// terminal's own program: what a person started by hand in a plain terminal. `None` while the terminal's own program is in front,
+    /// and always where the system has no foreground group for a pseudoconsole (Windows, which reports the terminal's own program).
+    /// The name only (the system's short name for the process), never its arguments; read-only, and never in the output path.
+    pub fn foreground_program(&self) -> io::Result<Option<String>> {
+        let front = self.control()?.foreground_pid()?;
+        if front == 0 || front == self.pid {
+            return Ok(None);
+        }
+        agora_platform::process_name(front).map(Some)
+    }
+
     /// A handle that writes input without the terminal (or whatever lock reached it): clone it, let go of the locks, then
     /// write. A program that never reads its input blocks the writer, and only the writer.
     pub fn input_handle(&self) -> io::Result<PtyControl> {

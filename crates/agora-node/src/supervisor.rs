@@ -1324,6 +1324,9 @@ struct AdapterEntry {
     refusal: Arc<std::sync::OnceLock<SkipVerdict>>,
 }
 
+/// ADR-0094: how often a plain terminal's foreground program is looked at.
+const FOREGROUND_EVERY: Duration = Duration::from_secs(2);
+
 struct Entry {
     agent: Agent,
     /// The agent's current state is one it reported itself (see [`Origin`]).
@@ -1335,6 +1338,11 @@ struct Entry {
     pacer: Pacer,
     next_check: Instant,
     visible: bool,
+    /// ADR-0094: the kind of the program a person runs by hand in this plain terminal (a `shell` agent), found by its foreground
+    /// program's name; its screen rules read the terminal while it runs. Only the node's process lookup sets it.
+    inside: Option<String>,
+    /// When the foreground program is looked at next ([`FOREGROUND_EVERY`]).
+    next_look: Instant,
     restarts: u32,
     restart_at: Option<Instant>,
     gave_up: bool,
@@ -2348,6 +2356,8 @@ impl Supervisor {
                 terminal: Some(terminal),
                 pacer: Pacer::default(),
                 next_check: now,
+                inside: None,
+                next_look: now,
                 visible: true,
                 restarts: 0,
                 restart_at: None,
@@ -2615,6 +2625,8 @@ impl Supervisor {
                     terminal: Some(terminal),
                     pacer: Pacer::default(),
                     next_check: now,
+                    inside: None,
+                    next_look: now,
                     visible: true,
                     restarts: 0,
                     restart_at: None,
@@ -4257,10 +4269,46 @@ impl Supervisor {
             return;
         }
 
+        // ADR-0094: what a person runs by hand in a plain terminal. Looked at every few seconds while someone watches it or it is not
+        // idle, from the terminal's foreground process group (never its screen). A program a manifest names marks the terminal as
+        // running that kind, whose screen rules then read it; when the program ends the mark ends and so does what its rules said.
+        if entry.agent.kind == crate::manifests::SHELL_KIND
+            && now >= entry.next_look
+            && (entry.visible || entry.agent.state() != AgentState::Idle || entry.inside.is_some())
+        {
+            entry.next_look = now + FOREGROUND_EVERY;
+            let front = entry
+                .terminal
+                .as_ref()
+                .and_then(|t| t.foreground_program().ok().flatten());
+            let inside = front.as_deref().and_then(|name| {
+                self.kinds
+                    .iter()
+                    .find(|(kind, k)| {
+                        kind.as_str() != crate::manifests::SHELL_KIND
+                            && k.manifest.process.names.iter().any(|n| n == name)
+                    })
+                    .map(|(kind, _)| kind.clone())
+            });
+            if inside != entry.inside {
+                let ended = entry.inside.is_some();
+                entry.inside = inside;
+                entry.next_check = now;
+                if ended && !entry.state_reported {
+                    set_state(entry, AgentState::Unknown, Origin::Node, events);
+                }
+            }
+        }
         if now < entry.next_check {
             return;
         }
-        let Some(kind) = self.kinds.get(&entry.agent.kind) else {
+        let Some(kind) = self
+            .kinds
+            .get(entry.inside.as_ref().unwrap_or(&entry.agent.kind))
+        else {
+            return;
+        };
+        let Some(term) = entry.terminal.as_ref() else {
             return;
         };
         let detected = term.inspect(|t| kind.detector.detect(t)).map(|d| d.state);
@@ -4560,6 +4608,8 @@ impl Supervisor {
                 terminal: None,
                 pacer: Pacer::default(),
                 next_check: Instant::now(),
+                inside: None,
+                next_look: Instant::now(),
                 visible: true,
                 restarts: 0,
                 restart_at: None,
@@ -4965,6 +5015,11 @@ impl Supervisor {
         self.adapters
             .get(id)
             .is_some_and(|e| skips_now(e.launch.skips_permissions, &e.options, &e.rich.config))
+    }
+
+    /// ADR-0094: the kind a person runs by hand in this plain terminal now (found by its foreground program), if any.
+    pub fn runs_inside(&self, id: &AgentId) -> Option<String> {
+        self.agents.get(id).and_then(|e| e.inside.clone())
     }
 
     /// ADR-0095: whether a running terminal agent's kind has a screen-detection rule that says idle or done (a kind without one never

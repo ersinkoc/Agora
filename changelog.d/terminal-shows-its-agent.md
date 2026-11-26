@@ -1,0 +1,1 @@
+- A coding agent you start by hand in a plain terminal (Claude Code, Codex, WrongStack) is now recognised on Linux and macOS by its program name and read with that agent's screen rules, so the terminal shows when it is working or needs you, and stops when the program ends. The terminal stays a plain terminal (ADR-0094).

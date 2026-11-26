@@ -607,3 +607,96 @@ fn terminal_limit_and_disk_usage() {
     assert!(usage.files >= 1 && usage.bytes >= 1, "{usage:?}");
     sup.stop(&a).unwrap();
 }
+
+/// ADR-0094: a program a person starts by hand in a plain terminal is recognised by its foreground program's name (a manifest's
+/// `[process] names`), never by its screen; while it runs its kind's screen rules read the terminal, and when it ends the mark ends.
+/// A renamed program is not recognised. Unix only: a pseudoconsole has no foreground group, so nothing is marked on Windows yet.
+#[test]
+fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() {
+    if std::env::consts::FAMILY != "unix" || !sh_on_path() {
+        return;
+    }
+    let e = env("inside");
+    let bin = e.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // The fake agent under a name of its own: the system reports a process by its executable's file name.
+    let named = bin.join("probeagent");
+    std::fs::copy(fake_agent(), &named).unwrap();
+    let renamed = bin.join("otherprog");
+    std::fs::copy(fake_agent(), &renamed).unwrap();
+    let slow = e.dir.join("slow.toml");
+    std::fs::write(
+        &slow,
+        "name = \"slow\"\n[[frame]]\ntext = \"Fake Agent\\n\\n* Thinking... (esc to interrupt)\"\ndelay_ms = 3000\n\
+         [[frame]]\ntext = \"Fake Agent\\n\\nAllow Bash(rm -rf build)?\\n  1. Yes\\n  2. No\"\ndelay_ms = 4000\n\
+         [[frame]]\ntext = \"Fake Agent\\n\\nDone.\\n\\n> \"\ndelay_ms = 400\n",
+    )
+    .unwrap();
+    let mut sup = supervisor(RestartPolicy::default());
+    let mut fake = manifest(&fake_launch(), None);
+    fake.process.names = vec!["probeagent".into()];
+    sup.register(fake);
+    sup.register(
+        Manifest::parse(
+            "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-i\"]\n",
+        )
+        .unwrap(),
+    );
+    let mut req = request(&e, "plain");
+    req.kind = "shell".into();
+    let id = sup.start(&req, Instant::now()).unwrap();
+    let type_line = |sup: &Supervisor, prog: &Path| {
+        sup.terminal(&id)
+            .unwrap()
+            .send_input(format!("{} --script {}\n", prog.display(), slow.display()).into_bytes())
+            .unwrap();
+    };
+
+    // A renamed copy is not recognised: no mark, and the shell's own (empty) rules say nothing.
+    type_line(&sup, &renamed);
+    let end = Instant::now() + Duration::from_secs(6);
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        seen.extend(sup.tick(Instant::now()));
+        assert_eq!(sup.runs_inside(&id), None, "a renamed program was marked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!states(&seen).contains(&AgentState::Blocked), "{seen:?}");
+    // Let it finish before the next one.
+    let end = Instant::now() + Duration::from_secs(20);
+    while !sup
+        .terminal(&id)
+        .unwrap()
+        .snapshot()
+        .lines
+        .iter()
+        .any(|l| l.contains("Done."))
+    {
+        assert!(Instant::now() < end, "the renamed program never finished");
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(700));
+
+    type_line(&sup, &named);
+    let events = run_until(&mut sup, Duration::from_secs(20), |ev| {
+        states(ev).contains(&AgentState::Blocked)
+    });
+    assert_eq!(sup.runs_inside(&id).as_deref(), Some("fake"));
+    assert!(states(&events).contains(&AgentState::Blocked), "{events:?}");
+    // It ends, the shell is in front again: the mark ends, and so does what its rules said.
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut after = Vec::new();
+    while sup.runs_inside(&id).is_some() {
+        assert!(Instant::now() < end, "the mark never ended: {after:?}");
+        after.extend(sup.tick(Instant::now()));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        states(&after).last(),
+        Some(&AgentState::Unknown),
+        "{after:?}"
+    );
+    sup.stop(&id).unwrap();
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
