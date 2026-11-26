@@ -1,12 +1,14 @@
 # Plugins: sandboxed panels in the window
 
-ADR-0114 (Accepted) lets community plugins add panels to the web window (and the desktop app, which loads it). This page is build step
-2: the frame, its page policy, the message set with the rung-1 read capabilities, the window's header and marker, safe mode, and loading
-a package from a local file for development. Storing plugins on the hub, installing them for a hub and keeping grants per person are
-step 3; the reviewed catalog is step 4.
+ADR-0114 (Accepted) lets community plugins add panels to the web window (and the desktop app, which loads it). This page is build steps
+2 and 3. Step 2: the frame, its page policy, the message set with the rung-1 read capabilities, the window's header and marker, safe mode,
+and loading a package from a local file for development. Step 3: plugins the hub's owner installs for the hub, and grants kept per person
+on the hub ("Plugins installed on the hub"). The reviewed catalog is step 4.
 
-The code is in `apps/web/src/plugins/`; the frame page and its loader are `apps/web/public/plugin-frame.html` and `plugin-frame.js`;
-the hub's headers for them are in `crates/agora-hub/src/web.rs`; a sample plugin is `apps/web/plugins/sample/`.
+The code is in `apps/web/src/plugins/` (`hub.ts` for the hub's plugins); the frame page and its loader are
+`apps/web/public/plugin-frame.html` and `plugin-frame.js`; the hub's headers for them are in `crates/agora-hub/src/web.rs`; the hub's
+package check, storage and messages are `crates/agora-hub/src/plugin_package.rs`, `plugins.rs` and `schema/agora/v1/plugins.proto`; a
+sample plugin is `apps/web/plugins/sample/`.
 
 ## What a plugin is
 
@@ -69,6 +71,12 @@ whole package and nothing of it is kept or run: over 2 MiB (checked before the f
 `..`, a drive or a leading dot; an entry that is not a file's bytes (a link, an object, a number); a kind of file a plugin cannot use
 (scripts, stylesheets, images, fonts, JSON and text only); a file not in the list; a listed file missing; a wrong hash; more than 64
 files. Each refusal has its own message (`plugin-error-*`).
+
+**The same checks on the hub.** The hub checks a package with the same rules, in the same order and with the same codes
+(`crates/agora-hub/src/plugin_package.rs`, a port of `package.ts`), so it refuses at install what a window would refuse at load. It reads
+the JSON as the window does: one leading byte-order mark is dropped, a key given twice keeps its last value, `1.0` is `1`, base64 bits left
+over are ignored, and texts are measured in UTF-16 units. A text with a lone surrogate (`"\ud800"`) is refused by both. The two are held
+in agreement by shared packages that both test suites check against one list (`crates/agora-hub/tests/fixtures/plugin-packages/`).
 
 **Packing.** `node scripts/pack-plugin.mjs <folder> [--out <file>] [--write-hashes]` packs a flat folder and refuses a file not listed or
 a wrong hash, as the window would.
@@ -163,12 +171,52 @@ amendment to ADR-0114.
 The manifest declares the capabilities; the install screen lists them in plain words (`plugin-cap-*`) and the person allows each one,
 none by default (`plugins/grants.ts`). A capability not allowed answers `not-granted`. A version that asks for a capability the person was
 never shown is **held**: its panels are not offered until the person looks again. "What it can see" changes a grant; the plugin's frames
-start again with it. In step 2 grants are kept in this browser's storage beside the package (`agora.plugins.grants.v1`).
+start again with it. A development plugin's grant is kept in this browser's storage beside the package (`agora.plugins.grants.v1`); a hub
+plugin's is kept by the hub for the person (below). The two never share a grant.
+
+## Plugins installed on the hub
+
+**The owner installs, on the hub's machine.** `agora hub plugin add FILE` checks a package (as above) and keeps it for the hub;
+`agora hub plugin list` shows what is installed (id, version, name, what it asks to see, when); `agora hub plugin remove ID` removes one.
+They work like `agora hub fleet`: run where the hub's folder is, by whoever can open it, and each add (refused or not) and remove is a row
+of the audit trail as the owner's (`plugin.add`, `plugin.remove`; the outcome names the plugin, or why it was refused). No protocol message
+installs or removes a plugin, so nobody installs one from a window, the owner's included. Adding a plugin whose id is installed replaces
+it (another version). A hub keeps at most 16.
+
+**What the hub keeps.** The package as it came (opaque bytes, never run), its SHA-256, and what it read from the checked manifest (id,
+version, name, capabilities). Per person and plugin: the version a grant was given for, what that version asked for (`seen`, taken from the
+installed manifest, never from the window) and what the person allowed. Removing a plugin forgets everyone's grant for it; removing a
+person forgets theirs. The hub reads its store on every request, so a running hub follows `add` and `remove` at once.
+
+**The window.** Once connected, the window asks the hub for the installed plugins (`PluginList`) and this person's grants
+(`PluginGrantList`), fetches each package in pieces of at most 512 KiB (`PluginFetch`, by the listed SHA-256: a frame carries at most
+1 MiB and a package up to 2 MiB), and checks it again exactly as a file: the bytes must hash to the listed SHA-256 and the checked
+manifest must name the listed id and version, or the plugin is left out. Packages already checked are kept for the visit by their hash.
+A hub plugin shows the **Plugin** marker without **development**, and "installed on this hub" in the plugins list.
+
+- **Showing one is each person's choice.** A hub plugin nobody chose is listed as not shown; none of its panels is offered.
+  **Look at it** opens the install screen; **Show it** sends the grant (`PluginGrantSet`: the id, the version shown and the capabilities
+  allowed), and the window changes only once the hub kept it. **What it can see** changes it; **Stop showing** forgets the person's grant
+  (`PluginGrantRemove`) and closes its panes. A hub plugin has no **Remove**: only the owner removes it.
+- **A version that asks for more is held**, as for a development plugin: the grant names what the older version asked for, so its panels
+  wait until the person looks again. One that asks for nothing new stays shown.
+- **Removed on the hub, gone at the next load.** A plugin the owner removed is not in the next list, so a window that loads again (or
+  signs in again) drops it, and a pane that showed it shows the "unknown panel" placeholder. A hub plugin is offered only while the hub's
+  current list names it.
+- **An older hub** that does not know these messages refuses them: the window then has no hub plugins.
+- **A development plugin with the same id** stands in for the hub's in this browser, with its own grant in this browser; removing it brings
+  the hub's back with the person's hub grant.
+
+**Who may ask.** Every signed-in person, owner, member or viewer: each lists the installed plugins, fetches their packages and sets and reads
+only their own grants. A plugin only reads what its person can already see in the window, and choosing what it may see changes nothing on
+any machine, so a viewer may show a plugin too. The hub answers these itself; a request that names a node is refused
+(`protocol.invalid_message`, `target_node`). Setting and removing a grant are audit rows of the person (`plugin.grant`, `plugin.ungrant`).
+The messages are in `docs/specs/protocol.md`, "Plugins (ADR-0114)".
 
 ## Safe mode
 
 `?safe` in the address, or the safe-mode key **Ctrl+Alt+Shift+S** (⌘⌥⇧S on a Mac, by the key's place), opens the window with no plugins
-and the built-in theme (`plugins/safe.ts`): neither the plugin store nor the theme store reads this browser's storage, so another tab's
+and the built-in theme (`plugins/safe.ts`): nothing is asked of the hub, neither the plugin store nor the theme store reads this browser's storage, so another tab's
 change cannot bring a stored theme back either, and a choice made in safe mode holds for that visit only. A note at the bottom says so,
 with **Leave safe mode**.
 
@@ -204,8 +252,15 @@ runs.
 
 ## Tests
 
-- Unit (`apps/web/src/plugins/*.test.ts*`): the package checks, the message filter by source, type, size and rate, grants, the store,
-  the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode.
+- Unit (`apps/web/src/plugins/*.test.ts*`): the package checks (and the shared packages the hub checks too), the message filter by source,
+  type, size and rate, grants, the store, the projection (no approvals, terminal data or actions), the registry's host-set facts, the
+  marker and safe mode; hub plugins (`hub.test.ts`, `hubDialog.test.tsx`): loaded in pieces and checked again, grants kept on the hub and
+  read back, gone once removed, held on a new capability, left out when the bytes or the list do not agree, none from an older hub or in
+  safe mode, a development plugin standing in with its own grant, and the dialog without Remove.
+- Hub: the package check agrees with the window on the shared packages (`tests/plugin_package_agreement.rs`); storage, pieces, the cap
+  and grants (`src/plugins.rs`); over real sockets, owner, member and viewer each list, fetch and keep grants of their own, a node named is
+  refused, and a removed or replaced package is not served (`tests/plugins.rs`); `agora hub plugin add|list|remove` with its audit rows
+  (`crates/agora/tests/hub_cli.rs`); golden fixtures of the messages (`schema/fixtures/plugins/`).
 - Hub (`web.rs`): the exact headers of each path; only `/plugin-frame.html` has the frame page's.
 - Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's headers per path, read from `web.rs` by
   `scripts/hub-headers.mjs`): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
@@ -217,4 +272,7 @@ runs.
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
   package loads through the dialog.
+- Real hub (`scripts/e2e-plugin-hub.mjs`, headless Chromium with a real hub and node): the owner installs the sample plugin; the window lists
+  it as the hub's without Remove and draws none of its panes until the person shows it; then it draws the real agents, and after a reload
+  it is drawn with the grant the hub kept (nothing in this browser's storage); once the owner removes it, the next load drops it.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).

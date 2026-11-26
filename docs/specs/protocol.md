@@ -1408,6 +1408,36 @@ node sets. The window's button and the terminal client's key come with the next 
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
 
+### Plugins (ADR-0114)
+
+Schema step of ADR-0114 decision 6 (Accepted). New messages in `schema/agora/v1/plugins.proto` and new arms of `CommandRequest`
+(`plugin_list` 111, `plugin_fetch` 112, `plugin_grant_list` 113, `plugin_grant_set` 114, `plugin_grant_remove` 115) and `CommandOk`
+(`plugin_list` 33, `plugin_fetch` 34, `plugin_grant_list` 35); nothing published changed. No capability: a window sends them to any hub,
+and an older hub refuses them (the window then has no hub plugins). Every one is answered by the hub itself, for any signed-in person
+(owner, member or viewer alike, ahead of the routing that limits a viewer or a member's projects); one that names a node
+(`target_node` not empty) is refused with `protocol.invalid_message` (`target_node`). A node never receives them (refused as
+unsupported). No message installs or removes a plugin: the owner does, on the hub's machine (`agora hub plugin add FILE | list |
+remove ID`, docs/ux/plugins.md).
+
+- **`PluginList`** → `PluginListResult.plugins`: each installed plugin by id: `plugin_id`, `version`, `name`, `capabilities` (from the
+  manifest the hub checked), `sha256` of the whole package, `size` (at most 2 MiB) and `installed_ms`. A hub keeps at most 16.
+- **`PluginFetch { plugin_id, sha256, offset }`** → `PluginFetchResult { plugin_id, sha256, total_size, offset, data }`: at most 512 KiB of
+  the package from `offset`, empty at the end (a frame carries at most 1 MiB). `plugin.not_found` (`plugin_id`) unless that plugin is
+  installed with that package (removed, or replaced by another version); an `offset` past the end is `protocol.invalid_message`
+  (`offset`). The window joins the pieces, checks that they hash to `sha256`, and checks the package again as a file
+  (docs/ux/plugins.md, "The package"); the manifest must name the listed id and version.
+- **`PluginGrantList`** → `PluginGrantListResult.grants`: the caller's own grants, one per plugin: `plugin_id`, the `version` it was given
+  for (possibly older than the installed one), `seen` (what that version asked for), `granted` (what the person allowed, each in
+  `seen`) and `set_ms`. A window holds a plugin whose installed version asks for a capability not in `seen`.
+- **`PluginGrantSet { plugin_id, version, granted }`** → `Empty`: replaces the caller's grant for that plugin. `plugin.not_found` unless
+  `version` is the installed one; `protocol.invalid_message` (`granted`) for a capability that version does not ask for. The hub records
+  `seen` from the installed manifest and `granted` in the manifest's order.
+- **`PluginGrantRemove { plugin_id }`** → `Empty`: forgets the caller's grant (stop showing it); none is not an error.
+- **Kept per person.** Grants are keyed by the person (`owner` on a hub with one person) and plugin id. Removing a plugin forgets everyone's
+  grant for it; removing a person forgets theirs. Setting and removing a grant are audit rows of the person (`plugin.grant`,
+  `plugin.ungrant`); adding and removing a plugin are the owner's (`plugin.add`, `plugin.remove`).
+- Golden fixtures: `schema/fixtures/v1/agora.v1.Plugin*` and `schema/fixtures/plugins/` (`crates/agora-protocol/tests/plugins.rs`).
+
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub

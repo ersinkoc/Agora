@@ -64,6 +64,7 @@ import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
 import { SAFE, safeAddress } from './plugins/safe';
+import { pluginStore } from './plugins/store';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -339,6 +340,11 @@ export function App() {
     trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,
   }));
   const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
+  // ADR-0114 step 3: the plugins installed on the hub and this person's grants, read once this window is connected (again after a sign-in).
+  useEffect(() => {
+    if (!api) { void pluginStore.attachHub(undefined); return; }
+    if (live !== undefined) void pluginStore.attachHub({ command: (body) => api.command('', body) });
+  }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   // What the agents cost so far, asked for by the owner's window only (#1044).
   const usage = useUsageReport(api, live !== undefined, pairing.owner);
   useEffect(() => {

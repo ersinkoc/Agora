@@ -1,7 +1,8 @@
-// Plugins loaded for development, and the install screen (ADR-0114 decisions 3 and 6; docs/ux/plugins.md). Opened from the command
-// palette ("Plugins"). A package is loaded from a local file into this browser only; the install screen lists what it asks to see in
-// plain words and the person allows each one. Everything a plugin's name, author or licence says is shown as text, never as the window's
-// own words.
+// The plugins of this window, and the install screen (ADR-0114 decisions 3 and 6; docs/ux/plugins.md). Opened from the command palette
+// ("Plugins"). It lists the plugins installed on the hub (each person chooses whether to show one, and what it may see; only the hub's
+// owner adds or removes them, on the hub's machine) and those loaded from a local file into this browser only, for development. The
+// install screen lists what a plugin asks to see in plain words and the person allows each one. Everything a plugin's name, author or
+// licence says is shown as text, never as the window's own words.
 import * as Dialog from '@radix-ui/react-dialog';
 import { useId, useRef, useState } from 'react';
 import { t } from '../i18n';
@@ -19,7 +20,7 @@ export const packageErrorText = (code: PackageError | 'full', detail?: string) =
 
 type Screen =
   | { at: 'list'; error?: string; note?: string }
-  | { at: 'grant'; plugin: CheckedPlugin; text?: string; allow: Capability[] };
+  | { at: 'grant'; plugin: CheckedPlugin; text?: string; allow: Capability[]; dev: boolean; fresh?: boolean };
 
 export function PluginsDialog({ onClose }: { onClose: () => void }) {
   const { plugins, safe } = usePlugins();
@@ -34,11 +35,16 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
     if (file.current) file.current.value = '';
     if (!r.ok) { setScreen({ at: 'list', error: packageErrorText(r.code, r.detail) }); return; }
     // A plugin loaded again keeps what the person allowed it, for the capabilities it still asks for.
-    const before = plugins.find((p) => p.plugin.manifest.id === r.plugin.manifest.id)?.grant?.granted ?? [];
-    setScreen({ at: 'grant', plugin: r.plugin, text: r.text, allow: r.plugin.manifest.capabilities.filter((c) => before.includes(c)) });
+    // A development plugin never takes a hub plugin's grant, even with the same id.
+    const before = plugins.find((p) => p.dev && p.plugin.manifest.id === r.plugin.manifest.id)?.grant?.granted ?? [];
+    setScreen({ at: 'grant', plugin: r.plugin, text: r.text, allow: r.plugin.manifest.capabilities.filter((c) => before.includes(c)), dev: true });
   };
-  const save = (s: Extract<Screen, { at: 'grant' }>) => {
-    if (s.text === undefined) { pluginStore.regrant(s.plugin.manifest.id, s.allow); setScreen({ at: 'list' }); return; }
+  const save = async (s: Extract<Screen, { at: 'grant' }>) => {
+    if (s.text === undefined) {
+      const kept = await pluginStore.regrant(s.plugin.manifest.id, s.allow);
+      setScreen(kept ? { at: 'list' } : { at: 'list', error: t('plugin-grant-failed') });
+      return;
+    }
     const kept = pluginStore.install(s.plugin, s.text, s.allow);
     if (kept === 'full') { setScreen({ at: 'list', error: packageErrorText('full') }); return; }
     setScreen({ at: 'list', note: t(kept === 'kept' ? 'plugin-added' : 'plugin-added-visit', { name: s.plugin.manifest.name }) });
@@ -75,11 +81,14 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                       <span className="min-w-0 truncate font-medium text-ink">{m.name}</span>
                       <PluginMark dev={p.dev} />
                       <span className="text-xs text-muted">{t('plugin-version-by', { version: m.version, author: m.author })}</span>
+                      {!p.dev && <span className="text-xs text-muted" data-plugin-hub="">{t('plugin-from-hub')}</span>}
                     </div>
-                    <p className="m-0 text-xs text-muted">{p.state === 'held' ? t('plugin-held') : t('plugin-sees', { count: p.granted.length })}</p>
+                    <p className="m-0 text-xs text-muted">{p.state === 'new' ? t('plugin-not-shown') : p.state === 'held' ? t('plugin-held') : t('plugin-sees', { count: p.granted.length })}</p>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" onClick={() => setScreen({ at: 'grant', plugin: p.plugin, allow: [...p.granted] })}>{t(p.state === 'held' ? 'plugin-review' : 'plugin-change')}</Button>
-                      <Button size="sm" variant="danger-ghost" onClick={() => pluginStore.remove(m.id)}>{t('plugin-remove')}</Button>
+                      <Button size="sm" onClick={() => setScreen({ at: 'grant', plugin: p.plugin, allow: [...p.granted], dev: p.dev, fresh: p.state === 'new' })}>{t(p.state === 'new' ? 'plugin-look' : p.state === 'held' ? 'plugin-review' : 'plugin-change')}</Button>
+                      {/* A hub plugin is the owner's to remove, on the hub's machine; a person can stop showing it. */}
+                      {p.dev ? <Button size="sm" variant="danger-ghost" onClick={() => pluginStore.remove(m.id)}>{t('plugin-remove')}</Button>
+                        : p.state !== 'new' && <Button size="sm" variant="danger-ghost" onClick={() => void pluginStore.hide(m.id).then((ok) => { if (!ok) setScreen({ at: 'list', error: t('plugin-grant-failed') }); })}>{t('plugin-hide')}</Button>}
                     </div>
                   </li>
                 );
@@ -93,7 +102,7 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                   <Button onClick={() => file.current?.click()}>{t('plugin-load')}</Button></>}
               <Button variant="primary" onClick={onClose}>{t('plugins-done')}</Button>
             </div>
-          </> : <Grant titleId={titleId} screen={screen} onChange={(allow) => setScreen({ ...screen, allow })} onCancel={() => setScreen({ at: 'list' })} onSave={() => save(screen)} />}
+          </> : <Grant titleId={titleId} screen={screen} onChange={(allow) => setScreen({ ...screen, allow })} onCancel={() => setScreen({ at: 'list' })} onSave={() => void save(screen)} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -105,9 +114,10 @@ function Grant({ titleId, screen, onChange, onCancel, onSave }: { titleId: strin
   const m = screen.plugin.manifest;
   const toggle = (c: Capability, on: boolean) => onChange(m.capabilities.filter((x) => (x === c ? on : screen.allow.includes(x))));
   return <>
-    <Dialog.Title id={titleId} className="m-0 text-base font-semibold normal-case tracking-normal text-ink">{t('plugin-grant-title', { name: m.name })}</Dialog.Title>
+    <Dialog.Title id={titleId} className="m-0 text-base font-semibold normal-case tracking-normal text-ink">{t(screen.dev ? 'plugin-grant-title' : 'plugin-grant-title-hub', { name: m.name })}</Dialog.Title>
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-      <PluginMark dev />
+      <PluginMark dev={screen.dev} />
+      {!screen.dev && <span>{t('plugin-from-hub')}</span>}
       <span>{t('plugin-version-by', { version: m.version, author: m.author })}</span>
       <span>{t('plugin-licence', { licence: m.licence })}</span>
     </div>
@@ -123,7 +133,7 @@ function Grant({ titleId, screen, onChange, onCancel, onSave }: { titleId: strin
     </fieldset>}
     <div className="mt-1 flex flex-wrap justify-end gap-2">
       <Button onClick={onCancel}>{t('plugin-cancel')}</Button>
-      <Button variant="primary" onClick={onSave} data-plugin-save="">{t(screen.text === undefined ? 'plugin-save' : 'plugin-add')}</Button>
+      <Button variant="primary" onClick={onSave} data-plugin-save="">{t(screen.text !== undefined ? 'plugin-add' : screen.fresh ? 'plugin-show' : 'plugin-save')}</Button>
     </div>
   </>;
 }
