@@ -18,6 +18,10 @@ const USED_GRANULE_MS: u64 = 60_000;
 
 const MAX_NAME: usize = 64;
 
+/// Live credentials are stored as raw 32-byte SHA-256 hashes. A leading byte makes an expired
+/// credential's tombstone distinguishable even if the wall clock later moves backwards.
+const RETIRED_PREFIX: u8 = 0xff;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum TokenError {
     /// The name is empty, too long, or has characters other than letters, digits, `.`, `_`, `-`.
@@ -65,6 +69,22 @@ fn hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+/// Replaces the usable token hash while keeping the row that `list` shows. The payload is a
+/// domain-separated SHA-256 derivative with a tag that no live credential hash has.
+fn retired_hash(token_hash: &[u8]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(b"agora expired metrics token\0");
+    digest.update(token_hash);
+    let mut retired = Vec::with_capacity(33);
+    retired.push(RETIRED_PREFIX);
+    retired.extend_from_slice(&digest.finalize());
+    retired
+}
+
+fn is_retired(token_hash: &[u8]) -> bool {
+    token_hash.len() == 33 && token_hash.first() == Some(&RETIRED_PREFIX)
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
@@ -106,14 +126,16 @@ impl<'a> MetricsTokens<'a> {
             raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
         let conn = self.store.lock()?;
-        let live: Option<i64> = conn
+        let existing: Option<(Vec<u8>, i64, i64)> = conn
             .query_row(
-                "SELECT revoked_ms FROM metrics_tokens WHERE name = ?1",
+                "SELECT token_hash, expires_ms, revoked_ms FROM metrics_tokens WHERE name = ?1",
                 [name],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if live == Some(0) {
+        if existing.is_some_and(|(token_hash, expires, revoked)| {
+            !is_retired(&token_hash) && revoked == 0 && (expires == 0 || expires > to_i64(now_ms))
+        }) {
             return Err(TokenError::Exists);
         }
         conn.execute("DELETE FROM metrics_tokens WHERE name = ?1", [name])?;
@@ -136,9 +158,30 @@ impl<'a> MetricsTokens<'a> {
     /// Ends the token called `name`. `false` when no live token has that name.
     pub fn revoke(&self, name: &str, now_ms: u64) -> Result<bool, TokenError> {
         let conn = self.store.lock()?;
+        let row: Option<(Vec<u8>, i64, i64)> = conn
+            .query_row(
+                "SELECT token_hash, expires_ms, revoked_ms FROM metrics_tokens WHERE name = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((token_hash, expires, revoked)) = row else {
+            return Ok(false);
+        };
+        if is_retired(&token_hash) || revoked != 0 {
+            return Ok(false);
+        }
+        if expires != 0 && expires <= to_i64(now_ms) {
+            conn.execute(
+                "UPDATE metrics_tokens SET token_hash = ?2 WHERE name = ?1 AND token_hash = ?3",
+                params![name, retired_hash(&token_hash), token_hash],
+            )?;
+            return Ok(false);
+        }
         let n = conn.execute(
-            "UPDATE metrics_tokens SET revoked_ms = ?2 WHERE name = ?1 AND revoked_ms = 0",
-            params![name, to_i64(now_ms.max(1))],
+            "UPDATE metrics_tokens SET revoked_ms = ?2 WHERE name = ?1 AND revoked_ms = 0
+             AND (expires_ms = 0 OR expires_ms > ?3)",
+            params![name, to_i64(now_ms.max(1)), to_i64(now_ms)],
         )?;
         drop(conn);
         if n > 0 {
@@ -197,7 +240,14 @@ impl<'a> MetricsTokens<'a> {
         if !same(&stored, &want) {
             return false;
         }
-        if revoked != 0 || (expires != 0 && to_i64(now_ms) >= expires) {
+        if revoked != 0 {
+            return false;
+        }
+        if expires != 0 && to_i64(now_ms) >= expires {
+            let _ = conn.execute(
+                "UPDATE metrics_tokens SET token_hash = ?2 WHERE token_hash = ?1",
+                params![want, retired_hash(&stored)],
+            );
             return false;
         }
         let minute = to_i64(now_ms - now_ms % USED_GRANULE_MS);
@@ -253,6 +303,234 @@ mod tests {
         let long = t.create("long", 0, None).unwrap();
         assert!(t.check(&short, DAY - 1) && !t.check(&short, DAY));
         assert!(t.check(&long, 4000 * DAY));
+    }
+
+    #[test]
+    fn f390_an_expired_metrics_token_cannot_return_after_clock_rollback() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        let t = MetricsTokens::new(&s);
+        let never = t.create("never", 0, None).unwrap();
+        assert!(t.check(&never, 4000 * DAY));
+        assert!(!t.check("agm_unknown", 1));
+        println!("CONTROL OK");
+
+        let short = t.create("short", 0, Some(DAY)).unwrap();
+        assert!(!t.check(&short, DAY));
+        let actual = t.check(&short, DAY - 1);
+        println!("EXPECTED: false");
+        println!("ACTUAL: {actual}");
+        if !actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(!actual);
+    }
+
+    #[test]
+    fn verifies_f390_metrics_token_expiry_boundaries() {
+        let never_store = SqliteStore::open_in_memory().unwrap();
+        let never = MetricsTokens::new(&never_store);
+        let token = never.create("never", 0, None).unwrap();
+        assert!(never.check(&token, 4000 * DAY));
+
+        let exact_store = SqliteStore::open_in_memory().unwrap();
+        let exact = MetricsTokens::new(&exact_store);
+        let token = exact.create("exact", 0, Some(DAY)).unwrap();
+        assert!(exact.check(&token, DAY - 1));
+        assert!(!exact.check(&token, DAY));
+        assert!(!exact.check(&token, DAY - 1));
+        assert_eq!(exact.list().unwrap()[0].expires_ms, DAY);
+
+        let late_store = SqliteStore::open_in_memory().unwrap();
+        let late = MetricsTokens::new(&late_store);
+        let token = late.create("late", 0, Some(DAY)).unwrap();
+        assert!(!late.check(&token, DAY + 500));
+        assert!(!late.check(&token, 1));
+        assert!(!late.check("agm_unknown", 1));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f391_an_expired_metrics_token_name_is_not_live() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        let t = MetricsTokens::new(&s);
+        t.create("revoked", 0, None).unwrap();
+        assert!(t.revoke("revoked", 1).unwrap());
+        assert!(t.create("revoked", 2, None).is_ok());
+        println!("CONTROL OK");
+
+        t.create("expired", 0, Some(DAY)).unwrap();
+        let actual = t.create("expired", DAY, None).map(|_| ());
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn verifies_f391_metrics_token_name_reuse_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+        tokens.create("live", 0, Some(DAY)).unwrap();
+        assert_eq!(
+            tokens.create("live", DAY - 1, None),
+            Err(TokenError::Exists)
+        );
+        tokens.create("never", 0, None).unwrap();
+        assert_eq!(
+            tokens.create("never", 4000 * DAY, None),
+            Err(TokenError::Exists)
+        );
+
+        let old = tokens.create("exact", 0, Some(DAY)).unwrap();
+        let exact = tokens.create("exact", DAY, None).unwrap();
+        assert!(!tokens.check(&old, 1));
+        assert!(tokens.check(&exact, DAY));
+
+        tokens.create("late", 0, Some(DAY)).unwrap();
+        assert!(tokens.create("late", DAY + 500, None).is_ok());
+        tokens.create("revoked", 0, None).unwrap();
+        assert!(tokens.revoke("revoked", 1).unwrap());
+        assert!(tokens.create("revoked", 2, None).is_ok());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f392_revoking_an_expired_metrics_token_reports_it_was_not_live() {
+        let control_store = SqliteStore::open_in_memory().unwrap();
+        let control = MetricsTokens::new(&control_store);
+        control.create("live", 0, Some(DAY)).unwrap();
+        assert!(control.revoke("live", DAY - 1).unwrap());
+        assert!(!control.revoke("live", DAY).unwrap());
+        println!("CONTROL OK");
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+        tokens.create("expired", 0, Some(DAY)).unwrap();
+        let actual = tokens.revoke("expired", DAY).unwrap();
+        println!("EXPECTED: false");
+        println!("ACTUAL: {actual}");
+        if !actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(!actual);
+    }
+
+    #[test]
+    fn verifies_f392_metrics_token_revoke_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+        assert!(!tokens.revoke("unknown", 1).unwrap());
+
+        tokens.create("live", 0, Some(DAY)).unwrap();
+        assert!(tokens.revoke("live", DAY - 1).unwrap());
+        assert!(!tokens.revoke("live", DAY).unwrap());
+
+        let exact = tokens.create("exact", 0, Some(DAY)).unwrap();
+        assert!(!tokens.revoke("exact", DAY).unwrap());
+        assert!(!tokens.check(&exact, DAY - 1));
+
+        let late = tokens.create("late", 0, Some(DAY)).unwrap();
+        assert!(!tokens.revoke("late", DAY + 500).unwrap());
+        assert!(!tokens.check(&late, 1));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f395_an_observed_expired_metrics_token_name_stays_reusable_after_clock_rollback() {
+        let control_store = SqliteStore::open_in_memory().unwrap();
+        let control = MetricsTokens::new(&control_store);
+        control.create("name", 0, None).unwrap();
+        assert!(control.revoke("name", 1).unwrap());
+        assert!(control.create("name", 2, None).is_ok());
+        println!("CONTROL OK");
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+        let expired = tokens.create("name", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&expired, DAY));
+        let actual = tokens.create("name", DAY - 1, None).map(|_| ());
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn f396_revoking_an_observed_expired_metrics_token_stays_false_after_clock_rollback() {
+        let control_store = SqliteStore::open_in_memory().unwrap();
+        let control = MetricsTokens::new(&control_store);
+        control.create("live", 0, Some(DAY)).unwrap();
+        assert!(control.revoke("live", DAY - 1).unwrap());
+        assert!(!control.revoke("unknown", DAY - 1).unwrap());
+        println!("CONTROL OK");
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+        let expired = tokens.create("expired", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&expired, DAY));
+        let actual = tokens.revoke("expired", DAY - 1).unwrap();
+        println!("EXPECTED: false");
+        println!("ACTUAL: {actual}");
+        if !actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(!actual);
+    }
+
+    #[test]
+    fn verifies_f395_terminal_metrics_token_name_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+
+        tokens.create("active", 0, None).unwrap();
+        assert_eq!(tokens.create("active", DAY, None), Err(TokenError::Exists));
+
+        let exact = tokens.create("exact", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&exact, DAY));
+        assert!(tokens.create("exact", DAY - 1, None).is_ok());
+
+        let late = tokens.create("late", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&late, DAY * 2));
+        assert!(tokens.create("late", DAY - 1, None).is_ok());
+
+        tokens.create("revoked", 0, None).unwrap();
+        assert!(tokens.revoke("revoked", 1).unwrap());
+        assert!(tokens.create("revoked", 0, None).is_ok());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f396_terminal_metrics_token_revoke_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let tokens = MetricsTokens::new(&store);
+
+        tokens.create("live", 0, None).unwrap();
+        assert!(tokens.revoke("live", DAY).unwrap());
+        assert!(!tokens.revoke("live", DAY).unwrap());
+        assert!(!tokens.revoke("unknown", DAY).unwrap());
+
+        let exact = tokens.create("exact", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&exact, DAY));
+        assert!(!tokens.revoke("exact", DAY - 1).unwrap());
+
+        let late = tokens.create("late", 0, Some(DAY)).unwrap();
+        assert!(!tokens.check(&late, DAY * 2));
+        assert!(!tokens.revoke("late", DAY - 1).unwrap());
+        println!("FIX VERIFIED");
     }
 
     #[test]

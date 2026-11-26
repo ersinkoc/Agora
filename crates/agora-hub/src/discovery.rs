@@ -92,27 +92,13 @@ pub struct Found {
     pub version: String,
 }
 
-/// Text from the network is untrusted: no control characters and none of the bidirectional, zero-width, invisible or tag characters
-/// that make one name look like another (U+00AD soft hyphen, U+034F, U+061C, U+200B-200F, U+202A-202E, U+2060-2064, U+2066-2069,
-/// U+3164, U+FEFF and the tag characters U+E0000-E007F).
+/// Text from the network is untrusted: no control character or character in the shared hidden-character policy may make one name
+/// look like another.
 fn plain(s: &str) -> bool {
     !s.is_empty()
-        && !s.chars().any(|c| {
-            c.is_control()
-                || matches!(
-                    c,
-                    '\u{00AD}'
-                        | '\u{034F}'
-                        | '\u{061C}'
-                        | '\u{200B}'..='\u{200F}'
-                        | '\u{202A}'..='\u{202E}'
-                        | '\u{2060}'..='\u{2064}'
-                        | '\u{2066}'..='\u{2069}'
-                        | '\u{3164}'
-                        | '\u{FEFF}'
-                        | '\u{E0000}'..='\u{E007F}'
-                )
-        })
+        && !s
+            .chars()
+            .any(|c| c.is_control() || agora_core::text::is_hidden(c))
 }
 
 /// Reads an answer, or `None` for anything that is not one (too long, not a message, not accepting, no name, an unusable port or
@@ -674,7 +660,10 @@ mod tests {
             '\u{00AD}',
             '\u{061C}',
             '\u{034F}',
+            '\u{2800}',
             '\u{3164}',
+            '\u{FE0F}',
+            '\u{FFA0}',
             '\u{E0000}',
             '\u{E0041}',
             '\u{E007F}',

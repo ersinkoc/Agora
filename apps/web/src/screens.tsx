@@ -59,6 +59,7 @@ import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
+import { visible } from './net/hidden';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -314,12 +315,12 @@ export function Focus({ agent, approvals = [], onResolve, stale = false, source:
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
       <header className="ide-bar min-h-10 flex-wrap border-b py-1">
         <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{agent.name}</h1>
+        <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{visible(agent.name)}</h1>
         {/* A live chat agent's state and tokens are said once, in its session bar (`PromptBox`); a terminal or a closed agent keeps them here. */}
         {!(agent.terminal === false && !agent.closed) && <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>}
         <NoAskBadge agent={agent} />
         <AsksLessChip agent={agent} />
-        <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
+        <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{visible(agent.machine)}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{visible(agent.project || agent.workspace)}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{visible(agent.branch)}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens && agent.terminal !== false ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
         <CloseAgentMenu agent={agent} />
@@ -400,7 +401,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
   const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
   const [confirming, setConfirming] = useState<MyDevice | undefined>();
-  const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
+  const name = (id: string) => visible(machines?.find((m) => m.id === id)?.name ?? id);
   const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
   const canVouch = (trustedOn?.length ?? 0) > 0;
   const inApp = useAppNotify(); // the desktop app's own notifications have a card there only
@@ -564,7 +565,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                       <a className="set-item set-item--link" href={`#/machines/${encodeURIComponent(m.id)}`}>
                         <SystemTile system={m.os} />
                         <span className="set-item__main">
-                          <span className="set-item__name"><bdi>{m.name}</bdi></span>
+                          <span className="set-item__name"><bdi>{visible(m.name)}</bdi></span>
                           <span className="set-item__meta">
                             {systemName(m.os) && <span>{peerText(systemName(m.os))}</span>}
                             <span>{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
@@ -572,7 +573,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                           </span>
                         </span>
                         <span className="set-item__end">
-                          {m.build && <span title={t('network-build')}><Tag mono>{m.build}</Tag></span>}
+                          {m.build && <span title={t('network-build')}><Tag mono>{visible(m.build)}</Tag></span>}
                           <Pill tone={m.online ? 'finished' : 'idle'} icon={<span aria-hidden className="set-dot" />}>{t(m.online ? 'machine-online' : 'machine-offline')}</Pill>
                         </span>
                       </a>

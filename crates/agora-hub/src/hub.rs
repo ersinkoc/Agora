@@ -482,9 +482,7 @@ impl Hub {
     ) -> Result<Ingest, SessionError> {
         let (outcome, stored) = session.event_stored(payload)?;
         if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
-            self.metrics
-                .events_ingested
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::saturating_add(&self.metrics.events_ingested, 1);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(stored.as_deref().unwrap_or(payload)) {
                 let restarted = match &event.body {
@@ -1167,7 +1165,9 @@ impl Hub {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         });
-        g.subs_dropped += (before - g.subs.len()) as u64;
+        g.subs_dropped = g
+            .subs_dropped
+            .saturating_add(u64::try_from(before - g.subs.len()).unwrap_or(u64::MAX));
     }
 
     /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
@@ -1453,6 +1453,165 @@ mod tests {
             Ingest::Duplicate { acked: 2 }
         );
         assert!(sub.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn f372_the_ingested_event_counter_does_not_wrap_after_saturation() {
+        let (hub, sup) = (hub(), support());
+        hub.metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        assert_eq!(
+            hub.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn the_ingested_event_counter_still_reaches_its_maximum() {
+        let (hub, sup) = (hub(), support());
+        hub.metrics
+            .events_ingested
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        assert_eq!(
+            hub.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn verifies_f372_ingested_counter_saturation_for_applied_resynced_and_near_max_events() {
+        let sup = support();
+
+        let applied = hub();
+        applied
+            .metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut applied_session = open_session(&applied, &sup, "applied");
+        applied
+            .ingest(&mut applied_session, &online("applied", 1))
+            .unwrap();
+        assert_eq!(
+            applied
+                .metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+
+        let resynced = hub();
+        resynced
+            .metrics
+            .events_ingested
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        let mut resynced_session = open_session(&resynced, &sup, "resynced");
+        resynced_session.snapshot_required(9).unwrap();
+        assert!(matches!(
+            resynced.ingest(&mut resynced_session, &online("resynced", 7)),
+            Ok(Ingest::Resynced { .. })
+        ));
+        assert_eq!(
+            resynced
+                .metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+
+        let near = hub();
+        near.metrics
+            .events_ingested
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        let mut near_session = open_session(&near, &sup, "near");
+        near.ingest(&mut near_session, &online("near", 1)).unwrap();
+        assert_eq!(
+            near.metrics
+                .events_ingested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn f375_subscriber_drop_metrics_do_not_wrap_after_saturation() {
+        let dropped_after_publish = |starting| {
+            let hub = hub();
+            let (tx, rx) = sync_channel(1);
+            drop(rx);
+            let mut inner = hub.lock();
+            inner.subs.push(tx);
+            inner.subs_dropped = starting;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Hub::publish(
+                    &mut inner,
+                    Delivered {
+                        pos: 1,
+                        event: Event {
+                            producer_id: "n".into(),
+                            seq: 1,
+                            at_ms: 1,
+                            body: None,
+                        },
+                    },
+                );
+            }))
+            .map(|()| inner.subs_dropped)
+            .map_err(|_| ())
+        };
+
+        assert_eq!(dropped_after_publish(u64::MAX - 1), Ok(u64::MAX));
+        println!("CONTROL OK");
+
+        let actual = dropped_after_publish(u64::MAX);
+        println!("EXPECTED: Ok({})", u64::MAX);
+        println!("ACTUAL: {actual:?}");
+        if actual == Ok(u64::MAX) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(u64::MAX));
+    }
+
+    #[test]
+    fn verifies_f375_subscriber_drop_metrics_are_monotonic_at_boundaries() {
+        let dropped_after = |starting, subscribers| {
+            let hub = hub();
+            let mut inner = hub.lock();
+            for _ in 0..subscribers {
+                let (tx, rx) = sync_channel(1);
+                drop(rx);
+                inner.subs.push(tx);
+            }
+            inner.subs_dropped = starting;
+            Hub::publish(
+                &mut inner,
+                Delivered {
+                    pos: 1,
+                    event: Event {
+                        producer_id: "n".into(),
+                        seq: 1,
+                        at_ms: 1,
+                        body: None,
+                    },
+                },
+            );
+            inner.subs_dropped
+        };
+
+        assert_eq!(dropped_after(7, 0), 7);
+        assert_eq!(dropped_after(2, 3), 5);
+        assert_eq!(dropped_after(u64::MAX - 1, 2), u64::MAX);
+        println!("FIX VERIFIED");
     }
 
     /// ADR-0054: the event a node's resync lands on goes into the view and to subscribers like any applied one.
@@ -2456,7 +2615,7 @@ mod tests {
         hub.store()
             .set_setting(
                 &format!("board.{old}"),
-                br#"{"next": 2, "tasks": [{"id": "t1", "title": "kept from before", "detail": "", "depends_on": [], "done": false, "owner": null, "summary": ""}], "leases": []}"#,
+                br#"{"next": 2, "tasks": [{"id": "t-1", "title": "kept from before", "detail": "", "depends_on": [], "done": false, "owner": null, "summary": ""}], "leases": []}"#,
             )
             .unwrap();
         hub.board_join_settled("old", &folded);

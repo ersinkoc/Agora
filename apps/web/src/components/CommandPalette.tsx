@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { rank } from '../fuzzy';
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, EmptyState } from './kit';
 
@@ -45,7 +46,7 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  const groups = useMemo(() => groupPalette(rank(items, query, (i) => i.label), query.trim() === ''), [items, query]);
+  const groups = useMemo(() => groupPalette(rank(items, query, (i) => visible(i.label)), query.trim() === ''), [items, query]);
   const flat = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const shown = Math.min(active, Math.max(flat.length - 1, 0));
   const current = flat[shown];
@@ -99,7 +100,7 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
                     <div key={r.id} id={optionId(r.id)} role="option" aria-selected={i === shown} aria-keyshortcuts={r.ariaKeys ?? r.keys} className="palette__row"
                       onMouseEnter={() => setActive(i)} onClick={() => choose(r)}>
                       {r.agent ? <AgentAvatar accent={r.agent.accent} kind={r.agent.kind} /> : <span aria-hidden className="palette__icon"><Icon name={r.icon ?? 'step'} /></span>}
-                      <span className="palette__label">{r.label}</span>
+                      <span className="palette__label">{visible(r.label)}</span>
                       {r.keys && <kbd aria-hidden className="ide-kbd">{r.keys}</kbd>}
                     </div>
                   );

@@ -519,11 +519,13 @@ const SEEN_COMMITMENT: u8 = 1;
 const SEEN_EXPORTER: u8 = 2;
 const SEEN_NONCE: u8 = 3;
 
-/// Text a machine supplies for the owner's card: bounded, with no control character and none of the characters that reorder or hide
-/// text (bidirectional controls, zero-width characters, the byte order mark).
+/// Text a machine supplies for the owner's card: bounded, with no control or hidden character.
 fn clean_text(s: &str) -> bool {
-    let hides = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
-    !s.is_empty() && s.len() <= TEXT_MAX && !s.chars().any(|c| c.is_control() || hides(c))
+    !s.is_empty()
+        && s.len() <= TEXT_MAX
+        && !s
+            .chars()
+            .any(|c| c.is_control() || agora_core::text::is_hidden(c))
 }
 
 impl Default for Pairing {
@@ -2348,6 +2350,7 @@ mod tests {
             (long.as_str(), "linux", "node_name"),
             ("a\nb", "linux", "node_name"),
             ("ok", long.as_str(), "os"),
+            ("ok", "lin\u{2800}ux", "os"),
         ] {
             let mut p = open_hub();
             let c = m.commit();

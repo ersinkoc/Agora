@@ -283,14 +283,24 @@ impl Exchange {
 pub fn split_address(typed: &str) -> Option<(String, String)> {
     let t = typed.trim();
     let t = t.strip_prefix("wss://").unwrap_or(t).trim_end_matches('/');
-    if t.is_empty() || t.contains(['/', ' ', '\t', '@']) {
+    if t.is_empty()
+        || t.contains(['/', '@', '?', '#'])
+        || t.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return None;
     }
+    let port = |p: &str| {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u16>().ok())
+            .flatten()
+            .filter(|p| *p != 0)
+    };
     let (host, port) = if let Some(rest) = t.strip_prefix('[') {
         let (h, after) = rest.split_once(']')?;
+        h.parse::<std::net::Ipv6Addr>().ok()?;
         let port = match after {
             "" => DEFAULT_PORT,
-            a => a.strip_prefix(':')?.parse().ok()?,
+            a => port(a.strip_prefix(':')?)?,
         };
         (h.to_string(), port)
     } else if t.parse::<IpAddr>().is_ok() {
@@ -298,11 +308,14 @@ pub fn split_address(typed: &str) -> Option<(String, String)> {
         (t.to_string(), DEFAULT_PORT)
     } else {
         match t.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.parse().ok()?),
+            Some((h, p)) if !h.contains([':', '[', ']']) => (h.to_string(), port(p)?),
+            Some(_) => return None,
             None => (t.to_string(), DEFAULT_PORT),
         }
     };
-    if host.is_empty() || port == 0 {
+    if host.is_empty()
+        || (!host.contains(':') && rustls::pki_types::ServerName::try_from(host.clone()).is_err())
+    {
         return None;
     }
     let addr = if host.contains(':') {
@@ -1070,6 +1083,49 @@ mod tests {
         ] {
             assert_eq!(ok(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn f426_pairing_refuses_brackets_around_a_non_ipv6_host() {
+        assert_eq!(
+            split_address("[2001:db8::1]:7443"),
+            Some(("2001:db8::1".into(), "[2001:db8::1]:7443".into()))
+        );
+        println!("CONTROL OK");
+
+        let actual = split_address("[hub.example]:7443");
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, None);
+    }
+
+    #[test]
+    fn verifies_f426_pairing_address_boundaries() {
+        for valid in [
+            "hub.example",
+            "hub.example:1",
+            "127.0.0.1:65535",
+            "::1",
+            "[::1]:7443",
+        ] {
+            assert!(split_address(valid).is_some(), "{valid}");
+        }
+        for invalid in [
+            "[hub.example]:7443",
+            "[127.0.0.1]:7443",
+            "hub.example:+443",
+            "hub.example:65536",
+            "hub.example?query",
+            "hub\n.example",
+        ] {
+            assert_eq!(split_address(invalid), None, "{invalid:?}");
+        }
+        println!("FIX VERIFIED");
     }
 
     /// F1440: a peer that completes the TLS handshake and then never answers the WebSocket upgrade ends the pairing within the

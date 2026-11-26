@@ -193,10 +193,10 @@ pub fn render(
         let line = t(
             key!("tui-asks"),
             &[
-                ("agent", Arg::Str(local(&a.agent_id).to_string())),
+                ("agent", Arg::Str(visible(local(&a.agent_id)))),
                 (
                     "action",
-                    Arg::Str(format!("{} {}", a.action, a.detail).trim().to_string()),
+                    Arg::Str(visible(format!("{} {}", a.action, a.detail).trim())),
                 ),
             ],
         );
@@ -210,7 +210,7 @@ pub fn render(
         waiting += 1;
         let line = t(
             key!("tui-blocked"),
-            &[("agent", Arg::Str(local(&a.agent_id).to_string()))],
+            &[("agent", Arg::Str(visible(local(&a.agent_id))))],
         );
         let (on, off) = paint(AgentState::Blocked, color);
         out.push(format!("  {on}!{off} {line}"));
@@ -253,7 +253,7 @@ pub fn render(
         } else {
             folder(project).unwrap_or_else(|| project.to_string())
         };
-        out.push(format!("{bold}{name}{reset}"));
+        out.push(format!("{bold}{}{reset}", visible(&name)));
         for (a, depth) in helper_order(&agents) {
             let st = state_of(a);
             let (on, off) = paint(st, color);
@@ -273,7 +273,7 @@ pub fn render(
                     "  {}",
                     t(
                         key!("tui-started-by"),
-                        &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                        &[("agent", Arg::Str(visible(local(&a.parent_agent_id))))],
                     )
                 )
             };
@@ -288,9 +288,9 @@ pub fn render(
             let no_ask = badge(a, t, "  ");
             out.push(format!(
                 "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
-                local(&a.agent_id),
-                a.kind,
-                a.node_id,
+                visible(local(&a.agent_id)),
+                visible(&a.kind),
+                visible(&a.node_id),
             ));
         }
     }
@@ -304,7 +304,7 @@ pub fn render(
             &n.hostname
         };
         let status = presence_text(n, now_ms, t);
-        out.push(format!("  {id}  {dim}{status}{reset}"));
+        out.push(format!("  {}  {dim}{status}{reset}", visible(id)));
     }
     out.push(String::new());
     if keys && s.agents.iter().any(|x| x.agent_id == selected) {
@@ -1594,5 +1594,68 @@ mod tests {
         assert_eq!(wrap_row("ab", 0, 0), vec!["a", "b"]);
         assert_eq!(wrap_row("ab", 1, 0), vec!["a", "b"]);
         assert!(wrap_row("", 0, 0).is_empty());
+    }
+
+    #[test]
+    fn approval_rows_make_untrusted_text_visible() {
+        let mut snap = snapshot();
+        snap.approvals[0].agent_id = "laptop/a\u{3164}gent".into();
+        snap.approvals[0].action = "sh\u{2800}ell".into();
+        snap.approvals[0].detail = "safe\u{034f} detail".into();
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
+        assert!(text.contains("website"), "control missing: {text:?}");
+        assert!(!text.chars().any(agora_core::text::is_hidden), "{text:?}");
+        assert!(
+            text.contains("a\\u{3164}gent") && text.contains("sh\\u{2800}ell"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn inventory_rows_make_snapshot_labels_visible() {
+        let mut snap = snapshot();
+        snap.checkouts[0].path = "/work/pro\u{2800}ject".into();
+        snap.agents[0].agent_id = "laptop/a\u{3164}gent".into();
+        snap.agents[0].kind = "co\u{034f}dex".into();
+        snap.agents[0].node_id = "lap\u{ffa0}top".into();
+        snap.nodes[0].hostname = "ma\u{202e}chine".into();
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
+        assert!(text.contains("claude-code"), "control missing: {text:?}");
+        assert!(!text.chars().any(agora_core::text::is_hidden), "{text:?}");
+        for shown in [
+            "pro\\u{2800}ject",
+            "a\\u{3164}gent",
+            "co\\u{34f}dex",
+            "lap\\u{ffa0}top",
+            "ma\\u{202e}chine",
+        ] {
+            assert!(text.contains(shown), "missing {shown:?}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn verifies_approval_visibility_across_fields_and_unicode() {
+        let mut snap = snapshot();
+        snap.approvals[0].agent_id = "laptop/Grü\u{034f}ße".into();
+        snap.approvals[0].action = "ça\u{3164}lış".into();
+        snap.approvals[0].detail = "漢\u{2800}字 😀".into();
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
+        assert!(!text.chars().any(agora_core::text::is_hidden), "{text:?}");
+        for shown in ["Grü\\u{34f}ße", "ça\\u{3164}lış", "漢\\u{2800}字 😀"] {
+            assert!(text.contains(shown), "missing {shown:?}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn verifies_inventory_visibility_across_sources_and_unicode() {
+        let mut snap = snapshot();
+        snap.checkouts[0].path = "/w/Grü\u{034f}ße".into();
+        snap.agents[0].kind = "ça\u{3164}lış".into();
+        snap.nodes[0].hostname = "漢\u{2800}字-😀".into();
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
+        assert!(!text.chars().any(agora_core::text::is_hidden), "{text:?}");
+        for shown in ["Grü\\u{34f}ße", "ça\\u{3164}lış", "漢\\u{2800}字-😀"] {
+            assert!(text.contains(shown), "missing {shown:?}: {text:?}");
+        }
     }
 }

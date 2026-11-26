@@ -25,8 +25,15 @@ describe('board columns', () => {
 });
 
 describe('untrusted task text', () => {
-  it('cuts to a short plain line and removes control and bidirectional characters', () => {
-    expect(plain('a‮b\u0007c\n\nd', 50)).toBe('abc d');
+  it('makes hidden Unicode in one-line board text visible', () => {
+    expect(plain('Ta\u3164sk\u034f', TITLE_MAX)).toBe('Ta\\u{3164}sk\\u{34f}');
+  });
+  it('verifies one-line board text across isolate, private-use and control characters', () => {
+    expect(plain('模型\u2066', TITLE_MAX)).toBe('模型\\u{2066}');
+    expect(plain('İş\ue000\u0001', TITLE_MAX)).toBe('İş\\u{e000}\\u{1}');
+  });
+  it('cuts to a short plain line and names control and bidirectional characters', () => {
+    expect(plain('a‮b\u0007c\n\nd', 50)).toBe('a\\u{202e}b\\u{7}c d');
     const cut = plain('x'.repeat(10_000), TITLE_MAX);
     expect(Array.from(cut)).toHaveLength(TITLE_MAX);
     expect(cut.endsWith('…')).toBe(true);

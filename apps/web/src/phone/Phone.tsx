@@ -124,6 +124,7 @@ function PhoneRequest({ ask, guard, onResolve, onOpen, onFold }: { ask: PhoneAsk
   // returns how it went, so the window's holds free it again when it failed.
   if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-card phone-card--slab">{fold && <div className="phone-fold__back">{fold}</div>}<SkipApproval approval={x} busy={stale} onResolve={onResolve ? (ok) => onResolve(x, ok) : undefined} />{onResolve && staleWhy}</div>;
   const name = agent?.name || approvalName(x);
+  const shownName = visible(name);
   const why = `phone-why-${x.id}`;
   const sent = guard.status(x.id) === 'sent';
   const off = { disabled: stale, 'aria-disabled': !guard.canAnswer(x.id) || undefined, 'aria-describedby': stale ? why : undefined };
@@ -131,8 +132,8 @@ function PhoneRequest({ ask, guard, onResolve, onOpen, onFold }: { ask: PhoneAsk
     <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-req">
       <ApprovalRequest density="row" stacked icon={ASK_ICON[askKind(x)]}
         avatar={<AgentAvatar accent={agent?.accent || 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />}
-        title={askTitle(x, visible(name))} where={<bdi>{visible(machine)}</bdi>}
-        titleEnd={fold || onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name })} title={t('approval-open-agent', { name })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
+        title={askTitle(x, shownName)} where={<bdi>{visible(machine)}</bdi>}
+        titleEnd={fold || onOpen && <button type="button" className="phone-iconbtn phone-req__open" onClick={onOpen} aria-label={t('approval-open-agent', { name: shownName })} title={t('approval-open-agent', { name: shownName })}><Icon name="chevron" className="size-4 rtl:rotate-180" /></button>}
         actions={onResolve && !docked && <AnswerButtons approval={x} off={off} alwaysNote={alwaysNoteId(x, 'phone')}
           onDeny={() => send(() => onResolve(x, false))} onAllow={() => send(() => onResolve(x, true))} onAlways={() => send(() => onResolve(x, true, undefined, true))} />}
         foot={onResolve && (docked || x.always || stale || sent) ? <>
@@ -250,8 +251,8 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
       <button type="button" className={`phone-row${a.closed ? ' phone-row--closed' : ''}`} onClick={() => onOpen(a.id)}>
         <AgentAvatar accent={a.accent || 'var(--agent-slate)'} kind={kindOf({ kind: a.kind, name: a.name })} needsYou={a.state === 'needs-you' && !a.closed} />
         <span className="min-w-0 flex-1">
-          <span className="phone-row__name block truncate font-medium text-ink">{a.name}</span>
-          <span className="block truncate text-caption text-muted">{a.project || a.workspace}{a.branch ? ` · ${a.branch}` : ''}</span>
+          <span className="phone-row__name block truncate font-medium text-ink">{visible(a.name)}</span>
+          <span className="block truncate text-caption text-muted">{visible(a.project || a.workspace)}{a.branch ? ` · ${visible(a.branch)}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />
         <AsksLessChip agent={a} />
@@ -352,10 +353,10 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
       </section>}
       {groups.length === 0 && !empty && <p className="muted m-0 p-4">{t(filter ? 'fleet-filter-none' : 'ide-welcome-none')}</p>}
       {groups.map((g) => (
-        <section key={g.id} className="phone-section" aria-label={g.name}>
+        <section key={g.id} className="phone-section" aria-label={visible(g.name)}>
           <h2 className="phone-section__title">
             <span aria-hidden className={`size-2 flex-none rounded-full ${g.online ? 'bg-finished' : 'bg-unknown'}`} />
-            <span className="min-w-0 flex-1 truncate">{g.name}</span>
+            <span className="min-w-0 flex-1 truncate">{visible(g.name)}</span>
             {!g.online && <Tag>{t('phone-offline')}</Tag>}
           </h2>
           {g.agents.length === 0 ? <p className="muted m-0 px-1">{t('phone-no-agents')}</p>
@@ -414,13 +415,13 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   const closing = useCloseAsk();
   const guard = useAskGuard(asks, stale, [notice ?? '', !!agent?.closed, !!agent && closing?.id === agent.id && closing.where === 'pane', changed > 0 && !!loadDiff, !!files, distrusted]);
   return (
-    <PhoneShell label={agent?.name ?? t('focus-not-found')}
+    <PhoneShell label={agent ? visible(agent.name) : t('focus-not-found')}
       dock={agent && dock && !agent.closed && <NeedsDock dock={dock} count={mine.length} machines={machines} stale={stale} onResolve={onResolve} onOpen={(id) => (id === agent.id ? unfold(mine[0]?.id, true) : onOpen(id))} />}
       top={<>
         <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
         <div className="min-w-0 flex-1">
-          <h1 className="phone-title">{agent?.name ?? t('focus-not-found')}</h1>
-          {agent && <span className="flex min-w-0 items-center gap-2 text-caption text-muted"><StatusPill state={agent.state} failed={endedWithError(agent)} /><span className="truncate">{agent.machine}</span></span>}
+          <h1 className="phone-title">{agent ? visible(agent.name) : t('focus-not-found')}</h1>
+          {agent && <span className="flex min-w-0 items-center gap-2 text-caption text-muted"><StatusPill state={agent.state} failed={endedWithError(agent)} /><span className="truncate">{visible(agent.machine)}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
         {agent && <AsksLessChip agent={agent} />}
@@ -441,7 +442,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           : <div className="phone-pane" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
             {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
               <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
-                <TerminalView source={source ?? demo} label={`${t('focus-terminal')} · ${agent.name}`} />
+                <TerminalView source={source ?? demo} label={`${t('focus-terminal')} · ${visible(agent.name)}`} />
               </Suspense>
             )}
           </div>}

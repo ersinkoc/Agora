@@ -12,6 +12,7 @@ import { setLanguage } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { MachineModel } from '../net/view';
 import { Workspace } from '../layout/Workspace';
+import { barePanels } from '../layout/testPanels';
 import { reduce, workspaceOf, type Action, type Workspace as WorkspaceState } from '../layout/engine';
 import { LAYOUT_VERSION } from '../layout/tree';
 import { panelRegistry, type PanelDef, type PanelState } from '../layout/panels';
@@ -87,6 +88,34 @@ describe('an Agents-list row', () => {
     expect(closed.querySelector('.kit-avatar')?.textContent).toBe('G');
     expect(closed.querySelector('.kit-tone-danger')).not.toBeNull(); // ended with an error: the one red (ADR-0102)
   });
+
+  it('makes node-supplied machine, folder, agent, helper, and branch labels visible', () => {
+    const shown: AgentTileModel = { ...fleet[0]!, name: 'clau\u3164de\u202e', machine: 'lap\u034ftop', project: 'lo\u2066gin', workspace: 'wo\u200brk', branch: 'fi\ue000x', parentName: 'par\u0007ent' };
+    const hiddenMachines: MachineModel[] = [{ ...machines[0]!, name: shown.machine }];
+    act(() => root.render(<Explorer by="machine" onBy={noop} spread={new Map()} fleet={[shown]} machines={hiddenMachines} open={[]} projects={[]} project=""
+      onProject={noop} onToggle={noop} onCollapse={noop} onDismiss={noop} />));
+    const row = host.querySelector<HTMLElement>('[data-agent-row]')!;
+    expect(row.textContent).toContain('clau\\u{3164}de\\u{202e}');
+    expect(row.textContent).toContain('par\\u{7}ent');
+    expect(row.title).toContain('fi\\u{e000}x');
+    expect(host.querySelector('[data-machine-id]')?.textContent).toContain('lap\\u{34f}top');
+    expect(host.querySelector('[data-machine-id]')?.textContent).toContain('lo\\u{2066}gin');
+  });
+
+  it('verifies explorer labels while opening the raw agent identity', () => {
+    const toggled: string[] = [];
+    for (const [char, escaped] of [['\u061c', '\\u{61c}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const shown: AgentTileModel = { ...fleet[0]!, id: `raw${char}id`, name: `co${char}dex`, machine: `ma${char}chine`, project: `pro${char}ject`, workspace: `wo${char}rk`, branch: `br${char}anch`, parentName: `par${char}ent` };
+      act(() => root.render(<Explorer by="machine" onBy={noop} spread={new Map()} fleet={[shown]} machines={[{ ...machines[0]!, id: shown.machineId!, name: shown.machine }]} open={[]} projects={[]} project=""
+        onProject={noop} onToggle={(id) => toggled.push(id)} onCollapse={noop} onDismiss={noop} />));
+      const row = host.querySelector<HTMLButtonElement>('[data-agent-row]')!;
+      for (const [start, end] of [['co', 'dex'], ['par', 'ent'], ['br', 'anch']] as const) expect(`${row.textContent} ${row.title}`).toContain(`${start}${escaped}${end}`);
+      expect(host.querySelector('[data-machine-id]')?.textContent).toContain(`ma${escaped}chine`);
+      expect(host.querySelector('[data-machine-id]')?.textContent).toContain(`pro${escaped}ject`);
+      act(() => row.click());
+      expect(toggled.at(-1)).toBe(shown.id);
+    }
+  });
 });
 
 describe('pane tabs and bars', () => {
@@ -120,6 +149,34 @@ describe('pane tabs and bars', () => {
     expect(solo.querySelector('[title="codex · teal"] .kit-avatar')).not.toBeNull();
     expect(solo.querySelector('[data-pane-name]')?.textContent).toBe('codex · teal');
     expect(solo.querySelector('[data-no-ask]')?.className).not.toContain('ide-chip');
+  });
+
+  it('makes node-supplied pane labels visible', () => {
+    const raw = 'clau\u3164de\u202e · teal\ue000';
+    const hiddenFleet = [{ ...fleet[0]!, name: raw }];
+    const one = workspaceOf({ version: LAYOUT_VERSION, root: { type: 'tabs', active: 0, children: [{ type: 'pane', id: 'p-hidden', panel: 'agent', bind: { agent: hiddenFleet[0]!.id } }] } });
+    act(() => root.render(<div style={{ position: 'relative', width: 600, height: 400 }}>
+      <Workspace ws={one} dispatch={() => {}} fleet={hiddenFleet} bindings={{ attention: new Map() }} narrow={false}
+        {...barePanels(hiddenFleet, (c) => <p>{c.agent?.name}</p>)} welcome={null} />
+    </div>));
+    const tab = host.querySelector<HTMLElement>('#tab-p-hidden')!;
+    expect(tab.title).toBe('clau\\u{3164}de\\u{202e} · teal\\u{e000}');
+    expect(tab.querySelector('[data-pane-name]')?.textContent).toBe('clau\\u{3164}de\\u{202e} · teal\\u{e000}');
+  });
+
+  it('verifies pane labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u200d', '\\u{200d}'], ['\u0085', '\\u{85}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw = `co${char}dex · teal`;
+      const hiddenFleet = [{ ...fleet[0]!, name: raw }];
+      const one = workspaceOf({ version: LAYOUT_VERSION, root: { type: 'tabs', active: 0, children: [{ type: 'pane', id: 'p-edge', panel: 'agent', bind: { agent: hiddenFleet[0]!.id } }] } });
+      act(() => root.render(<div style={{ position: 'relative', width: 600, height: 400 }}>
+        <Workspace ws={one} dispatch={() => {}} fleet={hiddenFleet} bindings={{ attention: new Map() }} narrow={false}
+          {...barePanels(hiddenFleet, (c) => <p>{c.agent?.name}</p>)} welcome={null} />
+      </div>));
+      const tab = host.querySelector<HTMLElement>('#tab-p-edge')!;
+      expect(tab.title).toBe(`co${escaped}dex · teal`);
+      expect(tab.querySelector('[data-pane-name]')?.textContent).toBe(`co${escaped}dex · teal`);
+    }
   });
 
   it('still moves between tabs with the arrow keys, Home and End', () => {

@@ -27,7 +27,7 @@ export function AlwaysNote({ approval: x, surface, className = '' }: { approval:
   const label = x.always.label.trim();
   return (
     <div id={alwaysNoteId(x, surface)} className={`grid gap-0.5 text-xs text-muted ${className}`}>
-      <p className="m-0">{t(alwaysText('approval-allow-always-note'), { name: approvalName(x) })}</p>
+      <p className="m-0">{t(alwaysText('approval-allow-always-note'), { name: visible(approvalName(x)) })}</p>
       {label && <p className="m-0 break-words" dir="auto">{t('approval-allow-always-label', { label: visible(plainText(label, 120)) })}</p>}
     </div>
   );

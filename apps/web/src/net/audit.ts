@@ -1,5 +1,6 @@
 // The audit trail (ADR-0049): who did what, where, and how it ended. The hub serves it to its owner only; this file asks for it and
 // turns a row into words the page can show. Pure apart from the one fetch, which a test replaces.
+import { visible } from './hidden';
 
 // `session` is a short id of the session that did it (L16), so two windows of one person can be told apart; empty for the hub itself.
 export interface AuditRow { id: number; atMs: number; who: string; session: string; action: string; node: string; outcome: string }
@@ -20,7 +21,7 @@ export async function loadAudit(token: string, who: string, fetcher: typeof fetc
   try {
     const raw = (await res.json()) as { id: number; at_ms: number; who: string; session?: string; action: string; node: string; outcome: string }[];
     // Newest first: that is what someone looking at a trail wants to see.
-    return { ok: true, rows: raw.map((r) => ({ id: r.id, atMs: r.at_ms, who: r.who, session: r.session ?? '', action: r.action, node: r.node, outcome: r.outcome })).reverse() };
+    return { ok: true, rows: raw.map((r) => ({ id: r.id, atMs: r.at_ms, who: visible(r.who), session: visible(r.session ?? ''), action: visible(r.action), node: visible(r.node), outcome: visible(r.outcome) })).reverse() };
   } catch {
     return { ok: false, reason: 'failed' };
   }

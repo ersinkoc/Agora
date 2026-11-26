@@ -1,14 +1,14 @@
 //! Breaking-change check for `schema/` (ADR-0006, ADR-0009): a published message is never changed.
 //!
 //! Compares a base schema (for example the target branch) with the current one. Anything the base declared
-//! must still exist with the same meaning. Adding messages, fields, enums, and enum values is allowed.
+//! must still exist with the same meaning. Adding messages, non-required fields, enums, and enum values is allowed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use prost_types::{
-    field_descriptor_proto::Label, DescriptorProto, EnumDescriptorProto, FieldDescriptorProto,
-    FileDescriptorSet,
+    field_descriptor_proto::{Label, Type},
+    DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorSet,
 };
 
 /// Compile every `*.proto` below `schema_root/agora/` (recursively) into one descriptor set.
@@ -25,12 +25,25 @@ pub fn load(schema_root: &Path) -> Result<FileDescriptorSet, String> {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a directory", dir.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     }
     for e in std::fs::read_dir(dir)? {
-        let p = e?.path();
-        if p.is_dir() {
+        let e = e?;
+        let file_type = e.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let p = e.path();
+        if file_type.is_dir() {
             collect(&p, out)?;
         } else if p.extension().is_some_and(|x| x == "proto") {
             out.push(p);
@@ -42,28 +55,47 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[derive(Default)]
 struct Index<'a> {
     messages: BTreeMap<String, &'a DescriptorProto>,
+    message_syntax: BTreeMap<String, &'a str>,
     enums: BTreeMap<String, &'a EnumDescriptorProto>,
+    enum_syntax: BTreeMap<String, &'a str>,
+    extensions: BTreeMap<(String, i32), &'a FieldDescriptorProto>,
+    extension_syntax: BTreeMap<(String, i32), &'a str>,
 }
 
 fn index(fds: &FileDescriptorSet) -> Index<'_> {
-    fn walk<'a>(prefix: &str, m: &'a DescriptorProto, ix: &mut Index<'a>) {
+    fn walk<'a>(prefix: &str, m: &'a DescriptorProto, syntax: &'a str, ix: &mut Index<'a>) {
         let name = format!("{prefix}.{}", m.name());
+        for extension in &m.extension {
+            let key = (extension.extendee().to_string(), extension.number());
+            ix.extension_syntax.insert(key.clone(), syntax);
+            ix.extensions.insert(key, extension);
+        }
         for n in &m.nested_type {
-            walk(&name, n, ix);
+            walk(&name, n, syntax, ix);
         }
         for e in &m.enum_type {
-            ix.enums.insert(format!("{name}.{}", e.name()), e);
+            let enum_name = format!("{name}.{}", e.name());
+            ix.enum_syntax.insert(enum_name.clone(), syntax);
+            ix.enums.insert(enum_name, e);
         }
+        ix.message_syntax.insert(name.clone(), syntax);
         ix.messages.insert(name, m);
     }
     let mut ix = Index::default();
     for f in &fds.file {
         let pkg = f.package();
+        for extension in &f.extension {
+            let key = (extension.extendee().to_string(), extension.number());
+            ix.extension_syntax.insert(key.clone(), f.syntax());
+            ix.extensions.insert(key, extension);
+        }
         for m in &f.message_type {
-            walk(pkg, m, &mut ix);
+            walk(pkg, m, f.syntax(), &mut ix);
         }
         for e in &f.enum_type {
-            ix.enums.insert(format!("{pkg}.{}", e.name()), e);
+            let name = format!("{pkg}.{}", e.name());
+            ix.enum_syntax.insert(name.clone(), f.syntax());
+            ix.enums.insert(name, e);
         }
     }
     ix
@@ -71,11 +103,51 @@ fn index(fds: &FileDescriptorSet) -> Index<'_> {
 
 fn describe(f: &FieldDescriptorProto) -> String {
     let label = match f.label() {
+        Label::Required => "required ",
         Label::Repeated => "repeated ",
         _ if f.proto3_optional() => "optional ",
         _ => "",
     };
     format!("{label}{:?} {}", f.r#type(), f.type_name())
+}
+
+fn ranges_cover(base: &[(i64, i64)], head: &[(i64, i64)]) -> bool {
+    base.iter().all(|&(start, end)| {
+        let mut cursor = start;
+        let mut ranges = head.to_vec();
+        ranges.sort_unstable();
+        for (from, to) in ranges {
+            if from > cursor || to <= cursor {
+                continue;
+            }
+            cursor = cursor.max(to);
+            if cursor >= end {
+                return true;
+            }
+        }
+        cursor >= end
+    })
+}
+
+fn message_ranges(m: &DescriptorProto) -> Vec<(i64, i64)> {
+    m.reserved_range
+        .iter()
+        .map(|r| (i64::from(r.start()), i64::from(r.end())))
+        .collect()
+}
+
+fn extension_ranges(m: &DescriptorProto) -> Vec<(i64, i64)> {
+    m.extension_range
+        .iter()
+        .map(|r| (i64::from(r.start()), i64::from(r.end())))
+        .collect()
+}
+
+fn enum_ranges(e: &EnumDescriptorProto) -> Vec<(i64, i64)> {
+    e.reserved_range
+        .iter()
+        .map(|r| (i64::from(r.start()), i64::from(r.end()) + 1))
+        .collect()
 }
 
 fn oneof_name<'a>(message: &'a DescriptorProto, field: &FieldDescriptorProto) -> Option<&'a str> {
@@ -87,6 +159,73 @@ fn oneof_name<'a>(message: &'a DescriptorProto, field: &FieldDescriptorProto) ->
     message.oneof_decl.get(index).map(|oneof| oneof.name())
 }
 
+fn packed(field: &FieldDescriptorProto, syntax: &str) -> bool {
+    field
+        .options
+        .as_ref()
+        .and_then(|options| options.packed)
+        .unwrap_or_else(|| {
+            syntax == "proto3"
+                && field.label() == Label::Repeated
+                && matches!(
+                    field.r#type(),
+                    Type::Double
+                        | Type::Float
+                        | Type::Int64
+                        | Type::Uint64
+                        | Type::Int32
+                        | Type::Fixed64
+                        | Type::Fixed32
+                        | Type::Bool
+                        | Type::Uint32
+                        | Type::Enum
+                        | Type::Sfixed32
+                        | Type::Sfixed64
+                        | Type::Sint32
+                        | Type::Sint64
+                )
+        })
+}
+
+fn is_proto2(syntax: &str) -> bool {
+    syntax.is_empty() || syntax == "proto2"
+}
+
+fn effective_default(field: &FieldDescriptorProto, index: &Index<'_>) -> Option<String> {
+    if field.r#type() == Type::Enum {
+        let descriptor = index.enums.get(field.type_name().trim_start_matches('.'))?;
+        let value = match field.default_value.as_deref() {
+            Some(name) => descriptor.value.iter().find(|value| value.name() == name),
+            None => descriptor.value.first(),
+        }?;
+        return Some(format!("#{}", value.number()));
+    }
+    if let Some(value) = &field.default_value {
+        return Some(value.clone());
+    }
+    if field.label() == Label::Repeated {
+        return None;
+    }
+    match field.r#type() {
+        Type::Double
+        | Type::Float
+        | Type::Int64
+        | Type::Uint64
+        | Type::Int32
+        | Type::Fixed64
+        | Type::Fixed32
+        | Type::Uint32
+        | Type::Sfixed32
+        | Type::Sfixed64
+        | Type::Sint32
+        | Type::Sint64 => Some("0".to_string()),
+        Type::Bool => Some("false".to_string()),
+        Type::String | Type::Bytes => Some(String::new()),
+        Type::Enum => None,
+        Type::Message | Type::Group => None,
+    }
+}
+
 /// Returns one line per breaking change; empty means compatible.
 pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> Vec<String> {
     let (b, h) = (index(base), index(head));
@@ -96,6 +235,44 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
             out.push(format!("message {name} was removed"));
             continue;
         };
+        if h.message_syntax.get(name) != b.message_syntax.get(name) {
+            out.push(format!(
+                "message {name}: syntax changed from `{}` to `{}`",
+                b.message_syntax.get(name).copied().unwrap_or(""),
+                h.message_syntax.get(name).copied().unwrap_or("")
+            ));
+        }
+        let base_map = bm.options.as_ref().is_some_and(|o| o.map_entry());
+        let head_map = hm.options.as_ref().is_some_and(|o| o.map_entry());
+        if base_map != head_map {
+            out.push(format!("message {name}: map semantics changed"));
+        }
+        let base_message_set = bm
+            .options
+            .as_ref()
+            .is_some_and(|o| o.message_set_wire_format());
+        let head_message_set = hm
+            .options
+            .as_ref()
+            .is_some_and(|o| o.message_set_wire_format());
+        if base_message_set != head_message_set {
+            out.push(format!("message {name}: MessageSet wire format changed"));
+        }
+        for reserved in &bm.reserved_name {
+            if !hm.reserved_name.contains(reserved) {
+                out.push(format!(
+                    "message {name}: reserved name `{reserved}` was removed"
+                ));
+            }
+        }
+        if !ranges_cover(&message_ranges(bm), &message_ranges(hm)) {
+            out.push(format!(
+                "message {name}: reserved number range was narrowed"
+            ));
+        }
+        if !ranges_cover(&extension_ranges(bm), &extension_ranges(hm)) {
+            out.push(format!("message {name}: extension range was narrowed"));
+        }
         for bf in &bm.field {
             match hm.field.iter().find(|f| f.number() == bf.number()) {
                 None => out.push(format!(
@@ -110,6 +287,13 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                             bf.name(),
                             hf.name()
                         ));
+                    } else if hf.json_name() != bf.json_name() {
+                        out.push(format!(
+                            "{name}.{}: JSON name changed from `{}` to `{}`",
+                            bf.name(),
+                            bf.json_name(),
+                            hf.json_name()
+                        ));
                     }
                     if describe(hf) != describe(bf) {
                         out.push(format!(
@@ -118,6 +302,38 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                             describe(bf).trim(),
                             describe(hf).trim()
                         ));
+                    }
+                    let base_default = effective_default(bf, &b);
+                    let head_default = effective_default(hf, &h);
+                    if describe(hf) == describe(bf) && head_default != base_default {
+                        out.push(format!(
+                            "{name}.{}: default value changed from `{:?}` to `{:?}`",
+                            bf.name(),
+                            base_default,
+                            head_default
+                        ));
+                    }
+                    let base_options = bf.options.as_ref();
+                    let head_options = hf.options.as_ref();
+                    let base_ctype = base_options.and_then(|o| o.ctype).unwrap_or_default();
+                    let head_ctype = head_options.and_then(|o| o.ctype).unwrap_or_default();
+                    if base_ctype != head_ctype {
+                        out.push(format!("{name}.{}: C++ type option changed", bf.name()));
+                    }
+                    let base_jstype = base_options.and_then(|o| o.jstype).unwrap_or_default();
+                    let head_jstype = head_options.and_then(|o| o.jstype).unwrap_or_default();
+                    if base_jstype != head_jstype {
+                        out.push(format!(
+                            "{name}.{}: JavaScript type option changed",
+                            bf.name()
+                        ));
+                    }
+                    let base_syntax = b.message_syntax.get(name).copied().unwrap_or("");
+                    let head_syntax = h.message_syntax.get(name).copied().unwrap_or("");
+                    if describe(hf) == describe(bf)
+                        && packed(bf, base_syntax) != packed(hf, head_syntax)
+                    {
+                        out.push(format!("{name}.{}: packed encoding changed", bf.name()));
                     }
                     let old_oneof = oneof_name(bm, bf);
                     let new_oneof = oneof_name(hm, hf);
@@ -130,27 +346,170 @@ pub fn breaking_changes(base: &FileDescriptorSet, head: &FileDescriptorSet) -> V
                 }
             }
         }
+        for hf in &hm.field {
+            if hf.label() == Label::Required
+                && !bm.field.iter().any(|bf| bf.number() == hf.number())
+            {
+                out.push(format!(
+                    "{name}: required field {} = {} was added",
+                    hf.name(),
+                    hf.number()
+                ));
+            }
+        }
     }
     for (name, be) in &b.enums {
         let Some(he) = h.enums.get(name) else {
             out.push(format!("enum {name} was removed"));
             continue;
         };
+        if h.enum_syntax.get(name) != b.enum_syntax.get(name) {
+            out.push(format!(
+                "enum {name}: syntax changed from `{}` to `{}`",
+                b.enum_syntax.get(name).copied().unwrap_or(""),
+                h.enum_syntax.get(name).copied().unwrap_or("")
+            ));
+        }
+        for reserved in &be.reserved_name {
+            if !he.reserved_name.contains(reserved) {
+                out.push(format!(
+                    "enum {name}: reserved name `{reserved}` was removed"
+                ));
+            }
+        }
+        if !ranges_cover(&enum_ranges(be), &enum_ranges(he)) {
+            out.push(format!("enum {name}: reserved number range was narrowed"));
+        }
+        if b.enum_syntax.get(name).copied().is_some_and(is_proto2)
+            && h.enum_syntax.get(name).copied().is_some_and(is_proto2)
+        {
+            if let (Some(base_default), Some(head_default)) = (be.value.first(), he.value.first()) {
+                let base_default_still_exists = he.value.iter().any(|value| {
+                    value.number() == base_default.number() && value.name() == base_default.name()
+                });
+                if base_default_still_exists
+                    && (head_default.number() != base_default.number()
+                        || head_default.name() != base_default.name())
+                {
+                    out.push(format!(
+                        "enum {name}: implicit default changed from {} = {} to {} = {}",
+                        base_default.name(),
+                        base_default.number(),
+                        head_default.name(),
+                        head_default.number()
+                    ));
+                }
+            }
+        }
+        let mut base_first_names = BTreeMap::new();
+        for value in &be.value {
+            base_first_names
+                .entry(value.number())
+                .or_insert_with(|| value.name());
+        }
+        for (number, base_name) in base_first_names {
+            if !he
+                .value
+                .iter()
+                .any(|value| value.number() == number && value.name() == base_name)
+            {
+                continue;
+            }
+            let head_name = he
+                .value
+                .iter()
+                .find(|value| value.number() == number)
+                .map(|value| value.name());
+            if head_name != Some(base_name) {
+                out.push(format!(
+                    "enum {name}: canonical JSON name for value {number} changed from `{base_name}` to `{}`",
+                    head_name.unwrap_or("")
+                ));
+            }
+        }
         for bv in &be.value {
+            if he
+                .value
+                .iter()
+                .any(|v| v.number() == bv.number() && v.name() == bv.name())
+            {
+                continue;
+            }
             match he.value.iter().find(|v| v.number() == bv.number()) {
                 None => out.push(format!(
                     "{name}: value {} = {} was removed",
                     bv.name(),
                     bv.number()
                 )),
-                Some(hv) if hv.name() != bv.name() => {
+                Some(hv) => {
                     out.push(format!(
                         "{name}: value {} renamed to {}",
                         bv.name(),
                         hv.name()
                     ));
                 }
-                Some(_) => {}
+            }
+        }
+    }
+    for ((extendee, number), bf) in &b.extensions {
+        match h.extensions.get(&(extendee.clone(), *number)) {
+            None => out.push(format!(
+                "extension {} = {number} of {extendee} was removed",
+                bf.name()
+            )),
+            Some(hf) => {
+                if hf.name() != bf.name() {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee} renamed to {}",
+                        bf.name(),
+                        hf.name()
+                    ));
+                }
+                if describe(hf) != describe(bf) {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: type changed from `{}` to `{}`",
+                        bf.name(),
+                        describe(bf).trim(),
+                        describe(hf).trim()
+                    ));
+                }
+                if describe(hf) == describe(bf)
+                    && effective_default(hf, &h) != effective_default(bf, &b)
+                {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: default value changed",
+                        bf.name()
+                    ));
+                }
+                let base_options = bf.options.as_ref();
+                let head_options = hf.options.as_ref();
+                let base_ctype = base_options.and_then(|o| o.ctype).unwrap_or_default();
+                let head_ctype = head_options.and_then(|o| o.ctype).unwrap_or_default();
+                if base_ctype != head_ctype {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: C++ type option changed",
+                        bf.name()
+                    ));
+                }
+                let base_jstype = base_options.and_then(|o| o.jstype).unwrap_or_default();
+                let head_jstype = head_options.and_then(|o| o.jstype).unwrap_or_default();
+                if base_jstype != head_jstype {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: JavaScript type option changed",
+                        bf.name()
+                    ));
+                }
+                let key = (extendee.clone(), *number);
+                let base_syntax = b.extension_syntax.get(&key).copied().unwrap_or("");
+                let head_syntax = h.extension_syntax.get(&key).copied().unwrap_or("");
+                if describe(hf) == describe(bf)
+                    && packed(bf, base_syntax) != packed(hf, head_syntax)
+                {
+                    out.push(format!(
+                        "extension {} = {number} of {extendee}: packed encoding changed",
+                        bf.name()
+                    ));
+                }
             }
         }
     }

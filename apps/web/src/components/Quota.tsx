@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { visible } from '../net/hidden';
 import { ago } from '../net/time';
 import { chipFor, quotaView, resetsText, resetAtText, startHint, toolName, windowLabel, type QuotaBar, type QuotaObs, CRITICAL_PERCENT } from '../net/quota';
 import { agentKindOf } from '../net/fleet';
@@ -55,7 +56,7 @@ export function StartLimitHint({ tool, machineId }: { tool: string; machineId: s
 }
 
 function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: boolean }) {
-  const where = showMachine ? `${b.machine}, ` : '';
+  const where = showMachine ? `${visible(b.machine)}, ` : '';
   const label = windowLabel(b.window);
   const observed = t('quota-observed', { when: ago(now - b.ageMs, now) });
   if (b.state === 'reset') {
@@ -98,7 +99,7 @@ export function QuotaSection({ fleet, hideEmpty }: { fleet: readonly AgentTileMo
       return <div key={tool.tool} className="rounded-m border border-line bg-surface-0 px-3 py-2">
         <strong className="block truncate font-medium" title={name}>{name}</strong>
         {tool.machines.map((m) => <div key={m.machineId} className="grid">
-          {several && <span className="mt-1 truncate text-xs text-muted" title={m.machine}>{m.machine}</span>}
+          {several && <span className="mt-1 truncate text-xs text-muted" title={visible(m.machine)}>{visible(m.machine)}</span>}
           <ul className="m-0 grid list-none divide-y divide-line p-0">{m.bars.map((b) => <Bar key={b.key} b={b} now={now} showMachine={several} />)}</ul>
         </div>)}
       </div>;

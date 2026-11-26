@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { t } from '../i18n';
 import { Icon } from './Icon';
+import { visible } from '../net/hidden';
 
 export interface DeviceRequestModel {
   id: string;
@@ -35,7 +36,7 @@ export function DeviceRequest({ request, machines, onApprove, onLater, inline }:
       className={`${inline ? 'w-full max-w-[24rem] ' : 'fixed bottom-4 end-4 z-40 w-[min(24rem,calc(100vw-2rem))] '}grid gap-3 rounded-m border border-line bg-surface-1 p-4 shadow-card`}>
       <div className="flex items-start gap-2">
         <Icon name="monitor" className="mt-0.5 size-4 text-accent" />
-        <h2 id={`device-request-${request.id}`} className="m-0 flex-1 text-sm font-semibold tracking-normal text-ink normal-case">{t('device-request-title', { name: request.name || request.id })}</h2>
+        <h2 id={`device-request-${request.id}`} className="m-0 flex-1 text-sm font-semibold tracking-normal text-ink normal-case">{t('device-request-title', { name: visible(request.name || request.id) })}</h2>
       </div>
       <div className="grid gap-1">
         <span className="text-xs text-muted">{t('device-fingerprint')}</span>
@@ -48,7 +49,7 @@ export function DeviceRequest({ request, machines, onApprove, onLater, inline }:
           <label key={m.id} className="flex items-center gap-2 text-[0.8125rem]">
             <input type="checkbox" checked={chosen.has(m.id)} disabled={state === 'busy'}
               onChange={(e) => setChosen((c) => { const n = new Set(c); if (e.target.checked) n.add(m.id); else n.delete(m.id); return n; })} />
-            {m.name}
+            {visible(m.name)}
           </label>
         ))}
         <span className="text-xs text-muted">{all ? t('device-request-all') : t('device-request-some')}</span>

@@ -75,4 +75,23 @@ describe('usage (no money)', () => {
     expect(html).toContain('<h3 class="panel-section-title">Plan limits</h3>');
     expect(html).not.toContain('uppercase');
   });
+  it('makes usage agent, machine, and project labels visible', () => {
+    const hidden = [
+      agent({ name: 'clau\u3164de\u202e', machine: 'lap\u034ftop', project: 'lo\u2066gin', tokens: 5, startedMs: 1 }),
+      agent({ id: 'n2/b', machineId: 'n2', name: 'co\ue000dex', machine: 'ser\u0007ver', project: 'ot\u200bher', projectId: 'p2', tokens: 7, startedMs: 1 }),
+    ];
+    const html = renderToStaticMarkup(<UsagePanel fleet={hidden} now={5} />);
+    for (const shown of ['clau\\u{3164}de\\u{202e}', 'lap\\u{34f}top', 'lo\\u{2066}gin', 'co\\u{e000}dex', 'ser\\u{7}ver', 'ot\\u{200b}her']) expect(html).toContain(shown);
+  });
+  it('verifies usage labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u061c', '\\u{61c}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const html = renderToStaticMarkup(<UsagePanel fleet={[
+        agent({ name: `co${char}dex`, machine: `ma${char}chine`, project: `pro${char}ject`, tokens: 5, startedMs: 1 }),
+        agent({ id: 'n2/b', machineId: 'n2', name: 'other', machine: 'other', project: 'other', projectId: 'p2', tokens: 1, startedMs: 1 }),
+      ]} now={5} />);
+      expect(html).toContain(`co${escaped}dex`);
+      expect(html).toContain(`ma${escaped}chine`);
+      expect(html).toContain(`pro${escaped}ject`);
+    }
+  });
 });

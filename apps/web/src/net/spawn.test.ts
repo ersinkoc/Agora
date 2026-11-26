@@ -26,7 +26,7 @@ describe('agents that start agents', () => {
   });
 
   it('shows hidden and control characters as visible escapes, the same set the node refuses', () => {
-    expect(visible('a\u200bb\u202ec\u{e0041}d\ufe0fe\u3164f\u00adg\u001bh\nk\tl')).toBe('a\\u{200b}b\\u{202e}c\\u{e0041}d\\u{fe0f}e\\u{3164}f\\u{ad}g\\u{1b}h\nk\tl');
+    expect(visible('a\u200bb\u202ec\u{e0041}d\ufe0fe\u3164f\u2800g\u00adh\u001bi\nj\tk')).toBe('a\\u{200b}b\\u{202e}c\\u{e0041}d\\u{fe0f}e\\u{3164}f\\u{2800}g\\u{ad}h\\u{1b}i\nj\tk');
     expect(visible('Grüße 🚀 çalış')).toBe('Grüße 🚀 çalış');
   });
 

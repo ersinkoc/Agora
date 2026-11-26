@@ -27,19 +27,24 @@ pub enum Kind {
 
 /// The diff's lines with their kind, as plain text (an agent's file can hold control characters: they never reach the screen).
 pub fn lines(diff: &str) -> Vec<(Kind, String)> {
+    let mut in_hunk = false;
     diff.lines()
         .map(|l| {
-            let kind = if l.starts_with("diff ")
-                || l.starts_with("index ")
-                || l.starts_with("--- ")
-                || l.starts_with("+++ ")
-                || l.starts_with("new file")
-                || l.starts_with("deleted file")
-                || l.starts_with("rename ")
-            {
+            let kind = if l.starts_with("diff ") {
+                in_hunk = false;
                 Kind::File
             } else if l.starts_with("@@") {
+                in_hunk = true;
                 Kind::Hunk
+            } else if !in_hunk
+                && (l.starts_with("index ")
+                    || l.starts_with("--- ")
+                    || l.starts_with("+++ ")
+                    || l.starts_with("new file")
+                    || l.starts_with("deleted file")
+                    || l.starts_with("rename "))
+            {
+                Kind::File
             } else if l.starts_with('+') {
                 Kind::Added
             } else if l.starts_with('-') {

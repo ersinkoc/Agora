@@ -338,6 +338,96 @@ fn forwarded(head: &str) -> bool {
         })
 }
 
+/// One valid, consistent decimal Content-Length. Repeated and comma-joined copies are allowed only when every value agrees.
+fn request_content_length(head: &str) -> Result<Option<usize>, ()> {
+    let mut declared = None;
+    for line in head.split("\r\n").skip(1).take_while(|l| !l.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        for item in value.split(',').map(str::trim) {
+            if item.is_empty() || !item.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            let value = item.parse::<usize>().map_err(|_| ())?;
+            if declared.is_some_and(|earlier| earlier != value) {
+                return Err(());
+            }
+            declared = Some(value);
+        }
+    }
+    Ok(declared)
+}
+
+fn token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// An HTTP/1 request line with exactly one method, target and supported version.
+fn request_parts(head: &str) -> Option<(&str, &str)> {
+    let line = head.split("\r\n").next()?;
+    let mut parts = line.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    (parts.next().is_none()
+        && !method.is_empty()
+        && method.bytes().all(token_byte)
+        && !target.is_empty()
+        && matches!(version, "HTTP/1.0" | "HTTP/1.1"))
+    .then_some((method, target))
+}
+
+/// Field lines this small server can parse without normalizing an invalid name or accepting an obsolete continuation.
+fn valid_request_fields(head: &str) -> bool {
+    head.split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .all(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                !name.is_empty()
+                    && name.bytes().all(token_byte)
+                    && !value.bytes().any(|b| (b < b' ' && b != b'\t') || b == 0x7f)
+            })
+        })
+}
+
+fn header_values<'a>(head: &'a str, wanted: &'a str) -> impl Iterator<Item = &'a str> {
+    head.split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .filter(move |(name, _)| name.eq_ignore_ascii_case(wanted))
+        .map(|(_, value)| value.trim())
+}
+
+fn single_header(head: &str, wanted: &str) -> Result<Option<String>, ()> {
+    let mut values = header_values(head, wanted);
+    let value = values.next().map(str::to_string);
+    if values.next().is_some() {
+        return Err(());
+    }
+    Ok(value)
+}
+
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
     stream: S,
@@ -369,7 +459,12 @@ where
     let mut chunk = [0u8; 1024];
     let end = loop {
         if let Some(i) = find(&head, b"\r\n\r\n") {
-            break i + 4;
+            let end = i + 4;
+            if end > MAX_HEAD {
+                respond(&mut stream, 431, "text/plain", b"", false).await?;
+                return Ok(First::Answered);
+            }
+            break end;
         }
         if head.len() > MAX_HEAD {
             respond(&mut stream, 431, "text/plain", b"", false).await?;
@@ -413,30 +508,45 @@ where
             }
         }
     }
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next().unwrap_or("");
-    let upgrade = lines.any(|l| {
+    let Some((method, target)) = request_parts(&text) else {
+        respond(&mut stream, 400, "text/plain", b"", false).await?;
+        return Ok(First::Answered);
+    };
+    if !valid_request_fields(&text) || header_values(&text, "transfer-encoding").next().is_some() {
+        respond(&mut stream, 400, "text/plain", b"", false).await?;
+        return Ok(First::Answered);
+    }
+    let authorization = match single_header(&text, "authorization") {
+        Ok(value) => value,
+        Err(()) => {
+            respond(&mut stream, 400, "text/plain", b"", false).await?;
+            return Ok(First::Answered);
+        }
+    };
+    let upgrade = text.split("\r\n").skip(1).any(|l| {
         l.split_once(':').is_some_and(|(k, v)| {
-            k.trim().eq_ignore_ascii_case("upgrade") && v.trim().eq_ignore_ascii_case("websocket")
+            k.eq_ignore_ascii_case("upgrade") && v.trim().eq_ignore_ascii_case("websocket")
         })
     });
     if upgrade {
         return Ok(First::WebSocket(Rewind::new(head, stream)));
     }
-    let mut parts = request_line.split(' ');
-    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split(['?', '#']).next().unwrap_or("/");
     let head_only = method == "HEAD";
     let header = |name: &str| {
         text.split("\r\n")
             .skip(1)
             .filter_map(|l| l.split_once(':'))
-            .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.trim().to_string())
     };
     let bearer = || {
-        header("authorization")
-            .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
+        authorization.as_deref().and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            scheme
+                .eq_ignore_ascii_case("bearer")
+                .then(|| token.trim().to_string())
+        })
     };
     // A reverse proxy on this machine (`tailscale serve`, a tunnel) connects from loopback for visitors from anywhere. A request that
     // says it was forwarded is never "the owner at the hub's own machine": its address is unknown, so the screen password applies.
@@ -472,9 +582,14 @@ where
     };
     if method == "POST" && (path == "/api/session" || passkey_op.is_some() || account_op.is_some())
     {
-        let length = header("content-length")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+        let length = match request_content_length(&text) {
+            Ok(Some(length)) => length,
+            Ok(None) => usize::MAX,
+            Err(()) => {
+                respond(&mut stream, 400, "text/plain", b"", false).await?;
+                return Ok(First::Answered);
+            }
+        };
         if length > MAX_BODY {
             respond(&mut stream, 413, "text/plain", b"", false).await?;
             return Ok(First::Answered);
@@ -690,6 +805,38 @@ async fn respond_as<S: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
 
+    struct EmptySessions;
+
+    impl SessionApi for EmptySessions {
+        fn sign_in<'a>(&'a self, _req: &'a SignInRequest<'a>) -> SessionReply<'a, SignInReply> {
+            Box::pin(async { SignInReply::Failed })
+        }
+    }
+
+    struct EndSessions;
+
+    impl SessionApi for EndSessions {
+        fn sign_in<'a>(&'a self, _req: &'a SignInRequest<'a>) -> SessionReply<'a, SignInReply> {
+            Box::pin(async { SignInReply::Failed })
+        }
+
+        fn end(&self, bearer: &str) -> u16 {
+            if bearer == "good" {
+                200
+            } else {
+                401
+            }
+        }
+    }
+
+    struct SignInSessions;
+
+    impl SessionApi for SignInSessions {
+        fn sign_in<'a>(&'a self, _req: &'a SignInRequest<'a>) -> SessionReply<'a, SignInReply> {
+            Box::pin(async { SignInReply::Token("token".to_string()) })
+        }
+    }
+
     #[test]
     fn paths_cannot_leave_the_root() {
         assert_eq!(safe_relative("/a/b.js"), Some(PathBuf::from("a/b.js")));
@@ -897,6 +1044,128 @@ mod tests {
             "POST {path} HTTP/1.1\r\nHost: h\r\nUser-Agent: curl/8.5\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    #[tokio::test]
+    async fn f427_conflicting_content_lengths_are_refused_before_sign_in() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(Arc::clone(&hub));
+        let code = crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+            .create_code(crate::server::now_ms())
+            .unwrap();
+        let body = serde_json::json!({ "code": code }).to_string();
+        let control = format!(
+            "POST /api/session HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (control, _) = ask(&api, "127.0.0.1", control).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let code = crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+            .create_code(crate::server::now_ms())
+            .unwrap();
+        let body = serde_json::json!({ "code": code }).to_string();
+        let request = format!(
+            "POST /api/session HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+            body.len() + 1
+        );
+        let (actual, _) = ask(&api, "127.0.0.1", request).await;
+        println!("EXPECTED: HTTP/1.1 400");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn verifies_f427_content_length_boundaries() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(hub);
+        let body = r#"{"code":"bad"}"#;
+        for fields in [
+            format!("Content-Length: {}", body.len()),
+            format!("Content-Length: {0}\r\nContent-Length: {0}", body.len()),
+            format!("Content-Length: {0}, {0}", body.len()),
+        ] {
+            let request =
+                format!("POST /api/session HTTP/1.1\r\nHost: h\r\n{fields}\r\n\r\n{body}");
+            let (out, _) = ask(&api, "127.0.0.1", request).await;
+            assert!(!out.starts_with("HTTP/1.1 400"), "{fields}: {out}");
+        }
+        for fields in [
+            format!("Content-Length: +{}", body.len()),
+            format!(
+                "Content-Length: {}\r\nContent-Length: {}",
+                body.len() + 1,
+                body.len()
+            ),
+            "Content-Length: 1x".to_string(),
+        ] {
+            let request =
+                format!("POST /api/session HTTP/1.1\r\nHost: h\r\n{fields}\r\n\r\n{body}");
+            let (out, _) = ask(&api, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{fields}: {out}");
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[tokio::test]
+    async fn f428_a_request_head_over_the_limit_is_refused() {
+        let at_limit_prefix = "GET / HTTP/1.1\r\nX-Pad: ";
+        let suffix = "\r\n\r\n";
+        let at_limit = format!(
+            "{at_limit_prefix}{}{suffix}",
+            "a".repeat(MAX_HEAD - at_limit_prefix.len() - suffix.len())
+        );
+        let (control, _) = ask(&EmptySessions, "127.0.0.1", at_limit).await;
+        assert!(!control.starts_with("HTTP/1.1 431"), "{control}");
+        println!("CONTROL OK");
+
+        let over = format!(
+            "{at_limit_prefix}{}{suffix}",
+            "a".repeat(MAX_HEAD + 1 - at_limit_prefix.len() - suffix.len())
+        );
+        let (actual, _) = ask(&EmptySessions, "127.0.0.1", over).await;
+        println!("EXPECTED: HTTP/1.1 431");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 431") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 431"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn verifies_f428_request_head_size_boundaries() {
+        let prefix = "GET / HTTP/1.1\r\nX-Pad: ";
+        let suffix = "\r\n\r\n";
+        for size in [MAX_HEAD - 1, MAX_HEAD] {
+            let request = format!(
+                "{prefix}{}{suffix}",
+                "a".repeat(size - prefix.len() - suffix.len())
+            );
+            let (out, _) = ask(&EmptySessions, "127.0.0.1", request).await;
+            assert!(!out.starts_with("HTTP/1.1 431"), "{size}");
+        }
+        for size in [MAX_HEAD + 1, MAX_HEAD + 512, MAX_HEAD + 1024] {
+            let request = format!(
+                "{prefix}{}{suffix}",
+                "a".repeat(size - prefix.len() - suffix.len())
+            );
+            let (out, _) = ask(&EmptySessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 431"), "{size}: {out}");
+        }
+        println!("FIX VERIFIED");
     }
 
     #[tokio::test]
@@ -1348,5 +1617,220 @@ mod tests {
         ]))
         .await;
         assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn proof_f435_transfer_coding_cannot_reframe_a_sign_in_body() {
+        let body = r#"{"code":"ok"}"#;
+        let request = |extra: &str| {
+            format!(
+                "POST /api/session HTTP/1.1\r\nHost: h\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let (control, _) = ask(&SignInSessions, "127.0.0.1", request("")).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let (actual, _) = ask(
+            &SignInSessions,
+            "127.0.0.1",
+            request("Transfer-Encoding: chunked\r\n"),
+        )
+        .await;
+        println!("EXPECTED: HTTP/1.1 400 before sign-in");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn proof_f436_invalid_http_versions_cannot_reach_sign_in() {
+        let body = r#"{"code":"ok"}"#;
+        let request = |version: &str| {
+            format!(
+                "POST /api/session {version}\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let (control, _) = ask(&SignInSessions, "127.0.0.1", request("HTTP/1.1")).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let (actual, _) = ask(&SignInSessions, "127.0.0.1", request("HTTP/9.9")).await;
+        println!("EXPECTED: HTTP/1.1 400 before sign-in");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn proof_f437_whitespace_cannot_normalize_an_authorization_field_name() {
+        let control =
+            "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer good\r\n\r\n";
+        let (control, _) = ask(&EndSessions, "127.0.0.1", control.to_string()).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let malformed =
+            "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization : Bearer good\r\n\r\n";
+        let (actual, _) = ask(&EndSessions, "127.0.0.1", malformed.to_string()).await;
+        println!("EXPECTED: HTTP/1.1 400 before sign-out");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn proof_f438_conflicting_authorization_fields_are_not_first_wins() {
+        let control =
+            "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer good\r\n\r\n";
+        let (control, _) = ask(&EndSessions, "127.0.0.1", control.to_string()).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let repeated = "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer good\r\nAuthorization: Bearer bad\r\n\r\n";
+        let (actual, _) = ask(&EndSessions, "127.0.0.1", repeated.to_string()).await;
+        println!("EXPECTED: HTTP/1.1 400 before sign-out");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 400") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 400"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn proof_f439_bearer_auth_scheme_is_ascii_case_insensitive() {
+        let control =
+            "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer good\r\n\r\n";
+        let (control, _) = ask(&EndSessions, "127.0.0.1", control.to_string()).await;
+        assert!(control.starts_with("HTTP/1.1 200"), "{control}");
+        println!("CONTROL OK");
+
+        let lower = "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: bearer good\r\n\r\n";
+        let (actual, _) = ask(&EndSessions, "127.0.0.1", lower.to_string()).await;
+        println!("EXPECTED: HTTP/1.1 200 with a case-insensitive auth scheme");
+        println!("ACTUAL: {}", actual.lines().next().unwrap_or(""));
+        if actual.starts_with("HTTP/1.1 200") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.starts_with("HTTP/1.1 200"), "{actual}");
+    }
+
+    #[tokio::test]
+    async fn verify_f435_transfer_codings_are_refused_before_authentication() {
+        let body = r#"{"code":"ok"}"#;
+        for field in [
+            "Transfer-Encoding: gzip",
+            "transfer-encoding: chunked",
+            "Transfer-Encoding: gzip, chunked",
+        ] {
+            let request = format!(
+                "POST /api/session HTTP/1.1\r\nHost: h\r\n{field}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (out, _) = ask(&SignInSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{field}: {out}");
+        }
+        let (out, _) = ask(
+            &SignInSessions,
+            "127.0.0.1",
+            post("/api/session", &serde_json::json!({ "code": "ok" })),
+        )
+        .await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        println!("FIX VERIFIED: F435 unsupported transfer coding is refused before auth");
+    }
+
+    #[tokio::test]
+    async fn verify_f436_request_lines_across_version_spacing_and_arity() {
+        let body = r#"{"code":"ok"}"#;
+        for line in [
+            "POST /api/session HTTP/0.9",
+            "POST  /api/session HTTP/1.1",
+            "POST /api/session HTTP/1.1 extra",
+        ] {
+            let request = format!(
+                "{line}\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (out, _) = ask(&SignInSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{line:?}: {out}");
+        }
+        for version in ["HTTP/1.0", "HTTP/1.1"] {
+            let request = format!(
+                "POST /api/session {version}\r\nHost: h\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (out, _) = ask(&SignInSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 200"), "{version}: {out}");
+        }
+        println!("FIX VERIFIED: F436 only exact supported HTTP/1 request lines reach auth");
+    }
+
+    #[tokio::test]
+    async fn verify_f437_field_names_across_leading_internal_and_precolon_whitespace() {
+        for field in [
+            " Authorization: Bearer good",
+            "Authori zation: Bearer good",
+            "Authorization\t: Bearer good",
+        ] {
+            let request = format!("DELETE /api/session HTTP/1.1\r\nHost: h\r\n{field}\r\n\r\n");
+            let (out, _) = ask(&EndSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{field:?}: {out}");
+        }
+        let valid = "DELETE /api/session HTTP/1.1\r\nHost: h\r\nauthorization: Bearer good\r\n\r\n";
+        let (out, _) = ask(&EndSessions, "127.0.0.1", valid.to_string()).await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        println!("FIX VERIFIED: F437 invalid field names are never normalized into auth");
+    }
+
+    #[tokio::test]
+    async fn verify_f438_authorization_is_single_across_order_and_equal_values() {
+        for fields in [
+            "Authorization: Bearer good\r\nAuthorization: Bearer bad",
+            "Authorization: Bearer bad\r\nAuthorization: Bearer good",
+            "Authorization: Bearer good\r\nAuthorization: Bearer good",
+        ] {
+            let request = format!("DELETE /api/session HTTP/1.1\r\nHost: h\r\n{fields}\r\n\r\n");
+            let (out, _) = ask(&EndSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 400"), "{fields:?}: {out}");
+        }
+        let single =
+            "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer good\r\n\r\n";
+        let (out, _) = ask(&EndSessions, "127.0.0.1", single.to_string()).await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        println!("FIX VERIFIED: F438 Authorization is never resolved first-wins");
+    }
+
+    #[tokio::test]
+    async fn verify_f439_bearer_scheme_case_boundaries_and_other_scheme() {
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            let request = format!(
+                "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: {scheme} good\r\n\r\n"
+            );
+            let (out, _) = ask(&EndSessions, "127.0.0.1", request).await;
+            assert!(out.starts_with("HTTP/1.1 200"), "{scheme}: {out}");
+        }
+        let other = "DELETE /api/session HTTP/1.1\r\nHost: h\r\nAuthorization: Basic good\r\n\r\n";
+        let (out, _) = ask(&EndSessions, "127.0.0.1", other.to_string()).await;
+        assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+        println!("FIX VERIFIED: F439 Bearer is case-insensitive without accepting other schemes");
     }
 }

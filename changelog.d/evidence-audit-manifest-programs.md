@@ -1,0 +1,1 @@
+- Reject agent kind ids with a punctuation prefix and manifest commands whose program is only whitespace.

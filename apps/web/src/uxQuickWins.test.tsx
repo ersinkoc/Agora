@@ -82,6 +82,19 @@ describe('quick win: a failed agent is never drawn as success', () => {
     expect(html).not.toContain('state--failed');
     expect(html).not.toContain('Ended with an error');
   });
+  it('makes closed-agent identity and location labels visible', () => {
+    const html = summary(closed({ name: 'clau\u3164de\u202e', machine: 'lap\u034ftop', workspace: 'wo\u2066rk', branch: 'fi\ue000x' }));
+    expect(html).toContain('clau\\u{3164}de\\u{202e}');
+    expect(html).toContain('lap\\u{34f}top');
+    expect(html).toContain('wo\\u{2066}rk');
+    expect(html).toContain('fi\\u{e000}x');
+  });
+  it('verifies closed-agent labels across isolate, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u2069', '\\u{2069}'], ['\u0007', '\\u{7}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const html = summary(closed({ name: `co${char}dex`, machine: `ma${char}chine`, workspace: `wo${char}rk`, branch: `br${char}anch` }));
+      for (const [start, end] of [['co', 'dex'], ['ma', 'chine'], ['wo', 'rk'], ['br', 'anch']] as const) expect(html).toContain(`${start}${escaped}${end}`);
+    }
+  });
   it('a badge for a failed agent names the error in both languages', () => {
     expect(renderToStaticMarkup(<StateBadge state="finished" failed />)).toContain('Ended with an error');
     setLanguage('tr');
@@ -226,7 +239,7 @@ describe('quick win: the safety badge is one sign and says all of it on demand',
     expect(new Set([started, neutral, approved]).size).toBe(3);
     expect(neutral).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back');
     expect(approved).toContain('with your approval');
-    expect(label(<NoAskBadge agent={{ skipsPermissions: true }} session cause={'Mode: YOLO\u202e'} />)).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: YOLO');
+    expect(label(<NoAskBadge agent={{ skipsPermissions: true }} session cause={'Mode: YOLO\u202e'} />)).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: YOLO\\u{202e}');
   });
   it('says the same in Turkish', () => {
     setLanguage('tr');

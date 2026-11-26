@@ -3,6 +3,8 @@
 // program offered and copies only when the user presses Copy (docs/security/threat-model.md). A request to READ the clipboard is
 // never answered.
 
+import { hasHidden } from '../net/hidden';
+
 export const MAX_OFFER = 8192;
 /** At most one new offer per this many milliseconds; one that is still pending is never replaced. */
 export const OFFER_GAP_MS = 2000;
@@ -21,7 +23,7 @@ export function clipboardOffer(data: string): string | undefined {
   try {
     const bin = atob(payload);
     const text = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-    return text.length > 0 && text.length <= MAX_OFFER && !UNSHOWABLE.test(text) ? text : undefined;
+    return text.length > 0 && text.length <= MAX_OFFER && !UNSHOWABLE.test(text) && !hasHidden(text) ? text : undefined;
   } catch { return undefined; }
 }
 

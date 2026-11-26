@@ -888,6 +888,13 @@ impl Mesh {
         reply_to: Option<&str>,
         now_ms: u64,
     ) -> Result<String, MeshError> {
+        if let Some(expired) = reply_to.filter(|id| {
+            self.asks
+                .get(*id)
+                .is_some_and(|a| a.answer.is_none() && now_ms >= a.deadline_ms)
+        }) {
+            self.asks.remove(expired);
+        }
         let answers = reply_to.and_then(|r| {
             self.asks
                 .get(r)
@@ -1256,20 +1263,30 @@ impl Mesh {
         (tasks, leases)
     }
 
-    /// Moves a claimed task from `from` to `to` if `from` is not the owner any more (a handoff that could not be delivered is
-    /// undone this way). Returns whether it moved.
+    /// Undoes a handoff that could not be delivered. A task still owned by `from` is released;
+    /// an open task is returned to `to` only while that agent is still registered. Returns whether
+    /// the task changed.
     pub fn reassign_task(&mut self, id: &str, from: &AgentId, to: &AgentId) -> bool {
         let tid = TaskId::new(id);
+        let target_is_live = self.agents.contains_key(to);
         let Some(rec) = self.tasks.get_mut(&tid) else {
             return false;
         };
-        if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
-            return false;
+        let changed = match rec.task.state() {
+            TaskState::Claimed(owner) if owner == from => {
+                let _ = rec.task.release(from);
+                if target_is_live {
+                    let _ = rec.task.claim(to);
+                }
+                true
+            }
+            TaskState::Open if target_is_live => rec.task.claim(to).is_ok(),
+            _ => false,
+        };
+        if changed {
+            self.task_changed(&tid);
         }
-        let _ = rec.task.release(from);
-        let moved = rec.task.claim(to).is_ok();
-        self.task_changed(&tid);
-        moved
+        changed
     }
 
     /// Gives back claimed tasks whose owner is not a registered agent (it ended, or the broker was restored without it).
@@ -2065,6 +2082,83 @@ mod tests {
             // A late reply is still delivered as an ordinary message.
             assert_eq!(m.inbox(&id("a"), None, 10).unwrap()[0].body, "reply");
         }
+    }
+
+    #[test]
+    fn f394_a_reply_refused_at_the_deadline_cannot_return_after_clock_rollback() {
+        let mut control = mesh();
+        let control_ask = control.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        control
+            .send_message(&id("b"), "a", "on time", &[], Some(&control_ask), 9)
+            .unwrap();
+        assert!(matches!(
+            control.ask_status(&control_ask, 10),
+            AskStatus::Answered { .. }
+        ));
+        println!("CONTROL OK");
+
+        let mut target = mesh();
+        let ask = target.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        target
+            .send_message(&id("b"), "a", "late", &[], Some(&ask), 10)
+            .unwrap();
+        target
+            .send_message(&id("b"), "a", "rollback", &[], Some(&ask), 9)
+            .unwrap();
+        let actual = target.ask_status(&ask, 9);
+        println!("EXPECTED: TimedOut");
+        println!("ACTUAL: {actual:?}");
+        if actual == AskStatus::TimedOut {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, AskStatus::TimedOut);
+    }
+
+    #[test]
+    fn verifies_f394_ask_reply_deadline_boundaries() {
+        let mut on_time = mesh();
+        let ask = on_time.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        on_time
+            .send_message(&id("b"), "a", "yes", &[], Some(&ask), 9)
+            .unwrap();
+        assert!(matches!(
+            on_time.ask_status(&ask, 100),
+            AskStatus::Answered { reply, .. } if reply == "yes"
+        ));
+
+        let mut exact = mesh();
+        let ask = exact.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        exact
+            .send_message(&id("b"), "a", "late", &[], Some(&ask), 10)
+            .unwrap();
+        exact
+            .send_message(&id("b"), "a", "rollback", &[], Some(&ask), 9)
+            .unwrap();
+        assert_eq!(exact.ask_status(&ask, 9), AskStatus::TimedOut);
+
+        let mut late = mesh();
+        let ask = late.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        late.send_message(&id("b"), "a", "late", &[], Some(&ask), 50)
+            .unwrap();
+        late.send_message(&id("b"), "a", "rollback", &[], Some(&ask), 1)
+            .unwrap();
+        assert_eq!(late.ask_status(&ask, 1), AskStatus::TimedOut);
+
+        let mut accepted = mesh();
+        let ask = accepted.ask(&id("a"), "b", "?", Some(10), 0).unwrap();
+        accepted
+            .send_message(&id("b"), "a", "kept", &[], Some(&ask), 1)
+            .unwrap();
+        accepted
+            .send_message(&id("b"), "a", "later", &[], Some(&ask), 20)
+            .unwrap();
+        assert!(matches!(
+            accepted.ask_status(&ask, 20),
+            AskStatus::Answered { reply, .. } if reply == "kept"
+        ));
+        println!("FIX VERIFIED");
     }
 
     #[test]

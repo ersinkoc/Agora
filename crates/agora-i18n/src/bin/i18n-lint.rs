@@ -6,9 +6,15 @@ use std::process::ExitCode;
 use agora_i18n::lint::{run, Severity};
 
 fn main() -> ExitCode {
-    let root = std::env::args()
-        .nth(1)
-        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let mut args = std::env::args_os().skip(1);
+    let root = match (args.next(), args.next()) {
+        (None, None) => PathBuf::from("."),
+        (Some(root), None) => PathBuf::from(root),
+        _ => {
+            eprintln!("usage: i18n-lint [repo-root]");
+            return ExitCode::from(2);
+        }
+    };
     match run(&root) {
         Ok(findings) => {
             let mut errors = 0;

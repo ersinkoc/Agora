@@ -247,7 +247,12 @@ fn csi(b: &[u8]) -> Step {
 fn mouse(params: &[u8], fin: u8) -> Option<Event> {
     let text = std::str::from_utf8(params).ok()?;
     let mut it = text.split(';').map(|n| n.parse::<u16>().ok());
-    let (b, x, y) = (it.next()??, it.next()??, it.next()??);
+    let b = it.next()??;
+    let col = it.next()??.checked_sub(1)?;
+    let row = it.next()??.checked_sub(1)?;
+    if it.next().is_some() {
+        return None;
+    }
     let mods = u8::try_from(b & 0b1_1100).ok()?;
     // The wheel's two low bits say up or down, and a move's say no button: neither is a button.
     let button = if b & 64 != 0 || b & 32 != 0 && b & 3 == 3 {
@@ -266,8 +271,8 @@ fn mouse(params: &[u8], fin: u8) -> Option<Event> {
     };
     Some(Event::Mouse(Mouse {
         kind,
-        col: x.saturating_sub(1),
-        row: y.saturating_sub(1),
+        col,
+        row,
         button,
         mods,
     }))

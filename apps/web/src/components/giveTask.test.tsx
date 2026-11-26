@@ -296,7 +296,7 @@ describe('review fixes', () => {
     expect(dialog().textContent).not.toMatch(/[\u202E\u0007]/);
     click(button('Give the task', dialog()));
     await flush();
-    expect(dialog().textContent).toContain('Sent to claude · abc.');
+    expect(dialog().textContent).toContain('Sent to claude · a\\u{202e}b\\u{7}c.');
   });
 });
 
@@ -447,7 +447,7 @@ describe('start a new agent for the task', () => {
     const win = startWindow()!;
     expect(dialog()).toBeNull(); // the picker gave way to the start window
     const named = win.querySelector('[data-start-for-task]')!;
-    expect(named.textContent).toBe('For the task “<b>bold</b> evil” of shop');
+    expect(named.textContent).toBe('For the task “<b>bold</b> \\u{202e}evil” of shop');
     expect(named.querySelector('b')).toBeNull();
     // Prefilled as an ordinary start prefills: the machine with the project's folder, and that folder; the person still chooses it.
     expect((win.querySelector('input:not([type])') as HTMLInputElement).value).toBe('/w/shop');

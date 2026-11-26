@@ -17,6 +17,7 @@
 # Line and paragraph separators (Zl, Zp), then the bidirectional embeddings and overrides.
 2028-202E
 2060-206F
+2800
 3164
 FE00-FE0F
 FEFF

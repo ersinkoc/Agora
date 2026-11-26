@@ -5,7 +5,7 @@ import { LimitChip } from './Quota';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { agentKind, endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
-import type { MachineModel } from '../net/view';
+import { visible, type MachineModel } from '../net/view';
 import { ago, agoShort } from '../net/time';
 import { Icon } from './Icon';
 import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
@@ -95,9 +95,9 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // ADR-0060: an agent its machine's restart interrupted, with Resume or Start again; shown in every grouping.
   const stoppedRow = (a: AgentTileModel) => <li key={a.id}>
                 <div className="flex items-center">
-                  <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+                  <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.machine)} · ${visible(a.workspace)}`}>
                     <span className="opacity-60"><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span>
-                    <span className="min-w-0 flex-1 truncate text-muted">{a.name}</span>
+                    <span className="min-w-0 flex-1 truncate text-muted">{visible(a.name)}</span>
                     <FinishedMark agentId={a.id} compact />
                     <StatusMark state="finished" />
                   </button>
@@ -114,12 +114,12 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // red, the state's shape last); the row in front is an accent tint, never a bar on its edge.
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <div className="group flex items-center">
-    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-wrap gap-y-1 overflow-hidden" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.name} · ${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}`}>
+    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-wrap gap-y-1 overflow-hidden" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}`}>
       <AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" needsYou={a.state === 'needs-you'} />
       <span className="flex min-w-[40%] flex-1 items-baseline gap-1.5 overflow-hidden" data-agent-name-cell>
-        <span className="max-w-full flex-none truncate" data-agent-name>{a.name}</span>
-        {a.parentName && <span className="min-w-0 truncate text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}
-        {withMachine && <span className="min-w-0 truncate text-xs text-muted">{a.machine}</span>}
+        <span className="max-w-full flex-none truncate" data-agent-name>{visible(a.name)}</span>
+        {a.parentName && <span className="min-w-0 truncate text-xs text-muted">{t('helper-started-by', { name: visible(a.parentName) })}</span>}
+        {withMachine && <span className="min-w-0 truncate text-xs text-muted">{visible(a.machine)}</span>}
       </span>
       <LimitChip agent={a} compact fit />
       {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
@@ -151,7 +151,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       </label>
     </div>
     {projects.length > 0 && <label className="flex-none px-2 pb-2 text-xs text-muted"><span className="sr-only">{t('filter-project')}</span>
-      <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select>
+      <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: visible(p.name), count: p.machines.size })}</option>)}</select>
     </label>}
     <div className="@container flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
     <nav ref={setViewport} data-agent-count={fleet.length} className="min-h-0 flex-1 overflow-y-auto px-1 pb-3 [--explorer-row-size:2rem] [@media(pointer:coarse)]:[--explorer-row-size:var(--tap)]">
@@ -187,18 +187,18 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
         const seen = m && !m.online ? t('machine-last-seen', { when: ago(m.lastSeenMs, now) }) : undefined;
         return <section key={machine} data-machine-id={machine} data-online={m?.online ? 'true' : 'false'} className="mb-0.5">
           <div className="group flex items-center">
-            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} title={seen ? `${t('machine-offline')} · ${seen}` : undefined} onClick={() => fold(machine)}>
+            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name: visible(name) })} title={seen ? `${t('machine-offline')} · ${seen}` : undefined} onClick={() => fold(machine)}>
               <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
               <span aria-hidden className={`size-2 flex-none rounded-full ${m?.online ? 'bg-finished' : 'bg-unknown'}`} />
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
-              <span className="min-w-0 flex-1 truncate">{name}{m && sharesName(m, machines) && <code className="ms-1.5 text-xs font-normal text-muted">{m.id}</code>}</span>
+              <span className="min-w-0 flex-1 truncate">{visible(name)}{m && sharesName(m, machines) && <code className="ms-1.5 text-xs font-normal text-muted">{visible(m.id)}</code>}</span>
               {m && !m.online && <span className="flex-none truncate text-xs font-normal text-muted" data-last-seen>{t('explorer-offline-for', { when: agoShort(m.lastSeenMs, now) })}</span>}
               {(m?.online !== false || count > 0) && <span className="text-xs font-normal text-muted">{count}</span>}
             </button>
-            {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}
+            {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: visible(name) })} title={t('ide-add-here', { machine: visible(name) })}><Icon name="plus" className="size-3.5" /></button>}
           </div>
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
-            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span>{(() => { const sp = list[0]?.projectId ? spread.get(list[0].projectId) : undefined; return sharedAcross(sp) ? <ProjectChip spread={sp} compact /> : null; })()}</div>
+            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{visible(list[0]?.project || folder)}</span>{(() => { const sp = list[0]?.projectId ? spread.get(list[0].projectId) : undefined; return sharedAcross(sp) ? <ProjectChip spread={sp} compact /> : null; })()}</div>
             <ExplorerRows {...rowWindow} items={helperTree(list)} idOf={row => row.agent.id}
               renderRow={({ agent: a, depth }) => agentRow(a, depth, false)} />
           </div>)}
@@ -218,9 +218,9 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
         </div>
         {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-danger">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
         {!folded.has('~closed') && <ExplorerRows {...rowWindow} items={closed} idOf={agentId} renderRow={a => <li key={a.id} className="group flex items-center">
-            <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+            <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.machine)} · ${visible(a.workspace)}`}>
               <span className="opacity-60"><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span>
-              <span className="min-w-0 flex-1 truncate text-muted">{a.name}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">{visible(a.name)}</span>
               <span className="flex-none text-xs font-normal text-muted">{a.endedMs ? agoShort(a.endedMs, now) : ''}</span>
               <StatusMark state="finished" failed={endedWithError(a)} />
             </button>

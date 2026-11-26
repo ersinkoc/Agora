@@ -189,7 +189,7 @@ mod tests {
 
     fn spec(toml: &str) -> McpSpec {
         let src = format!(
-            "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[mcp]\n{toml}"
+            "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"x\"]\n[mcp]\n{toml}"
         );
         Manifest::parse(&src).unwrap().mcp.unwrap()
     }

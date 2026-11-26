@@ -1,3 +1,5 @@
+import { visible } from './hidden';
+
 // A person's devices (ADR-0061): this browser registers its key and a name with the hub when it signs in; another device of the same
 // person that the machines already trust can approve it (an endorsement, signed with that device's key and verified by each machine);
 // a trusted device can remove one (a revocation). The hub only carries these; its list of devices is only a list of candidates.
@@ -50,6 +52,7 @@ export function revokeMessage(deviceId: string, issuedAtMs: number, revokerDevic
 }
 
 export function fromHex(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) throw new TypeError('invalid hex');
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
@@ -114,7 +117,7 @@ export function browserName(ua: string = typeof navigator === 'undefined' ? '' :
 export function deviceLabel(name: string | null | undefined, id: string): string {
   if (!name) return id;
   const tail = id.slice(id.lastIndexOf('-') + 1).slice(-4);
-  return tail ? `${name} · ${tail}` : name;
+  return tail ? `${visible(name)} · ${tail}` : visible(name);
 }
 
 // Signs, with this device's key, that `target` is the person's too, for `nodes` (empty: every machine of theirs).

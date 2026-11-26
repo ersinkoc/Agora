@@ -9,8 +9,9 @@ class DeferredSocket implements Socket {
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
   sent: Uint8Array[] = [];
+  closes = 0;
   send(data: Uint8Array) { this.sent.push(data); }
-  close() {} // The close event is released explicitly by each test.
+  close() { this.closes++; } // The close event is released explicitly by each test.
 }
 
 function setup(onRejected?: () => void) {
@@ -192,6 +193,23 @@ describe('live connection lifecycle', () => {
     // The full backing buffer is valid, but the view supplied by the transport is incomplete.
     s.onmessage!({ data: packet.subarray(0, packet.length - 1) });
     expect(t.seen).toEqual([6]);
+    t.live.close();
+  });
+
+  it('closes the connection when the WebSocket delivers a text message', () => {
+    const rejected = vi.fn();
+    const t = setup(rejected);
+    const s = t.sockets[0]!;
+    s.onopen!();
+    s.onmessage!({ data: 'not a binary frame' });
+    expect(s.closes).toBe(1);
+    s.onclose!();
+    t.live.retry();
+    const next = t.sockets[1]!;
+    next.onopen!();
+    next.onmessage!({ data: 'still not binary' });
+    next.onclose!();
+    expect(rejected).not.toHaveBeenCalled();
     t.live.close();
   });
 });

@@ -11,7 +11,9 @@ export function b64urlEncode(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 export function b64urlDecode(text: string): Uint8Array<ArrayBuffer> {
-  const s = atob(text.replace(/-/g, '+').replace(/_/g, '/'));
+  if (!/^[A-Za-z0-9_-]*$/.test(text) || text.length % 4 === 1) throw new TypeError('invalid base64url');
+  const base64 = text.replace(/-/g, '+').replace(/_/g, '/');
+  const s = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='));
   const out = new Uint8Array(new ArrayBuffer(s.length));
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
   return out;
@@ -81,7 +83,7 @@ export async function signInWithPasskey(env: Env = defaults()): Promise<PasskeyR
     if (begin.status === 503) return { ok: false, reason: 'busy' };
     if (!begin.ok) return { ok: false, reason: 'failed' };
     const { challenge, rpId, ids } = (await begin.json()) as { challenge: string; rpId: string; ids: string[] };
-    if (ids.length === 0) return { ok: false, reason: 'failed' };
+    if (ids.length === 0 || ids.length > 32) return { ok: false, reason: 'failed' };
     const cred = (await env.credentials.get({
       publicKey: {
         challenge: b64urlDecode(challenge),
@@ -102,7 +104,7 @@ export async function signInWithPasskey(env: Env = defaults()): Promise<PasskeyR
     if (done.status === 503) return { ok: false, reason: 'busy' };
     if (!done.ok) return { ok: false, reason: 'failed' };
     const body = (await done.json()) as { token?: unknown };
-    if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };
+    if (typeof body.token !== 'string' || body.token.length === 0) return { ok: false, reason: 'failed' };
     rememberToken(body.token);
     return { ok: true, token: body.token };
   } catch (e) {

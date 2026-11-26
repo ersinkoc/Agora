@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use agora_i18n::{key, Arg};
 use agora_protocol::v1::{DirectoryEntries, DirectoryEntry, Snapshot};
 
-use crate::render::Text;
+use crate::render::{plain, Text};
 
 /// What one frame of the picker shows.
 pub struct Picker<'a> {
@@ -259,9 +259,10 @@ pub fn child(folder: &str, name: &str) -> String {
     }
 }
 
-/// Text cut to `width` characters (folder names are shown as plain text: no control characters reach the terminal).
+/// Text cut to `width` characters (folder names are shown as plain text: hidden characters are escaped and controls cannot reach the terminal).
 fn fit(text: &str, width: usize) -> String {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let without_controls: String = text.chars().filter(|c| !c.is_control()).collect();
+    let clean = plain(&without_controls);
     if clean.chars().count() <= width {
         return clean;
     }
@@ -429,6 +430,25 @@ mod tests {
         assert!(r.iter().any(|l| l == "   p24  tui-folder-git"), "{r:#?}");
         assert!(!r.iter().any(|l| l.contains("p00")), "scrolled: {r:#?}");
         assert!(r[11].contains("tui-folder-keys"), "{r:#?}");
+    }
+
+    #[test]
+    fn folder_names_make_hidden_characters_visible() {
+        let mut f = folder(1, false);
+        f.entries[0].name = "a\u{202e}\u{2800}b".into();
+        let p = Picker {
+            machine: "mac2",
+            folder: &f,
+            selected: 0,
+            notice: "",
+            projects: false,
+            color: false,
+            cols: 80,
+            rows: 8,
+        };
+        let drawn = frame(&p, &text);
+        assert!(!drawn.chars().any(agora_core::text::is_hidden), "{drawn:?}");
+        assert!(drawn.contains("a\\u{2800}b"), "{drawn:?}");
     }
 
     #[test]

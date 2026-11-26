@@ -473,7 +473,8 @@ fn compute_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
     let root = git_refs(path, &["rev-parse", "--show-toplevel"])
         .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
     // Rebuilt from its parts so it uses this system's separator: git for Windows answers `C:/...`.
-    let root: PathBuf = Path::new(root.trim()).components().collect();
+    let root = root.strip_suffix('\n').unwrap_or(&root);
+    let root: PathBuf = Path::new(root).components().collect();
     // The two identity queries run at the resolved root, so the `.git` checks in `git_command` see the checkout's own `.git`
     // (a linked `.git` is refused even when asked from a subfolder). They run side by side: one serial git spawn less, which
     // shows on Windows. A thread that cannot be started is no error: that query then runs in order instead.
@@ -1303,22 +1304,29 @@ fn log_unchecked(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError>
         return Ok(Vec::new());
     }
     let n = format!("-n{limit}");
-    // Fields are split by the ASCII unit separator and records end with the record separator: neither can occur in a
-    // subject or a name, so no quoting is needed.
+    // Git terminates each commit with NUL under -z. Use NUL between its four fields too:
+    // a commit's author and subject can contain other ASCII control characters.
     let out = git_refs(
         worktree,
         &[
             "log",
             &n,
             "--no-color",
-            "--format=%H%x1f%an%x1f%ct%x1f%s%x1e",
+            "-z",
+            "--format=%H%x00%an%x00%ct%x00%s",
         ],
     )?;
-    Ok(out
-        .split('\u{1e}')
-        .filter_map(|rec| {
-            let mut f = rec.trim_start_matches('\n').splitn(4, '\u{1f}');
-            let (id, author, ct, subject) = (f.next()?, f.next()?, f.next()?, f.next()?);
+    let mut fields = out.split_terminator('\0');
+    let records = std::iter::from_fn(|| {
+        Some((
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        ))
+    });
+    Ok(records
+        .filter_map(|(id, author, ct, subject)| {
             Some(Commit {
                 id: id.to_string(),
                 author: author.to_string(),

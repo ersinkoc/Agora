@@ -52,8 +52,14 @@ fn dns_name_ok(n: &str) -> bool {
 /// The canonical text of a name: an IP address in its shortest form, a DNS name in lower case.
 fn canonical(n: &str) -> Option<String> {
     let n = n.trim();
-    if let Ok(ip) = n.trim_matches(['[', ']']).parse::<IpAddr>() {
+    if let Ok(ip) = n.parse::<IpAddr>() {
         return Some(ip.to_string());
+    }
+    if let Some(inner) = n.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        return inner.parse::<Ipv6Addr>().ok().map(|ip| ip.to_string());
+    }
+    if n.contains(['[', ']']) {
+        return None;
     }
     dns_name_ok(n).then(|| n.to_ascii_lowercase())
 }
@@ -377,6 +383,48 @@ mod tests {
                 .all[0],
             "2001:db8::1"
         );
+    }
+
+    #[test]
+    fn f422_only_one_balanced_pair_may_bracket_an_ipv6_owner_name() {
+        let control = select(&["[2001:db8::1]".to_string()], None, ip("127.0.0.1"), &[]).unwrap();
+        assert_eq!(control.all[0], "2001:db8::1");
+        println!("CONTROL OK");
+
+        let malformed = "[2001:db8::1".to_string();
+        let actual = select(std::slice::from_ref(&malformed), None, ip("127.0.0.1"), &[]);
+        let expected = Err(NamesError::Invalid(malformed));
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f422_owner_name_bracket_boundaries() {
+        for valid in ["2001:db8::1", "[2001:db8::1]", "127.0.0.1", "hub.example"] {
+            assert!(
+                select(&[valid.to_string()], None, ip("127.0.0.1"), &[]).is_ok(),
+                "{valid}"
+            );
+        }
+        for invalid in [
+            "[2001:db8::1",
+            "2001:db8::1]",
+            "[[2001:db8::1]]",
+            "[127.0.0.1]",
+        ] {
+            assert_eq!(
+                select(&[invalid.to_string()], None, ip("127.0.0.1"), &[]),
+                Err(NamesError::Invalid(invalid.to_string())),
+                "{invalid}"
+            );
+        }
+        println!("FIX VERIFIED");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { getLanguage, t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { agentKindOf } from './fleet';
+import { visible } from './hidden';
 
 // ADR-0091: the plan limits of subscription tools, as the nodes read them from the tools' own files. Pure: the window's clock is a
 // parameter, nothing here reads it. A limit is only ever what a tool reported: with no observation the answer is "unknown", never a
@@ -43,12 +44,13 @@ export function windowLabel(window: string): string {
   if (window === 'five_hour') return t('quota-window-five-hour');
   if (window === 'seven_day') return t('quota-window-seven-day');
   const minutes = windowMinutes(window);
-  return minutes === undefined ? window : t('quota-window-minutes', { minutes });
+  return minutes === undefined ? visible(window) : t('quota-window-minutes', { minutes });
 }
 
 /** The tool's name in the window: the agent kind with a capital ("codex" becomes "Codex"). */
 export function toolName(tool: string): string {
-  return tool ? tool.charAt(0).toUpperCase() + tool.slice(1) : tool;
+  const shown = visible(tool);
+  return shown ? shown.charAt(0).toUpperCase() + shown.slice(1) : shown;
 }
 
 // fresh: observed, its window still running, and not older than the window is long. stale: observed longer ago than the window is

@@ -320,7 +320,14 @@ fn secs_ms(a: &Value, k: &str) -> Result<Option<u64>, ()> {
     match a.get(k) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => match v.as_f64() {
-            Some(n) if n.is_finite() && n >= 0.0 => Ok(Some((n * 1000.0) as u64)),
+            Some(n)
+                if n.is_finite()
+                    && n >= 0.0
+                    && (n * 1000.0).is_finite()
+                    && n * 1000.0 < u64::MAX as f64 =>
+            {
+                Ok(Some((n * 1000.0) as u64))
+            }
             _ => Err(()),
         },
     }
@@ -810,20 +817,26 @@ impl McpConnection {
                 done(mesh.task_claim(me, t).map(|()| json!({"ok": true})))
             }
             "task_complete" => {
-                let (Some(t), Some(summary)) =
-                    (str_arg(&args, "task_id"), str_arg(&args, "summary"))
-                else {
+                let (Some(t), Some(summary), Some(refs)) = (
+                    str_arg(&args, "task_id"),
+                    str_arg(&args, "summary"),
+                    strs_arg(&args, "refs"),
+                ) else {
                     return bad();
                 };
+                if let Err(e) = limits.check_content(summary, &refs) {
+                    return reply(id, error_result(&e, &limits));
+                }
                 done(
                     mesh.task_complete(me, t, summary)
                         .map(|()| json!({"ok": true})),
                 )
             }
             "lease_acquire" => {
-                let (Some(paths), Ok(Some(ttl))) = (
+                let (Some(paths), Ok(Some(ttl)), Ok(_reason)) = (
                     strs_arg(&args, "paths").filter(|paths| !paths.is_empty()),
                     secs_ms(&args, "ttl_s"),
+                    optional_str_arg(&args, "reason"),
                 ) else {
                     return bad();
                 };
@@ -1325,6 +1338,228 @@ mod tests {
                 "{name} {args}"
             );
         }
+    }
+
+    #[test]
+    fn f417_task_completion_refuses_non_string_refs() {
+        let (mut m, mut a, _) = setup();
+        let (task, error) = payload(call(
+            &mut a,
+            &mut m,
+            0,
+            "task_create",
+            json!({"title": "document it"}),
+        ));
+        assert!(!error);
+        let task = task["task_id"].as_str().unwrap();
+        let (_, error) = payload(call(
+            &mut a,
+            &mut m,
+            0,
+            "task_claim",
+            json!({"task_id": task}),
+        ));
+        assert!(!error);
+        println!("CONTROL OK");
+
+        let actual = call(
+            &mut a,
+            &mut m,
+            0,
+            "task_complete",
+            json!({"task_id": task, "summary": "done", "refs": [7]}),
+        );
+        let refused = matches!(
+            actual,
+            Outcome::Reply(Message::ErrorResponse {
+                code: INVALID_PARAMS,
+                ..
+            })
+        );
+        println!("EXPECTED: invalid params");
+        println!("ACTUAL: {actual:?}");
+        if refused {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(refused);
+    }
+
+    #[test]
+    fn f418_lease_reason_refuses_a_non_string_value() {
+        let (mut m, mut a, _) = setup();
+        let control = call(
+            &mut a,
+            &mut m,
+            0,
+            "lease_acquire",
+            json!({"paths": ["control"], "ttl_s": 1, "reason": "editing"}),
+        );
+        assert!(matches!(control, Outcome::Reply(Message::Response { .. })));
+        println!("CONTROL OK");
+
+        let actual = call(
+            &mut a,
+            &mut m,
+            0,
+            "lease_acquire",
+            json!({"paths": ["target"], "ttl_s": 1, "reason": 7}),
+        );
+        let refused = matches!(
+            actual,
+            Outcome::Reply(Message::ErrorResponse {
+                code: INVALID_PARAMS,
+                ..
+            })
+        );
+        println!("EXPECTED: invalid params");
+        println!("ACTUAL: {actual:?}");
+        if refused {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(refused);
+    }
+
+    #[test]
+    fn f419_seconds_that_do_not_fit_milliseconds_are_invalid() {
+        let (mut m, mut a, _) = setup();
+        assert!(matches!(
+            call(
+                &mut a,
+                &mut m,
+                0,
+                "ask",
+                json!({"to": "b", "question": "ready?", "timeout_s": 1}),
+            ),
+            Outcome::Waiting { .. }
+        ));
+        println!("CONTROL OK");
+
+        let actual = call(
+            &mut a,
+            &mut m,
+            0,
+            "ask",
+            json!({"to": "b", "question": "ready?", "timeout_s": 1e300}),
+        );
+        let refused = matches!(
+            actual,
+            Outcome::Reply(Message::ErrorResponse {
+                code: INVALID_PARAMS,
+                ..
+            })
+        );
+        println!("EXPECTED: invalid params");
+        println!("ACTUAL: {actual:?}");
+        if refused {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(refused);
+    }
+
+    #[test]
+    fn verifies_f417_task_completion_ref_boundaries() {
+        fn completion(refs: Value) -> Outcome {
+            let (mut m, mut a, _) = setup();
+            let (task, error) = payload(call(
+                &mut a,
+                &mut m,
+                0,
+                "task_create",
+                json!({"title": "complete"}),
+            ));
+            assert!(!error);
+            let task = task["task_id"].as_str().unwrap();
+            assert!(
+                !payload(call(
+                    &mut a,
+                    &mut m,
+                    0,
+                    "task_claim",
+                    json!({"task_id": task}),
+                ))
+                .1
+            );
+            call(
+                &mut a,
+                &mut m,
+                0,
+                "task_complete",
+                json!({"task_id": task, "summary": "done", "refs": refs}),
+            )
+        }
+
+        for refs in [Value::Null, json!([]), json!(["src/lib.rs", "t-1"])] {
+            assert!(matches!(
+                completion(refs),
+                Outcome::Reply(Message::Response { .. })
+            ));
+        }
+        for refs in [json!("src/lib.rs"), json!(["ok", 1]), json!({})] {
+            assert!(matches!(
+                completion(refs),
+                Outcome::Reply(Message::ErrorResponse {
+                    code: INVALID_PARAMS,
+                    ..
+                })
+            ));
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f418_lease_reason_type_boundaries() {
+        let (mut m, mut a, _) = setup();
+        for (i, reason) in [Value::Null, json!("editing"), json!("")]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(matches!(
+                call(
+                    &mut a,
+                    &mut m,
+                    0,
+                    "lease_acquire",
+                    json!({"paths": [format!("ok-{i}")], "ttl_s": 1, "reason": reason}),
+                ),
+                Outcome::Reply(Message::Response { .. })
+            ));
+        }
+        for (i, reason) in [json!(7), json!([]), json!({"why": "editing"})]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(matches!(
+                call(
+                    &mut a,
+                    &mut m,
+                    0,
+                    "lease_acquire",
+                    json!({"paths": [format!("bad-{i}")], "ttl_s": 1, "reason": reason}),
+                ),
+                Outcome::Reply(Message::ErrorResponse {
+                    code: INVALID_PARAMS,
+                    ..
+                })
+            ));
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f419_seconds_to_milliseconds_boundaries() {
+        assert_eq!(secs_ms(&json!({}), "ttl_s"), Ok(None));
+        assert_eq!(secs_ms(&json!({"ttl_s": null}), "ttl_s"), Ok(None));
+        assert_eq!(secs_ms(&json!({"ttl_s": 0}), "ttl_s"), Ok(Some(0)));
+        assert_eq!(secs_ms(&json!({"ttl_s": 1.5}), "ttl_s"), Ok(Some(1_500)));
+        assert_eq!(secs_ms(&json!({"ttl_s": -1}), "ttl_s"), Err(()));
+        assert_eq!(secs_ms(&json!({"ttl_s": 1e300}), "ttl_s"), Err(()));
+        println!("FIX VERIFIED");
     }
 
     #[test]

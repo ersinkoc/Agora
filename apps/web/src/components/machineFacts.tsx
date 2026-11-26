@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import { ago } from '../net/time';
 import type { MachineModel } from '../net/view';
 import { Icon, type IconName } from './Icon';
@@ -16,8 +17,8 @@ export function OsTile({ os }: { os: string }) {
 export function MachineName({ m, id, className = '' }: { m: Pick<MachineModel, 'id' | 'name'>; id?: string; className?: string }) {
   return (
     <span className="flex min-w-0 items-baseline gap-2">
-      <strong id={id} className={`truncate ${className}`.trim()}>{m.name}</strong>
-      {m.id !== m.name && <code dir="ltr" className="truncate text-xs font-normal text-muted">{m.id}</code>}
+      <strong id={id} className={`truncate ${className}`.trim()}>{visible(m.name)}</strong>
+      {m.id !== m.name && <code dir="ltr" className="truncate text-xs font-normal text-muted">{visible(m.id)}</code>}
     </span>
   );
 }
@@ -27,5 +28,5 @@ export function MachineName({ m, id, className = '' }: { m: Pick<MachineModel, '
 export function MachineFacts({ m, now }: { m: MachineModel; now: number }) {
   const when = t(m.online ? 'network-heard' : 'network-last-seen', { when: ago(m.lastSeenMs, now) });
   const parts: [string, boolean][] = [[peerText(systemName(m.os)) || '?', false], ...(m.build ? [[m.build, true] as [string, boolean]] : []), [when, false]];
-  return <>{parts.map(([p, mono], i) => <span key={i}>{i > 0 && ' · '}<bdi data-fact={i === 0 ? 'os' : undefined} className={mono ? 'font-mono' : undefined}>{p}</bdi></span>)}</>;
+  return <>{parts.map(([p, mono], i) => <span key={i}>{i > 0 && ' · '}<bdi data-fact={i === 0 ? 'os' : undefined} className={mono ? 'font-mono' : undefined}>{mono ? visible(p) : p}</bdi></span>)}</>;
 }

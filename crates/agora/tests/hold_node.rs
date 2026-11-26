@@ -694,7 +694,10 @@ fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts()
     let _serial = serial();
     let rig = Rig::new("kept", &sh("echo up; sleep 600"));
     let manifest = rig.root.join("manifests/k.toml");
-    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    // Launch options need engine 2 (agent-manifest.md).
+    let mut text = std::fs::read_to_string(&manifest)
+        .expect("manifest")
+        .replace("min_engine = 1", "min_engine = 2");
     text.push_str("[[launch.option]]\nid = \"skip\"\nlabel = \"option-skip\"\nargs = [\"--yes\"]\nskips_permissions = true\n");
     std::fs::write(&manifest, text).expect("manifest");
     let node = rig.node();

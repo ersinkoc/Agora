@@ -142,9 +142,10 @@ export class TouchScroll {
     if (this.last === undefined) return { kind: 'ignore' };
     this.carry += this.last - y;
     this.last = y;
-    const whole = Math.trunc(this.carry / Math.max(1, s.cellHeight));
+    const rowHeight = Math.max(1, s.cellHeight);
+    const whole = Math.trunc(this.carry / rowHeight);
     if (whole === 0) return { kind: 'ignore' };
-    this.carry -= whole * s.cellHeight;
+    this.carry -= whole * rowHeight;
     if (s.mouse) return { kind: 'ignore' };
     if (s.altScreen) return { kind: 'arrows', count: Math.min(Math.abs(whole), s.rows), up: whole < 0 };
     return { kind: 'scroll', lines: whole };

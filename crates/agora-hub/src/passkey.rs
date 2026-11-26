@@ -73,8 +73,14 @@ pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
             out.push(((acc >> bits) & 0xff) as u8);
         }
     }
-    // A single leftover character (6 bits) cannot come from any byte string.
-    (s.len() % 4 != 1).then_some(out)
+    // A single leftover character (6 bits) cannot come from any byte string. RFC 4648 also requires the unused low bits of
+    // the last character to be zero, so one byte string has only one textual encoding.
+    match s.len() % 4 {
+        1 => None,
+        2 if acc & 0x0f != 0 => None,
+        3 if acc & 0x03 != 0 => None,
+        _ => Some(out),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +411,42 @@ mod tests {
         }
         assert_eq!(b64url_decode("AQID=").as_deref(), None);
         assert_eq!(b64url_decode("A"), None);
+    }
+
+    #[test]
+    fn f381_base64url_rejects_nonzero_unused_pad_bits() {
+        assert_eq!(b64url_decode("AA"), Some(vec![0]));
+        assert_eq!(b64url_decode("AAA"), Some(vec![0, 0]));
+        println!("CONTROL OK");
+
+        let actual = (b64url_decode("AB"), b64url_decode("AAB"));
+        let expected = (None, None);
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f381_base64url_canonical_tail_boundaries() {
+        for (text, bytes) in [
+            ("", vec![]),
+            ("AA", vec![0]),
+            ("AAA", vec![0, 0]),
+            ("AAAA", vec![0, 0, 0]),
+        ] {
+            assert_eq!(b64url_decode(text), Some(bytes));
+        }
+        for text in ["AB", "A_", "AAB", "AA_", "A", "AA="] {
+            assert_eq!(b64url_decode(text), None, "{text}");
+        }
+        assert_eq!(b64url_decode("_w"), Some(vec![0xff]));
+        assert_eq!(b64url_decode("__8"), Some(vec![0xff, 0xff]));
+        println!("FIX VERIFIED");
     }
 
     #[test]

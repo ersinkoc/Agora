@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use agora_core::AgentId;
+use agora_core::{AgentId, LeaseTable};
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
 use agora_mesh::mcp::{
     board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
@@ -672,39 +672,184 @@ impl Boards {
         let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
             return;
         };
-        let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
-        let tasks: Vec<TaskEntry> = v["tasks"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|t| {
-                        let owner = t["owner"].as_str().map(AgentId::new);
-                        let done = t["done"].as_bool().unwrap_or(false);
-                        TaskEntry {
-                            id: agora_core::TaskId::new(text(t, "id")),
-                            project: project.to_string(),
-                            title: text(t, "title"),
-                            detail: text(t, "detail"),
-                            depends_on: t["depends_on"]
-                                .as_array()
-                                .map(|d| {
-                                    d.iter()
-                                        .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                            status: match (&owner, done) {
-                                (None, _) => TaskStatus::Open,
-                                (Some(_), false) => TaskStatus::Claimed,
-                                (Some(_), true) => TaskStatus::Done,
-                            },
-                            owner,
-                            summary: t["summary"].as_str().map(str::to_string),
-                        }
-                    })
-                    .collect()
+        let Some(task_values) = v["tasks"].as_array() else {
+            return;
+        };
+        let qualified_agent = |id: &str| {
+            id.split_once('/').is_some_and(|(node, agent)| {
+                !node.is_empty() && !agent.is_empty() && !agent.contains('/')
             })
-            .unwrap_or_default();
+        };
+        for task in task_values {
+            if task["id"].as_str().is_none()
+                || task["title"].as_str().is_none()
+                || task["detail"].as_str().is_none()
+                || (!task["summary"].is_null() && task["summary"].as_str().is_none())
+            {
+                return;
+            }
+            let Some(dependencies) = task["depends_on"].as_array() else {
+                return;
+            };
+            if dependencies
+                .iter()
+                .any(|dependency| !dependency.is_string())
+                || task["done"].as_bool().is_none()
+            {
+                return;
+            }
+            if let Some(owner) = task["owner"].as_str() {
+                if !qualified_agent(owner) {
+                    return;
+                }
+            } else if !task["owner"].is_null() {
+                return;
+            }
+        }
+        let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
+        let tasks: Vec<TaskEntry> = task_values
+            .iter()
+            .map(|t| {
+                let owner = t["owner"].as_str().map(AgentId::new);
+                let done = t["done"].as_bool().unwrap_or(false);
+                TaskEntry {
+                    id: agora_core::TaskId::new(text(t, "id")),
+                    project: project.to_string(),
+                    title: text(t, "title"),
+                    detail: text(t, "detail"),
+                    depends_on: t["depends_on"]
+                        .as_array()
+                        .map(|d| {
+                            d.iter()
+                                .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    status: match (&owner, done) {
+                        (None, _) => TaskStatus::Open,
+                        (Some(_), false) => TaskStatus::Claimed,
+                        (Some(_), true) => TaskStatus::Done,
+                    },
+                    owner,
+                    summary: t["summary"].as_str().map(str::to_string),
+                }
+            })
+            .collect();
+        let Some(next) = v["next"].as_u64() else {
+            return;
+        };
+        if next == 0 || next == u64::MAX {
+            return;
+        }
+        let mut ids = BTreeMap::new();
+        for (value, task) in task_values.iter().zip(&tasks) {
+            let Some(number) = task
+                .id
+                .as_str()
+                .strip_prefix("t-")
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                return;
+            };
+            if number == 0 || number >= next || ids.insert(task.id.clone(), number).is_some() {
+                return;
+            }
+            if value["done"].as_bool() == Some(true) && task.owner.is_none() {
+                return;
+            }
+        }
+        // A dependency names a task of this board, or an id below `next` that no task has: a merge (ADR-0115) points a dependency
+        // whose task went to another id there, so the task keeps waiting, and no new task can ever take that id. Anything else (an
+        // id at or above `next`, which a later task would get, or not a task id at all) refuses the board, and so does a cycle.
+        let placeholder = |dependency: &agora_core::TaskId| {
+            dependency
+                .as_str()
+                .strip_prefix("t-")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|number| number > 0 && number < next)
+        };
+        let by_id: BTreeMap<&agora_core::TaskId, &TaskEntry> =
+            tasks.iter().map(|task| (&task.id, task)).collect();
+        if tasks.iter().any(|task| {
+            task.depends_on
+                .iter()
+                .any(|dependency| !ids.contains_key(dependency) && !placeholder(dependency))
+        }) {
+            return;
+        }
+        // Depth-first, without recursion: 0 not seen, 1 on the current path, 2 done.
+        let mut mark: BTreeMap<&agora_core::TaskId, u8> = BTreeMap::new();
+        for start in &tasks {
+            if mark.get(&start.id).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            let mut stack: Vec<(&agora_core::TaskId, usize)> = vec![(&start.id, 0)];
+            mark.insert(&start.id, 1);
+            while let Some((id, at)) = stack.pop() {
+                let deps = by_id
+                    .get(id)
+                    .map_or(&[][..], |task| task.depends_on.as_slice());
+                if let Some(next_dep) = deps.get(at) {
+                    stack.push((id, at + 1));
+                    if !by_id.contains_key(next_dep) {
+                        continue;
+                    }
+                    match mark.get(next_dep).copied().unwrap_or(0) {
+                        0 => {
+                            mark.insert(next_dep, 1);
+                            stack.push((next_dep, 0));
+                        }
+                        1 => return,
+                        _ => {}
+                    }
+                } else {
+                    mark.insert(id, 2);
+                }
+            }
+        }
+        let Some(lease_values) = v["leases"].as_array() else {
+            return;
+        };
+        let mut lease_check = LeaseTable::new();
+        let mut restored_leases = Vec::with_capacity(lease_values.len());
+        for lease in lease_values {
+            let (Some(path), Some(holder), Some(expires)) = (
+                lease["path"].as_str(),
+                lease["holder"].as_str(),
+                lease["expires_at_ms"].as_u64(),
+            ) else {
+                return;
+            };
+            if !qualified_agent(holder) {
+                return;
+            }
+            let holder = AgentId::new(holder);
+            // Live leases may not overlap another holder's, nor repeat. An ended one (`expires_at_ms` 0 included) is released below
+            // whatever it overlaps: a merge (ADR-0115) passes a lease that lost its path on as ended, so loading says it was released.
+            if expires > now_ms {
+                let before = lease_check.all().len();
+                if lease_check
+                    .acquire(path, &holder, now_ms, expires - now_ms)
+                    .is_err()
+                    || lease_check.all().len() != before + 1
+                {
+                    return;
+                }
+            }
+            restored_leases.push((path.to_string(), holder, expires));
+        }
+        let Some(live_lease_count) = u64::try_from(
+            restored_leases
+                .iter()
+                .filter(|(_, _, expires)| *expires > now_ms)
+                .count(),
+        )
+        .ok() else {
+            return;
+        };
+        if next.checked_add(live_lease_count).is_none() {
+            return;
+        }
         let restarted = self
             .restarted
             .lock()
@@ -714,21 +859,8 @@ impl Boards {
         let mesh = g
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
-        mesh.import_tasks(v["next"].as_u64().unwrap_or(1), &tasks);
-        let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = v["leases"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|l| {
-                        Some((
-                            l["path"].as_str()?.to_string(),
-                            AgentId::new(l["holder"].as_str()?),
-                            l["expires_at_ms"].as_u64()?,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        mesh.import_tasks(next, &tasks);
+        let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = restored_leases
             .into_iter()
             .partition(|(_, _, expires)| *expires > now_ms);
         // A restored lease is granted again to its holder, so it belongs to a grant: when the holder ends, `sync` (or a restart of
@@ -1080,7 +1212,7 @@ impl Boards {
                 .or_insert_with(|| (0, BTreeSet::new()));
             // A hold that is still running keeps its end: joins one after another never hold grants longer than one wait.
             if entry.0 <= now_ms {
-                entry.0 = now_ms + JOIN_WAIT_MS;
+                entry.0 = now_ms.saturating_add(JOIN_WAIT_MS);
             }
             entry.1.extend(join.iter().cloned());
             out.extend(join.into_iter().map(|n| (n, project.clone())));
@@ -1130,10 +1262,17 @@ impl Boards {
     }
 
     fn joining(&self, project: &str, now_ms: u64) -> bool {
-        let j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        if j.pending
+            .get(project)
+            .is_some_and(|(until, _)| now_ms >= *until)
+        {
+            j.pending.remove(project);
+            return false;
+        }
         j.pending
             .get(project)
-            .is_some_and(|(until, nodes)| !nodes.is_empty() && now_ms < *until)
+            .is_some_and(|(_, nodes)| !nodes.is_empty())
     }
 
     /// Puts what `node` handed over for `project` on the board (ADR-0039 amendment B): each lease for its holder, refused (and both
@@ -1693,6 +1832,131 @@ mod tests {
     }
 
     #[test]
+    fn f415_join_wait_creation_does_not_overflow_the_clock() {
+        let control = Boards::new();
+        let shared = view(&["alpha", "beta"]);
+        assert_eq!(control.membership(&shared, 1_000).len(), 2);
+        println!("CONTROL OK");
+
+        let target = Boards::new();
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            target.membership(&shared, u64::MAX - JOIN_WAIT_MS + 1)
+        }));
+        println!("EXPECTED: membership succeeds");
+        println!(
+            "ACTUAL: {}",
+            if actual.is_ok() {
+                "succeeded"
+            } else {
+                "panicked"
+            }
+        );
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(matches!(actual, Ok(pairs) if pairs.len() == 2));
+    }
+
+    #[test]
+    fn verifies_f415_join_wait_clock_boundaries() {
+        for now in [0, u64::MAX - JOIN_WAIT_MS, u64::MAX - JOIN_WAIT_MS + 1] {
+            let boards = Boards::new();
+            let shared = view(&["alpha", "beta"]);
+            assert_eq!(boards.membership(&shared, now).len(), 2);
+            assert!(boards.membership(&shared, now).is_empty());
+        }
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f393_an_ended_join_wait_cannot_return_after_clock_rollback() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        b.membership(&view(&["alpha"]), 0);
+        b.membership(&v, 1_000);
+        let early = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["early"], "ttl_s": 60}),
+            1_000 + JOIN_WAIT_MS - 1,
+        );
+        assert!(text(&early).contains("board.unavailable"));
+        println!("CONTROL OK");
+
+        let ended = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["ended"], "ttl_s": 60}),
+            1_000 + JOIN_WAIT_MS,
+        );
+        assert!(text(&ended).contains("lease_id"), "{}", text(&ended));
+        let actual = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["rollback"], "ttl_s": 60}),
+            1_001,
+        );
+        let granted = text(&actual).contains("lease_id");
+        println!("EXPECTED: true");
+        println!("ACTUAL: {granted}");
+        if granted {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(granted, "{}", text(&actual));
+    }
+
+    #[test]
+    fn verifies_f393_join_wait_deadline_boundaries() {
+        fn pending() -> (Boards, View) {
+            let boards = Boards::new();
+            let shared = view(&["alpha", "beta"]);
+            boards.membership(&view(&["alpha"]), 0);
+            boards.membership(&shared, 1_000);
+            (boards, shared)
+        }
+        let acquire = |boards: &Boards, shared: &View, path: &str, now| {
+            text(&run(
+                boards,
+                shared,
+                "alpha",
+                "lease_acquire",
+                json!({"paths": [path], "ttl_s": 60}),
+                now,
+            ))
+        };
+
+        let (active, shared) = pending();
+        assert!(
+            acquire(&active, &shared, "active", 1_000 + JOIN_WAIT_MS - 1)
+                .contains("board.unavailable")
+        );
+
+        let (exact, shared) = pending();
+        assert!(acquire(&exact, &shared, "exact", 1_000 + JOIN_WAIT_MS).contains("lease_id"));
+        assert!(acquire(&exact, &shared, "exact-rollback", 1_001).contains("lease_id"));
+
+        let (late, shared) = pending();
+        assert!(acquire(&late, &shared, "late", 1_000 + JOIN_WAIT_MS + 500).contains("lease_id"));
+        assert!(acquire(&late, &shared, "late-rollback", 1_002).contains("lease_id"));
+
+        let (settled, shared) = pending();
+        settled.join_settled("alpha", "p");
+        settled.join_settled("beta", "p");
+        assert!(acquire(&settled, &shared, "settled", 1_001).contains("lease_id"));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
     fn handed_over_work_lands_on_the_board_and_a_conflicting_lease_is_refused_with_both_holders_told(
     ) {
         use agora_protocol::v1::{BoardJoinLease, BoardJoinResult, BoardJoinTask};
@@ -1875,6 +2139,54 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .to_string()
+    }
+
+    fn handed_off_task() -> (Boards, View, String, Handoff) {
+        let boards = Boards::new();
+        let shared = view(&["alpha", "beta", "gamma"]);
+        let made = run(
+            &boards,
+            &shared,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(
+            &boards,
+            &shared,
+            "alpha",
+            "task_claim",
+            json!({"task_id": id}),
+            2,
+        );
+        let handoff = run(
+            &boards,
+            &shared,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        (boards, shared, id, handoff)
+    }
+
+    fn saved_task<'a>(snapshot: &'a Value, id: &str) -> &'a Value {
+        snapshot["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == id)
+            .unwrap()
     }
 
     #[test]
@@ -2895,5 +3207,1354 @@ mod tests {
         };
         assert_eq!(status_row("alpha/tree")["workspace"], "/src/tree");
         assert_eq!(status_row("alpha/helper")["workspace"], "/home/me/folder");
+    }
+
+    #[test]
+    fn f397_a_failed_handoff_does_not_return_a_task_to_a_giver_that_ended() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let handoff = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        let mut gone = v.clone();
+        gone.agents.get_mut("alpha/a").unwrap().running = false;
+        run(&b, &gone, "beta", "task_list", json!({}), 4);
+        println!("CONTROL OK");
+
+        b.revert_handoff(&handoff);
+        let saved: Value = serde_json::from_slice(&b.snapshot("p", 5).unwrap()).unwrap();
+        let actual = saved["tasks"][0]["owner"].as_str();
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, None);
+    }
+
+    #[test]
+    fn f398_a_failed_handoff_returns_an_open_task_when_only_the_receiver_ended() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "target", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let handoff = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        )
+        .handoff
+        .unwrap();
+        let mut gone = v.clone();
+        gone.agents.get_mut("beta/a").unwrap().running = false;
+        run(&b, &gone, "alpha", "task_list", json!({}), 4);
+        let before: Value = serde_json::from_slice(&b.snapshot("p", 4).unwrap()).unwrap();
+        assert!(before["tasks"][0]["owner"].is_null());
+        println!("CONTROL OK");
+
+        b.revert_handoff(&handoff);
+        let saved: Value = serde_json::from_slice(&b.snapshot("p", 5).unwrap()).unwrap();
+        let actual = saved["tasks"][0]["owner"].as_str();
+        println!("EXPECTED: Some(\"alpha/a\")");
+        println!("ACTUAL: {actual:?}");
+        if actual == Some("alpha/a") {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Some("alpha/a"));
+    }
+
+    #[test]
+    fn f399_a_snapshot_whose_next_id_collides_with_a_task_is_ignored() {
+        let correct = Boards::new();
+        let snapshot = json!({
+            "next": 2,
+            "tasks": [{"id": "t-1", "title": "kept", "detail": "", "depends_on": [],
+                       "done": false, "owner": null, "summary": null}],
+            "leases": []
+        });
+        correct.load("p", snapshot.to_string().as_bytes(), 0);
+        let listed = run(
+            &correct,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_list",
+            json!({}),
+            1,
+        );
+        let list: Value = serde_json::from_str(&text(&listed)).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        let snapshot = json!({
+            "next": 1,
+            "tasks": [{"id": "t-1", "title": "must not load", "detail": "", "depends_on": [],
+                       "done": false, "owner": null, "summary": null}],
+            "leases": []
+        });
+        damaged.load("p", snapshot.to_string().as_bytes(), 0);
+        let listed = run(
+            &damaged,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_list",
+            json!({}),
+            1,
+        );
+        let actual: Value = serde_json::from_str(&text(&listed)).unwrap();
+        println!("EXPECTED: []");
+        println!("ACTUAL: {actual}");
+        if actual.as_array().is_some_and(Vec::is_empty) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, json!([]));
+    }
+
+    #[test]
+    fn verifies_f397_failed_handoff_giver_liveness_boundaries() {
+        let (normal, _, id, handoff) = handed_off_task();
+        normal.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&normal.snapshot("p", 4).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "alpha/a");
+
+        let (giver_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("alpha/a").unwrap().running = false;
+        run(&giver_gone, &view, "beta", "task_list", json!({}), 4);
+        giver_gone.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&giver_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert!(saved_task(&snapshot, &id)["owner"].is_null());
+
+        let (both_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("alpha/a").unwrap().running = false;
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(&both_gone, &view, "gamma", "task_list", json!({}), 4);
+        both_gone.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&both_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert!(saved_task(&snapshot, &id)["owner"].is_null());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f398_failed_handoff_receiver_race_boundaries() {
+        let (receiver_gone, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(&receiver_gone, &view, "alpha", "task_list", json!({}), 4);
+        receiver_gone.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&receiver_gone.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "alpha/a");
+
+        let (claimed_elsewhere, mut view, id, handoff) = handed_off_task();
+        view.agents.get_mut("beta/a").unwrap().running = false;
+        run(
+            &claimed_elsewhere,
+            &view,
+            "gamma",
+            "task_claim",
+            json!({"task_id": id}),
+            4,
+        );
+        claimed_elsewhere.revert_handoff(&handoff);
+        let snapshot: Value =
+            serde_json::from_slice(&claimed_elsewhere.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "gamma/a");
+
+        let (completed, view, id, handoff) = handed_off_task();
+        run(
+            &completed,
+            &view,
+            "beta",
+            "task_complete",
+            json!({"task_id": id, "summary": "done"}),
+            4,
+        );
+        completed.revert_handoff(&handoff);
+        let snapshot: Value = serde_json::from_slice(&completed.snapshot("p", 5).unwrap()).unwrap();
+        assert_eq!(saved_task(&snapshot, &id)["owner"], "beta/a");
+        assert_eq!(saved_task(&snapshot, &id)["done"], true);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f399_snapshot_task_id_boundaries() {
+        let load = |snapshot: Value| {
+            let boards = Boards::new();
+            boards.load("p", snapshot.to_string().as_bytes(), 0);
+            let listed = run(
+                &boards,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_list",
+                json!({}),
+                1,
+            );
+            serde_json::from_str::<Value>(&text(&listed)).unwrap()
+        };
+        let task = |id: &str| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": [],
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert_eq!(
+            load(json!({"next": 3, "tasks": [task("t-1"), task("t-2")], "leases": []}))
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("t-2")], "leases": []})),
+            json!([])
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("t-1"), task("t-1")], "leases": []})),
+            json!([])
+        );
+        assert_eq!(
+            load(json!({"next": 2, "tasks": [task("other")], "leases": []})),
+            json!([])
+        );
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f400_a_snapshot_counter_at_u64_max_is_ignored_before_id_allocation_panics() {
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": 1, "tasks": [], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let control = run(
+            &valid,
+            &view(&["alpha", "beta"]),
+            "alpha",
+            "task_create",
+            json!({"title": "control", "depends_on": []}),
+            1,
+        );
+        assert_eq!(
+            agora_mesh::mcp::tool_result_value(match &control.verdict {
+                Verdict::Done { result, .. } => result,
+                _ => panic!(),
+            })
+            .unwrap()["task_id"],
+            "t-1"
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": u64::MAX, "tasks": [], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(
+                &damaged,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_create",
+                json!({"title": "target", "depends_on": []}),
+                1,
+            )
+        }));
+        println!("EXPECTED: Ok(t-1)");
+        println!("ACTUAL: {}", if actual.is_ok() { "Ok" } else { "panic" });
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_ok());
+    }
+
+    #[test]
+    fn f401_a_done_snapshot_task_without_an_owner_is_not_reopened() {
+        let task = |owner: Value| {
+            json!({"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                   "done": true, "owner": owner, "summary": "done"})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": 2, "tasks": [task(json!("alpha/a"))], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let saved: Value = serde_json::from_slice(&valid.snapshot("p", 0).unwrap()).unwrap();
+        assert_eq!(saved["tasks"][0]["done"], true);
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": 2, "tasks": [task(Value::Null)], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f402_a_snapshot_task_with_an_unknown_dependency_is_ignored() {
+        let task = |dependency: &str| {
+            json!({"id": "t-2", "title": "task", "detail": "", "depends_on": [dependency],
+                   "done": false, "owner": null, "summary": null})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 3,
+                "tasks": [
+                    {"id": "t-1", "title": "dependency", "detail": "", "depends_on": [],
+                     "done": true, "owner": "alpha/a", "summary": "done"},
+                    task("t-1")
+                ],
+                "leases": []
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            // `t-3` is not below `next`: a later task would take that id. (An id below `next` that names no task is a merge's
+            // waiting placeholder, ADR-0115, and loads.)
+            json!({"next": 3, "tasks": [task("t-3")], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f403_a_snapshot_with_a_dependency_cycle_is_ignored() {
+        let task = |id: &str, dependency: &str| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": [dependency],
+                   "done": false, "owner": null, "summary": null})
+        };
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 3,
+                "tasks": [
+                    {"id": "t-1", "title": "first", "detail": "", "depends_on": [],
+                     "done": false, "owner": null, "summary": null},
+                    task("t-2", "t-1")
+                ],
+                "leases": []
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"next": 3, "tasks": [task("t-1", "t-2"), task("t-2", "t-1")], "leases": []})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f404_a_snapshot_with_conflicting_live_leases_is_ignored_atomically() {
+        let lease = |path: &str, holder: &str| json!({"path": path, "holder": holder, "expires_at_ms": 10_000});
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({
+                "next": 1,
+                "tasks": [],
+                "leases": [lease("src/a", "alpha/a"), lease("src/b", "beta/a")]
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({
+                "next": 1,
+                "tasks": [],
+                "leases": [lease("src", "alpha/a"), lease("src/lib", "beta/a")]
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0).map_or(0, |bytes| {
+            serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len()
+        });
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f400_snapshot_counter_allocation_boundaries() {
+        let create_after = |next: u64| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": next, "tasks": [], "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            let answer = run(
+                &boards,
+                &view(&["alpha", "beta"]),
+                "alpha",
+                "task_create",
+                json!({"title": "task", "depends_on": []}),
+                1,
+            );
+            let Verdict::Done { result, .. } = answer.verdict else {
+                panic!()
+            };
+            agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(create_after(1), "t-1");
+        assert_eq!(create_after(42), "t-42");
+        assert_eq!(create_after(u64::MAX - 1), format!("t-{}", u64::MAX - 1));
+        assert_eq!(create_after(0), "t-1");
+        assert_eq!(create_after(u64::MAX), "t-1");
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f401_snapshot_task_terminal_state_boundaries() {
+        let load = |done: bool, owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+
+        let open = load(false, Value::Null).unwrap();
+        assert_eq!(open[0]["done"], false);
+        assert!(open[0]["owner"].is_null());
+        let claimed = load(false, json!("alpha/a")).unwrap();
+        assert_eq!(claimed[0]["done"], false);
+        assert_eq!(claimed[0]["owner"], "alpha/a");
+        let done = load(true, json!("alpha/a")).unwrap();
+        assert_eq!(done[0]["done"], true);
+        assert_eq!(done[0]["owner"], "alpha/a");
+        assert!(load(true, Value::Null).is_none());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f402_snapshot_dependency_existence_boundaries() {
+        let load = |tasks: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 4, "tasks": tasks, "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert_eq!(load(json!([task("t-1", json!([]))])), 1);
+        assert_eq!(
+            load(json!([
+                task("t-1", json!([])),
+                task("t-2", json!(["t-1"])),
+                task("t-3", json!(["t-1", "t-2"]))
+            ])),
+            3
+        );
+        // An id below `next` that no task has is a merge's waiting placeholder (ADR-0115): the task loads and keeps waiting.
+        assert_eq!(load(json!([task("t-2", json!(["t-1"]))])), 1);
+        assert_eq!(load(json!([task("t-1", json!(["t-9"]))])), 0);
+        assert_eq!(load(json!([task("t-1", json!(["t-4"]))])), 0);
+        assert_eq!(load(json!([task("t-1", json!(["x"]))])), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f403_snapshot_dependency_order_boundaries() {
+        let load = |tasks: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 4, "tasks": tasks, "leases": []})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+
+        assert!(load(json!([
+            task("t-1", json!([])),
+            task("t-2", json!(["t-1"])),
+            task("t-3", json!(["t-2"]))
+        ])));
+        assert!(!load(json!([task("t-1", json!(["t-1"]))])));
+        assert!(!load(json!([
+            task("t-1", json!(["t-2"])),
+            task("t-2", json!(["t-1"]))
+        ])));
+        // A merge (ADR-0115) can renumber a task above one that waits for it: no cycle, so it loads.
+        assert!(load(json!([
+            task("t-1", json!(["t-2"])),
+            task("t-2", json!([]))
+        ])));
+        assert!(!load(json!([
+            task("t-1", json!(["t-3"])),
+            task("t-2", json!(["t-1"])),
+            task("t-3", json!(["t-2"]))
+        ])));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f404_snapshot_lease_consistency_boundaries() {
+        let load = |leases: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        let lease = |path: &str, holder: &str| json!({"path": path, "holder": holder, "expires_at_ms": 10_000});
+
+        assert_eq!(
+            load(json!([lease("src/a", "alpha/a"), lease("src/b", "beta/a")])),
+            2
+        );
+        assert_eq!(
+            load(json!([
+                lease("src", "alpha/a"),
+                lease("src/lib", "alpha/a")
+            ])),
+            2
+        );
+        assert_eq!(
+            load(json!([lease("src", "alpha/a"), lease("src/lib", "beta/a")])),
+            0
+        );
+        assert_eq!(load(json!([lease("../outside", "alpha/a")])), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f405_a_non_array_dependency_field_does_not_silently_lose_dependencies() {
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+        let load = |dependencies: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 3,
+                    "tasks": [task("t-1", json!([])), task("t-2", dependencies)],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load(json!(["t-1"])), 2);
+        println!("CONTROL OK");
+
+        let actual = load(json!("t-1"));
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f406_a_non_boolean_done_field_does_not_reopen_a_completed_task() {
+        let load = |done: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": "alpha/a", "summary": "done"}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+        assert_eq!(load(json!(true)).unwrap()[0]["done"], true);
+        println!("CONTROL OK");
+
+        let actual = load(json!("true"));
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f407_duplicate_snapshot_leases_are_not_partially_collapsed() {
+        let lease =
+            |path: &str| json!({"path": path, "holder": "alpha/a", "expires_at_ms": 10_000});
+        let load = |leases: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load(json!([lease("src/a"), lease("src/b")])), 2);
+        println!("CONTROL OK");
+
+        let actual = load(json!([lease("src/a"), lease("src/a")]));
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f408_a_snapshot_task_owner_must_be_a_hub_qualified_agent() {
+        let load = |owner: &str| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load("alpha/a"), 1);
+        println!("CONTROL OK");
+
+        let actual = load("alpha");
+        println!("EXPECTED: 0 tasks");
+        println!("ACTUAL: {actual} tasks");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn f409_a_snapshot_lease_holder_must_be_a_hub_qualified_agent() {
+        let load = |holder: &str| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 1,
+                    "tasks": [],
+                    "leases": [{"path": "src", "holder": holder, "expires_at_ms": 10_000}]
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+        assert_eq!(load("alpha/a"), 1);
+        println!("CONTROL OK");
+
+        let actual = load("alpha");
+        println!("EXPECTED: 0 leases");
+        println!("ACTUAL: {actual} leases");
+        if actual == 0 {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn verifies_f405_snapshot_dependency_field_type_boundaries() {
+        let task = |id: &str, dependencies: Value| {
+            json!({"id": id, "title": id, "detail": "", "depends_on": dependencies,
+                   "done": false, "owner": null, "summary": null})
+        };
+        let load = |dependencies: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 3,
+                    "tasks": [task("t-1", json!([])), task("t-2", dependencies)],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!([])));
+        assert!(load(json!(["t-1"])));
+        assert!(!load(json!("t-1")));
+        assert!(!load(Value::Null));
+        assert!(!load(json!(["t-1", 2])));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f406_snapshot_done_field_type_boundaries() {
+        let load = |done: Value, owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": done, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!(false), Value::Null));
+        assert!(load(json!(false), json!("alpha/a")));
+        assert!(load(json!(true), json!("alpha/a")));
+        assert!(!load(json!("false"), json!("alpha/a")));
+        assert!(!load(json!(0), json!("alpha/a")));
+        assert!(!load(Value::Null, json!("alpha/a")));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f407_snapshot_duplicate_lease_boundaries() {
+        let load = |paths: &[&str]| {
+            let boards = Boards::new();
+            let leases: Vec<Value> = paths
+                .iter()
+                .map(|path| json!({"path": path, "holder": "alpha/a", "expires_at_ms": 10_000}))
+                .collect();
+            boards.load(
+                "p",
+                json!({"next": 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).map_or(0, |bytes| {
+                serde_json::from_slice::<Value>(&bytes).unwrap()["leases"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+        };
+
+        assert_eq!(load(&["src/a"]), 1);
+        assert_eq!(load(&["src/a", "src/b"]), 2);
+        assert_eq!(load(&["src", "src/lib"]), 2);
+        assert_eq!(load(&["src/a", "src/a"]), 0);
+        assert_eq!(load(&["src/a", "./src/a"]), 0);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f408_snapshot_task_owner_identity_boundaries() {
+        let load = |owner: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": owner, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(Value::Null));
+        assert!(load(json!("alpha/a")));
+        assert!(load(json!(BOARD_AGENT)));
+        assert!(!load(json!("alpha")));
+        assert!(!load(json!("/a")));
+        assert!(!load(json!("alpha/")));
+        assert!(!load(json!("alpha/a/extra")));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f409_snapshot_lease_holder_identity_boundaries() {
+        let load = |holder: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 1,
+                    "tasks": [],
+                    "leases": [{"path": "src", "holder": holder, "expires_at_ms": 10_000}]
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+
+        assert!(load(json!("alpha/a")));
+        assert!(load(json!(BOARD_AGENT)));
+        assert!(!load(json!("alpha")));
+        assert!(!load(json!("/a")));
+        assert!(!load(json!("alpha/")));
+        assert!(!load(json!("alpha/a/extra")));
+        assert!(!load(json!(7)));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f410_a_non_string_snapshot_title_does_not_silently_become_empty() {
+        let load = |title: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": title, "detail": "", "depends_on": [],
+                               "done": false, "owner": null, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+        assert_eq!(load(json!("title")).unwrap()[0]["title"], "title");
+        println!("CONTROL OK");
+
+        let actual = load(json!(7));
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f411_a_non_string_snapshot_detail_does_not_silently_become_empty() {
+        let load = |detail: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": detail, "depends_on": [],
+                               "done": false, "owner": null, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+        assert_eq!(load(json!("detail")).unwrap()[0]["detail"], "detail");
+        println!("CONTROL OK");
+
+        let actual = load(json!(["detail"]));
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f412_a_non_string_snapshot_summary_does_not_silently_disappear() {
+        let load = |summary: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": "alpha/a", "summary": summary}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards
+                .snapshot("p", 0)
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap()["tasks"].clone())
+        };
+        assert_eq!(load(json!("handoff")).unwrap()[0]["summary"], "handoff");
+        println!("CONTROL OK");
+
+        let actual = load(json!({"text": "handoff"}));
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f413_a_snapshot_with_no_id_counter_is_ignored() {
+        let lease = json!({"path": "src", "holder": "alpha/a", "expires_at_ms": 10_000});
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": 1, "tasks": [], "leases": [lease.clone()]})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        damaged.load(
+            "p",
+            json!({"tasks": [], "leases": [lease]})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        let actual = damaged.snapshot("p", 0);
+        println!("EXPECTED: None");
+        println!("ACTUAL: {}", if actual.is_some() { "Some" } else { "None" });
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn f414_restore_reserves_enough_id_space_for_every_live_lease() {
+        let leases = json!([
+            {"path": "src/a", "holder": "alpha/a", "expires_at_ms": 10_000},
+            {"path": "src/b", "holder": "alpha/a", "expires_at_ms": 10_000}
+        ]);
+        let valid = Boards::new();
+        valid.load(
+            "p",
+            json!({"next": u64::MAX - 3, "tasks": [], "leases": leases.clone()})
+                .to_string()
+                .as_bytes(),
+            0,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&valid.snapshot("p", 0).unwrap()).unwrap()["leases"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        println!("CONTROL OK");
+
+        let damaged = Boards::new();
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            damaged.load(
+                "p",
+                json!({"next": u64::MAX - 1, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                0,
+            );
+        }));
+        println!("EXPECTED: Ok and ignored");
+        println!("ACTUAL: {}", if actual.is_ok() { "Ok" } else { "panic" });
+        if actual.is_ok() && damaged.snapshot("p", 0).is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual.is_ok());
+        assert!(damaged.snapshot("p", 0).is_none());
+    }
+
+    #[test]
+    fn verifies_f410_snapshot_title_type_boundaries() {
+        let load = |title: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": title, "detail": "", "depends_on": [],
+                               "done": false, "owner": null, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+        assert!(load(json!("")));
+        assert!(load(json!("task")));
+        assert!(load(json!("görev")));
+        assert!(!load(json!(7)));
+        assert!(!load(Value::Null));
+        assert!(!load(json!(["task"])));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f411_snapshot_detail_type_boundaries() {
+        let load = |detail: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": detail, "depends_on": [],
+                               "done": false, "owner": null, "summary": null}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+        assert!(load(json!("")));
+        assert!(load(json!("detail")));
+        assert!(load(json!("satır\niki")));
+        assert!(!load(json!(false)));
+        assert!(!load(Value::Null));
+        assert!(!load(json!({"detail": "text"})));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f412_snapshot_summary_type_boundaries() {
+        let load = |summary: Value| {
+            let boards = Boards::new();
+            boards.load(
+                "p",
+                json!({
+                    "next": 2,
+                    "tasks": [{"id": "t-1", "title": "task", "detail": "", "depends_on": [],
+                               "done": false, "owner": "alpha/a", "summary": summary}],
+                    "leases": []
+                })
+                .to_string()
+                .as_bytes(),
+                0,
+            );
+            boards.snapshot("p", 0).is_some()
+        };
+        assert!(load(Value::Null));
+        assert!(load(json!("")));
+        assert!(load(json!("handoff")));
+        assert!(!load(json!(1)));
+        assert!(!load(json!(true)));
+        assert!(!load(json!({"text": "handoff"})));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f413_snapshot_counter_type_boundaries() {
+        let load = |next: Option<Value>| {
+            let boards = Boards::new();
+            let mut snapshot = json!({"tasks": [], "leases": []});
+            if let Some(next) = next {
+                snapshot["next"] = next;
+            }
+            boards.load("p", snapshot.to_string().as_bytes(), 0);
+            boards.snapshot("p", 0).is_some()
+        };
+        assert!(load(Some(json!(1))));
+        assert!(load(Some(json!(42))));
+        assert!(load(Some(json!(u64::MAX - 1))));
+        assert!(!load(None));
+        assert!(!load(Some(json!("1"))));
+        assert!(!load(Some(json!(-1))));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn verifies_f414_live_lease_id_capacity_boundaries() {
+        let load = |next: u64, expires: &[u64], now: u64| {
+            let boards = Boards::new();
+            let leases: Vec<Value> = expires
+                .iter()
+                .enumerate()
+                .map(|(index, expires)| {
+                    json!({"path": format!("src/{index}"), "holder": "alpha/a",
+                           "expires_at_ms": expires})
+                })
+                .collect();
+            boards.load(
+                "p",
+                json!({"next": next, "tasks": [], "leases": leases})
+                    .to_string()
+                    .as_bytes(),
+                now,
+            );
+            boards.snapshot("p", now).is_some()
+        };
+        assert!(load(u64::MAX - 3, &[10_000, 10_000], 0));
+        assert!(load(u64::MAX - 2, &[10_000, 10_000], 0));
+        assert!(load(u64::MAX - 1, &[10_000], 0));
+        assert!(!load(u64::MAX - 1, &[10_000, 10_000], 0));
+        assert!(load(u64::MAX - 1, &[1, 2], 10));
+        println!("FIX VERIFIED");
     }
 }

@@ -187,7 +187,10 @@ impl Lockout {
     }
 
     pub(crate) fn check(&self, now_ms: u64) -> Option<u64> {
-        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.1 != 0 && now_ms >= s.1 {
+            s.1 = 0;
+        }
         (now_ms < s.1).then(|| s.1 - now_ms)
     }
 
@@ -251,15 +254,26 @@ impl<'a> Enrollment<'a> {
         // Issue first: a bad CSR or node id must not burn a valid code (the user would have to start over).
         let mut conn = self.store.lock()?;
         let tx = crate::store::write_tx(&mut conn)?;
+        let code_hash = hash(code);
         let live: Option<i64> = tx
             .query_row(
                 "SELECT expires_ms FROM enrollment_codes WHERE code_hash = ?1",
-                [hash(code)],
+                [&code_hash],
                 |r| r.get(0),
             )
             .optional()?;
-        if live.is_none_or(|exp| exp <= to_i64(now_ms)) {
+        let Some(expires_ms) = live else {
             drop(tx);
+            drop(conn);
+            self.lockout.failed(now_ms);
+            return Err(EnrollError::BadCode);
+        };
+        if expires_ms <= to_i64(now_ms) {
+            tx.execute(
+                "DELETE FROM enrollment_codes WHERE code_hash = ?1",
+                [&code_hash],
+            )?;
+            tx.commit()?;
             drop(conn);
             self.lockout.failed(now_ms);
             return Err(EnrollError::BadCode);
@@ -267,7 +281,7 @@ impl<'a> Enrollment<'a> {
         let issued = ca.issue_node(node_id, csr_pem)?;
         tx.execute(
             "DELETE FROM enrollment_codes WHERE code_hash = ?1",
-            [hash(code)],
+            [&code_hash],
         )?;
         // One live identity per node id: enrolling again under a name replaces what was there (the old certificate is revoked,
         // and a connection it still holds is closed), so a redeemed code can never add a second route for an existing node.
@@ -717,6 +731,79 @@ mod tests {
     }
 
     #[test]
+    fn f387_an_expired_enrollment_code_cannot_return_after_clock_rollback() {
+        let (control_store, control_ca, control_csr) = setup();
+        let mut control = Enrollment::new(&control_store);
+        let fresh = control.create_code(0).unwrap();
+        assert!(control
+            .redeem(
+                &control_ca,
+                &fresh,
+                "control",
+                &control_csr,
+                CODE_TTL_MS - 1
+            )
+            .is_ok());
+        println!("CONTROL OK");
+
+        let (store, ca, csr) = setup();
+        let mut enrollment = Enrollment::new(&store);
+        let code = enrollment.create_code(0).unwrap();
+        assert!(matches!(
+            enrollment.redeem(&ca, &code, "target", &csr, CODE_TTL_MS),
+            Err(EnrollError::BadCode)
+        ));
+        let actual = enrollment.redeem(&ca, &code, "target", &csr, 1).map(|_| ());
+        println!("EXPECTED: Err(BadCode)");
+        println!("ACTUAL: {actual:?}");
+        if matches!(actual, Err(EnrollError::BadCode)) {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(matches!(actual, Err(EnrollError::BadCode)));
+    }
+
+    #[test]
+    fn verifies_f387_enrollment_code_expiry_boundaries() {
+        let (fresh_store, fresh_ca, fresh_csr) = setup();
+        let mut fresh = Enrollment::new(&fresh_store);
+        let code = fresh.create_code(0).unwrap();
+        assert!(fresh
+            .redeem(&fresh_ca, &code, "fresh", &fresh_csr, CODE_TTL_MS - 1)
+            .is_ok());
+
+        let (exact_store, exact_ca, exact_csr) = setup();
+        let mut exact = Enrollment::new(&exact_store);
+        let code = exact.create_code(0).unwrap();
+        assert!(matches!(
+            exact.redeem(&exact_ca, &code, "exact", &exact_csr, CODE_TTL_MS),
+            Err(EnrollError::BadCode)
+        ));
+        assert!(matches!(
+            exact.redeem(&exact_ca, &code, "exact", &exact_csr, 1),
+            Err(EnrollError::BadCode)
+        ));
+
+        let (late_store, late_ca, late_csr) = setup();
+        let mut late = Enrollment::new(&late_store);
+        let code = late.create_code(0).unwrap();
+        assert!(matches!(
+            late.redeem(&late_ca, &code, "late", &late_csr, CODE_TTL_MS + 500),
+            Err(EnrollError::BadCode)
+        ));
+        assert!(matches!(
+            late.redeem(&late_ca, &code, "late", &late_csr, 2),
+            Err(EnrollError::BadCode)
+        ));
+        assert!(matches!(
+            late.redeem(&late_ca, "unknown", "late", &late_csr, 3),
+            Err(EnrollError::BadCode)
+        ));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
     fn a_bad_request_does_not_burn_a_valid_code() {
         let (store, ca, csr) = setup();
         let mut e = Enrollment::new(&store);
@@ -745,6 +832,49 @@ mod tests {
         }
         // After the lockout the real code still works.
         assert!(e.redeem(&ca, &code, "n", &csr, LOCKOUT_MS + 100).is_ok());
+    }
+
+    #[test]
+    fn f382_an_ended_enrollment_lockout_does_not_return_after_clock_rollback() {
+        let lockout = Lockout::new();
+        for _ in 0..MAX_FAILURES {
+            lockout.failed(0);
+        }
+        assert_eq!(lockout.check(1), Some(LOCKOUT_MS - 1));
+        println!("CONTROL OK");
+
+        assert_eq!(lockout.check(LOCKOUT_MS + 1), None);
+        let actual = lockout.check(1);
+        println!("EXPECTED: None");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_none() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, None);
+    }
+
+    #[test]
+    fn verifies_f382_enrollment_lockout_deadline_boundaries() {
+        let locked = || {
+            let lockout = Lockout::new();
+            for _ in 0..MAX_FAILURES {
+                lockout.failed(10);
+            }
+            lockout
+        };
+
+        let exact = locked();
+        assert_eq!(exact.check(10 + LOCKOUT_MS - 1), Some(1));
+        assert_eq!(exact.check(10 + LOCKOUT_MS), None);
+        assert_eq!(exact.check(10), None);
+
+        let later = locked();
+        assert_eq!(later.check(10 + LOCKOUT_MS + 500), None);
+        assert_eq!(later.check(11), None);
+
+        println!("FIX VERIFIED");
     }
 
     #[test]

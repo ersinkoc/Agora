@@ -313,10 +313,13 @@ export function connectLive(o: LiveOptions): Live {
     };
     s.onmessage = (m) => {
       if (closed || sock !== s) return;
-      if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
-      const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array(m.data.buffer, m.data.byteOffset, m.data.byteLength);
+      // Any delivered message proves this was not a silent authentication refusal, even when its shape is a protocol error.
       heard = true;
       received++;
+      // One WebSocket message is one binary protocol frame. Text (and any other browser value) is a protocol error, just like a
+      // malformed binary envelope: close so the next connection starts from the last proven event position.
+      if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) { s.close(); return; }
+      const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array(m.data.buffer, m.data.byteOffset, m.data.byteLength);
       const f = decodeFrame(bytes);
       if (!f) { s.close(); return; }
       // ADR-0106: the first frame says the role: a `Welcome`, or anything else from an older hub, which names none.

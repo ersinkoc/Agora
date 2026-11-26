@@ -48,6 +48,16 @@ describe('a tool call with the node\'s data', () => {
     expect(html).toContain('+1'); // two chips and "+1"
     expect(html).not.toContain('<a '); // a path is never a link
   });
+  it('makes tool location paths visible', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"x","arguments":{}}', callKind: 'search', locations: [{ path: 'src/Grü\u3164ße\u2800.ts', line: 3 }] })]} />);
+    expect([...html].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(html).toContain('Grü\\u{3164}ße\\u{2800}.ts:3');
+  });
+  it('verifies multilingual tool paths in chip text and tooltip', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"x","arguments":{}}', callKind: 'search', locations: [{ path: 'src/漢\u202e字\u3164.rs', line: 7 }] })]} />);
+    expect(html).toContain('漢\\u{202e}字\\u{3164}.rs:7');
+    expect(html).toContain('title="src/漢\\u{202e}字\\u{3164}.rs:7"');
+  });
   it('folds what a run printed to its last lines, with the rest on request, and says when the node shortened it', () => {
     const out = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
     act(() => root.render(<ToolSteps lines={[call(1, { text: '{"tool":"execute","arguments":{"command":"cargo test"}}', callKind: 'run', status: 'completed', output: out, outputCut: true })]} open />));
@@ -64,6 +74,17 @@ describe('a tool call with the node\'s data', () => {
     expect(host.querySelector('details details')?.hasAttribute('open')).toBe(true);
     expect(host.querySelector('img')).toBeNull();
     expect(host.textContent).toContain('<img src=x onerror=alert(1)>');
+  });
+  it('makes hidden characters in tool output visible', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { text: '{"tool":"execute","arguments":{"command":"x"}}', output: 'co\u2800de\u034f' })]} open />);
+    expect(html).toContain('co\\u{2800}de\\u{34f}');
+    expect(html).not.toContain('\u2800');
+    expect(html).not.toContain('\u034f');
+  });
+  it('verifies tool output across isolate, private-use and control characters', () => {
+    const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { output: '模型\u2066\nça\ue000\u0001' })]} open />);
+    for (const shown of ['模型\\u{2066}', 'ça\\u{e000}\\u{1}']) expect(html).toContain(shown);
+    expect([...html].filter((c) => ['\u2066', '\ue000', '\u0001'].includes(c))).toEqual([]);
   });
   it('opens a group with a failed call, folded or not, and says so; a spinner follows the calls themselves', () => {
     const html = renderToStaticMarkup(<ToolSteps lines={[call(1, { status: 'failed' })]} flag="call-failed" />);
@@ -601,6 +622,28 @@ describe('the "/" menu of the composer', () => {
     expect([...host.querySelectorAll('[data-slash-option]')].map((o) => o.querySelector('code')?.textContent)).toEqual(['/compact']);
     type('hello');
     expect(host.querySelector('[role=listbox]')).toBeNull();
+  });
+  it('makes command menu text visible while retaining the raw command value', () => {
+    const unsafe: SessionModel = { ...base, commands: [{ name: 're\u3164view', description: 'De\u2800scription', inputHint: 'Hi\u034fnt' }] };
+    mount([L(1)], agent({ session: unsafe }));
+    type('/');
+    const row = host.querySelector('[data-slash-option]') as HTMLElement;
+    expect([...row.textContent ?? ''].some((c) => ['\u3164', '\u2800', '\u034f'].includes(c))).toBe(false);
+    expect(row.textContent).toContain('/re\\u{3164}view');
+    act(() => row.click());
+    expect(box().value).toBe('/re\u3164view ');
+  });
+  it('verifies command visibility across fields and multilingual text', () => {
+    const raw = 'ça\u202elış';
+    const unsafe: SessionModel = { ...base, commands: [{ name: raw, description: 'Grü\u3164ße 😀', inputHint: '漢\u2800字' }] };
+    mount([L(1)], agent({ session: unsafe }));
+    type('/');
+    const row = host.querySelector('[data-slash-option]') as HTMLElement;
+    expect(row.textContent).toContain('/ça\\u{202e}lış');
+    expect(row.textContent).toContain('Grü\\u{3164}ße 😀');
+    expect(row.textContent).toContain('漢\\u{2800}字');
+    act(() => row.click());
+    expect(box().value).toBe(`/${raw} `);
   });
   it('is a combobox for the keyboard: arrows move, Enter inserts the command and does not send, Escape closes', () => {
     const send = vi.fn(async () => true);

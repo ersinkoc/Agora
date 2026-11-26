@@ -72,18 +72,19 @@ pub fn primary_language(tag: &str) -> String {
 }
 
 /// The user's locale from the environment: `AGORA_LANG` first, then the usual `LC_ALL`, `LC_MESSAGES`, `LANG`.
-/// Empty and `C`/`POSIX` count as unset.
+/// Empty and the `C`/`POSIX` locale families count as unset.
 pub fn locale_from_env() -> String {
     ["AGORA_LANG", "LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
-        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
+        .find(|v| !v.is_empty() && !matches!(primary_language(v).as_str(), "c" | "posix"))
         .unwrap_or_else(|| "en".to_string())
 }
 
 impl Catalog {
     /// Parse Fluent source and add its messages (later sources override earlier ones).
     pub fn add_source(&mut self, src: &str) {
+        let src = src.strip_prefix('\u{feff}').unwrap_or(src);
         let mut current: Option<(String, String)> = None;
         for line in src.lines() {
             if let Some((id, rest)) = starts_message(line) {
@@ -91,16 +92,18 @@ impl Catalog {
                     self.messages.insert(id, body);
                 }
                 current = Some((id.to_string(), rest.to_string()));
-            } else if line.starts_with('#') || line.trim().is_empty() {
-                // Comments end a message; blank lines inside a selector are harmless to keep.
-                if line.starts_with('#') {
-                    if let Some((id, body)) = current.take() {
-                        self.messages.insert(id, body);
-                    }
+            } else if line.starts_with('#')
+                || line.strip_prefix('-').and_then(starts_message).is_some()
+            {
+                // Unsupported terms and comments end the previous message.
+                if let Some((id, body)) = current.take() {
+                    self.messages.insert(id, body);
                 }
-            } else if let Some((_, body)) = current.as_mut() {
-                body.push('\n');
-                body.push_str(line);
+            } else if !line.trim().is_empty() {
+                if let Some((_, body)) = current.as_mut() {
+                    body.push('\n');
+                    body.push_str(line);
+                }
             }
         }
         if let Some((id, body)) = current {
@@ -285,18 +288,29 @@ fn string_literal(inner: &str) -> Option<String> {
 /// Variants look like `[one] text` / `*[other] text`, each starting a (possibly indented) line.
 fn select_variant(variants: &str, value: Option<&Arg>, args: &[(&str, Arg)]) -> String {
     let mut parsed: Vec<(String, bool, String)> = Vec::new();
+    let mut depth = 0usize;
     for line in variants.lines() {
         let t = line.trim_start();
         let (default, t) = t.strip_prefix('*').map_or((false, t), |r| (true, r));
-        if let Some(r) = t.strip_prefix('[') {
-            if let Some((key, text)) = r.split_once(']') {
-                parsed.push((key.trim().to_string(), default, text.trim().to_string()));
-                continue;
+        let variant = (depth == 0)
+            .then(|| t.strip_prefix('[')?.split_once(']'))
+            .flatten();
+        let text = if let Some((key, text)) = variant {
+            parsed.push((key.trim().to_string(), default, text.trim().to_string()));
+            text
+        } else {
+            if let Some(last) = parsed.last_mut() {
+                last.2.push('\n');
+                last.2.push_str(line.trim());
             }
-        }
-        if let Some(last) = parsed.last_mut() {
-            last.2.push('\n');
-            last.2.push_str(line.trim());
+            line
+        };
+        for byte in text.bytes() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
         }
     }
     let wanted = value.map(|v| match v {

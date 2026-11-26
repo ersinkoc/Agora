@@ -37,7 +37,18 @@ pub struct LeaseTable {
 }
 
 fn normalize(path: &str) -> Result<String, LeaseError> {
+    if path.contains('\0') {
+        return Err(LeaseError::InvalidPath);
+    }
     let unified = path.replace('\\', "/");
+    let mut rooted = unified.as_str();
+    while let Some(rest) = rooted.strip_prefix("./") {
+        rooted = rest;
+    }
+    let bytes = rooted.as_bytes();
+    if rooted.starts_with('/') || (bytes.get(1) == Some(&b':') && bytes[0].is_ascii_alphabetic()) {
+        return Err(LeaseError::InvalidPath);
+    }
     let mut parts = Vec::new();
     for part in unified.split('/') {
         match part {
@@ -85,7 +96,8 @@ impl LeaseTable {
         if let Some(other) = self
             .leases
             .iter()
-            .find(|l| &l.holder != holder && overlaps(&l.path, &path))
+            .filter(|l| &l.holder != holder && overlaps(&l.path, &path))
+            .max_by_key(|l| l.expires_at_ms)
         {
             return Err(LeaseError::Conflict {
                 holder: other.holder.clone(),
@@ -128,7 +140,8 @@ impl LeaseTable {
         let path = normalize(path).ok()?;
         self.leases
             .iter()
-            .find(|l| !l.is_expired(now_ms) && &l.holder != agent && overlaps(&l.path, &path))
+            .filter(|l| !l.is_expired(now_ms) && &l.holder != agent && overlaps(&l.path, &path))
+            .max_by_key(|l| l.expires_at_ms)
     }
 
     /// Who may not write `path` right now (a live lease held by someone else).

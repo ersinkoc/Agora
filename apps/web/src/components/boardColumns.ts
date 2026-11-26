@@ -1,4 +1,5 @@
 import type { BoardTaskModel } from '../net/view';
+import { visible as showHidden } from '../net/hidden';
 
 // ADR-0095 step 1: the three columns of a project's board, over the statuses the mesh board already has (no message changes).
 // Backlog = open (nobody holds it), Doing = claimed, Done = done. Pure: no I/O, no state.
@@ -29,7 +30,7 @@ export const visible = (text: string): string => text.replace(HIDDEN, '');
 
 // Plain text, one line, cut to `max` characters (by code point) with an ellipsis.
 export function plain(text: string, max: number): string {
-  const clean = text.replace(HIDDEN, '').replace(/\s+/g, ' ').trim();
+  const clean = showHidden(text).replace(/\s+/g, ' ').trim();
   const chars = Array.from(clean.length > max * 2 ? clean.slice(0, max * 2) : clean);
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('');
 }

@@ -20,7 +20,7 @@ export function FullRequest({ detail }: { detail: string }) {
   return (
     <details className="text-xs text-muted">
       <summary className="cursor-pointer">{t('approval-full-request')}</summary>
-      <pre dir="ltr" className="m-0 mt-1 max-h-48 overflow-auto font-mono break-all whitespace-pre-wrap">{detail}</pre>
+      <pre dir="ltr" className="m-0 mt-1 max-h-48 overflow-auto font-mono break-all whitespace-pre-wrap">{visible(detail)}</pre>
     </details>
   );
 }
@@ -54,7 +54,7 @@ export function PlainRequest({ approval: x, density, surface, agent, alert, busy
   const inline = pin.row && roomy && !!onAnswer && decidableInline(x);
   const drawnInline = useRef(inline);
   useLayoutEffect(() => { if (drawnInline.current !== inline) { drawnInline.current = inline; guard.restart(); } }, [inline, guard.restart]);
-  const name = agent?.name || approvalName(x);
+  const name = visible(agent?.name || approvalName(x));
   const d = x.detail ? detailText(x.detail) : '';
   const ask = visible(d ? `${x.action} · ${d}` : x.action);
   const why = `approval-stale-${useId()}`;

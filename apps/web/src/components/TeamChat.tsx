@@ -2,9 +2,9 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { visible } from '../net/hidden';
 import { ago } from '../net/time';
 import type { MessageModel } from '../net/view';
-import { visible } from './boardColumns';
 import { Icon } from './Icon';
 import { AgentAvatar, Tag } from './kit';
 
@@ -33,8 +33,8 @@ function Avatar({ m, agent, size }: { m: MessageModel; agent?: AgentTileModel; s
 
 function Meta({ m }: { m: MessageModel }) {
   return <>
-    {m.crossMachine ? <span className="team-msg__tag" title={t('message-cross')}><Tag>{m.toMachine ?? t('message-cross')}</Tag><span className="sr-only">{t('message-cross')}</span></span> : null}
-    {m.via ? <span className="team-msg__tag" title={t('message-via', { machine: m.via })}><Tag>{t('message-via', { machine: m.via })}</Tag></span> : null}
+    {m.crossMachine ? <span className="team-msg__tag" title={t('message-cross')}><Tag>{m.toMachine ? visible(m.toMachine) : t('message-cross')}</Tag><span className="sr-only">{t('message-cross')}</span></span> : null}
+    {m.via ? <span className="team-msg__tag" title={t('message-via', { machine: visible(m.via) })}><Tag>{t('message-via', { machine: visible(m.via) })}</Tag></span> : null}
   </>;
 }
 

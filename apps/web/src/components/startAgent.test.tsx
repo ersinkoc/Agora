@@ -6,7 +6,8 @@ import { setLanguage, t } from '../i18n';
 import type { DirectoryListing } from '../net/directory';
 import { CommandError } from '../net/live';
 import type { MachineModel } from '../net/view';
-import { StartAgent, type KindChoice } from './StartAgent';
+import { StartAgent, refusalWords, type KindChoice } from './StartAgent';
+import { missingNote } from './startChoice';
 
 // The start window with the widget kit (redesign PR 10): agent cards, the machine as a segmented control, "How it acts" with its red risk
 // state and its confirmation (ADR-0059), the not-installed note only for the chosen kind (finding L9), and the name preview.
@@ -95,6 +96,23 @@ describe('the start window, agent cards', () => {
     expect(group('Which agent').textContent).not.toContain('Installed');
   });
 
+  it('makes agent kind display names visible while retaining the raw kind id', async () => {
+    await open({ loadKinds: async () => [{ kind: 'raw-kind', name: 'Grü\u3164ße\u202e', installed: true, level: 2 }] });
+    const choice = radios('Which agent')[0] as HTMLButtonElement;
+    expect(choice.getAttribute('aria-label')).toBe('Grü\\u{3164}ße\\u{202e}');
+    expect(choice.textContent).toContain('Grü\\u{3164}ße\\u{202e}');
+    expect(choice.dataset.kind).toBe('raw-kind');
+    expect([...choice.textContent ?? ''].filter((c) => ['\u3164', '\u202e'].includes(c))).toEqual([]);
+  });
+
+  it('verifies visible kind names while starting the raw kind id', async () => {
+    const onStart = await open({ loadKinds: async () => [{ kind: 'raw-kind', name: 'İş\u2066\u0001', installed: true, level: 2 }] });
+    const choice = radios('Which agent')[0] as HTMLButtonElement;
+    expect(choice.getAttribute('aria-label')).toBe('İş\\u{2066}\\u{1}');
+    click(button('Start')); await flush();
+    expect(onStart).toHaveBeenCalledWith('n1', expect.anything(), 'raw-kind', false, false, expect.anything());
+  });
+
   it('is chosen by keyboard: one tab stop, the arrows move and choose (installed into not installed), Home and End go to the ends', async () => {
     await open();
     expect(radios('Which agent').map((r) => r.tabIndex)).toEqual([0, -1, -1, -1]);
@@ -139,6 +157,20 @@ describe('the start window, a kind the machine cannot find', () => {
     click(card('Claude Code'));
     expect(note()).toBeNull();
     expect(button('Start')?.disabled).toBe(false);
+  });
+
+  it('makes missing program names visible', async () => {
+    await open({ loadKinds: async () => [{ kind: 'broken', name: 'Broken', installed: false, level: 2, program: 'ge\u202em\u3164ini' }] });
+    click(card('Broken'));
+    const note = win().querySelector('[data-start-missing]') as HTMLElement;
+    expect(note.textContent).toContain('ge\\u{202e}m\\u{3164}ini');
+    expect([...note.textContent].filter((c) => ['\u202e', '\u3164'].includes(c))).toEqual([]);
+  });
+
+  it('verifies missing program text in selection and runtime refusal paths', () => {
+    const program = 'ça\u034f\ue000';
+    expect(missingNote({ installed: false, program })).toEqual(['start-not-installed-program', { program: 'ça\\u{34f}\\u{e000}' }]);
+    expect(refusalWords('start-program-missing', program)).toEqual(['start-not-installed-program', { program: 'ça\\u{34f}\\u{e000}' }]);
   });
 });
 
@@ -251,6 +283,24 @@ describe('the start window, machine, preview and errors', () => {
     expect(document.querySelector('[role=dialog] [data-start-preview]')?.textContent).toBe('Ccodex · … olarak görünecek; rengi başlarken seçilir.');
   });
 
+  it('makes the raw kind id visible in the agent name preview', async () => {
+    const raw = 'co\u3164dex\u202e';
+    await open({ loadKinds: async () => [{ kind: raw, name: 'Codex', installed: true, level: 2 }] });
+    const preview = win().querySelector('[data-start-preview]') as HTMLElement;
+    expect(preview.querySelector('strong')?.textContent).toBe('co\\u{3164}dex\\u{202e} · …');
+    expect(preview.textContent).not.toContain('\u3164');
+    expect(preview.textContent).not.toContain('\u202e');
+  });
+
+  it('verifies the visible preview while starting with the raw kind id', async () => {
+    const raw = 'cla\u2066ude\ue000';
+    const onStart = await open({ loadKinds: async () => [{ kind: raw, name: 'Claude', installed: true, level: 3 }] });
+    const preview = win().querySelector('[data-start-preview]') as HTMLElement;
+    expect(preview.querySelector('strong')?.textContent).toBe('cla\\u{2066}ude\\u{e000} · …');
+    click(button('Start')); await flush();
+    expect(onStart).toHaveBeenCalledWith('n1', expect.anything(), raw, false, false, expect.anything());
+  });
+
   it('shows a refused start in red, and still offers the device approval ask (ADR-0061)', async () => {
     const ask = vi.fn(async () => false);
     await open({ onStart: async () => 'approval-not-trusted', trust: { id: 'd', key: 'k' }, askApproval: { can: () => true, ask } });
@@ -269,6 +319,49 @@ describe('the start window, machine, preview and errors', () => {
 });
 
 describe('StartAgent', () => {
+  it('makes board task title and project visible', async () => {
+    await open({ forTask: { projectId: 'p', project: 'Pr\u2800oject\u2066', title: 'Ta\u3164sk\u034f' } });
+    const note = win().querySelector('[data-start-for-task]') as HTMLElement;
+    for (const shown of ['Pr\\u{2800}oject\\u{2066}', 'Ta\\u{3164}sk\\u{34f}']) expect(note.textContent).toContain(shown);
+    expect([...note.textContent].filter((c) => ['\u2800', '\u2066', '\u3164', '\u034f'].includes(c))).toEqual([]);
+  });
+
+  it('verifies visible board task text in the other-project warning', async () => {
+    await open({ forTask: { projectId: 'other', project: 'İş\u202e\ue000', title: '模型\u2066\u000b' } });
+    expect(win().querySelector('[data-start-for-task]')?.textContent).toContain('模型\\u{2066}\\u{b}');
+    const warning = win().querySelector('[role=alert]') as HTMLElement;
+    expect(warning.textContent).toContain('İş\\u{202e}\\u{e000}');
+    expect([...win().textContent ?? ''].filter((c) => ['\u202e', '\ue000', '\u2066', '\u000b'].includes(c))).toEqual([]);
+  });
+
+  it('makes folder-browser paths and entries visible', async () => {
+    await act(async () => {
+      root.render(<StartAgent projects={[]} machines={machines.slice(0, 1)} initialNode="n1" loadKinds={() => Promise.resolve([])}
+        inspect={() => Promise.reject(new Error('unused'))}
+        list={() => Promise.resolve({ path: '/Grü\u3164ße', parent: '/', entries: [{ name: 'ça\u2800lış', isGit: false }], truncated: false })}
+        onStart={() => Promise.resolve(undefined)} onClose={() => {}} />);
+    });
+    const browseBtn = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent?.includes(t('start-browse')));
+    await act(async () => { browseBtn!.click(); });
+    const shown = win().textContent ?? '';
+    expect([...shown].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(shown).toContain('/Grü\\u{3164}ße');
+    expect(shown).toContain('ça\\u{2800}lış');
+  });
+  it('verifies folder display while navigating with the raw path', async () => {
+    const list = vi.fn(async () => ({ path: '/Grü\u3164ße', parent: '/', entries: [{ name: '漢\u202e字', isGit: false }], truncated: false }));
+    await act(async () => {
+      root.render(<StartAgent projects={[]} machines={machines.slice(0, 1)} initialNode="n1" loadKinds={() => Promise.resolve([])} inspect={() => Promise.reject(new Error('unused'))}
+        list={list} onStart={() => Promise.resolve(undefined)} onClose={() => {}} />);
+    });
+    const browseBtn = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent?.includes(t('start-browse')));
+    await act(async () => { browseBtn!.click(); });
+    expect(win().textContent).toContain('Grü\\u{3164}ße');
+    const folder = Array.from(win().querySelectorAll('button')).find((b) => b.textContent?.includes('漢\\u{202e}字'));
+    await act(async () => { folder!.click(); });
+    expect(list).toHaveBeenLastCalledWith('n1', '/Grü\u3164ße/漢\u202e字');
+  });
+
   it('ignores stale directory listings from a previous machine after switching', async () => {
     const machines: MachineModel[] = [
       { id: 'n1', name: 'Node 1', online: true, os: 'linux', binary: '', agentsRunning: 0, terminalsOpen: 0, memoryBytes: 0, lastSeenMs: 0 },

@@ -8,6 +8,7 @@
 //! docs/specs/protocol.md, "Shared terminal size").
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -45,7 +46,7 @@ const RELAY_QUEUE: usize = 512;
 pub const NODE_QUEUE_MAX: usize = 1024;
 
 struct Link {
-    conn: u64,
+    owner: Arc<()>,
     capabilities: Vec<String>,
     tx: mpsc::UnboundedSender<ToNode>,
     load: Arc<LinkLoad>,
@@ -63,12 +64,29 @@ pub struct LinkLoad {
 }
 
 struct Relay {
-    client: u64,
+    client: ClientId,
     client_stream: u32,
     /// The terminal this relay shows; `None` for a chat.
     terminal: Option<String>,
     to_client: mpsc::Sender<RelayFrame>,
     closed: Arc<Mutex<Vec<u32>>>,
+}
+
+#[derive(Clone)]
+struct ClientId(Arc<()>);
+
+impl PartialEq for ClientId {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ClientId {}
+
+impl Hash for ClientId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.0), state);
+    }
 }
 
 /// A terminal size: `(cols, rows)`.
@@ -93,13 +111,13 @@ pub enum Resize {
 #[derive(Default)]
 struct Shared {
     /// Client connection → the size it last asked for. Counts only while that client has a relay for the terminal.
-    asked: HashMap<u64, Size>,
+    asked: HashMap<ClientId, Size>,
     /// The size the hub last sent the node or saw in the terminal's own resize frame; `None` when unknown.
     applied: Option<Size>,
 }
 
 /// The smallest size over the clients in `viewers` that asked for one: the minimum of the columns and, separately, of the rows.
-fn smallest(asked: &HashMap<u64, Size>, viewers: &HashSet<u64>) -> Option<Size> {
+fn smallest(asked: &HashMap<ClientId, Size>, viewers: &HashSet<ClientId>) -> Option<Size> {
     asked
         .iter()
         .filter(|(c, _)| viewers.contains(c))
@@ -114,6 +132,7 @@ pub struct Router {
     /// `(node, terminal id)` → the sizes the windows watching it asked for.
     sizes: Mutex<HashMap<(String, String), Shared>>,
     next: AtomicU64,
+    request_epoch: Mutex<u64>,
     next_stream: AtomicU32,
     /// Terminal relays ended because the window's queue was full or gone (`GET /api/metrics`). Chat relays are not counted.
     relays_dropped: AtomicU64,
@@ -129,6 +148,7 @@ impl Default for Router {
             relays: Mutex::default(),
             sizes: Mutex::default(),
             next: AtomicU64::new(0),
+            request_epoch: Mutex::new(0),
             next_stream: AtomicU32::new(agora_protocol::frame::FIRST_DYNAMIC_STREAM),
             relays_dropped: AtomicU64::new(0),
             terminal_bytes: AtomicU64::new(0),
@@ -140,7 +160,7 @@ impl Default for Router {
 /// hub ended (the node left, the client was too slow, the terminal exited). Dropping it ends all its relays.
 pub struct ClientRelays {
     router: Arc<Router>,
-    id: u64,
+    id: ClientId,
     tx: mpsc::Sender<RelayFrame>,
     closed: Arc<Mutex<Vec<u32>>>,
 }
@@ -154,13 +174,13 @@ impl ClientRelays {
     /// The client ended one of its streams.
     pub fn close(&self, client_stream: u32) {
         self.router
-            .close_client_stream(self.id, Some(client_stream));
+            .close_client_stream(&self.id, Some(client_stream));
     }
 }
 
 impl Drop for ClientRelays {
     fn drop(&mut self) {
-        self.router.close_client_stream(self.id, None);
+        self.router.close_client_stream(&self.id, None);
     }
 }
 
@@ -169,7 +189,7 @@ impl Drop for ClientRelays {
 pub struct Registration {
     router: Arc<Router>,
     node: String,
-    conn: u64,
+    owner: Arc<()>,
     load: Arc<LinkLoad>,
 }
 
@@ -193,7 +213,9 @@ impl Registration {
     fn release(&self) -> bool {
         let ours = {
             let mut g = self.router.nodes.lock().unwrap_or_else(|e| e.into_inner());
-            let ours = g.get(&self.node).is_some_and(|l| l.conn == self.conn);
+            let ours = g
+                .get(&self.node)
+                .is_some_and(|l| Arc::ptr_eq(&l.owner, &self.owner));
             if ours {
                 g.remove(&self.node);
             }
@@ -234,7 +256,7 @@ impl Router {
         capabilities: Vec<String>,
     ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let conn = self.next.fetch_add(1, Ordering::Relaxed);
+        let owner = Arc::new(());
         let load = Arc::new(LinkLoad::default());
         let replaced = self
             .nodes
@@ -243,7 +265,7 @@ impl Router {
             .insert(
                 node.to_string(),
                 Link {
-                    conn,
+                    owner: Arc::clone(&owner),
                     tx,
                     capabilities,
                     load: Arc::clone(&load),
@@ -259,7 +281,7 @@ impl Router {
             Registration {
                 router: Arc::clone(self),
                 node: node.to_string(),
-                conn,
+                owner,
                 load,
             },
             rx,
@@ -272,7 +294,7 @@ impl Router {
         (
             ClientRelays {
                 router: Arc::clone(self),
-                id: self.next.fetch_add(1, Ordering::Relaxed),
+                id: ClientId(Arc::new(())),
                 tx,
                 closed: Arc::default(),
             },
@@ -289,20 +311,35 @@ impl Router {
         client_stream: u32,
         terminal: Option<&str>,
     ) -> u32 {
-        let stream = self.next_stream.fetch_add(1, Ordering::Relaxed);
-        self.relays
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (node.to_string(), stream),
-                Relay {
-                    client: client.id,
-                    client_stream,
-                    terminal: terminal.map(str::to_string),
-                    to_client: client.tx.clone(),
-                    closed: Arc::clone(&client.closed),
-                },
-            );
+        let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+        let first = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+        let mut stream = self.next_stream.load(Ordering::Relaxed).max(first);
+        while relays.keys().any(|(n, s)| n == node && *s == stream) {
+            stream = if stream == u32::MAX {
+                first
+            } else {
+                stream + 1
+            };
+        }
+        self.next_stream.store(
+            if stream == u32::MAX {
+                first
+            } else {
+                stream + 1
+            },
+            Ordering::Relaxed,
+        );
+        relays.insert(
+            (node.to_string(), stream),
+            Relay {
+                client: client.id.clone(),
+                client_stream,
+                terminal: terminal.map(str::to_string),
+                to_client: client.tx.clone(),
+                closed: Arc::clone(&client.closed),
+            },
+        );
+        drop(relays);
         if let Some(t) = terminal {
             self.reshape(node, t);
         }
@@ -348,7 +385,7 @@ impl Router {
             return Resize::PassThrough;
         }
         let shared = sizes.entry(key).or_default();
-        shared.asked.insert(client.id, size);
+        shared.asked.insert(client.id.clone(), size);
         match smallest(&shared.asked, &viewers) {
             Some(min) if shared.applied != Some(min) => {
                 shared.applied = Some(min);
@@ -462,12 +499,12 @@ impl Router {
             payload,
         });
         if sent.is_ok() && terminal {
-            self.terminal_bytes.fetch_add(bytes, Ordering::Relaxed);
+            crate::metrics::saturating_add(&self.terminal_bytes, bytes);
         }
         let exited = kind == 3;
         if sent.is_err() || exited {
             if sent.is_err() && terminal {
-                self.relays_dropped.fetch_add(1, Ordering::Relaxed);
+                crate::metrics::saturating_add(&self.relays_dropped, 1);
             }
             if let Some(r) = relays.remove(&key) {
                 if sent.is_err() {
@@ -510,12 +547,12 @@ impl Router {
 
     /// Ends one client stream (or all of a client's) and tells the nodes to stop writing on them. A window that stopped watching
     /// a terminal (or left) no longer counts for its size: the others get the size they need, which may be bigger.
-    fn close_client_stream(&self, client: u64, only: Option<u32>) {
+    fn close_client_stream(&self, client: &ClientId, only: Option<u32>) {
         let (ended, left) = {
             let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
             let keys: Vec<_> = relays
                 .iter()
-                .filter(|(_, r)| r.client == client && only.is_none_or(|s| s == r.client_stream))
+                .filter(|(_, r)| &r.client == client && only.is_none_or(|s| s == r.client_stream))
                 .map(|(k, _)| k.clone())
                 .collect();
             let mut left: Vec<(String, String)> = Vec::new();
@@ -532,14 +569,14 @@ impl Router {
             match only {
                 None => {
                     for s in sizes.values_mut() {
-                        s.asked.remove(&client);
+                        s.asked.remove(client);
                     }
                 }
                 Some(_) => {
                     for (node, t) in &left {
-                        if !viewers(&relays, node, t).contains(&client) {
+                        if !viewers(&relays, node, t).contains(client) {
                             if let Some(s) = sizes.get_mut(&(node.clone(), t.clone())) {
-                                s.asked.remove(&client);
+                                s.asked.remove(client);
                             }
                         }
                     }
@@ -621,7 +658,17 @@ impl Router {
         stream: u32,
     ) -> Result<oneshot::Receiver<v1::CommandResponse>, Error> {
         let offline = || Error::new(ErrorCode::NodeOffline).with("node_id", node);
-        request.request_id = format!("h{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let mut epoch = self.request_epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let sequence = self.next.fetch_add(1, Ordering::Relaxed);
+        request.request_id = if *epoch == 0 {
+            format!("h{sequence}")
+        } else {
+            format!("h{}-{sequence}", *epoch)
+        };
+        if sequence == u64::MAX {
+            *epoch = epoch.saturating_add(1);
+        }
+        drop(epoch);
         request.target_node.clear();
         let (reply, rx) = oneshot::channel();
         let g = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
@@ -763,11 +810,15 @@ impl Router {
 }
 
 /// The client connections that have a relay for `terminal` on `node`.
-fn viewers(relays: &HashMap<(String, u32), Relay>, node: &str, terminal: &str) -> HashSet<u64> {
+fn viewers(
+    relays: &HashMap<(String, u32), Relay>,
+    node: &str,
+    terminal: &str,
+) -> HashSet<ClientId> {
     relays
         .iter()
         .filter(|((n, _), r)| n == node && r.terminal.as_deref() == Some(terminal))
-        .map(|(_, r)| r.client)
+        .map(|(_, r)| r.client.clone())
         .collect()
 }
 
@@ -1263,6 +1314,327 @@ mod tests {
         assert_eq!(client.take_closed(), vec![6]);
         assert_eq!(r.relays_dropped(), 1);
         assert_eq!(r.terminal_bytes(), 8 + 2 * RELAY_QUEUE as u64);
+    }
+
+    #[test]
+    fn f373_terminal_bytes_do_not_wrap_after_the_counter_saturates() {
+        let r = Router::new();
+        r.terminal_bytes.store(u64::MAX, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        r.relay_frame("n", stream, 0, vec![1]);
+        assert_eq!(r.terminal_bytes(), u64::MAX);
+    }
+
+    #[test]
+    fn terminal_bytes_still_reach_the_counter_maximum() {
+        let r = Router::new();
+        r.terminal_bytes.store(u64::MAX - 1, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        r.relay_frame("n", stream, 0, vec![1]);
+        assert_eq!(r.terminal_bytes(), u64::MAX);
+    }
+
+    #[test]
+    fn f374_dropped_terminal_relays_do_not_wrap_after_the_counter_saturates() {
+        let r = Router::new();
+        r.relays_dropped.store(u64::MAX, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", stream, 0, vec![1]);
+        }
+        assert_eq!(r.relays_dropped(), u64::MAX);
+    }
+
+    #[test]
+    fn dropped_terminal_relays_still_reach_the_counter_maximum() {
+        let r = Router::new();
+        r.relays_dropped.store(u64::MAX - 1, Ordering::Relaxed);
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let stream = r.open_relay("n", &client, 1, Some("terminal"));
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", stream, 0, vec![1]);
+        }
+        assert_eq!(r.relays_dropped(), u64::MAX);
+    }
+
+    #[test]
+    fn verifies_f373_terminal_byte_saturation_for_single_multi_and_empty_payloads() {
+        for (starting, payload, expected) in [
+            (u64::MAX, vec![1], u64::MAX),
+            (u64::MAX - 2, vec![1, 2, 3], u64::MAX),
+            (17, Vec::new(), 17),
+        ] {
+            let r = Router::new();
+            r.terminal_bytes.store(starting, Ordering::Relaxed);
+            let (_reg, _node_rx) = r.register("n");
+            let (client, _frames) = r.client();
+            let stream = r.open_relay("n", &client, 1, Some("terminal"));
+            r.relay_frame("n", stream, 0, payload);
+            assert_eq!(r.terminal_bytes(), expected);
+        }
+    }
+
+    #[test]
+    fn verifies_f374_drop_saturation_for_max_near_max_and_non_terminal_relays() {
+        for (starting, terminal, expected) in [
+            (u64::MAX, Some("terminal"), u64::MAX),
+            (u64::MAX - 1, Some("terminal"), u64::MAX),
+            (9, None, 9),
+        ] {
+            let r = Router::new();
+            r.relays_dropped.store(starting, Ordering::Relaxed);
+            let (_reg, _node_rx) = r.register("n");
+            let (client, _frames) = r.client();
+            let stream = r.open_relay("n", &client, 1, terminal);
+            for _ in 0..=RELAY_QUEUE {
+                r.relay_frame("n", stream, 0, vec![1]);
+            }
+            assert_eq!(r.relays_dropped(), expected);
+        }
+    }
+
+    #[test]
+    fn f376_dynamic_stream_ids_never_wrap_into_reserved_streams() {
+        let control = Router::new();
+        let (_reg, _node_rx) = control.register("n");
+        let (client, _frames) = control.client();
+        control.next_stream.store(u32::MAX - 1, Ordering::Relaxed);
+        assert_eq!(control.open_relay("n", &client, 1, None), u32::MAX - 1);
+        assert_eq!(control.open_relay("n", &client, 2, None), u32::MAX);
+        println!("CONTROL OK");
+
+        let target = Router::new();
+        let (_reg, _node_rx) = target.register("n");
+        let (client, _frames) = target.client();
+        target.next_stream.store(u32::MAX, Ordering::Relaxed);
+        assert_eq!(target.open_relay("n", &client, 1, None), u32::MAX);
+        let actual = target.open_relay("n", &client, 2, None);
+        let expected = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+        println!("EXPECTED: {expected}");
+        println!("ACTUAL: {actual}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f376_dynamic_stream_allocation_boundaries() {
+        let r = Router::new();
+        let (_reg, _node_rx) = r.register("n");
+        let (client, _frames) = r.client();
+        let first = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+
+        r.next_stream.store(0, Ordering::Relaxed);
+        assert_eq!(r.open_relay("n", &client, 1, None), first);
+
+        r.next_stream.store(u32::MAX, Ordering::Relaxed);
+        assert_eq!(r.open_relay("n", &client, 2, None), u32::MAX);
+        assert_eq!(r.open_relay("n", &client, 3, None), first + 1);
+
+        r.next_stream.store(first, Ordering::Relaxed);
+        assert_eq!(r.open_relay("n", &client, 4, None), first + 2);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f377_a_wrapped_connection_id_cannot_let_an_old_registration_end_its_replacement() {
+        let control = Router::new();
+        let (old, _old_rx) = control.register("n");
+        let (_current, _current_rx) = control.register("n");
+        drop(old);
+        assert!(control.is_connected("n"));
+        println!("CONTROL OK");
+
+        let target = Router::new();
+        let (old, _old_rx) = target.register("n");
+        target.next.store(u64::MAX, Ordering::Relaxed);
+        let (_at_max, _max_rx) = target.register("n");
+        let (_current, _current_rx) = target.register("n");
+        drop(old);
+        let actual = target.is_connected("n");
+        println!("EXPECTED: true");
+        println!("ACTUAL: {actual}");
+        if actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual);
+    }
+
+    #[test]
+    fn verifies_f377_registration_ownership_is_unique_across_boundaries() {
+        let ordinary = Router::new();
+        let (old, _old_rx) = ordinary.register("n");
+        let (_current, _current_rx) = ordinary.register("n");
+        drop(old);
+        assert!(ordinary.is_connected("n"));
+
+        let wrapped = Router::new();
+        let (old, _old_rx) = wrapped.register("n");
+        wrapped.next.store(u64::MAX, Ordering::Relaxed);
+        let (_at_max, _max_rx) = wrapped.register("n");
+        let (_current, _current_rx) = wrapped.register("n");
+        drop(old);
+        assert!(wrapped.is_connected("n"));
+
+        let reordered = Router::new();
+        let (oldest, _oldest_rx) = reordered.register("n");
+        let (older, _older_rx) = reordered.register("n");
+        let (_current, _current_rx) = reordered.register("n");
+        drop(older);
+        drop(oldest);
+        assert!(reordered.is_connected("n"));
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f378_a_wrapped_client_id_cannot_let_an_old_client_close_its_replacements_relay() {
+        let control = Router::new();
+        let (_reg, _node_rx) = control.register("n");
+        let (old, _old_frames) = control.client();
+        let (current, mut current_frames) = control.client();
+        let stream = control.open_relay("n", &current, 1, None);
+        drop(old);
+        control.relay_frame("n", stream, 0, vec![1]);
+        assert!(current_frames.try_recv().is_ok());
+        println!("CONTROL OK");
+
+        let target = Router::new();
+        let (_reg, _node_rx) = target.register("n");
+        target.next.store(0, Ordering::Relaxed);
+        let (old, _old_frames) = target.client();
+        target.next.store(u64::MAX, Ordering::Relaxed);
+        let (_at_max, _max_frames) = target.client();
+        let (current, mut current_frames) = target.client();
+        let stream = target.open_relay("n", &current, 1, None);
+        drop(old);
+        target.relay_frame("n", stream, 0, vec![1]);
+        let actual = current_frames.try_recv().is_ok();
+        println!("EXPECTED: true");
+        println!("ACTUAL: {actual}");
+        if actual {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert!(actual);
+    }
+
+    #[test]
+    fn verifies_f378_client_ownership_cannot_alias() {
+        let relay_survives_old_client = |force_boundary: bool, close_one: bool| {
+            let r = Router::new();
+            let (_reg, _node_rx) = r.register("n");
+            let (old, _old_frames) = r.client();
+            let old_stream = r.open_relay("n", &old, 7, None);
+            if force_boundary {
+                r.next.store(u64::MAX, Ordering::Relaxed);
+                let (_boundary, _boundary_frames) = r.client();
+            }
+            let (current, mut frames) = r.client();
+            let current_stream = r.open_relay("n", &current, 8, None);
+            if close_one {
+                old.close(7);
+            } else {
+                drop(old);
+            }
+            r.relay_frame("n", current_stream, 0, vec![1]);
+            assert!(frames.try_recv().is_ok());
+            assert!(!r
+                .relays
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&("n".to_string(), old_stream)));
+        };
+
+        relay_survives_old_client(false, false);
+        relay_survives_old_client(true, false);
+        relay_survives_old_client(true, true);
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
+    fn f379_request_ids_remain_fresh_when_the_u64_sequence_wraps() {
+        let r = Router::new();
+        let (_reg, mut node_rx) = r.register("n");
+        r.next.store(10, Ordering::Relaxed);
+        let _first_reply = r.send("n", req("n")).unwrap();
+        let first = match node_rx.try_recv().unwrap() {
+            ToNode::Command { request, .. } => request.request_id,
+            ToNode::Close { .. } => panic!("unexpected close"),
+        };
+        let _control_reply = r.send("n", req("n")).unwrap();
+        let control = match node_rx.try_recv().unwrap() {
+            ToNode::Command { request, .. } => request.request_id,
+            ToNode::Close { .. } => panic!("unexpected close"),
+        };
+        assert_ne!(first, control);
+        println!("CONTROL OK");
+
+        r.next.store(0, Ordering::Relaxed);
+        let _baseline_reply = r.send("n", req("n")).unwrap();
+        let baseline = match node_rx.try_recv().unwrap() {
+            ToNode::Command { request, .. } => request.request_id,
+            ToNode::Close { .. } => panic!("unexpected close"),
+        };
+        r.next.store(u64::MAX, Ordering::Relaxed);
+        let _at_max_reply = r.send("n", req("n")).unwrap();
+        let _ = node_rx.try_recv().unwrap();
+        let _wrapped_reply = r.send("n", req("n")).unwrap();
+        let actual = match node_rx.try_recv().unwrap() {
+            ToNode::Command { request, .. } => request.request_id,
+            ToNode::Close { .. } => panic!("unexpected close"),
+        };
+        println!("EXPECTED: a request id different from {baseline}");
+        println!("ACTUAL: {actual}");
+        if actual != baseline {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_ne!(actual, baseline);
+    }
+
+    #[test]
+    fn verifies_f379_request_ids_are_unique_across_sequence_epochs() {
+        let r = Router::new();
+        let (_reg, mut node_rx) = r.register("n");
+        let send_id = |r: &Router, node_rx: &mut mpsc::UnboundedReceiver<ToNode>| {
+            let _reply = r.send("n", req("n")).unwrap();
+            match node_rx.try_recv().unwrap() {
+                ToNode::Command { request, .. } => request.request_id,
+                ToNode::Close { .. } => panic!("unexpected close"),
+            }
+        };
+
+        assert_eq!(send_id(&r, &mut node_rx), "h0");
+        assert_eq!(send_id(&r, &mut node_rx), "h1");
+
+        r.next.store(u64::MAX - 1, Ordering::Relaxed);
+        let before_wrap = send_id(&r, &mut node_rx);
+        let at_wrap = send_id(&r, &mut node_rx);
+        let after_wrap = send_id(&r, &mut node_rx);
+        let next_epoch = send_id(&r, &mut node_rx);
+        assert_eq!(before_wrap, format!("h{}", u64::MAX - 1));
+        assert_eq!(at_wrap, format!("h{}", u64::MAX));
+        assert_eq!(after_wrap, "h1-0");
+        assert_eq!(next_epoch, "h1-1");
+        assert_eq!(
+            HashSet::from([before_wrap, at_wrap, after_wrap, next_epoch]).len(),
+            4
+        );
+        println!("FIX VERIFIED");
     }
 
     #[test]

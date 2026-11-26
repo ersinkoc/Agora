@@ -7,6 +7,7 @@ import { shortCount } from './sessionChoice';
 import { QuotaSection } from './Quota';
 import { AgentAvatar, StatTile } from './kit';
 import { EmptyState } from './EmptyState';
+import { visible } from '../net/hidden';
 
 // The Usage panel of the rail: tokens, context and time per machine, project and agent. No money: most people pay a subscription, so a
 // dollar figure says little, so no amount is ever shown here. Plan limits (ADR-0091) are what the tools themselves reported: fresh,
@@ -22,7 +23,7 @@ function Meter({ pct, label }: { pct: number; label: string }) {
 
 function AgentRow({ a }: { a: UsageAgent }) {
   return <li className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 py-1.5">
-    <span className={`flex min-w-0 flex-1 basis-32 items-center gap-2 ${a.running ? 'text-ink' : 'text-muted'}`}><AgentAvatar accent={a.accent} kind={a.kind} size="s" /><span className="min-w-0 truncate">{a.name}</span></span>
+    <span className={`flex min-w-0 flex-1 basis-32 items-center gap-2 ${a.running ? 'text-ink' : 'text-muted'}`}><AgentAvatar accent={a.accent} kind={a.kind} size="s" /><span className="min-w-0 truncate">{visible(a.name)}</span></span>
     <span className="flex-none text-xs text-muted tabular-nums">{a.tokens > 0 ? shortCount(a.tokens) : '—'}</span>
     <span className="flex-none text-xs text-muted tabular-nums" title={t('usage-since-start')}>{time(a.activeMs)}</span>
     {a.contextPct !== undefined && <span className="flex flex-none items-center gap-1.5 text-xs text-muted"><Meter pct={a.contextPct} label={t('usage-context', { percent: a.contextPct })} />{a.contextPct}%</span>}
@@ -48,13 +49,13 @@ export function UsagePanel({ fleet, now }: { fleet: readonly AgentTileModel[]; n
     {v.byMachine.length > 1 && <section className="grid gap-1.5" aria-label={t('usage-by-machine')}>
       <h3 className="panel-section-title">{t('usage-by-machine')}</h3>
       <ul className="m-0 grid list-none divide-y divide-line p-0">
-        {v.byMachine.map((m) => <li key={m.id} className="flex items-center gap-3 py-1.5"><span className="min-w-0 flex-1 truncate">{m.machine}</span><span className="text-xs text-muted tabular-nums">{shortCount(m.tokens)}</span><span className="text-xs text-muted tabular-nums" title={t('usage-since-start')}>{time(m.activeMs)}</span></li>)}
+        {v.byMachine.map((m) => <li key={m.id} className="flex items-center gap-3 py-1.5"><span className="min-w-0 flex-1 truncate">{visible(m.machine)}</span><span className="text-xs text-muted tabular-nums">{shortCount(m.tokens)}</span><span className="text-xs text-muted tabular-nums" title={t('usage-since-start')}>{time(m.activeMs)}</span></li>)}
       </ul>
     </section>}
     <section className="grid gap-2" aria-label={t('usage-by-project')}>
       <h3 className="panel-section-title">{t('usage-by-project')}</h3>
       {v.byProject.map((g) => <div key={g.key} className="rounded-m border border-line bg-surface-0 px-3 py-2">
-        <div className="flex min-w-0 items-baseline gap-2"><strong className="min-w-0 flex-1 truncate font-medium">{g.project}</strong><span className="truncate text-xs text-muted">{g.machine}</span></div>
+        <div className="flex min-w-0 items-baseline gap-2"><strong className="min-w-0 flex-1 truncate font-medium">{visible(g.project)}</strong><span className="truncate text-xs text-muted">{visible(g.machine)}</span></div>
         <ul className="m-0 grid list-none divide-y divide-line p-0">{g.agents.map((a) => <AgentRow key={a.id} a={a} />)}</ul>
       </div>)}
     </section>

@@ -21,6 +21,18 @@ describe('group by agent kind and state', () => {
     expect(g.map((x) => x.name)).toEqual(['codex', 'claude', 'wrongstack', '']); // the group with something that needs you comes first
     expect(g.find((x) => x.name === 'claude')?.agents.map((a) => a.id).sort()).toEqual(['a', 'c', 'f']);
   });
+  it('makes a node-reported kind visible in the group name while retaining its raw key', () => {
+    const raw = 'co\u3164dex\u202e';
+    const [group] = groupFleet([agent('unsafe', { kind: raw })], [], 'kind');
+    expect(group).toMatchObject({ key: raw, name: 'co\\u{3164}dex\\u{202e}' });
+  });
+  it('verifies kind group names across isolate, private-use and control characters', () => {
+    const kinds = ['cla\u2066ude', 'çe\ue000viri\u0001'];
+    const groups = groupFleet(kinds.map((kind, i) => agent(String(i), { kind })), [], 'kind');
+    expect(new Map(groups.map((g) => [g.key, g.name]))).toEqual(new Map([
+      [kinds[0], 'cla\\u{2066}ude'], [kinds[1], 'çe\\u{e000}viri\\u{1}'],
+    ]));
+  });
   it('groups by state in a fixed order, what needs you first', () => {
     const g = groupFleet(fleet, [], 'state');
     expect(g.map((x) => x.key)).toEqual(['needs-you', 'working', 'idle', 'finished', 'failed']);

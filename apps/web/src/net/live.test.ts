@@ -26,6 +26,27 @@ describe('view', () => {
     expect(machinesOnline(v)).toBe(1);
   });
 
+  it('makes every machine-supplied tile label safe to display', () => {
+    const v = fromSnapshot({
+      nodes: [{ nodeId: 'n', hostname: 'ma\u3164chine', online: true }],
+      workspaces: [{ workspaceId: 'n/w', nodeId: 'n', path: '/work/a\u2800b', gitRoot: '/work/p\uffa0', branch: 'b\u034f', projectId: 'p' }],
+      agentWorkspaces: [{ agentId: 'n/a', workspaceId: 'n/w' }],
+      agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'co\u202edex', running: true }],
+    });
+    expect(tiles(v)[0]).toMatchObject({
+      name: expect.stringContaining('co\\u{202e}dex'), machine: 'ma\\u{3164}chine', workspace: '/work/a\\u{2800}b', project: 'p\\u{ffa0}', branch: 'b\\u{34f}',
+    });
+  });
+
+  it('makes machine facts and start-project labels safe without changing their command values', () => {
+    const v = fromSnapshot({
+      nodes: [{ nodeId: 'n', hostname: 'ma\u3164chine', os: 'lin\u2800ux', build: 'v\u034f1', binary: 'ago\uffa0ra', online: true }],
+      checkouts: [{ checkoutId: 'n/c', nodeId: 'n', projectId: 'project-id', path: '/work/re\u202epo' }],
+    });
+    expect(machines(v)[0]).toMatchObject({ id: 'n', name: 'ma\\u{3164}chine', os: 'lin\\u{2800}ux', build: 'v\\u{34f}1', binary: 'ago\\u{ffa0}ra' });
+    expect(projectChoices(v)[0]).toEqual({ node: 'n', projectId: 'project-id', path: '/work/re\u202epo', label: 'ma\\u{3164}chine · re\\u{202e}po' });
+  });
+
   it('names the workspace by project folder and hides machine-made branches', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));

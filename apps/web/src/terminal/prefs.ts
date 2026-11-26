@@ -7,7 +7,8 @@ let size = 13;
 try { const v = Number(window.localStorage.getItem(KEY)); if (v >= MIN_SIZE && v <= MAX_SIZE) size = v; } catch { /* default */ }
 export const terminalSize = () => size;
 export function setTerminalSize(next: number) {
-  size = Math.min(MAX_SIZE, Math.max(MIN_SIZE, Math.round(next)));
+  const rounded = Math.round(next);
+  if (Number.isFinite(rounded)) size = Math.min(MAX_SIZE, Math.max(MIN_SIZE, rounded));
   try { window.localStorage.setItem(KEY, String(size)); } catch { /* holds for this visit */ }
   window.dispatchEvent(new Event('agora-terminal-size'));
 }

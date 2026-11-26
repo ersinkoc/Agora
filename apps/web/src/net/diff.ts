@@ -98,7 +98,7 @@ export function unquote(s: string): string {
       i += 1;
     }
   }
-  return new TextDecoder().decode(new Uint8Array(bytes));
+  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(bytes));
 }
 
 // `--- a/x`, `+++ b/x` or `/dev/null`, with the tab git adds after a name that holds a space.
@@ -134,21 +134,34 @@ export function parseHunks(text: string): Pick<DiffFile, 'added' | 'removed' | '
   // Line numbers follow the hunk header (`@@ -old,n +new,n @@`); a header that cannot be read leaves its lines unnumbered.
   let oldNo: number | undefined;
   let newNo: number | undefined;
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const raw of text.split('\n')) {
     if (raw.startsWith('@@')) {
       inHunk = true;
       out.lines.push({ kind: 'hunk', text: raw });
-      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+      const m = HUNK.exec(raw);
       oldNo = m ? Number(m[1]) : undefined;
-      newNo = m ? Number(m[2]) : undefined;
-    }
-    else if (!inHunk) continue;
-    else if (raw.startsWith('+')) { out.added++; out.lines.push({ kind: 'add', text: raw.slice(1), ...(newNo !== undefined ? { newNo: newNo++ } : {}) }); }
-    else if (raw.startsWith('-')) { out.removed++; out.lines.push({ kind: 'del', text: raw.slice(1), ...(oldNo !== undefined ? { oldNo: oldNo++ } : {}) }); }
-    else if (raw.startsWith(' ')) {
+      newNo = m ? Number(m[3]) : undefined;
+      oldLeft = m ? Number(m[2] ?? 1) : Infinity;
+      newLeft = m ? Number(m[4] ?? 1) : Infinity;
+    } else if (raw.startsWith('diff --git ')) {
+      inHunk = false;
+    } else if (!inHunk) {
+      continue;
+    } else if (newLeft > 0 && raw.startsWith('+')) {
+      out.added++;
+      newLeft--;
+      out.lines.push({ kind: 'add', text: raw.slice(1), ...(newNo !== undefined ? { newNo: newNo++ } : {}) });
+    } else if (oldLeft > 0 && raw.startsWith('-')) {
+      out.removed++;
+      oldLeft--;
+      out.lines.push({ kind: 'del', text: raw.slice(1), ...(oldNo !== undefined ? { oldNo: oldNo++ } : {}) });
+    } else if (oldLeft > 0 && newLeft > 0 && raw.startsWith(' ')) {
+      oldLeft--;
+      newLeft--;
       out.lines.push({ kind: 'ctx', text: raw.slice(1), ...(oldNo !== undefined ? { oldNo: oldNo++ } : {}), ...(newNo !== undefined ? { newNo: newNo++ } : {}) });
     }
-    else if (raw.startsWith('diff --git ')) inHunk = false;
   }
   return out;
 }
@@ -161,7 +174,9 @@ export function parseDiff(text: string): DiffFile[] {
   let newNo = 0;
   let oldLeft = 0;
   let newLeft = 0;
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  for (const line of lines) {
     const cr = line.endsWith('\r');
     const raw = cr ? line.slice(0, -1) : line;
     if (raw.startsWith('diff --git ')) {
@@ -277,6 +292,12 @@ export function lineEndingOnly(lines: DiffLine[], pairs: Map<DiffLine, DiffLine>
   return n;
 }
 
+function splitsCodePoint(text: string, at: number): boolean {
+  const high = text.charCodeAt(at - 1);
+  const low = text.charCodeAt(at);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
 /** The part of `a` that differs from `b`, as [start, end) after their common start and common end; undefined when equal. */
 export function changedSpan(a: string, b: string): [number, number] | undefined {
   if (a === b) return undefined;
@@ -284,6 +305,8 @@ export function changedSpan(a: string, b: string): [number, number] | undefined 
   while (start < a.length && start < b.length && a[start] === b[start]) start++;
   let end = 0;
   while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
+  if (splitsCodePoint(a, start) || splitsCodePoint(b, start)) start--;
+  if (splitsCodePoint(a, a.length - end) || splitsCodePoint(b, b.length - end)) end--;
   return [start, a.length - end];
 }
 
@@ -369,5 +392,9 @@ export function countByStatus(files: DiffFile[]): ChangeCounts {
 /** Is `b` the same change as `a` (the same lines, in the same order)? Used to tell whether a file read now still belongs to the
  *  diff on screen: a change inside a folded region leaves the diff's own lines in place but changes the file's diff. */
 export function sameChange(a: DiffFile, b: DiffFile | undefined): boolean {
-  return !!b && a.lines.length === b.lines.length && a.lines.every((l, i) => l.kind === b.lines[i]?.kind && l.text === b.lines[i]?.text);
+  return !!b && a.lines.length === b.lines.length && a.lines.every((line, i) => {
+    const current = b.lines[i];
+    return current?.kind === line.kind && current.text === line.text
+      && !!current.cr === !!line.cr && !!current.noEol === !!line.noEol;
+  });
 }

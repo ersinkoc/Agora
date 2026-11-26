@@ -35,6 +35,9 @@ function putVarint(out: number[], v: number): void {
 
 export function encodeFrame(f: Frame): Uint8Array {
   if (f.payload.byteLength > MAX_PAYLOAD) throw new RangeError('payload too large');
+  if (!Number.isInteger(f.streamId) || f.streamId < 0 || f.streamId > 0xffffffff) throw new RangeError('stream id out of range');
+  if (!Number.isInteger(f.kind) || f.kind < 0 || f.kind > 0xff) throw new RangeError('kind out of range');
+  if (f.seq !== undefined && (!Number.isSafeInteger(f.seq) || f.seq < 0)) throw new RangeError('sequence out of range');
   const head: number[] = [];
   putVarint(head, f.streamId);
   head.push(f.kind, f.seq === undefined ? 0 : 1);
@@ -56,6 +59,7 @@ function getVarint(buf: Uint8Array, at: { pos: number }): number | undefined {
     value += (b & 0x7f) * 2 ** (7 * i);
     if ((b & 0x80) === 0) {
       if (i > 0 && b === 0) return undefined; // padded, not canonical
+      if (!Number.isSafeInteger(value)) return undefined;
       at.pos += i + 1;
       return value;
     }

@@ -1,5 +1,6 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
+import { visible } from '../net/hidden';
 import type { AgentTileModel, SessionModel } from '../model';
 import { isRich, mergeLines, noticeText, queuedNote, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
@@ -310,9 +311,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
                 className={`flex min-h-9 cursor-pointer items-baseline gap-2.5 rounded-xs px-2.5 py-1.5 text-[0.8125rem] ${i === at ? 'bg-accent/15 text-ink' : 'text-muted hover:bg-surface-2'}`}
                 // Pressing here must not move the caret out of the box before the choice is taken.
                 onPointerDown={(e) => e.preventDefault()} onClick={() => take(i)}>
-                <code dir="ltr" className="flex-none font-mono text-xs font-semibold text-ink">/{c.name.replace(/^\/+/, '')}</code>
-                {c.inputHint && <span dir="auto" className="flex-none truncate text-xs text-muted italic max-md:hidden">{c.inputHint}</span>}
-                <span dir="auto" className="min-w-0 flex-1 truncate text-xs">{c.description}</span>
+                <code dir="ltr" className="flex-none font-mono text-xs font-semibold text-ink">/{visible(c.name.replace(/^\/+/, ''))}</code>
+                {c.inputHint && <span dir="auto" className="flex-none truncate text-xs text-muted italic max-md:hidden">{visible(c.inputHint)}</span>}
+                <span dir="auto" className="min-w-0 flex-1 truncate text-xs">{visible(c.description)}</span>
               </li>
             ))}
           </ul>

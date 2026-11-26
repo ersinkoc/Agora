@@ -8,6 +8,7 @@ import { useHighlightedFile } from '../highlight/useHighlight';
 import { StatusBadge } from './ChangesView';
 import { Icon } from './Icon';
 import { Resizer } from './Resizer';
+import { visible } from '../net/hidden';
 
 // An agent's workspace as an editor shows it (docs/ux/main-window.md, Files): a folder tree that opens lazily, with the files and
 // folders that hold changes marked; open files as tabs; the file with line numbers, where it changed in the gutter, and a search.
@@ -291,11 +292,11 @@ export function FilesView({ files, load, changed, compact = false }: {
                 const secret = secrets.has(path);
                 return (
                   <button key={path} type="button" role="treeitem" aria-level={1} data-path={path} aria-selected={path === active} aria-current={path === active} disabled={gone}
-                    aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: path }) : undefined}
-                    className="ide-row font-mono text-xs disabled:opacity-60" title={gone ? t('files-deleted') : secret ? t('files-secret') : path}
+                    aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: visible(path) }) : undefined}
+                    className="ide-row font-mono text-xs disabled:opacity-60" title={gone ? t('files-deleted') : secret ? t('files-secret') : visible(path)}
                     onClick={() => { if (!gone) { openFile(path, size < 0 ? 0 : size); if (!secret) reveal(path); } }}>
                     <Icon name={secret ? 'lock' : 'files'} className="size-3.5 flex-none text-muted" />
-                    <span className={`min-w-0 flex-1 truncate text-start ${gone ? 'line-through' : ''}`} dir="ltr">{path}</span>
+                    <span className={`min-w-0 flex-1 truncate text-start ${gone ? 'line-through' : ''}`} dir="ltr">{visible(path)}</span>
                     {st && <StatusBadge status={st} />}
                   </button>
                 );
@@ -304,7 +305,7 @@ export function FilesView({ files, load, changed, compact = false }: {
             <TreeLevel dir="" depth={0} listings={listings} open={open} list={list} toggle={toggle} pick={openFile} active={active} status={status} folders={folders} />
           )}
         </div>
-        {secretNote !== undefined && <p role="status" className="m-0 flex flex-none items-start gap-1.5 border-t border-line px-3 py-1.5 text-xs text-muted"><Icon name="lock" className="mt-0.5 size-3.5" /><span className="min-w-0"><span className="font-mono text-ink" dir="ltr">{baseName(secretNote)}</span>. {t('files-secret')}</span></p>}
+        {secretNote !== undefined && <p role="status" className="m-0 flex flex-none items-start gap-1.5 border-t border-line px-3 py-1.5 text-xs text-muted"><Icon name="lock" className="mt-0.5 size-3.5" /><span className="min-w-0"><span className="font-mono text-ink" dir="ltr">{visible(baseName(secretNote))}</span>. {t('files-secret')}</span></p>}
       </div>
       <div className="hidden @2xl:block"><Resizer side="start" value={treeWidth} min={160} max={520} onChange={setTreeWidth} /></div>
 
@@ -321,11 +322,11 @@ export function FilesView({ files, load, changed, compact = false }: {
             <div role="tablist" aria-label={t('files-open-files')} className="flex flex-none overflow-x-auto border-b border-line bg-surface-1">
               {tabs.map((x) => (
                 <div key={x.path} role="tab" aria-selected={x.path === active} tabIndex={x.path === active ? 0 : -1} className="ide-tab cursor-pointer gap-1.5 pe-1"
-                  title={x.path} onClick={() => setActive(x.path)} onAuxClick={(e) => { if (e.button === 1) closeTab(x.path); }}
+                  title={visible(x.path)} onClick={() => setActive(x.path)} onAuxClick={(e) => { if (e.button === 1) closeTab(x.path); }}
                   onKeyDown={(e) => { if (e.key === 'Delete') closeTab(x.path); }}>
                   {status.get(x.path) && <StatusBadge status={status.get(x.path) as DiffStatus} />}
-                  <span className="truncate font-mono text-xs" dir="ltr">{baseName(x.path)}</span>
-                  <button type="button" className="ide-iconbtn size-5 flex-none" aria-label={t('files-close-tab', { name: baseName(x.path) })}
+                  <span className="truncate font-mono text-xs" dir="ltr">{visible(baseName(x.path))}</span>
+                  <button type="button" className="ide-iconbtn size-5 flex-none" aria-label={t('files-close-tab', { name: visible(baseName(x.path)) })}
                     onClick={(e) => { e.stopPropagation(); closeTab(x.path); }}><Icon name="close" className="size-3" /></button>
                 </div>
               ))}
@@ -337,8 +338,8 @@ export function FilesView({ files, load, changed, compact = false }: {
                     <span key={c.path} className="flex min-w-0 items-center gap-0.5">
                       {i > 0 && <Icon name="chevron" className="size-3 flex-none text-muted" />}
                       {i < all.length - 1
-                        ? <button type="button" className="truncate rounded-xs px-1 text-muted hover:bg-surface-2 hover:text-ink" onClick={() => reveal(c.path, true)}>{c.name}</button>
-                        : <span className="truncate px-1 font-semibold text-ink">{c.name}</span>}
+                        ? <button type="button" className="truncate rounded-xs px-1 text-muted hover:bg-surface-2 hover:text-ink" onClick={() => reveal(c.path, true)}>{visible(c.name)}</button>
+                        : <span className="truncate px-1 font-semibold text-ink">{visible(c.name)}</span>}
                     </span>
                   ))}
                 </nav>
@@ -372,10 +373,10 @@ export function FilesView({ files, load, changed, compact = false }: {
                 : content === 'binary' ? <p className="muted p-4">{t('files-binary')}</p>
                 : content === 'secret' ? <p role="note" className="flex items-center gap-2 p-4 text-muted"><Icon name="lock" className="size-4" />{t('files-secret')}</p>
                 : content === 'failed' ? <p role="alert" className="p-4">{activeStatus === 'deleted' ? t('files-deleted') : t('files-too-large')}</p>
-                : <CodeView key={active} label={active ?? ''} lines={content.lines} html={html} marks={marks} matches={finding ? matches : []} current={current} />}
+                : <CodeView key={active} label={visible(active ?? '')} lines={content.lines} html={html} marks={marks} matches={finding ? matches : []} current={current} />}
             </div>
             {active !== undefined && changeOf(active) && marks.size === 0 && activeStatus === 'renamed' && (
-              <p className="m-0 flex-none border-t border-line px-3 py-1 text-xs text-muted">{t('changes-renamed-from', { name: changeOf(active)?.oldPath ?? '' })}</p>
+              <p className="m-0 flex-none border-t border-line px-3 py-1 text-xs text-muted">{t('changes-renamed-from', { name: visible(changeOf(active)?.oldPath ?? '') })}</p>
             )}
           </>
         )}
@@ -405,12 +406,12 @@ export function TreeLevel({ dir, depth, listings, open, list, toggle, pick, acti
         return (
           <div key={path}>
             <button type="button" role="treeitem" aria-level={depth + 1} data-path={path} aria-expanded={f.isDir ? isOpen : undefined} aria-selected={path === active} aria-current={path === active}
-              aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: f.name }) : undefined}
-              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={secret ? t('files-secret') : path}
+              aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: visible(f.name) }) : undefined}
+              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={secret ? t('files-secret') : visible(path)}
               onClick={() => (f.isDir ? toggle(path) : pick(path, f.size))}>
               <span className="w-3 flex-none text-muted">{f.isDir && <Icon name="chevron" className={`size-3 transition-transform duration-150 ${isOpen ? 'rotate-90' : 'rtl:rotate-180'}`} />}</span>
               <Icon name={f.isDir ? 'folder' : secret ? 'lock' : 'files'} className={`size-3.5 flex-none ${f.isDir ? 'text-muted' : 'text-muted/70'}`} />
-              <span className={`min-w-0 flex-1 truncate text-start ${st ? 'text-ink' : ''}`} dir="ltr">{f.name}</span>
+              <span className={`min-w-0 flex-1 truncate text-start ${st ? 'text-ink' : ''}`} dir="ltr">{visible(f.name)}</span>
               {f.isDir && folders.has(path) && <span className="size-1.5 flex-none rounded-full bg-working" title={t('files-folder-changed')} />}
               {st && <StatusBadge status={st} />}
             </button>

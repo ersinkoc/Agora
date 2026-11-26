@@ -51,7 +51,7 @@ function ReviewCard({ approval: x, agent, guard, busy, narrowable, alert, onOpen
   const { row } = usePinnedRow(guard.restart);
   const [open, setOpen] = useState(false);
   const why = `review-stale-${useId()}`;
-  const name = agent?.name || approvalName(x);
+  const name = visible(agent?.name || approvalName(x));
   const sent = guard.status(x.id) === 'sent';
   const stale = !!onResolve && guard.stale;
   return (

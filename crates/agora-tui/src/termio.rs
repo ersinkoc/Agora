@@ -9,6 +9,8 @@
 //! switches them while this client watches (`docs/ux/terminal-fidelity.md`). Everything a program sends is untrusted text: nothing here
 //! executes or opens anything; the caller decides, after showing the user what it would do.
 
+use std::net::Ipv6Addr;
+
 use agora_vt::Modes;
 
 /// Which events the program asked to be told about (DECSET 9, 1000, 1002, 1003).
@@ -456,6 +458,23 @@ pub fn safe_link(uri: &str) -> Option<&str> {
     if authority.is_empty() || authority.contains('@') || authority.starts_with(':') {
         return None;
     }
+    let port_ok = |port: &str| {
+        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+    };
+    if let Some(host) = authority.strip_prefix('[') {
+        let close = host.find(']')?;
+        if close == 0 || host[..close].parse::<Ipv6Addr>().is_err() {
+            return None;
+        }
+        let rest = &host[close + 1..];
+        if !rest.is_empty() && rest.strip_prefix(':').is_none_or(|p| !port_ok(p)) {
+            return None;
+        }
+    } else if let Some((host, port)) = authority.split_once(':') {
+        if host.is_empty() || host.contains(':') || !port_ok(port) {
+            return None;
+        }
+    }
     Some(uri)
 }
 
@@ -484,12 +503,22 @@ pub fn link_in_row(chars: &[char], at: usize) -> Option<String> {
         .rev()
         .find(|&i| starts(i, "http://") || starts(i, "https://"))?;
     let mut last = run.len();
-    while last > first
-        && matches!(
-            run[last - 1],
+    while last > first {
+        let trailing = run[last - 1];
+        if trailing == ']' {
+            let text = &run[first..last];
+            let opens = text.iter().filter(|&&c| c == '[').count();
+            let closes = text.iter().filter(|&&c| c == ']').count();
+            if opens == closes {
+                break;
+            }
+        }
+        if !matches!(
+            trailing,
             '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | ')' | ']' | '}' | '>' | '"'
-        )
-    {
+        ) {
+            break;
+        }
         last -= 1;
     }
     if start + last <= at {
@@ -598,13 +627,7 @@ pub const MAX_TITLE: usize = 60;
 
 /// Characters that draw as nothing, as something else, or that reorder text, besides the control characters: written as escapes.
 fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{e0000}'..='\u{e007f}'
-            | '\u{061c}' | '\u{feff}' | '\u{3164}' | '\u{2800}' | '\u{00ad}' | '\u{fe0f}' | '\u{180e}')
+    c.is_control() || agora_core::text::is_hidden(c)
 }
 
 /// A program's title made safe to draw: control, bidirectional and invisible characters become visible escapes (`\x1b`, `\u{202e}`),
@@ -1076,6 +1099,10 @@ mod tests {
         assert_eq!(safe_title("a\u{9b}b\x7f"), "a\\x9bb\\x7f");
         // More characters that draw as nothing or as something else.
         for c in [
+            '\u{034f}',
+            '\u{0600}',
+            '\u{115f}',
+            '\u{17b4}',
             '\u{206a}',
             '\u{206f}',
             '\u{e0001}',

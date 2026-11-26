@@ -11,6 +11,7 @@ import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar } from './kit';
 import { alwaysText } from '../net/always';
+import { visible } from '../net/hidden';
 
 // How one conversation entry looks. Everything here was written by an agent or a person: it is drawn as React text, never as HTML
 // (the one exception is the syntax highlighter's own output, which is escaped text inside <span class> tags).
@@ -21,12 +22,12 @@ const ICONS: Record<ToolAction, IconName> = {
 
 function Inlines({ parts }: { parts: Inline[] }) {
   return <>{parts.map((p, i) => p.kind === 'code'
-    ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{p.text}</code>
-    : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{p.text}</strong>
+    ? <code key={i} className="rounded-xs bg-surface-2 px-1 py-px font-mono text-[0.92em]">{visible(p.text)}</code>
+    : p.kind === 'strong' ? <strong key={i} className="font-semibold text-ink">{visible(p.text)}</strong>
       // `href` passed `safeLink` when it was read: http or https only. It opens without access to this window. On a touch screen it reaches
       // into the lines above and below (#1073); its text, in the inner span, stays above a neighbouring link's reach (`.tap-inline`).
-      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{p.text}</span></a>
-        : <span key={i}>{p.text}</span>)}</>;
+      : p.kind === 'link' && p.href ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer" className="tap-inline text-accent underline underline-offset-2 hover:brightness-110"><span>{visible(p.text)}</span></a>
+        : <span key={i}>{visible(p.text)}</span>)}</>;
 }
 
 // What a person copies: the text as written. Always reachable by keyboard (it shows on focus even where it hides until hover).
@@ -44,12 +45,13 @@ export function CopyButton({ text, label, className = '' }: { text: string; labe
 const HOVER = 'opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-visible:opacity-100 max-md:opacity-100 pointer-coarse:opacity-100';
 
 function CodeBlock({ lang, text }: { lang: string; text: string }) {
-  const html = useHighlightedCode(lang, text);
+  const shown = visible(text);
+  const html = useHighlightedCode(lang, shown);
   return (
     <div className="overflow-hidden rounded-s border border-codeblock-line bg-codeblock text-codeblock-ink">
       <div className="flex h-7 items-center justify-between gap-2 border-b border-codeblock-line ps-3 pe-1 text-xs text-muted pointer-coarse:h-11"><span className="font-mono">{lang || t('chat-code')}</span><CopyButton text={text} /></div>
       <pre dir="ltr" className="m-0 max-h-96 overflow-auto p-3 font-mono text-xs leading-5">
-        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
+        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{shown}</code>}
       </pre>
     </div>
   );
@@ -72,7 +74,7 @@ function BlockView({ block }: { block: Block }) {
           <tbody>{block.rows.map((r, i) => <tr key={i} className="border-t border-line first:border-t-0">{r.map((c, j) => <td key={j} className="px-3 py-1.5 align-top"><Inlines parts={c} /></td>)}</tr>)}</tbody>
         </table>
       </div>
-    ) : <pre dir="ltr" className="m-0 overflow-x-auto font-mono text-xs leading-5">{block.text}</pre>;
+    ) : <pre dir="ltr" className="m-0 overflow-x-auto font-mono text-xs leading-5">{visible(block.text)}</pre>;
     default: return <p className="m-0 break-words whitespace-pre-wrap"><Inlines parts={block.inlines} /></p>;
   }
 }
@@ -103,7 +105,7 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
     <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-personentry-line bg-personentry text-personentry-ink px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed opacity-80' : ''}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
-      <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
+      <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{visible(line.text)}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
         {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
         {line.atMs > 0 && <span>{clock(line.atMs)}</span>}
@@ -116,12 +118,13 @@ export const UserText = memo(function UserText({ line, state }: { line: ChatLine
 // An agent's turn: its avatar (the kit's agent avatar, in the agent's own colour, as on its tile and rows), its name, the model it runs and when
 // it began, and everything it said and did beside them.
 export function Turn({ name, accent, kind, model, atMs, children }: { name: string; accent?: string; kind?: string; model?: string; atMs: number; children: ReactNode }) {
+  const shown = visible(name);
   return (
-    <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={name}>
+    <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={shown}>
       <span className="max-md:hidden" data-turn-avatar><AgentAvatar accent={accent ?? 'var(--agent-slate)'} kind={kind || name} /></span>
       <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
-        <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
-        {model && <span className="truncate">{model}</span>}
+        <b className="truncate text-[0.8125rem] font-semibold text-ink">{shown}</b>
+        {model && <span className="truncate">{visible(model)}</span>}
         {atMs > 0 && <span className="flex-none">{clock(atMs)}</span>}
       </div>
       <div className="col-start-2 flex min-w-0 flex-col gap-2.5 max-md:col-start-1">{children}</div>
@@ -139,7 +142,7 @@ export function Thought({ text, seconds, live = false }: { text: string; seconds
         <span>{live ? t('chat-thinking') : seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
         <Icon name="chevron" className="ms-auto size-3 transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
       </summary>
-      <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{text}</div>
+      <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{visible(text)}</div>
     </details>
   );
 }
@@ -157,15 +160,15 @@ const DIFF_CAP = 200;
 function DiffLines({ lines: all, fallback }: { lines: ReturnType<typeof parseHunks>['lines']; fallback: string }) {
   const [full, setFull] = useState(false);
   const lines = full ? all : all.slice(0, DIFF_CAP);
-  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{fallback}</pre>;
+  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{visible(fallback)}</pre>;
   return (
     <pre dir="ltr" className="m-0 max-h-80 overflow-auto bg-surface-0 font-mono text-xs leading-5">
       {lines.map((l, i) => l.kind === 'hunk'
-        ? <div key={i} className="bg-surface-2 px-3.5 py-1 text-muted">{l.text}</div>
+        ? <div key={i} className="bg-surface-2 px-3.5 py-1 text-muted">{visible(l.text)}</div>
         : (
           <div key={i} className={`grid grid-cols-[3rem_minmax(0,1fr)] ${l.kind === 'add' ? 'bg-finished/10 diff-bar-add' : l.kind === 'del' ? 'bg-removed/10 diff-bar-del' : ''}`}>
             <span aria-hidden className="pe-2.5 text-end text-muted select-none">{l.kind === 'del' ? l.oldNo : l.newNo}</span>
-            <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text || ' '}</span>
+            <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text ? visible(l.text) : ' '}</span>
           </div>
         ))}
       {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
@@ -203,7 +206,7 @@ function OutputBlock({ text, cut }: { text: string; cut?: boolean }) {
   const tail = useMemo(() => outputTail(text, full ? Number.MAX_SAFE_INTEGER : OUTPUT_TAIL), [text, full]);
   return (
     <div data-output>
-      <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{tail.text}</pre>
+      <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{visible(tail.text)}</pre>
       {tail.hidden > 0 && <button type="button" className="mt-1 text-xs text-muted underline underline-offset-2 hover:text-ink pointer-coarse:min-h-11" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: tail.hidden + OUTPUT_TAIL })}</button>}
       {cut && <p className="m-0 mt-1 text-xs text-muted">{t('tool-output-cut')}</p>}
     </div>
@@ -216,7 +219,7 @@ function PlaceChips({ places, skip }: { places: readonly { path: string; line: n
   const list = places.filter((p) => p.path !== skip);
   if (list.length === 0) return null;
   return <>
-    {list.slice(0, 2).map((p, i) => <code key={`${p.path}:${p.line}`} dir="ltr" title={p.line > 0 ? `${p.path}:${p.line}` : p.path} data-place className={`min-w-0 max-w-40 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted ${i > 0 ? 'max-md:hidden' : ''}`}>{baseName(p.path)}{p.line > 0 ? `:${p.line}` : ''}</code>)}
+    {list.slice(0, 2).map((p, i) => <code key={`${p.path}:${p.line}`} dir="ltr" title={visible(p.line > 0 ? `${p.path}:${p.line}` : p.path)} data-place className={`min-w-0 max-w-40 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted ${i > 0 ? 'max-md:hidden' : ''}`}>{visible(baseName(p.path))}{p.line > 0 ? `:${p.line}` : ''}</code>)}
     {list.length > 2 && <span className="flex-none text-xs text-muted max-md:hidden">+{list.length - 2}</span>}
   </>;
 }
@@ -234,10 +237,10 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
   const [runOpen] = useState(() => line.status === 'in_progress' && !ended && !!line.output);
   const status = line.status && shownStatus(line.status, ended);
   const heading = v.raw
-    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
+    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{visible(v.raw)}</span>
     : <>
-      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
-      {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
+      <span className="isolate min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(visible(v.title))} /> : t(`tool-${action}`)}</span>
+      {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{visible(v.subject)}</code>}
       {line.locations && <PlaceChips places={line.locations} skip={showsSubject ? v.subject : undefined} />}
     </>;
   const row = 'flex min-h-9 pointer-coarse:min-h-11 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
@@ -258,13 +261,13 @@ const ToolStep = memo(function ToolStep({ line, diff, ended = false }: { line: C
       </summary>
       {d && diff ? <div className="border-t border-line"><DiffLines lines={d.lines} fallback={diff.text} /></div> : (
         <div className="border-t border-line bg-surface-0 px-3.5 py-2">
-          {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{v.raw}</pre> : <>
-            {action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{v.subject}</pre>}
+          {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{visible(v.raw)}</pre> : <>
+            {action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{visible(v.subject)}</pre>}
             {line.output && <div className={v.details.length ? 'mb-2 border-b border-line pb-2' : ''}><OutputBlock text={line.output} cut={line.outputCut} /></div>}
             <dl dir="ltr" className="m-0 grid max-h-72 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs">
               {v.details.map(([k, val], i) => <div key={i} className="contents">
-                <dt className="text-muted">{k}</dt>
-                <dd className="m-0 break-words whitespace-pre-wrap">{val}</dd>
+                <dt className="text-muted">{visible(k)}</dt>
+                <dd className="m-0 break-words whitespace-pre-wrap">{visible(val)}</dd>
               </div>)}
             </dl>
           </>}
@@ -299,7 +302,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, ended
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
           : <Icon name="board" className="size-3.5 flex-none" />}
         <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
-        <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
+        <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${visible(sum.last)}` : ''}</span>
         <span className="flex-1 md:hidden" />
         {flag && <span className={`flex flex-none items-center gap-1 text-xs font-medium ${flag === 'needs-you' ? 'text-needs-you' : 'text-danger'}`}><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
         <Icon name="chevron" className={CHEVRON} />
@@ -323,7 +326,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
     <details open={d.lines.length <= 24} className="group max-w-3xl overflow-hidden rounded-m border border-line bg-surface-1" data-diff-path={line.path}>
       <summary className="flex min-h-9 pointer-coarse:min-h-11 min-w-0 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
         <span aria-hidden className="grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 text-accent"><Icon name="pencil" className="size-3.5" /></span>
-        <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
+        <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{visible(dir)}</span><span className="font-semibold text-ink">{visible(name)}</span></span>
         <Counts added={d.added} removed={d.removed} />
         <Icon name="chevron" className={CHEVRON} />
       </summary>
@@ -348,8 +351,8 @@ export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLi
       <Counts added={added} removed={removed} />
       <ul className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0 pointer-coarse:gap-y-5">
         {files.slice(0, SHOWN_FILES).map((f) => <li key={f.path} className="min-w-0">
-          <button type="button" dir="ltr" title={f.path} className="tap-target inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
-            <span className="truncate">{files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path)}</span>
+          <button type="button" dir="ltr" title={visible(f.path)} className="tap-target inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
+            <span className="truncate">{visible(files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path))}</span>
           </button>
         </li>)}
         {files.length > SHOWN_FILES && <li className="muted self-center text-xs">{t('chat-files-more', { count: files.length - SHOWN_FILES })}</li>}
@@ -418,7 +421,7 @@ const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line
       <span className="min-w-0 flex-1 break-words">
         {/* ADR-0101: an approval answered "always" says so (the agent remembers it). */}
         <span className="font-medium text-ink">{outcome === 'approved' && line.always ? t(alwaysText('permission-approved-always')) : t(`permission-${outcome}`)}</span>
-        {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{line.text}</code></>}
+        {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{visible(line.text)}</code></>}
       </span>
       {outcome === 'pending' && onShow && <button type="button" className="tap-target text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}
     </div>

@@ -112,12 +112,24 @@ describe('agent text is untrusted', () => {
     expect(view.querySelector('[data-team-reader-body]')?.textContent).toBe(html);
     expect((window as { __pwned?: number }).__pwned).toBeUndefined();
   });
-  it('control and bidirectional characters never reach the screen; line breaks stay in the reading view', () => {
+  it('control and bidirectional characters are named on screen; line breaks stay in the reading view', () => {
     act(() => root.render(<TeamChat messages={[msg({ body: 'line one\nline‮two\u0007', from: 'codex⁦ · teal' })]} now={NOW} />));
     const row = rows()[0] as HTMLButtonElement;
-    expect(row.querySelector('.team-msg__from')?.textContent).toBe('codex · teal');
+    expect(row.querySelector('.team-msg__from')?.textContent).toBe('codex\\u{2066} · teal');
     act(() => row.click());
-    expect(dialog()?.querySelector('[data-team-reader-body]')?.textContent).toBe('line one\nlinetwo');
+    expect(dialog()?.querySelector('[data-team-reader-body]')?.textContent).toBe('line one\nline\\u{202e}two\\u{7}');
+  });
+  it('makes the full hidden-character set visible in names and message text', () => {
+    act(() => root.render(<TeamChat messages={[msg({ from: 'co\u3164dex', to: 'cla\u034fude', body: 'İş\u2800 sürüyor' })]} now={NOW} />));
+    const row = rows()[0] as HTMLButtonElement;
+    for (const shown of ['co\\u{3164}dex', 'cla\\u{34f}ude', 'İş\\u{2800} sürüyor']) expect(row.textContent).toContain(shown);
+    expect([...row.textContent ?? ''].filter((c) => ['\u3164', '\u034f', '\u2800'].includes(c))).toEqual([]);
+  });
+  it('verifies Team Chat text across isolate, private-use and control characters', () => {
+    act(() => root.render(<TeamChat messages={[msg({ from: '模型\u2066', to: 'İş\ue000', body: 'ça\u0001lış' })]} now={NOW} />));
+    const row = rows()[0] as HTMLButtonElement;
+    act(() => row.click());
+    for (const shown of ['模型\\u{2066}', 'İş\\u{e000}', 'ça\\u{1}lış']) expect(dialog()?.textContent).toContain(shown);
   });
 });
 

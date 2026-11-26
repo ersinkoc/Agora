@@ -27,7 +27,7 @@ const MAX_SHOWN_LINES: usize = 40;
 const MAX_SHOWN_CHARS: usize = 200;
 
 pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
-    let (Some(kind), Some(file)) = (o.positional.first(), o.file.as_deref()) else {
+    let ([kind], Some(file)) = (o.positional.as_slice(), o.file.as_deref()) else {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
@@ -39,7 +39,13 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
                 return ExitCode::from(2);
             }
         },
-        None => size_from_name(file).unwrap_or(DEFAULT_SIZE),
+        None => match size_from_name(file) {
+            Ok(size) => size.unwrap_or(DEFAULT_SIZE),
+            Err(()) => {
+                say.err(key!("cli-explain-bad-size"), &[]);
+                return ExitCode::from(2);
+            }
+        },
     };
     let dir = o
         .manifests
@@ -52,15 +58,18 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
         say.err(
             key!("cli-explain-manifest-problem"),
             &[
-                ("path", path.display().to_string().into()),
-                ("reason", reason.as_str().into()),
+                (
+                    "path",
+                    diagnostic_inline(&path.display().to_string()).into(),
+                ),
+                ("reason", diagnostic(reason).into()),
             ],
         );
     }
     let Some(found) = loaded.iter().find(|l| l.manifest.kind == *kind) else {
         say.err(
             key!("cli-explain-unknown-kind"),
-            &[("kind", kind.as_str().into())],
+            &[("kind", diagnostic_inline(kind).into())],
         );
         return ExitCode::from(1);
     };
@@ -77,7 +86,10 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
             say.err(
                 key!("cli-explain-file-too-large"),
                 &[
-                    ("path", file.display().to_string().into()),
+                    (
+                        "path",
+                        diagnostic_inline(&file.display().to_string()).into(),
+                    ),
                     ("max", (MAX_SCREEN_BYTES as i64).into()),
                 ],
             );
@@ -87,8 +99,11 @@ pub(crate) fn explain(say: &Say, o: &Opts) -> ExitCode {
             say.err(
                 key!("cli-explain-bad-file"),
                 &[
-                    ("path", file.display().to_string().into()),
-                    ("reason", e.to_string().into()),
+                    (
+                        "path",
+                        diagnostic_inline(&file.display().to_string()).into(),
+                    ),
+                    ("reason", diagnostic(&e.to_string()).into()),
                 ],
             );
             return ExitCode::from(1);
@@ -160,7 +175,7 @@ pub(crate) fn render(
             RuleOutcome::NotPresent(i) => (key!("cli-explain-rule-not-present"), Some(i)),
         };
         let mut args = vec![
-            ("id", c.id.as_str().into()),
+            ("id", diagnostic_inline(&c.id).into()),
             ("state", state_name(c.state).into()),
             ("priority", i64::from(c.priority).into()),
             ("region", c.region.name().into()),
@@ -175,7 +190,7 @@ pub(crate) fn render(
             key!("cli-explain-decided"),
             &[
                 ("state", state_name(d.state).into()),
-                ("id", d.rule_id.as_str().into()),
+                ("id", diagnostic_inline(&d.rule_id).into()),
             ],
         ),
         None => say.text(key!("cli-explain-undecided"), &[]),
@@ -201,7 +216,13 @@ fn shown(line: &str) -> String {
     let mut s: String = line
         .chars()
         .take(MAX_SHOWN_CHARS)
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| {
+            if c.is_control() || agora_core::text::is_hidden(c) {
+                '?'
+            } else {
+                c
+            }
+        })
         .collect();
     if line.chars().nth(MAX_SHOWN_CHARS).is_some() {
         s.push('…');
@@ -212,7 +233,12 @@ fn shown(line: &str) -> String {
 /// `COLSxROWS`, each 2 to 1000.
 pub(crate) fn parse_size(s: &str) -> Option<Size> {
     let (c, r) = s.split_once(['x', 'X'])?;
-    let ok = |v: &str| v.parse::<u16>().ok().filter(|n| (2..=1000).contains(n));
+    let ok = |v: &str| {
+        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u16>().ok())
+            .flatten()
+            .filter(|n| (2..=1000).contains(n))
+    };
     Some(Size {
         cols: ok(c)?,
         rows: ok(r)?,
@@ -220,9 +246,27 @@ pub(crate) fn parse_size(s: &str) -> Option<Size> {
 }
 
 /// The size a fixture file name carries: `trust@24x20.screen` (`docs/specs/agent-manifest.md`).
-pub(crate) fn size_from_name(path: &Path) -> Option<Size> {
-    let stem = path.file_stem()?.to_str()?;
-    parse_size(stem.rsplit_once('@')?.1)
+pub(crate) fn size_from_name(path: &Path) -> Result<Option<Size>, ()> {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(None);
+    };
+    let Some((_, annotated)) = stem.rsplit_once('@') else {
+        return Ok(None);
+    };
+    parse_size(annotated).map(Some).ok_or(())
+}
+
+/// Text used in an error parameter: retain what it said while making terminal controls and hidden formatting visible.
+fn diagnostic(text: &str) -> String {
+    agora_core::text::visible(text)
+}
+
+/// A value embedded in one diagnostic or report line: unlike a multiline reason, a line break or tab must not create a second
+/// apparent diagnostic or move the following text into another column.
+fn diagnostic_inline(text: &str) -> String {
+    diagnostic(text)
+        .replace('\n', "\\u{a}")
+        .replace('\t', "\\u{9}")
 }
 
 enum ReadError {
@@ -261,7 +305,7 @@ mod tests {
             .find(|l| l.manifest.kind == kind)
             .expect("kind");
         let path = fixture(screen);
-        let size = size_from_name(&path).unwrap_or(DEFAULT_SIZE);
+        let size = size_from_name(&path).unwrap().unwrap_or(DEFAULT_SIZE);
         let mut term = AlacrittyTerminal::new(size);
         term.feed(&std::fs::read(&path).expect("fixture"));
         let why = Detector::new(&found.manifest).explain(&term);
@@ -301,11 +345,11 @@ mod tests {
         assert_eq!(parse_size("120"), None);
         assert_eq!(
             size_from_name(Path::new("fixtures/codex/trust@24x20.screen")),
-            Some(Size { cols: 24, rows: 20 })
+            Ok(Some(Size { cols: 24, rows: 20 }))
         );
         assert_eq!(
             size_from_name(Path::new("fixtures/codex/trust.screen")),
-            None
+            Ok(None)
         );
         let out = report("codex", "codex/trust@24x20.screen");
         assert!(out[0].contains("24x20"), "{}", out.join("\n"));

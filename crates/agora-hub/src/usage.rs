@@ -74,8 +74,56 @@ pub struct Catalog {
 
 /// USD per million tokens as a JSON number → micro-USD per million tokens. Negative or non-finite values are not prices.
 fn micro(v: &Value) -> Option<u64> {
-    let f = v.as_f64()?;
-    (f.is_finite() && f >= 0.0).then(|| (f * 1_000_000.0).round() as u64)
+    let text = v.as_number()?.to_string();
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+        None => (text.as_str(), 0),
+    };
+    if mantissa.starts_with('-') {
+        return None;
+    }
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    if digits.bytes().all(|digit| digit == b'0') {
+        return Some(0);
+    }
+    let shift = exponent
+        .checked_add(6)?
+        .checked_sub(i32::try_from(fraction.len()).ok()?)?;
+    if shift >= 0 {
+        let zeros = usize::try_from(shift).ok()?;
+        let significant = digits.trim_start_matches('0');
+        if significant.len().saturating_add(zeros) > 20 {
+            return None;
+        }
+        return format!("{significant}{}", "0".repeat(zeros)).parse().ok();
+    }
+    let cut = i64::try_from(digits.len())
+        .ok()?
+        .checked_add(i64::from(shift))?;
+    if cut < 0 {
+        return Some(0);
+    }
+    let cut = usize::try_from(cut).ok()?;
+    let mut rounded = if cut == 0 {
+        0
+    } else {
+        digits.get(..cut)?.parse::<u64>().ok()?
+    };
+    if digits
+        .as_bytes()
+        .get(cut)
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        rounded = rounded.checked_add(1)?;
+    }
+    Some(rounded)
 }
 
 impl Catalog {
@@ -98,13 +146,27 @@ impl Catalog {
                     ) else {
                         continue;
                     };
+                    let cache_read = match cost.get("cache_read") {
+                        Some(value) => {
+                            let Some(value) = micro(value) else { continue };
+                            value
+                        }
+                        None => 0,
+                    };
+                    let cache_write = match cost.get("cache_write") {
+                        Some(value) => {
+                            let Some(value) = micro(value) else { continue };
+                            value
+                        }
+                        None => 0,
+                    };
                     prices.insert(
                         format!("{pid}/{mid}"),
                         Price {
                             input,
                             output,
-                            cache_read: cost.get("cache_read").and_then(micro).unwrap_or(0),
-                            cache_write: cost.get("cache_write").and_then(micro).unwrap_or(0),
+                            cache_read,
+                            cache_write,
                         },
                     );
                 }
@@ -126,23 +188,36 @@ impl Catalog {
     /// several providers list at their own prices has no price rather than a guess. An override of `provider/model` wins for
     /// the bare id too: it replaces that provider's catalog price before the choice is made.
     pub fn price(&self, model: &str) -> Option<Price> {
+        if model.is_empty() {
+            return None;
+        }
         if let Some(p) = self.overrides.get(model).or_else(|| self.prices.get(model)) {
             return Some(*p);
         }
-        if model.is_empty() || model.contains('/') {
+        if model.contains('/') {
             return None;
         }
-        let suffix = format!("/{model}");
-        let mut found: BTreeMap<&str, &Price> = BTreeMap::new();
-        for (k, p) in self.prices.iter().chain(self.overrides.iter()) {
-            if let Some(prov) = k.strip_suffix(suffix.as_str()) {
-                found.insert(prov, p);
+        let mut by_provider = BTreeMap::new();
+        for (key, price) in self.prices.iter().chain(&self.overrides) {
+            let Some((provider, candidate)) = key.split_once('/') else {
+                continue;
+            };
+            if candidate == model {
+                by_provider.insert(provider, *self.overrides.get(key).unwrap_or(price));
             }
         }
-        if found.len() == 1 {
-            return found.values().next().map(|p| **p);
+        let found: Vec<(&str, Price)> = by_provider.into_iter().collect();
+        if let [(_, p)] = found.as_slice() {
+            return Some(*p);
         }
-        FIRST_PARTY.iter().find_map(|f| found.get(f).map(|p| **p))
+        if let Some((_, first)) = found.first() {
+            if found.iter().all(|(_, price)| price == first) {
+                return Some(*first);
+            }
+        }
+        FIRST_PARTY
+            .iter()
+            .find_map(|f| found.iter().find(|(prov, _)| prov == f).map(|(_, p)| *p))
     }
 
     /// Reads the hub owner's override file: `{ "<model>": { "input": USD, "output": USD, "cache_read": USD,
@@ -152,19 +227,26 @@ impl Catalog {
         let root: Value = serde_json::from_str(json)?;
         let mut skipped = 0;
         for (model, p) in root.as_object().into_iter().flatten() {
+            let optional_price = |key| match p.get(key) {
+                Some(value) => micro(value),
+                None => Some(0),
+            };
             match (
                 p.get("input").and_then(micro),
                 p.get("output").and_then(micro),
+                optional_price("cache_read"),
+                optional_price("cache_write"),
             ) {
-                (Some(input), Some(output)) => self.set_override(
-                    model,
-                    Price {
-                        input,
-                        output,
-                        cache_read: p.get("cache_read").and_then(micro).unwrap_or(0),
-                        cache_write: p.get("cache_write").and_then(micro).unwrap_or(0),
-                    },
-                ),
+                (Some(input), Some(output), Some(cache_read), Some(cache_write)) => self
+                    .set_override(
+                        model,
+                        Price {
+                            input,
+                            output,
+                            cache_read,
+                            cache_write,
+                        },
+                    ),
                 _ => skipped += 1,
             }
         }
@@ -207,12 +289,12 @@ impl Catalog {
             (usage.cache_read_tokens, p.cache_read),
             (usage.cache_write_tokens, p.cache_write),
         ];
-        // u128: tokens * price cannot overflow for any real usage, and the division rounds to nearest once.
+        // u128 keeps real usage exact and the division rounds once; synthetic boundary inputs saturate.
         let total: u128 = parts
             .iter()
             .map(|(t, price)| u128::from(*t) * u128::from(*price))
-            .sum();
-        let micro = (total + 500_000) / 1_000_000;
+            .fold(0, u128::saturating_add);
+        let micro = total.saturating_add(500_000) / 1_000_000;
         Some(Cost::Estimated(u64::try_from(micro).unwrap_or(u64::MAX)))
     }
 }
@@ -237,7 +319,7 @@ impl Totals {
             Some(Cost::Estimated(v)) => {
                 self.estimated_micro_usd = self.estimated_micro_usd.saturating_add(v);
             }
-            None => self.unpriced_records += 1,
+            None => self.unpriced_records = self.unpriced_records.saturating_add(1),
         }
     }
 
@@ -461,5 +543,489 @@ mod tests {
         assert!(Catalog::bundled()
             .price("anthropic/claude-haiku-4-5")
             .is_some());
+    }
+
+    #[test]
+    fn f355_a_provider_override_also_wins_when_the_agent_reports_the_bare_model_id() {
+        let mut c = Catalog::from_models_dev(
+            r#"{"anthropic":{"models":{"shared":{"cost":{"input":3,"output":15}}}}}"#,
+        )
+        .unwrap();
+        c.set_override(
+            "anthropic/shared",
+            Price {
+                input: 1_000_000,
+                output: 2_000_000,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("shared").unwrap().input, 1_000_000);
+    }
+
+    #[test]
+    fn an_exact_provider_model_lookup_keeps_using_its_override() {
+        let mut c = Catalog::from_models_dev(
+            r#"{"anthropic":{"models":{"shared":{"cost":{"input":3,"output":15}}}}}"#,
+        )
+        .unwrap();
+        c.set_override(
+            "anthropic/shared",
+            Price {
+                input: 1_000_000,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("anthropic/shared").unwrap().input, 1_000_000);
+    }
+
+    #[test]
+    fn f356_identical_reseller_prices_are_not_an_ambiguous_cost_guess() {
+        let c = Catalog::from_models_dev(
+            r#"{"reseller-a":{"models":{"shared":{"cost":{"input":1.5,"output":4}}}},
+                "reseller-b":{"models":{"shared":{"cost":{"input":1.5,"output":4}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.price("shared"),
+            Some(Price {
+                input: 1_500_000,
+                output: 4_000_000,
+                ..Price::default()
+            })
+        );
+    }
+
+    #[test]
+    fn different_reseller_prices_remain_ambiguous() {
+        let c = Catalog::from_models_dev(
+            r#"{"reseller-a":{"models":{"shared":{"cost":{"input":1,"output":4}}}},
+                "reseller-b":{"models":{"shared":{"cost":{"input":2,"output":4}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("shared"), None);
+    }
+
+    #[test]
+    fn f357_an_empty_override_key_cannot_price_an_agent_with_no_model() {
+        let mut c = Catalog::default();
+        c.load_overrides(r#"{"":{"input":1,"output":2}}"#).unwrap();
+        assert_eq!(c.price(""), None);
+    }
+
+    #[test]
+    fn a_named_private_model_override_remains_usable() {
+        let mut c = Catalog::default();
+        c.load_overrides(r#"{"private/model":{"input":1,"output":2}}"#)
+            .unwrap();
+        assert_eq!(c.price("private/model").unwrap().output, 2_000_000);
+    }
+
+    #[test]
+    fn f358_a_price_that_cannot_fit_in_micro_usd_is_not_silently_clamped() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"too-large":{"cost":{"input":1e300,"output":1}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/too-large"), None);
+    }
+
+    #[test]
+    fn a_large_representable_price_remains_usable() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"large":{"cost":{"input":1000000000000,"output":1}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/large").unwrap().input, 1_000_000_000_000_000_000);
+    }
+
+    #[test]
+    fn f359_cost_estimation_saturates_when_all_four_products_overflow_the_u128_sum() {
+        let mut c = Catalog::default();
+        c.set_override(
+            "max/model",
+            Price {
+                input: u64::MAX,
+                output: u64::MAX,
+                cache_read: u64::MAX,
+                cache_write: u64::MAX,
+            },
+        );
+        assert_eq!(
+            c.cost(
+                "max/model",
+                &usage(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                None
+            ),
+            Some(Cost::Estimated(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn one_extreme_cost_product_keeps_saturating_to_the_public_u64_result() {
+        let mut c = Catalog::default();
+        c.set_override(
+            "max/model",
+            Price {
+                input: u64::MAX,
+                ..Price::default()
+            },
+        );
+        assert_eq!(
+            c.cost("max/model", &usage(u64::MAX, 0, 0, 0), None),
+            Some(Cost::Estimated(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn verifies_f355_bare_lookup_overrides_for_first_party_sole_and_competing_providers() {
+        let mut c = Catalog::from_models_dev(
+            r#"{"anthropic":{"models":{"first":{"cost":{"input":3,"output":3}},"shared":{"cost":{"input":4,"output":4}}}},
+                "reseller":{"models":{"solo":{"cost":{"input":5,"output":5}},"shared":{"cost":{"input":6,"output":6}}}}}"#,
+        )
+        .unwrap();
+        for (model, input) in [
+            ("anthropic/first", 1_000_000),
+            ("reseller/solo", 2_000_000),
+            ("anthropic/shared", 3_000_000),
+        ] {
+            c.set_override(
+                model,
+                Price {
+                    input,
+                    ..Price::default()
+                },
+            );
+        }
+        assert_eq!(c.price("first").unwrap().input, 1_000_000);
+        assert_eq!(c.price("solo").unwrap().input, 2_000_000);
+        assert_eq!(c.price("shared").unwrap().input, 3_000_000);
+    }
+
+    #[test]
+    fn verifies_f356_identical_prices_across_two_three_and_zero_cost_providers() {
+        for raw in [
+            r#"{"a":{"models":{"m":{"cost":{"input":1,"output":2}}}},"b":{"models":{"m":{"cost":{"input":1,"output":2}}}}}"#,
+            r#"{"a":{"models":{"m":{"cost":{"input":0.25,"output":0.5}}}},"b":{"models":{"m":{"cost":{"input":0.25,"output":0.5}}}},"c":{"models":{"m":{"cost":{"input":0.25,"output":0.5}}}}}"#,
+            r#"{"a":{"models":{"m":{"cost":{"input":0,"output":0}}}},"b":{"models":{"m":{"cost":{"input":0,"output":0}}}}}"#,
+        ] {
+            let c = Catalog::from_models_dev(raw).unwrap();
+            assert!(c.price("m").is_some(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn verifies_f357_empty_models_stay_unpriced_across_direct_file_and_cost_lookups() {
+        let mut direct = Catalog::default();
+        direct.set_override(
+            "",
+            Price {
+                input: 1,
+                output: 2,
+                ..Price::default()
+            },
+        );
+        assert_eq!(direct.price(""), None);
+
+        let mut file = Catalog::default();
+        file.load_overrides(r#"{"":{"input":3,"output":4}}"#)
+            .unwrap();
+        assert_eq!(file.price(""), None);
+        assert_eq!(
+            file.cost("", &usage(1_000_000, 1_000_000, 0, 0), None),
+            None
+        );
+    }
+
+    #[test]
+    fn verifies_f358_out_of_range_prices_across_integer_decimal_and_exponent_forms() {
+        for raw in ["1e300", "18446744073709.552", "100000000000000000000"] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(micro(&value), None, "{raw}");
+        }
+        let value: Value = serde_json::from_str("1000000000000").unwrap();
+        assert_eq!(micro(&value), Some(1_000_000_000_000_000_000));
+    }
+
+    #[test]
+    fn verifies_f359_saturation_across_two_four_and_near_max_product_sums() {
+        let mut c = Catalog::default();
+        c.set_override(
+            "max/model",
+            Price {
+                input: u64::MAX,
+                output: u64::MAX,
+                cache_read: u64::MAX,
+                cache_write: u64::MAX,
+            },
+        );
+        for usage in [
+            usage(u64::MAX, u64::MAX, 0, 0),
+            usage(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            usage(u64::MAX - 1, u64::MAX - 1, u64::MAX - 1, 0),
+        ] {
+            assert_eq!(
+                c.cost("max/model", &usage, None),
+                Some(Cost::Estimated(u64::MAX))
+            );
+        }
+    }
+
+    #[test]
+    fn f360_the_unpriced_record_counter_saturates_instead_of_overflowing() {
+        let mut totals = Totals {
+            unpriced_records: u64::MAX,
+            ..Totals::default()
+        };
+        totals.add(&Usage::default(), None);
+        assert_eq!(totals.unpriced_records, u64::MAX);
+    }
+
+    #[test]
+    fn the_unpriced_record_counter_still_reaches_its_maximum() {
+        let mut totals = Totals {
+            unpriced_records: u64::MAX - 1,
+            ..Totals::default()
+        };
+        totals.add(&Usage::default(), None);
+        assert_eq!(totals.unpriced_records, u64::MAX);
+    }
+
+    #[test]
+    fn f361_decimal_prices_round_exactly_at_a_half_micro_usd() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"half":{"cost":{"input":0.0001245,"output":0.0001245}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/half").unwrap().input, 125);
+    }
+
+    #[test]
+    fn a_decimal_price_below_the_half_micro_usd_still_rounds_down() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"low":{"cost":{"input":0.0001244,"output":0.0001244}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/low").unwrap().input, 124);
+    }
+
+    #[test]
+    fn f362_a_nested_model_id_is_not_mistaken_for_its_last_path_segment() {
+        let c = Catalog::from_models_dev(
+            r#"{"reseller":{"models":{"org/shared":{"cost":{"input":1,"output":2}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("shared"), None);
+    }
+
+    #[test]
+    fn a_nested_model_id_remains_available_by_its_complete_catalog_key() {
+        let c = Catalog::from_models_dev(
+            r#"{"reseller":{"models":{"org/shared":{"cost":{"input":1,"output":2}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("reseller/org/shared").unwrap().input, 1_000_000);
+    }
+
+    #[test]
+    fn f363_a_present_but_invalid_cache_price_does_not_become_a_free_cache_price() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"bad-cache":{"cost":{"input":1,"output":2,"cache_read":-1}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/bad-cache"), None);
+    }
+
+    #[test]
+    fn a_missing_cache_price_still_means_no_separate_cache_charge() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{"no-cache":{"cost":{"input":1,"output":2}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("p/no-cache").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn f364_a_unique_provider_override_can_price_the_usual_bare_model_id() {
+        let mut c = Catalog::default();
+        c.set_override(
+            "private/solo",
+            Price {
+                input: 7,
+                output: 9,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("solo").unwrap().input, 7);
+    }
+
+    #[test]
+    fn a_provider_override_remains_available_by_its_complete_key() {
+        let mut c = Catalog::default();
+        c.set_override(
+            "private/solo",
+            Price {
+                input: 7,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("private/solo").unwrap().input, 7);
+    }
+
+    #[test]
+    fn verifies_f360_unpriced_counts_across_normal_near_max_and_saturated_totals() {
+        for (starting, additions, expected) in [
+            (0, 3, 3),
+            (u64::MAX - 1, 1, u64::MAX),
+            (u64::MAX, 2, u64::MAX),
+        ] {
+            let mut totals = Totals {
+                unpriced_records: starting,
+                ..Totals::default()
+            };
+            for _ in 0..additions {
+                totals.add(&Usage::default(), None);
+            }
+            assert_eq!(totals.unpriced_records, expected);
+        }
+    }
+
+    #[test]
+    fn verifies_f361_exact_rounding_across_tiny_decimal_scientific_and_below_half_prices() {
+        for (raw, expected) in [
+            ("0.0000005", 1),
+            ("0.0001245", 125),
+            ("1.245e-4", 125),
+            ("0.0001244999", 124),
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(micro(&value), Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn verifies_f362_nested_ids_across_one_many_and_zero_inner_slashes() {
+        let c = Catalog::from_models_dev(
+            r#"{"reseller":{"models":{
+                "org/shared":{"cost":{"input":1,"output":2}},
+                "a/b/deep":{"cost":{"input":3,"output":4}},
+                "plain":{"cost":{"input":5,"output":6}}
+            }}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("shared"), None);
+        assert_eq!(c.price("deep"), None);
+        assert_eq!(c.price("reseller/org/shared").unwrap().input, 1_000_000);
+        assert_eq!(c.price("reseller/a/b/deep").unwrap().input, 3_000_000);
+        assert_eq!(c.price("plain").unwrap().input, 5_000_000);
+    }
+
+    #[test]
+    fn verifies_f363_invalid_cache_prices_across_negative_non_numeric_and_overflow_values() {
+        let c = Catalog::from_models_dev(
+            r#"{"p":{"models":{
+                "negative":{"cost":{"input":1,"output":2,"cache_read":-1}},
+                "text":{"cost":{"input":1,"output":2,"cache_write":"free"}},
+                "overflow":{"cost":{"input":1,"output":2,"cache_read":1e300}},
+                "missing":{"cost":{"input":1,"output":2}}
+            }}}"#,
+        )
+        .unwrap();
+        for model in ["negative", "text", "overflow"] {
+            assert_eq!(c.price(&format!("p/{model}")), None, "{model}");
+        }
+        assert_eq!(c.price("p/missing").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn verifies_f364_override_only_bare_lookups_for_unique_equal_ambiguous_and_first_party_prices()
+    {
+        let mut c = Catalog::default();
+        for (model, input) in [
+            ("private/unique", 1),
+            ("reseller-a/equal", 2),
+            ("reseller-b/equal", 2),
+            ("reseller-a/ambiguous", 3),
+            ("reseller-b/ambiguous", 4),
+            ("openai/first-party", 5),
+            ("reseller/first-party", 6),
+        ] {
+            c.set_override(
+                model,
+                Price {
+                    input,
+                    ..Price::default()
+                },
+            );
+        }
+        assert_eq!(c.price("unique").unwrap().input, 1);
+        assert_eq!(c.price("equal").unwrap().input, 2);
+        assert_eq!(c.price("ambiguous"), None);
+        assert_eq!(c.price("first-party").unwrap().input, 5);
+    }
+
+    #[test]
+    fn f365_a_present_invalid_override_cache_price_cannot_silently_become_free() {
+        let mut c = Catalog::default();
+        let skipped = c
+            .load_overrides(r#"{"private/model":{"input":1,"output":2,"cache_read":-1}}"#)
+            .unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(c.price("private/model"), None);
+    }
+
+    #[test]
+    fn a_missing_override_cache_price_still_means_no_separate_cache_charge() {
+        let mut c = Catalog::default();
+        assert_eq!(
+            c.load_overrides(r#"{"private/model":{"input":1,"output":2}}"#)
+                .unwrap(),
+            0
+        );
+        assert_eq!(c.price("private/model").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn f366_a_representable_decimal_with_many_insignificant_zeroes_is_not_rejected() {
+        let value: Value = serde_json::from_str("0.000000000000000000001e21").unwrap();
+        assert_eq!(micro(&value), Some(1_000_000));
+    }
+
+    #[test]
+    fn an_ordinary_representable_exponent_price_remains_usable() {
+        let value: Value = serde_json::from_str("1e-6").unwrap();
+        assert_eq!(micro(&value), Some(1));
+    }
+
+    #[test]
+    fn verifies_f365_override_cache_prices_across_negative_text_overflow_and_missing_values() {
+        let mut c = Catalog::default();
+        let skipped = c
+            .load_overrides(
+                r#"{
+                    "private/negative":{"input":1,"output":2,"cache_read":-1},
+                    "private/text":{"input":1,"output":2,"cache_write":"free"},
+                    "private/overflow":{"input":1,"output":2,"cache_read":1e300},
+                    "private/missing":{"input":1,"output":2}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(skipped, 3);
+        for model in ["negative", "text", "overflow"] {
+            assert_eq!(c.price(&format!("private/{model}")), None, "{model}");
+        }
+        assert_eq!(c.price("private/missing").unwrap().cache_read, 0);
+    }
+
+    #[test]
+    fn verifies_f366_insignificant_zeroes_across_positive_zero_fractional_and_integer_forms() {
+        for (raw, expected) in [
+            ("0.000000000000000000001e21", 1_000_000),
+            ("0e2147483647", 0),
+            ("0.000000000000000000005e20", 500_000),
+            ("100000000000000000000e-20", 1_000_000),
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(micro(&value), Some(expected), "{raw}");
+        }
     }
 }

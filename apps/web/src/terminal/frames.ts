@@ -31,7 +31,10 @@ export function decodeTerminalFrame(kind: number, payload: Uint8Array): Terminal
       return { type: 'snapshot', bytes: payload };
     case KIND_RESIZE:
       if (payload.byteLength !== 4) return undefined;
-      return { type: 'resize', cols: view.getUint16(0, true), rows: view.getUint16(2, true) };
+      const cols = view.getUint16(0, true);
+      const rows = view.getUint16(2, true);
+      if (cols < 1 || cols > 1000 || rows < 1 || rows > 1000) return undefined;
+      return { type: 'resize', cols, rows };
     case KIND_EXIT:
       if (payload.byteLength !== 4) return undefined;
       return { type: 'exit', code: view.getInt32(0, true) };

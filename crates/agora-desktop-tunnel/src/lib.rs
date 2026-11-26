@@ -188,11 +188,26 @@ pub fn fingerprint(ca_pem: &str) -> Result<String, TunnelError> {
 /// The name the hub's certificate must carry: its host name, or its IP number. A hub started without `--name` has a certificate for
 /// `localhost` only; for an IP address, [`PinnedVerifier`] also accepts that one.
 fn server_name(addr: &str) -> Result<ServerName<'static>, TunnelError> {
-    let (host, port) = addr.rsplit_once(':').ok_or(TunnelError::BadAddress)?;
-    if host.is_empty() || port.parse::<u16>().is_err() {
-        return Err(TunnelError::BadAddress);
-    }
-    let host = host.trim_matches(['[', ']']);
+    let valid_port = |port: &str| {
+        !port.is_empty()
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p != 0)
+    };
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').ok_or(TunnelError::BadAddress)?;
+        if host.parse::<std::net::Ipv6Addr>().is_err()
+            || !tail.strip_prefix(':').is_some_and(valid_port)
+        {
+            return Err(TunnelError::BadAddress);
+        }
+        host
+    } else {
+        let (host, port) = addr.rsplit_once(':').ok_or(TunnelError::BadAddress)?;
+        if host.is_empty() || host.contains([':', '[', ']']) || !valid_port(port) {
+            return Err(TunnelError::BadAddress);
+        }
+        host
+    };
     ServerName::try_from(host.to_string()).map_err(|_| TunnelError::BadAddress)
 }
 
@@ -835,5 +850,44 @@ mod tests {
         assert!(
             server_name("hub.example.com:7443").is_ok() && server_name("127.0.0.1:7443").is_ok()
         );
+    }
+
+    #[test]
+    fn f425_a_tunnel_refuses_a_malformed_hub_authority() {
+        assert!(server_name("[2001:db8::1]:7443").is_ok());
+        println!("CONTROL OK");
+
+        let actual = server_name("[[2001:db8::1]]:7443");
+        let expected = Err(TunnelError::BadAddress);
+        println!("EXPECTED: {expected:?}");
+        println!("ACTUAL: {actual:?}");
+        if actual == expected {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn verifies_f425_tunnel_hub_authority_boundaries() {
+        for valid in ["hub.example:443", "127.0.0.1:1", "[2001:db8::1]:65535"] {
+            assert!(server_name(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "hub.example:0",
+            "hub.example:+443",
+            "[hub.example]:443",
+            "[127.0.0.1]:443",
+            "[2001:db8::1:443",
+            "[[2001:db8::1]]:443",
+        ] {
+            assert_eq!(
+                server_name(invalid),
+                Err(TunnelError::BadAddress),
+                "{invalid}"
+            );
+        }
+        println!("FIX VERIFIED");
     }
 }

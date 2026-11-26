@@ -30,6 +30,20 @@ describe('the agent header', () => {
     expect(html).toContain('Mode: Build');
     expect(html).not.toContain('How long it has been running');
   });
+  it('makes agent-supplied mode and model labels visible', () => {
+    const unsafe: SessionModel = { ...session, modes: [opt('m\u3164ode', 'Bu\u2800ild')], models: [opt('m1', 'Mo\u034fdel')], currentMode: 'm\u3164ode' };
+    const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={unsafe} />);
+    expect([...html].some((c) => ['\u3164', '\u2800', '\u034f'].includes(c))).toBe(false);
+    expect(html).toContain('Bu\\u{2800}ild');
+    expect(html).toContain('Mo\\u{34f}del');
+  });
+  it('verifies option visibility for fallback ids and multilingual names', () => {
+    const unsafe: SessionModel = { ...session, modes: [opt('ça\u202elış', '')], models: [opt('m', 'Grü\u3164ße 😀')], currentMode: 'ça\u202elış', currentModel: 'm' };
+    const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={unsafe} />);
+    expect(html).toContain('ça\\u{202e}lış');
+    expect(html).toContain('Grü\\u{3164}ße 😀');
+    expect([...html].some((c) => ['\u202e', '\u3164'].includes(c))).toBe(false);
+  });
 });
 
 describe('choosing what is already in use', () => {
@@ -93,6 +107,23 @@ describe('the acts-freely tag', () => {
     one(html);
     expect(html).not.toContain('aria-label="Mode: ');
     expect(at(html, 'data-no-ask="started"')).toBeLessThan(at(html, 'aria-label="Model: '));
+  });
+});
+
+describe('agent-owned config labels', () => {
+  it('makes config choice labels visible without changing their ids', () => {
+    const config: ConfigOptionModel = { id: 'effort', name: 'Effort', description: '', category: 'thought_level', type: 'select', current: 'raw\u034fvalue', skipsPermissions: false, choices: [opt('raw\u034fvalue', 'Hi\uffa0gh')] };
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, modes: [], models: [], config: [config] }} />);
+    expect([...html].some((c) => ['\u034f', '\uffa0'].includes(c))).toBe(false);
+    expect(html).toContain('Hi\\u{ffa0}gh');
+  });
+  it('verifies config visibility for fallback values and multilingual choices', () => {
+    const a: ConfigOptionModel = { id: 'effort', name: '', description: '', category: 'thought_level', type: 'select', current: 'a', skipsPermissions: false, choices: [opt('a', 'ça\u202elış')] };
+    const b: ConfigOptionModel = { ...a, id: 'model', category: 'model', current: 'v', choices: [opt('v', 'Grü\u3164ße 😀')] };
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, modes: [], models: [], config: [a, b] }} />);
+    expect(html).toContain('ça\\u{202e}lış');
+    expect(html).toContain('Grü\\u{3164}ße 😀');
+    expect([...html].some((c) => ['\u202e', '\u3164'].includes(c))).toBe(false);
   });
 });
 

@@ -86,6 +86,25 @@ describe('the Settings page', () => {
     expect(host.querySelector('#settings-machines')!.textContent).toContain('2 of 3 online');
     expect(host.querySelector('.set-group__head a[href="#/machines"]')?.textContent).toContain('Manage machines');
   });
+
+  it('makes node-supplied machine names and builds visible', () => {
+    const raw: MachineModel = { ...machines[0]!, name: 'lap\u3164top\u202e', build: 'v1\u034f.2\ue000' };
+    render(page({ machines: [raw] }));
+    const row = host.querySelector('#settings-machines a.set-item')!;
+    expect(row.textContent).toContain('lap\\u{3164}top\\u{202e}');
+    expect(row.textContent).toContain('v1\\u{34f}.2\\u{e000}');
+  });
+
+  it('verifies machine labels across format, control, and supplementary private-use characters', () => {
+    for (const [char, escaped] of [['\u2069', '\\u{2069}'], ['\u0001', '\\u{1}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw: MachineModel = { ...machines[0]!, name: `lap${char}top`, build: `v1${char}.2` };
+      render(page({ machines: [raw] }));
+      const row = host.querySelector('#settings-machines a.set-item')!;
+      expect(row.textContent).toContain(`lap${escaped}top`);
+      expect(row.textContent).toContain(`v1${escaped}.2`);
+      expect(row.getAttribute('href')).toBe('#/machines/laptop');
+    }
+  });
 });
 
 describe('Appearance, This device and Passkey', () => {
@@ -137,6 +156,22 @@ describe('Your other devices', () => {
     expect(rows[0]!.querySelector('.kit-pill')?.textContent).toBe('Trusted on laptop');
     expect(rows[1]!.querySelector('.kit-pill.kit-tone-needs')?.textContent).toBe('Waiting for your approval');
     expect(rows[2]!.querySelector('.kit-pill')?.textContent).toBe('Removed');
+  });
+
+  it('makes trusted machine names visible on other-device rows', () => {
+    const raw = { ...machines[0]!, name: 'lap\u3164top\u202e\ue000' };
+    render(page({ machines: [raw], others: [other({ trustedOn: [raw.id] })] }));
+    expect(host.querySelector('#settings-devices .kit-pill')?.textContent).toBe('Trusted on lap\\u{3164}top\\u{202e}\\u{e000}');
+  });
+
+  it('verifies trusted machine labels while retaining raw trust ids', () => {
+    for (const [char, escaped] of [['\u061c', '\\u{61c}'], ['\u0085', '\\u{85}'], ['\u{f0000}', '\\u{f0000}']] as const) {
+      const raw = { ...machines[0]!, name: `ma${char}chine` };
+      const trustedOn = [raw.id];
+      render(page({ machines: [raw], others: [other({ trustedOn })] }));
+      expect(host.querySelector('#settings-devices .kit-pill')?.textContent).toBe(`Trusted on ma${escaped}chine`);
+      expect(trustedOn).toEqual(['laptop']);
+    }
   });
 
   it('offers Remove only from a trusted browser, and never for a device already removed', () => {

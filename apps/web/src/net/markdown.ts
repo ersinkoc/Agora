@@ -51,7 +51,7 @@ export function inlines(text: string): Inline[] {
 
 const FENCE = /^\s*(`{3,}|~{3,})\s*([\w+.-]*)\s*$/;
 const CLOSE = /^\s*(`{3,}|~{3,})\s*$/;
-const HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
+const HEADING = /^ {0,3}#{1,6}([ \t].*)$/;
 const ITEM = /^(\s*)([-*+]|(\d+)[.)])\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const TABLE = /^\s*\|.*\|\s*$/;
@@ -92,7 +92,12 @@ export function blocks(text: string): Block[] {
     }
     if (!line.trim()) { endPara(); continue; }
     const heading = HEADING.exec(line);
-    if (heading) { endPara(); out.push({ kind: 'heading', inlines: inlines(heading[1] ?? '') }); continue; }
+    if (heading) {
+      endPara();
+      const title = (heading[1] ?? '').replace(/[ \t]+#+[ \t]*$/, '').trim();
+      out.push({ kind: 'heading', inlines: inlines(title) });
+      continue;
+    }
     if (TABLE.test(line)) {
       endPara();
       const rows = [line];

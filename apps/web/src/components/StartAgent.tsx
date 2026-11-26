@@ -7,6 +7,7 @@ import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { ROLE_REFUSAL, refusalCode } from '../net/startRefusal';
 import { isRegistryKind } from '../net/agentKinds';
+import { visible } from '../net/hidden';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, Callout, SegmentedControl } from './kit';
 import { KindCards, NO_COLOUR } from './StartKinds';
@@ -19,7 +20,7 @@ import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, kee
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
 // #903: a refused start in words; a missing program is named, in the words the "not installed" note uses, when the machine said which.
 export function refusalWords(error: string, program: string | undefined): [string, Record<string, string>?] {
-  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program }] : [error];
+  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program: visible(program) }] : [error];
 }
 
 export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
@@ -54,9 +55,10 @@ const OS_ICON: Record<string, IconName> = { linux: 'osLinux', macos: 'osMac', wi
 export function AppearsAs({ kind }: { kind: string }) {
   const MARK = '\u0001';
   const [before = '', after = ''] = t('start-preview', { name: MARK }).split(MARK);
+  const shown = visible(kind);
   return <p data-start-preview="" className="m-0 flex min-w-0 items-center gap-2 text-caption text-muted">
-    <AgentAvatar accent={NO_COLOUR} kind={kind} size="s" />
-    <span className="min-w-0">{before}<strong className="font-semibold text-ink"><bdi>{kind} · …</bdi></strong>{after}</span>
+    <AgentAvatar accent={NO_COLOUR} kind={shown} size="s" />
+    <span className="min-w-0">{before}<strong className="font-semibold text-ink"><bdi>{shown} · …</bdi></strong>{after}</span>
   </p>;
 }
 
@@ -190,11 +192,11 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const seen = new Set<string>();
   const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
-  const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name);
+  const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: visible(m.name), id: visible(m.id) }) : visible(m.name));
   // A folder of another project: the task could not be given to an agent started there.
   const otherProject = !!forTask && !!info && info.projectId !== forTask.projectId;
 
-  const kindName = (k: string) => (Array.isArray(kinds) ? kinds.find((x) => x.kind === k)?.name ?? k : k);
+  const kindName = (k: string) => visible(Array.isArray(kinds) ? kinds.find((x) => x.kind === k)?.name ?? k : k);
   const machineLabel = online.find(m => m.id === node)?.name ?? node;
   const risky = launch.permission !== ASK;
 
@@ -209,7 +211,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
           <Dialog.Close className="ide-iconbtn" aria-label={t('start-cancel')} disabled={busy}><Icon name="close" /></Dialog.Close>
         </div>
         {!online.length ? <div className="px-5 py-4"><p className="m-0">{t('start-no-machines')}</p></div> : <div className="grid min-h-0 gap-5 overflow-y-auto px-5 py-4">
-          {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-m border border-line-accent bg-tint-accent px-3 py-2.5 text-body text-ink">{t('start-for-task', { title: forTask.title, project: forTask.project })}</p>}
+          {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-m border border-line-accent bg-tint-accent px-3 py-2.5 text-body text-ink">{t('start-for-task', { title: visible(forTask.title), project: visible(forTask.project) })}</p>}
           <div className="grid gap-2">
             <h2 className={H}>{t('start-machine')}</h2>
             {/* Many machines shrink their segments (each shows its whole name as its tooltip) rather than scroll. */}
@@ -224,9 +226,9 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
             {info ? <div className="kit-card kit-card--dense flex items-start gap-3">
               <span aria-hidden className="kit-chip kit-tone-accent"><Icon name="folder" /></span>
               <div className="min-w-0 flex-1">
-                <p className="m-0 break-all font-mono text-body text-ink">{info.path}</p>
-                <p className="m-0 mt-0.5 text-caption text-muted">{info.branch ? <><Icon name="branch" className="me-1 inline size-3" />{info.branch} · </> : null}{t('start-in-directory')}</p>
-                {info.portable && <p className="m-0 mt-0.5 break-all text-caption text-muted">{t('start-project-id', { id: info.projectId })}</p>}
+                <p className="m-0 break-all font-mono text-body text-ink">{visible(info.path)}</p>
+                <p className="m-0 mt-0.5 text-caption text-muted">{info.branch ? <><Icon name="branch" className="me-1 inline size-3" />{visible(info.branch)} · </> : null}{t('start-in-directory')}</p>
+                {info.portable && <p className="m-0 mt-0.5 break-all text-caption text-muted">{t('start-project-id', { id: visible(info.projectId) })}</p>}
               </div>
               <Button size="sm" disabled={busy} onClick={() => setInfo(undefined)}>{t('ide-folder-change')}</Button>
             </div> : <>
@@ -238,7 +240,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
               {browse && <div className="grid gap-1 rounded-m border border-line bg-surface-1 p-2" aria-busy={browse.busy}>
                 <div className="flex items-center gap-1.5">
                   <button type="button" className="ide-iconbtn" disabled={!browse.listing?.parent || browse.busy} onClick={() => void look(browse.listing?.parent ?? '')} aria-label={t('start-browse-up')} title={t('start-browse-up')}><Icon name="chevron" className="size-4 rotate-180 rtl:rotate-0" /></button>
-                  <code dir="ltr" className="min-w-0 flex-1 truncate text-caption" title={browse.listing?.path}>{browse.listing?.path ?? '…'}</code>
+                  <code dir="ltr" className="min-w-0 flex-1 truncate text-caption" title={visible(browse.listing?.path ?? '')}>{browse.listing ? visible(browse.listing.path) : '…'}</code>
                   <Button variant="primary" size="sm" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</Button>
                   <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
                 </div>
@@ -246,7 +248,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                 <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
                   {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-caption">{t('start-browse-empty')}</li>}
                   {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="kit-row" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
-                    <Icon name="folder" className="size-4 text-muted" /><span className="kit-row__label">{e.name}</span>{e.isGit && <span className="kit-tag" title={t('start-browse-git')}><Icon name="branch" className="size-3" />git</span>}
+                    <Icon name="folder" className="size-4 text-muted" /><span className="kit-row__label">{visible(e.name)}</span>{e.isGit && <span className="kit-tag" title={t('start-browse-git')}><Icon name="branch" className="size-3" />git</span>}
                   </button></li>)}
                 </ul>
                 {browse.listing?.truncated && <p className="muted m-0 text-caption">{t('start-browse-more')}</p>}
@@ -255,7 +257,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                 <span className="text-caption text-muted">{t('ide-folder-known')}</span>
                 <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
                   {known.map(p => <li key={p.path}><button type="button" className="kit-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
-                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-caption text-muted">{p.path}</span></span>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{visible(p.label)}</span><span className="block truncate font-mono text-caption text-muted">{visible(p.path)}</span></span>
                   </button></li>)}
                 </ul>
               </div>}
@@ -263,7 +265,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
             </>}
           </div>
 
-          {otherProject && forTask && <p role="alert" className="m-0 text-body text-danger">{t('start-for-task-other-project', { project: forTask.project })}</p>}
+          {otherProject && forTask && <p role="alert" className="m-0 text-body text-danger">{t('start-for-task-other-project', { project: visible(forTask.project) })}</p>}
           {info && <>
             <div className="grid gap-2">
               <h2 className={H}>{t('ide-agent-pick')}</h2>

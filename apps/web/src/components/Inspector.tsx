@@ -2,6 +2,7 @@ import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'rea
 import { needsPanel } from '../net/needsPanel';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { visible } from '../net/hidden';
 import type { UsageSummary } from '../net/usage';
 import { hasUsage } from '../net/usageView';
 import { UsagePanel } from './UsagePanel';
@@ -158,18 +159,18 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   return <>
     {tab === 'needs' && <div className="grid gap-2">
         {needs === 0 && <p className="muted">{t('attention-empty')}</p>}
-        {attention.filter((a) => !carded(a.id)).map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
+        {attention.filter((a) => !carded(a.id)).map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{visible(a.name)}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-danger">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
         {approvals.map(a => { const agent = agentOf(a.agentId); return <ApprovalCard key={a.id} approval={a} agent={agent} guard={guard} onOpen={agent ? () => onOpen(agent.id) : undefined} onResolve={onResolve ? (ok, choice, always) => onResolve(a, ok, choice, always) : undefined} />; })}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid grid-cols-1 list-none gap-1 p-0">
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">
-          <button type="button" className="ide-row min-w-0 flex-1 justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))} title={`${a.workspace} · ${a.machine}`}>
-            <span className="min-w-0">{a.shared ? <span className="block font-medium"><FolderPath path={a.workspace} /></span> : <span className="block truncate font-medium">{a.name}</span>}<span className="block truncate text-xs text-muted">{a.shared ? `${a.machine} · ${t('workspace-shared')}` : `${a.machine} · ${a.workspace}`}</span></span>
+          <button type="button" className="ide-row min-w-0 flex-1 justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))} title={`${visible(a.workspace)} · ${visible(a.machine)}`}>
+            <span className="min-w-0">{a.shared ? <span className="block font-medium"><FolderPath path={visible(a.workspace)} /></span> : <span className="block truncate font-medium">{visible(a.name)}</span>}<span className="block truncate text-xs text-muted">{a.shared ? `${visible(a.machine)} · ${t('workspace-shared')}` : `${visible(a.machine)} · ${visible(a.workspace)}`}</span></span>
             <span className="kit-tag flex-none">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
           </button>
-          {onPane && <button type="button" className="ide-iconbtn flex-none" onClick={() => onPane(a.id)} aria-label={t('pane-open-beside-named', { name: a.shared ? a.workspace : a.name })} title={t('pane-open-changes')}><Icon name="splitRight" /></button>}
+          {onPane && <button type="button" className="ide-iconbtn flex-none" onClick={() => onPane(a.id)} aria-label={t('pane-open-beside-named', { name: visible(a.shared ? a.workspace : a.name) })} title={t('pane-open-changes')}><Icon name="splitRight" /></button>}
         </li>)}
       </ul>)}
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}

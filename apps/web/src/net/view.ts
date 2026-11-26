@@ -8,6 +8,8 @@ import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 import { detailLaunchOptions, type StartOption } from './approval';
 import { ALWAYS_LIST_MAX, alwaysOffer, type AlwaysOffer } from './always';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
+import { visible } from './hidden';
+export { HIDDEN_RANGES, visible } from './hidden';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -48,10 +50,10 @@ const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean):
 const CATEGORIES: readonly ConfigCategory[] = ['', 'mode', 'model', 'model_config', 'thought_level', 'custom'];
 type ConfigWire = { id?: string | null; name?: string | null; description?: string | null; category?: number | null; type?: number | null; current?: string | null; choices?: readonly OptionWire[] | null; skipsPermissions?: boolean | null };
 export function configOf(list: readonly ConfigWire[] | null | undefined): ConfigOptionModel[] {
-  return (list ?? []).slice(0, 64).filter((o) => o.id).map((o) => ({
+  return (list ?? []).filter((o) => o.id).slice(0, 64).map((o) => ({
     id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', category: CATEGORIES[o.category ?? 0] ?? '',
     type: o.type === 2 ? 'boolean' as const : 'select' as const, current: o.current ?? '',
-    choices: (o.choices ?? []).slice(0, 64).map((c) => ({ id: c.id ?? '', name: c.name ?? '', description: c.description ?? '', skipsPermissions: !!c.skipsPermissions })).filter((c) => c.id),
+    choices: (o.choices ?? []).filter((c) => c.id).slice(0, 64).map((c) => ({ id: c.id ?? '', name: c.name ?? '', description: c.description ?? '', skipsPermissions: !!c.skipsPermissions })),
     skipsPermissions: !!o.skipsPermissions,
   }));
 }
@@ -549,16 +551,19 @@ export function tiles(v: View): AgentTileModel[] {
     const workspaceId = v.agentWorkspaces.get(id);
     const selected = workspaceId ? v.workspaces.get(workspaceId) : undefined;
     const sharing = !!workspaceId && (sharingCounts.get(workspaceId) ?? 0) > 1;
+    const workspace = selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '';
+    const project = selected ? lastSegment(selected.gitRoot || selected.path) : wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') : '';
+    const branch = selected?.branch || wt?.branch || '';
     // A closed agent is finished, whatever state it had when its machine lost it (a blocked one that ended is not waiting for anyone).
     const state = !a.running ? 'finished' : waiting.has(id) ? 'needs-you' : uiState(a.state);
     return {
       id,
-      name: `${a.kind} · ${ACCENT_NAMES[i]}`,
+      name: `${visible(a.kind)} · ${ACCENT_NAMES[i]}`,
       ...(a.kind ? { kind: a.kind } : {}),
       accent: ACCENTS[i] as string,
-      machine: node?.hostname || a.nodeId,
+      machine: visible(node?.hostname || a.nodeId),
       machineId: a.nodeId,
-      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '',
+      workspace: visible(workspace),
       shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,
       preview: '',
@@ -566,9 +571,9 @@ export function tiles(v: View): AgentTileModel[] {
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
       workspaceRef: selected && workspaceId ? { node: a.nodeId, id: workspaceId.slice(workspaceId.indexOf('/') + 1), directory: true } : wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
-      project: selected ? lastSegment(selected.gitRoot || selected.path) : wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
+      project: project ? visible(project) : undefined,
       terminal: v.withTerminal.has(id),
-      branch: selected?.branch || wt?.branch || undefined,
+      branch: branch ? visible(branch) : undefined,
       filesChanged: selected?.filesChanged ?? wt?.filesChanged ?? 0,
       closed: !a.running,
       exitCode: a.exitCode,
@@ -611,23 +616,6 @@ export interface ApprovalModel {
 export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[]; options: StartOption[] }
 // ADR-0066: a launch setting the request asks for (`label` is the machine's Fluent id for it, `value` the agent's text: shown, never interpreted).
 export interface StartSetting { id: string; label: string; value: string }
-
-// Characters that are invisible or change how text around them looks: the one list in crates/agora-core/src/hidden-characters.txt
-// (Default_Ignorable_Code_Point and every format character, the line and paragraph separators, the private use areas). The node refuses them in a start request; anything that reaches a card
-// is shown as a visible escape, with control characters other than line breaks and tabs, so what is shown is what is signed.
-export const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
-  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x0600, 0x0605], [0x061c, 0x061c], [0x06dd, 0x06dd], [0x070f, 0x070f], [0x0890, 0x0891],
-  [0x08e2, 0x08e2], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f],
-  [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd],
-  [0x13430, 0x1343f], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff], [0xe000, 0xf8ff], [0xf0000, 0xffffd],
-  [0x100000, 0x10fffd],
-];
-const hex = (n: number) => `\\u{${n.toString(16)}}`;
-const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([lo, hi]) => (lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`)).join('')}]|[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]`, 'gu');
-
-export function visible(text: string): string {
-  return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
-}
 
 /** ADR-0066: the `settings` of a start request's detail, read the way the node reads them (a list of `{id, label, value}`; anything that is
  * not a string is an empty string, so a request is signed over exactly what it shows). */
@@ -723,7 +711,7 @@ export interface MachineModel { id: string; name: string; os: string; online: bo
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build, terminalsOpen: n.terminalsOpen, binary: n.binary }))
+    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary) }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
@@ -734,7 +722,7 @@ export function projectChoices(v: View): ProjectChoice[] {
   const choices = new Map<string, ProjectChoice>();
   for (const c of [...v.checkouts.values(), ...v.workspaces.values()]) {
     if (v.nodes.get(c.nodeId)?.online) choices.set(`${c.nodeId}/${c.path}`, { node: c.nodeId, projectId: c.projectId, path: c.path,
-      label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` });
+      label: visible(`${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}`) });
   }
   return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }

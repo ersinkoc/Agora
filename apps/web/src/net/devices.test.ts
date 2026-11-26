@@ -101,4 +101,14 @@ describe('device labels', () => {
     expect(deviceLabel('', 'web-0123')).toBe('web-0123');
     expect(deviceLabel(undefined, 'web-0123')).toBe('web-0123');
   });
+  it('makes a remote device name visible', () => {
+    const label = deviceLabel('Grü\u3164ße\u202e', 'web-0123456789ab3f2a');
+    expect(label).toBe('Grü\\u{3164}ße\\u{202e} · 3f2a');
+    expect([...label].some((c) => ['\u3164', '\u202e'].includes(c))).toBe(false);
+  });
+  it('verifies remote device labels across isolate and control characters', () => {
+    const label = deviceLabel('İş\u2066\u0001', 'web-0123456789ab77c1');
+    expect(label).toBe('İş\\u{2066}\\u{1} · 77c1');
+    expect([...label].filter((c) => ['\u2066', '\u0001'].includes(c))).toEqual([]);
+  });
 });

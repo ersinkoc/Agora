@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { Icon } from '../components/Icon';
+import { visible } from '../net/hidden';
 import { type Action, type Preset, type Workspace, PRESETS } from './engine';
 import { PICTOGRAM_BOX, pictogram, presetOf } from './preset';
 import { Menu, type MenuItem } from './Menu';
@@ -109,11 +110,11 @@ function ListDialog({ onApply, onClose }: { onApply: (l: Named) => void; onClose
                   <input autoFocus aria-label={t('layout-save-name')} className="min-w-0 flex-1 py-1" value={renaming.to} maxLength={MAX_NAME} onChange={(e) => setRenaming({ from: l.name, to: e.target.value })} />
                   <button type="submit" className="button py-1" disabled={!renaming.to.trim()}>{t('layout-save')}</button>
                 </form>
-              ) : <span className="min-w-0 flex-1 truncate font-medium">{l.name}</span>}
+              ) : <span className="min-w-0 flex-1 truncate font-medium">{visible(l.name)}</span>}
               {renaming?.from !== l.name && <>
                 <button type="button" className="button button--primary py-1" onClick={() => onApply(l)}>{t('layout-apply')}</button>
-                <button type="button" className="button py-1" onClick={() => setRenaming({ from: l.name, to: l.name })}>{t('layout-rename')}</button>
-                <button type="button" className="button py-1" onClick={() => setList(deleteNamed(l.name))} aria-label={t('layout-delete-named', { name: l.name })}>{t('layout-delete')}</button>
+                <button type="button" className="button py-1" onClick={() => setRenaming({ from: l.name, to: visible(l.name) })}>{t('layout-rename')}</button>
+                <button type="button" className="button py-1" onClick={() => setList(deleteNamed(l.name))} aria-label={t('layout-delete-named', { name: visible(l.name) })}>{t('layout-delete')}</button>
               </>}
             </li>
           ))}

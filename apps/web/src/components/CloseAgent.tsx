@@ -9,6 +9,7 @@ import { canPlaySounds } from './chime';
 import { useSoundPrefs } from './SoundSettings';
 import { Icon } from './Icon';
 import { Button } from './kit';
+import { visible } from '../net/hidden';
 
 // What the window can do to end an agent: `AgentStop` for the agent it is given (undefined when it ended, else the error code). A context, so
 // the console, the full-size view and the phone read it without passing it down. Absent without a hub (the gallery and the demo): no control.
@@ -28,7 +29,7 @@ export function CloseAgentMenu({ agent, where = 'pane' }: { agent: AgentTileMode
     ...(can ? [{ label: t('close-agent'), divider: sounds, run: () => closeAsk.ask(agent.id, where) }] : []),
   ];
   if (items.length === 0) return null;
-  return <Menu label={t('agent-actions', { name: agent.name })} items={items}><Icon name="more" /></Menu>;
+  return <Menu label={t('agent-actions', { name: visible(agent.name) })} items={items}><Icon name="more" /></Menu>;
 }
 
 // One dialog for one ask, even where the agent is drawn twice at once (two panes on the same agent): of the confirms drawn for the ask,
@@ -83,7 +84,7 @@ export function CloseConfirm({ agent, where }: { agent: AgentTileModel; where: C
           onKeyDown={(e) => { if (e.key === 'Escape' || (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1)) e.stopPropagation(); }}
           className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(28rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 overflow-auto rounded-l border border-line bg-surface-raised p-5 text-ink shadow-pop">
           <span aria-hidden className="kit-chip kit-tone-danger row-span-2"><Icon name="close" /></span>
-          <Dialog.Title className="m-0 min-w-0 break-words text-title font-semibold normal-case tracking-normal text-ink">{t('close-title', { name: agent.name })}</Dialog.Title>
+          <Dialog.Title className="m-0 min-w-0 break-words text-title font-semibold normal-case tracking-normal text-ink">{t('close-title', { name: visible(agent.name) })}</Dialog.Title>
           <div id={body} className="col-start-2 m-0 min-w-0 text-muted">
             <p className="m-0">{t('close-body')}</p>
             {losesWork(agent) && <p className="m-0 mt-1 text-danger" data-close-warning>{t('close-working')}</p>}

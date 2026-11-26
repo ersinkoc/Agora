@@ -42,6 +42,19 @@ const row = (path: string) => host.querySelector<HTMLElement>(`[role=row][data-p
 const click = (el: Element) => act(() => { (el as HTMLElement).click(); });
 
 describe('the file manager list', () => {
+  it('makes listed file names visible', async () => {
+    await mount(files({ list: async () => [{ name: 'Grü\u3164ße\u2800.ts', isDir: false, size: 1 }] }));
+    const shown = host.textContent ?? '';
+    expect([...shown].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(shown).toContain('Grü\\u{3164}ße\\u{2800}.ts');
+  });
+  it('verifies multilingual display while preserving the raw row path', async () => {
+    const raw = '漢\u202e字\u3164.rs';
+    await mount(files({ list: async () => [{ name: raw, isDir: false, size: 1 }] }));
+    expect(host.textContent).toContain('漢\\u{202e}字\\u{3164}.rs');
+    expect(host.querySelector('[role=row][data-path]')?.getAttribute('data-path')).toBe(raw);
+  });
+
   it('lists a folder with folders first, kind and size, and a count', async () => {
     await mount();
     expect(names()).toEqual(['docs', 'src', '.env', 'big.bin', 'Cargo.toml', 'README.md']);
@@ -197,6 +210,27 @@ describe('leaving', () => {
 });
 
 describe('the preview', () => {
+  it('makes the code-region file label visible while reading the raw path', async () => {
+    const raw = 'Grü\u3164ße\u2800.ts';
+    const read = async (p: string) => { reads.push(p); return new TextEncoder().encode('x'); };
+    await mount(files({ list: async () => [{ name: raw, isDir: false, size: 1 }], read }));
+    click(row(raw)); await flush();
+    const region = host.querySelector('[role=region]') as HTMLElement;
+    expect([...region.getAttribute('aria-label') ?? ''].some((c) => ['\u3164', '\u2800'].includes(c))).toBe(false);
+    expect(region.getAttribute('aria-label')).toBe('Grü\\u{3164}ße\\u{2800}.ts');
+    expect(reads).toContain(raw);
+  });
+  it('verifies code-region labels across bidi and control characters without changing reads', async () => {
+    const raw = 'İş\u202e\u0001.rs';
+    const read = async (p: string) => { reads.push(p); return new TextEncoder().encode('x'); };
+    await mount(files({ list: async () => [{ name: raw, isDir: false, size: 1 }], read }));
+    const target = [...host.querySelectorAll<HTMLElement>('[role=row][data-path]')].find((el) => el.dataset.path === raw);
+    expect(target).toBeDefined();
+    click(target as HTMLElement); await flush();
+    expect(host.querySelector('[role=region]')?.getAttribute('aria-label')).toBe('İş\\u{202e}\\u{1}.rs');
+    expect(reads).toEqual([raw]);
+  });
+
   it('reads a text file once, shows its lines and size, and closes', async () => {
     await mount();
     click(row('README.md'));

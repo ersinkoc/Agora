@@ -142,15 +142,15 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   // cards are drawn from these same models), and of each card's status, so an answer settling restarts the dwell.
   const model = (it: Exclude<AttentionItem, { kind: 'pair' }>, inlineOk: boolean): RowModel => {
     const agent = it.agent;
-    const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
+    const name = visible(it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name);
     const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
     const review = !inline && it.kind === 'approval' && reviewsHere(it.approval);
     return {
       name,
       title: it.kind === 'approval' ? askTitle(it.approval, name) : name,
       icon: iconOf(it),
-      machine: agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined),
-      project: agent ? agent.project || agent.workspace : undefined,
+      machine: visible(agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) || '' : '')) || undefined,
+      project: agent ? visible(agent.project || agent.workspace) : undefined,
       ask: askOf(it),
       inline,
       when: knownWait && it.sinceMs ? t('fleet-asked', { when: ago(it.sinceMs, now) }) : undefined,
@@ -233,7 +233,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">
           {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : card(row.key, `fleet-ask fleet-ask--many${each.has(row.key) ? ' fleet-ask--open' : ''}`, 'stack',
-            <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</span>,
+            <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: visible(row.agentKind), machine: visible(row.machine) }) : t('fleet-same-ask-any', { count: row.items.length, machine: visible(row.machine) })}</span>,
             <>
               <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>
               {each.has(row.key) && <ul className="fleet-queue fleet-ask__each">{row.items.map((it) => rowOf(it, false))}</ul>}
@@ -389,10 +389,10 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
               {by === 'project' && sharedAcross(spread.get(g.key)) && <ProjectChip spread={spread.get(g.key) as ProjectSpread} />}
               {by === 'machine' && !g.online && g.machine && <span className="muted">{t('fleet-offline-since', { when: ago(g.machine.lastSeenMs, now) })}</span>}
               <span className="flex-1" />
-              {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: g.name })} title={t('fleet-start-on', { machine: g.name })}><Icon name="plus" /></button>}
+              {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: visible(g.name) })} title={t('fleet-start-on', { machine: visible(g.name) })}><Icon name="plus" /></button>}
             </header>
             {by === 'machine' && !g.online && <p className="muted m-0">{t('fleet-offline-note')}</p>}
-            {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.join(', ') })}</p>}
+            {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.map(visible).join(', ') })}</p>}
             {by === 'project' && spread.get(g.key) && <ProjectHint spread={spread.get(g.key) as ProjectSpread} />}
             {g.agents.length === 0 ? (g.online ? <p className="muted m-0">{t('fleet-no-agents-here')}</p> : null) : (
               <div className="fleet-grid">

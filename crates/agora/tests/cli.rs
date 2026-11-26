@@ -1290,3 +1290,330 @@ fn agent_explain_names_a_skipped_manifest_and_survives_a_closed_pipe() {
     assert!(status.success(), "{status:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn explain_audit_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "agora-cli-explain-audit-{}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn explain_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../manifests/agents/fixtures/codex/permission.screen")
+}
+
+fn explain_run(dir: &Path, kind: &str, screen: &Path, extra: &[&str]) -> std::process::Output {
+    Command::new(AGORA)
+        .env("AGORA_LANG", "en")
+        .args(["agent", "explain", kind])
+        .args(extra)
+        .arg("--file")
+        .arg(screen)
+        .arg("--manifests")
+        .arg(dir)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn proof_f440_explain_size_is_unsigned_decimal_syntax() {
+    let dir = explain_audit_dir("f440");
+    let screen = explain_fixture();
+    let control = explain_run(&dir, "codex", &screen, &["--size", "24x20"]);
+    assert!(control.status.success());
+    println!("CONTROL OK");
+    let actual = explain_run(&dir, "codex", &screen, &["--size", "+24x20"]);
+    println!("EXPECTED: exit 2 for a signed size component");
+    println!("ACTUAL: {:?}", actual.status.code());
+    if actual.status.code() == Some(2) {
+        println!("PROBLEM NOT REPRODUCED");
+    } else {
+        println!("PROBLEM CONFIRMED");
+    }
+    assert_eq!(actual.status.code(), Some(2));
+}
+
+#[test]
+fn proof_f441_malformed_size_annotation_does_not_fall_back_to_default() {
+    let dir = explain_audit_dir("f441");
+    let control = explain_run(&dir, "codex", &explain_fixture(), &[]);
+    assert!(control.status.success());
+    println!("CONTROL OK");
+    let screen = dir.join("capture@0x0.screen");
+    std::fs::copy(explain_fixture(), &screen).unwrap();
+    let actual = explain_run(&dir, "codex", &screen, &[]);
+    println!("EXPECTED: exit 2 for a malformed filename size annotation");
+    println!("ACTUAL: {:?}", actual.status.code());
+    if actual.status.code() == Some(2) {
+        println!("PROBLEM NOT REPRODUCED");
+    } else {
+        println!("PROBLEM CONFIRMED");
+    }
+    assert_eq!(actual.status.code(), Some(2));
+}
+
+#[test]
+fn proof_f442_explain_rejects_extra_positional_arguments() {
+    let dir = explain_audit_dir("f442");
+    let control = explain_run(&dir, "codex", &explain_fixture(), &[]);
+    assert!(control.status.success());
+    println!("CONTROL OK");
+    let actual = explain_run(&dir, "codex", &explain_fixture(), &["extra"]);
+    println!("EXPECTED: exit 2 for an extra positional argument");
+    println!("ACTUAL: {:?}", actual.status.code());
+    if actual.status.code() == Some(2) {
+        println!("PROBLEM NOT REPRODUCED");
+    } else {
+        println!("PROBLEM CONFIRMED");
+    }
+    assert_eq!(actual.status.code(), Some(2));
+}
+
+#[test]
+fn proof_f443_explain_escapes_hidden_screen_text() {
+    let dir = explain_audit_dir("f443");
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"title\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let control_screen = dir.join("control.screen");
+    std::fs::write(&control_screen, b"\x1b]0;safe title\x07").unwrap();
+    let control = explain_run(&dir, "audit-explain", &control_screen, &[]);
+    assert!(control.status.success());
+    assert!(String::from_utf8_lossy(&control.stdout).contains("safe title"));
+    println!("CONTROL OK");
+
+    let screen = dir.join("hidden.screen");
+    std::fs::write(&screen, "\x1b]0;safe\u{202e}evil\u{200b}\x07").unwrap();
+    let actual = explain_run(&dir, "audit-explain", &screen, &[]);
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    let exposed = stdout.contains(['\u{202e}', '\u{200b}']);
+    println!("EXPECTED: no raw bidi or zero-width characters in stdout");
+    println!("ACTUAL: raw hidden characters exposed = {exposed}");
+    if exposed {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!exposed, "{stdout:?}");
+}
+
+#[test]
+fn proof_f444_explain_escapes_manifest_diagnostic_paths() {
+    let dir = explain_audit_dir("f444");
+    std::fs::write(dir.join("regular-bad.toml"), "not toml").unwrap();
+    let control = explain_run(&dir, "codex", &explain_fixture(), &[]);
+    assert!(String::from_utf8_lossy(&control.stderr).contains("regular-bad.toml"));
+    println!("CONTROL OK");
+
+    let bad_name = "bad\x1b[2J.toml";
+    std::fs::write(dir.join(bad_name), "not toml").unwrap();
+    let actual = explain_run(&dir, "codex", &explain_fixture(), &[]);
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    let exposed = stderr.contains('\x1b');
+    println!("EXPECTED: no raw terminal escape in stderr diagnostics");
+    println!("ACTUAL: raw escape exposed = {exposed}");
+    if exposed {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!exposed, "{stderr:?}");
+}
+
+fn write_explain_audit_manifest(dir: &Path) {
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"title\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn verify_f440_size_components_across_sign_case_and_numeric_boundaries() {
+    let dir = explain_audit_dir("verify-f440");
+    let screen = explain_fixture();
+    for bad in ["+2x2", "2x+2", "-24X20"] {
+        let out = explain_run(&dir, "codex", &screen, &["--size", bad]);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+    }
+    for good in ["2x2", "1000X1000", "002x020"] {
+        let out = explain_run(&dir, "codex", &screen, &["--size", good]);
+        assert!(out.status.success(), "{good}: {:?}", out.status);
+    }
+    println!("FIX VERIFIED: F440 size components are unsigned decimal and bounded");
+}
+
+#[test]
+fn verify_f441_filename_annotations_across_range_syntax_and_absence() {
+    let dir = explain_audit_dir("verify-f441");
+    for name in [
+        "capture@1x20.screen",
+        "capture@20x1001.screen",
+        "capture@20-by-40.screen",
+    ] {
+        let screen = dir.join(name);
+        std::fs::copy(explain_fixture(), &screen).unwrap();
+        let out = explain_run(&dir, "codex", &screen, &[]);
+        assert_eq!(out.status.code(), Some(2), "{name}");
+    }
+    for name in ["capture.screen", "capture@24x20.screen"] {
+        let screen = dir.join(name);
+        std::fs::copy(explain_fixture(), &screen).unwrap();
+        let out = explain_run(&dir, "codex", &screen, &[]);
+        assert!(out.status.success(), "{name}: {:?}", out.status);
+    }
+    println!("FIX VERIFIED: F441 malformed filename size annotations never fall back");
+}
+
+#[test]
+fn verify_f442_positional_arity_across_one_two_and_flag_like_extras() {
+    let dir = explain_audit_dir("verify-f442");
+    let screen = explain_fixture();
+    for extras in [
+        vec!["extra"],
+        vec!["extra", "again"],
+        vec!["-not-an-option"],
+    ] {
+        let out = explain_run(&dir, "codex", &screen, &extras);
+        assert_eq!(out.status.code(), Some(2), "{extras:?}");
+    }
+    assert!(explain_run(&dir, "codex", &screen, &[]).status.success());
+    println!("FIX VERIFIED: F442 explain accepts exactly one positional KIND");
+}
+
+#[test]
+fn verify_f443_hidden_screen_text_across_bidi_zero_width_and_fillers() {
+    let dir = explain_audit_dir("verify-f443");
+    write_explain_audit_manifest(&dir);
+    let screen = dir.join("hidden.screen");
+    let hidden = ['\u{202e}', '\u{2066}', '\u{200b}', '\u{2800}', '\u{fe0f}'];
+    let title = format!(
+        "\x1b]0;safe{}a{}b{}c{}d{}e\x07",
+        hidden[0], hidden[1], hidden[2], hidden[3], hidden[4]
+    );
+    std::fs::write(&screen, title).unwrap();
+    let out = explain_run(&dir, "audit-explain", &screen, &[]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for c in hidden {
+        assert!(!stdout.contains(c), "U+{:04X}: {stdout:?}", u32::from(c));
+    }
+    assert!(stdout.matches('?').count() >= hidden.len(), "{stdout:?}");
+    println!("FIX VERIFIED: F443 hidden captured-screen characters are made visible");
+}
+
+#[test]
+fn verify_f444_diagnostics_escape_path_content_and_unknown_kind_text() {
+    let dir = explain_audit_dir("verify-f444");
+    std::fs::write(dir.join("bad\x1b[2J.toml"), "not toml").unwrap();
+    std::fs::write(dir.join("content.toml"), "bad\x1b[2J toml").unwrap();
+    let path_and_content = explain_run(&dir, "codex", &explain_fixture(), &[]);
+    let stderr = String::from_utf8_lossy(&path_and_content.stderr);
+    assert!(!stderr.contains('\x1b'), "{stderr:?}");
+    assert!(stderr.contains("\\u{1b}"), "{stderr:?}");
+
+    let kind = "unknown\u{202e}kind";
+    let unknown = explain_run(&dir, kind, &explain_fixture(), &[]);
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(!stderr.contains('\u{202e}'), "{stderr:?}");
+    assert!(stderr.contains("\\u{202e}"), "{stderr:?}");
+    println!("FIX VERIFIED: F444 terminal-active diagnostic parameters are escaped");
+}
+
+#[test]
+fn proof_f445_explain_unknown_kind_cannot_inject_diagnostic_lines() {
+    let dir = explain_audit_dir("f445");
+    let control = explain_run(&dir, "ordinary-unknown", &explain_fixture(), &[]);
+    assert_eq!(control.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&control.stderr).contains("ordinary-unknown"));
+    println!("CONTROL OK");
+
+    let actual = explain_run(&dir, "unknown\nFORGED DIAGNOSTIC", &explain_fixture(), &[]);
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    let injected = stderr
+        .lines()
+        .any(|line| line.starts_with("FORGED DIAGNOSTIC"));
+    println!("EXPECTED: an unknown kind cannot start a forged diagnostic line");
+    println!("ACTUAL: forged diagnostic line exposed = {injected}");
+    if injected {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!injected, "{stderr:?}");
+}
+
+#[test]
+fn proof_f446_explain_rule_ids_cannot_emit_terminal_controls() {
+    let dir = explain_audit_dir("f446");
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"ordinary-id\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let control = explain_run(&dir, "audit-explain", &explain_fixture(), &[]);
+    assert!(control.status.success());
+    assert!(String::from_utf8_lossy(&control.stdout).contains("ordinary-id"));
+    println!("CONTROL OK");
+
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"clear\\u001B[2J\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let actual = explain_run(&dir, "audit-explain", &explain_fixture(), &[]);
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    let exposed = stdout.contains('\x1b');
+    println!("EXPECTED: rule ids cannot emit raw terminal controls");
+    println!("ACTUAL: raw terminal escape exposed = {exposed}");
+    if exposed {
+        println!("PROBLEM CONFIRMED");
+    } else {
+        println!("PROBLEM NOT REPRODUCED");
+    }
+    assert!(!exposed, "{stdout:?}");
+}
+
+#[test]
+fn verify_f445_inline_diagnostics_escape_line_column_and_return_controls() {
+    let dir = explain_audit_dir("verify-f445");
+    for (kind, escaped) in [
+        ("bad\nforged", "bad\\u{a}forged"),
+        ("bad\tshift", "bad\\u{9}shift"),
+        ("bad\rreplace", "bad\\u{d}replace"),
+    ] {
+        let out = explain_run(&dir, kind, &explain_fixture(), &[]);
+        assert_eq!(out.status.code(), Some(1), "{kind:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(escaped), "{stderr:?}");
+        assert!(!stderr.contains(kind), "{stderr:?}");
+    }
+    println!("FIX VERIFIED: F445 inline diagnostics cannot inject lines or columns");
+}
+
+#[test]
+fn verify_f446_rule_ids_escape_controls_hidden_text_and_line_breaks() {
+    let dir = explain_audit_dir("verify-f446");
+    std::fs::write(
+        dir.join("audit-explain.toml"),
+        "kind = \"audit-explain\"\ndisplay_name = \"Audit\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"audit\"]\n[[rules]]\nid = \"esc\\u001B-tab\\t-line\\n-bidi\\u202E\"\nstate = \"idle\"\npriority = 1\nregion = \"title\"\ncontains = \"safe\"\n",
+    )
+    .unwrap();
+    let screen = dir.join("safe.screen");
+    std::fs::write(&screen, b"\x1b]0;safe\x07").unwrap();
+    let out = explain_run(&dir, "audit-explain", &screen, &[]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(['\x1b', '\t', '\u{202e}']), "{stdout:?}");
+    assert!(!stdout.contains("\n-bidi"), "{stdout:?}");
+    for escaped in ["\\u{1b}", "\\u{9}", "\\u{a}", "\\u{202e}"] {
+        assert!(stdout.contains(escaped), "{escaped}: {stdout:?}");
+    }
+    println!("FIX VERIFIED: F446 rule ids are inert in checks and decisions");
+}

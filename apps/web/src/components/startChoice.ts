@@ -1,4 +1,5 @@
 import type { ProjectChoice } from '../net/view';
+import { visible } from '../net/hidden';
 
 // Which machine the start window shows selected. The one already chosen while it is online; otherwise the one the window was
 // opened for, a machine with a known project, or the first online machine. A machine that comes online after the window opened
@@ -13,7 +14,7 @@ export function machineFor(current: string, online: readonly string[], initialNo
  * program by name, or the general sentence for a kind from an older machine that does not name it. Nothing for an installed kind. */
 export function missingNote(k: { installed: boolean; program?: string } | undefined): [string, Record<string, string>?] | undefined {
   if (!k || k.installed) return undefined;
-  return k.program ? ['start-not-installed-program', { program: k.program }] : ['start-not-installed-why'];
+  return k.program ? ['start-not-installed-program', { program: visible(k.program) }] : ['start-not-installed-why'];
 }
 
 /** ADR-0069: where a machine's program runs from when its folder is not on that machine's PATH, as shown: the last two parts only

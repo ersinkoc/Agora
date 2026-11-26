@@ -1,6 +1,7 @@
 // The built-in panels (ADR-0068 rung 3): the registry's facts (panels.ts) with each panel's drawing. A drawing sees only the context
 // the window gives its pane and acts only through that context's actions; the window draws the pane bar around it.
 import { Fragment, Suspense, lazy, type ReactNode } from 'react';
+import { visible } from '../net/hidden';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError } from '../model';
 import { asksUnderHeader } from '../net/chatView';
@@ -73,10 +74,10 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
       {/* Redesign PR 7: in a narrow pane the machine and the branch leave this row (they stay in its tooltip) so the folder is read whole,
           not three single letters, and the tools wrap inside the pane instead of running into the next one (app.css `.agent-body`). */}
       <div className="flex min-h-9 flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface-1 px-3 py-1">
-        <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}`}>
-          <span className="flex min-w-0 items-center gap-1.5" data-crumb="machine"><Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{a.machine}</span>
-          <Icon name="chevron" className="size-3 flex-none rtl:rotate-180" /></span><Icon name="folder" className="size-3.5 flex-none" /><span className="min-w-[4ch] truncate">{a.project || a.workspace}</span>
-          {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{a.branch}</span></span>}
+        <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}`}>
+          <span className="flex min-w-0 items-center gap-1.5" data-crumb="machine"><Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{visible(a.machine)}</span>
+          <Icon name="chevron" className="size-3 flex-none rtl:rotate-180" /></span><Icon name="folder" className="size-3.5 flex-none" /><span className="min-w-[4ch] truncate">{visible(a.project || a.workspace)}</span>
+          {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{visible(a.branch)}</span></span>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
           <NoAskBadge agent={a} />
           <AsksLessChip agent={a} />
@@ -113,7 +114,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
         <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox key={a.id} agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => review(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
           terminal && <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
-            <TerminalView source={terminal()} label={`${t('focus-terminal')} · ${a.name}`} />
+            <TerminalView source={terminal()} label={`${t('focus-terminal')} · ${visible(a.name)}`} />
           </Suspense>
         )}
       </div></>}

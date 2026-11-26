@@ -1,5 +1,6 @@
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { visible } from '../net/hidden';
 import { StateBadge } from './StateBadge';
 
 export function AttentionStrip({ agents, onOpen }: { agents: readonly AgentTileModel[]; onOpen?: (id: string) => void }) {
@@ -11,7 +12,7 @@ export function AttentionStrip({ agents, onOpen }: { agents: readonly AgentTileM
       ) : (
         agents.map((a) => (
           <button key={a.id} type="button" className="button" onClick={() => onOpen?.(a.id)}>
-            {a.name} <StateBadge state={a.state} />
+            {visible(a.name)} <StateBadge state={a.state} />
           </button>
         ))
       )}

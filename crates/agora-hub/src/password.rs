@@ -457,12 +457,27 @@ impl Tally {
             self.until_ms = now_ms.saturating_add(ms);
         }
     }
+
+    /// Recomputes the deadline after one provisional failure was given back.
+    fn recount_lock(&mut self, free: u32, cap_ms: u64) {
+        if self.failures < free {
+            self.until_ms = 0;
+            return;
+        }
+        let doublings = (self.failures - free).min(16);
+        let ms = FIRST_LOCKOUT_MS
+            .saturating_mul(1u64 << doublings)
+            .min(cap_ms);
+        self.until_ms = self.last_ms.saturating_add(ms);
+    }
 }
 
 #[derive(Debug, Default)]
 struct GuardState {
     by_address: HashMap<IpAddr, Tally>,
     global: Tally,
+    /// Lock decisions never move backward with the wall clock, so a deadline already observed to end cannot return.
+    observed_ms: u64,
 }
 
 /// Rate limits for everything that proves who is signing in (codes, the password, passkeys): per address and for the whole hub.
@@ -509,6 +524,8 @@ impl Guard {
         now_ms: u64,
     ) -> Result<Undo, u64> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now_ms = now_ms.max(s.observed_ms);
+        s.observed_ms = now_ms;
         let local = client.is_local();
         let key = client.bucket();
         let mine = s.by_address.get(&key).and_then(|t| t.locked(now_ms));
@@ -593,6 +610,7 @@ impl Guard {
         s.by_address.remove(&client.bucket());
         if !client.is_local() && scope == Scope::All {
             s.global.failures = s.global.failures.saturating_sub(1);
+            s.global.recount_lock(GLOBAL_FREE_FAILURES, MAX_LOCKOUT_MS);
         }
     }
 }
@@ -752,6 +770,69 @@ mod tests {
     }
 
     #[test]
+    fn f383_an_ended_password_lockout_does_not_return_after_clock_rollback() {
+        let guard = Guard::new();
+        let client = remote(1);
+        for _ in 0..ADDRESS_FREE_FAILURES {
+            assert_eq!(guard.attempt(&client, Scope::AddressOnly, 0), Ok(()));
+        }
+        assert_eq!(
+            guard.attempt(&client, Scope::AddressOnly, 1),
+            Err(FIRST_LOCKOUT_MS - 1)
+        );
+        assert_eq!(guard.attempt(&remote(2), Scope::AddressOnly, 1), Ok(()));
+        println!("CONTROL OK");
+
+        let after = FIRST_LOCKOUT_MS + 1;
+        let valid = guard
+            .attempt_undoable(&client, Scope::AddressOnly, after)
+            .unwrap();
+        guard.undo(valid);
+        let actual = guard.attempt(&client, Scope::AddressOnly, 1);
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn verifies_f383_password_lockout_deadline_boundaries() {
+        let locked = |last| {
+            let guard = Guard::new();
+            let client = remote(last);
+            for _ in 0..ADDRESS_FREE_FAILURES {
+                guard.attempt(&client, Scope::AddressOnly, 10).unwrap();
+            }
+            (guard, client)
+        };
+        let observe_valid = |guard: &Guard, client: &Client, now| {
+            let undo = guard
+                .attempt_undoable(client, Scope::AddressOnly, now)
+                .unwrap();
+            guard.undo(undo);
+        };
+
+        let (active, client) = locked(1);
+        assert_eq!(
+            active.attempt(&client, Scope::AddressOnly, 10 + FIRST_LOCKOUT_MS - 1),
+            Err(1)
+        );
+
+        let (exact, client) = locked(2);
+        observe_valid(&exact, &client, 10 + FIRST_LOCKOUT_MS);
+        assert!(exact.attempt(&client, Scope::AddressOnly, 10).is_ok());
+
+        let (later, client) = locked(3);
+        observe_valid(&later, &client, 10 + FIRST_LOCKOUT_MS + 500);
+        assert!(later.attempt(&client, Scope::AddressOnly, 11).is_ok());
+        println!("FIX VERIFIED");
+    }
+
+    #[test]
     fn an_ipv6_host_is_one_address_however_many_it_uses() {
         let g = Guard::new();
         for i in 0..ADDRESS_FREE_FAILURES {
@@ -789,6 +870,59 @@ mod tests {
             Ok(()),
             "the owner on the machine"
         );
+    }
+
+    #[test]
+    fn f423_a_success_at_the_global_threshold_does_not_leave_a_lockout() {
+        let g = Guard::new();
+        for last in 1..GLOBAL_FREE_FAILURES {
+            assert_eq!(g.attempt(&remote(last as u8), Scope::All, 0), Ok(()));
+        }
+        assert_eq!(g.attempt(&remote(200), Scope::AddressOnly, 0), Ok(()));
+        println!("CONTROL OK");
+
+        let successful = remote(201);
+        assert_eq!(g.attempt(&successful, Scope::All, 0), Ok(()));
+        g.succeeded(&successful, Scope::All);
+        let actual = g.attempt(&remote(202), Scope::All, 1);
+        println!("EXPECTED: Ok(())");
+        println!("ACTUAL: {actual:?}");
+        if actual.is_ok() {
+            println!("PROBLEM NOT REPRODUCED");
+        } else {
+            println!("PROBLEM CONFIRMED");
+        }
+        assert_eq!(actual, Ok(()));
+    }
+
+    #[test]
+    fn verifies_f423_success_recomputes_the_global_deadline() {
+        let fill = |failures: u32| {
+            let guard = Guard::new();
+            for last in 1..=failures {
+                guard.attempt(&remote(last as u8), Scope::All, 10).unwrap();
+            }
+            guard
+        };
+
+        let below = fill(GLOBAL_FREE_FAILURES - 2);
+        let c = remote(200);
+        below.attempt(&c, Scope::All, 10).unwrap();
+        below.succeeded(&c, Scope::All);
+        assert!(below.attempt(&remote(201), Scope::All, 11).is_ok());
+
+        let threshold = fill(GLOBAL_FREE_FAILURES - 1);
+        let c = remote(202);
+        threshold.attempt(&c, Scope::All, 10).unwrap();
+        threshold.succeeded(&c, Scope::All);
+        assert!(threshold.attempt(&remote(203), Scope::All, 11).is_ok());
+
+        let locked = fill(GLOBAL_FREE_FAILURES);
+        assert_eq!(
+            locked.attempt(&remote(204), Scope::All, 11),
+            Err(FIRST_LOCKOUT_MS - 1)
+        );
+        println!("FIX VERIFIED");
     }
 
     #[test]

@@ -7,6 +7,7 @@ import { endedWithError, shownExitCode, type AgentTileModel, type ResumeAction }
 import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
+import { visible } from '../net/hidden';
 
 // What a closed agent leaves behind: how it ended, how long it ran, what it changed and how many tokens it used. Its terminal is gone, so this is shown
 // in its place, with the ways to look at the work and to clear it from the list.
@@ -57,7 +58,7 @@ export function ClosedSummary({ agent, now, source, onReview, onHistory, onFiles
         <div className="flex items-start gap-3">
           <span className={failed ? undefined : 'text-finished'}><StateMark state="finished" failed={failed} /></span>
           <div className="min-w-0">
-            <h2 className="m-0 text-base normal-case tracking-normal text-ink">{agent.name}</h2>
+            <h2 className="m-0 text-base normal-case tracking-normal text-ink">{visible(agent.name)}</h2>
             <p className={`m-0 ${failed ? 'text-ink' : 'text-finished'}`}>{failed ? t(code === undefined ? 'closed-failed-signal' : 'closed-failed', { code: code ?? 0 }) : t('closed-ok')}</p>
           </div>
         </div>
@@ -72,9 +73,9 @@ export function ClosedSummary({ agent, now, source, onReview, onHistory, onFiles
         </div>}
         {resumeError && <p role="alert" className="m-0 text-danger">{t(resumeReasonKey(resumeError))}</p>}
         <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[0.8125rem]">
-          <dt className="text-muted">{t('closed-machine')}</dt><dd className="m-0 truncate">{agent.machine}</dd>
-          <dt className="text-muted">{t('closed-folder')}</dt><dd className="m-0 break-all font-mono text-xs">{agent.workspace || agent.project || '—'}</dd>
-          {agent.branch && <><dt className="text-muted">{t('closed-branch')}</dt><dd className="m-0 font-mono text-xs">{agent.branch}</dd></>}
+          <dt className="text-muted">{t('closed-machine')}</dt><dd className="m-0 truncate">{visible(agent.machine)}</dd>
+          <dt className="text-muted">{t('closed-folder')}</dt><dd className="m-0 break-all font-mono text-xs">{visible(agent.workspace || agent.project || '—')}</dd>
+          {agent.branch && <><dt className="text-muted">{t('closed-branch')}</dt><dd className="m-0 font-mono text-xs">{visible(agent.branch)}</dd></>}
           <dt className="text-muted">{t('closed-ended-label')}</dt><dd className="m-0">{agent.endedMs ? ago(agent.endedMs, now) : t('closed-earlier')}</dd>
           {ran && <><dt className="text-muted">{t('closed-ran-label')}</dt><dd className="m-0">{ran}</dd></>}
           <dt className="text-muted">{t('closed-changes-label')}</dt><dd className="m-0">{changes > 0 ? t('changes-files', { count: changes }) : t('closed-changes-none')}</dd>
