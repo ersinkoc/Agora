@@ -224,14 +224,16 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    encoding, focus, alternate scroll, the alternate screen, keypad, autowrap, insert, newline, the kitty keyboard flags, the cursor's
    shape and blink), and the repaint writes each one as an explicit set or reset after entering the program's screen and drawing it,
    so a window that opens, reloads or reconnects gets the mouse, the wheel, focus reports and the alternate screen (D1, D2, D3, D5 of
-   the ADR; `scripts/e2e-terminal-repaint.mjs` in Chromium and the terminal client, node and client tests). Not carried: modes the node
-   does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region) and origin mode, which waits for the scroll region; in the
+   the ADR; `scripts/e2e-terminal-repaint.mjs` in Chromium and the terminal client, node and client tests). The scroll region
+   (DECSTBM) and origin mode (DECOM) are carried too (M7.10): after the modes and before the cursor, whose row is then relative to the
+   top margin; a cursor outside the region under origin mode (DECRC can leave it there) keeps origin mode off at its absolute row
+   (pinned by a node test). Not carried: modes the node does not track (9, 1015, modifyOtherKeys, 47/1047); in the
    web window xterm.js switches 9 off on the repaint's 1000/1002/1003 resets (the terminal client keeps it); the keyboard flags are
    the current ones, not the program's stack (a pop after a late attach gives the window none, pinned by a node test); mode 12 is not
    written (xterm.js would keep it as the window's own blink setting).
    `agora terminal attach` writes the repaint to the user's own terminal. It leaves out the repaint's keyboard pop, pushes a
-   keyboard entry of its own, and on detach pops that entry together with any the program left on the main screen, then resets the
-   modes. On Windows the console host (ConPTY) sits between `agora` and the user's terminal, and it is a terminal itself:
+   keyboard entry of its own, and on detach pops that entry together with any the program left on the main screen, then gives the
+   whole screen back as the scroll region (the cursor kept) and resets the modes. On Windows the console host (ConPTY) sits between `agora` and the user's terminal, and it is a terminal itself:
    - it adds its own start (`CSI ? 9001 h`, `CSI ? 1004 h`);
    - it keeps the pen, cursor visibility, autowrap, insert, newline, the character set and focus reporting itself, re-rendering them
      for the real terminal;

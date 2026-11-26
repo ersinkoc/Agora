@@ -9,11 +9,13 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    Color as AColor, CursorShape as AShape, CursorStyle, NamedColor, Processor,
+    Color as AColor, CursorShape as AShape, CursorStyle, Handler, NamedColor, NamedPrivateMode,
+    PrivateMode, Processor,
 };
 
 use crate::{
-    Cell, Color, Cursor, CursorShape, Modes, MouseEncoding, MouseTracking, Size, Style, Terminal,
+    Cell, Color, Cursor, CursorShape, Margins, Modes, MouseEncoding, MouseTracking, Size, Style,
+    Terminal,
 };
 
 /// Scrolled-back lines kept per terminal. Memory is bounded by this (design/resource-limits.md).
@@ -515,6 +517,33 @@ impl Terminal for AlacrittyTerminal {
         }
     }
 
+    /// `alacritty_terminal` 0.26 keeps the scroll region private, and following DECSTBM in the byte stream would put a scanner on the
+    /// feed path (ADR-0100 decision 1, alternatives). So it is read here, once per repaint, from the backend's own cursor addressing:
+    /// under origin mode a cursor position is clamped to the region, so row 0 lands on its top and the last row on its bottom. The
+    /// cursor (position, pen, character sets, pending wrap) and the origin mode are put back exactly as they were; only the backend's
+    /// damage tracking, which nothing here reads, sees the move.
+    fn margins(&mut self) -> Option<Margins> {
+        let saved = self.term.grid().cursor.clone();
+        let origin = self.term.mode().contains(TermMode::ORIGIN);
+        let mode = PrivateMode::Named(NamedPrivateMode::Origin);
+        if !origin {
+            self.term.set_private_mode(mode);
+        }
+        self.term.goto(0, 0);
+        let top = self.term.grid().cursor.point.line.0;
+        // The row count: past every region, and no overflow in the backend's line arithmetic.
+        self.term.goto(i32::from(self.size.rows), 0);
+        let bottom = self.term.grid().cursor.point.line.0;
+        if !origin {
+            self.term.unset_private_mode(mode);
+        }
+        self.term.grid_mut().cursor = saved;
+        Some(Margins {
+            top: u16::try_from(top).ok()?,
+            bottom: u16::try_from(bottom).ok()?,
+        })
+    }
+
     fn modes(&self) -> Modes {
         let m = *self.term.mode();
         // One at a time in the backend (setting one clears the others); the widest wins should that ever change.
@@ -743,5 +772,76 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         t.feed(b"\r\n$ ");
         assert_eq!(t.bottom_non_empty_lines(2), vec!["frame", "$"]);
+    }
+
+    fn margins(top: u16, bottom: u16) -> Option<Margins> {
+        Some(Margins { top, bottom })
+    }
+
+    /// M7.10: the scroll region as the program set it, the whole screen when it set none, again after a resize or a full reset (the
+    /// backend resets it then), the same on the alternate screen.
+    #[test]
+    fn the_margins_are_the_programs_scroll_region() {
+        let size = Size { cols: 10, rows: 8 };
+        let mut t = AlacrittyTerminal::new(size);
+        assert_eq!(t.margins(), margins(0, 7));
+        t.feed(b"\x1b[3;6r");
+        assert_eq!(t.margins(), margins(2, 5));
+        t.feed(b"\x1b[?1049h");
+        assert_eq!(t.margins(), margins(2, 5));
+        t.feed(b"\x1b[2r");
+        assert_eq!(t.margins(), margins(1, 7));
+        // Refused by the backend (top not above bottom): unchanged.
+        t.feed(b"\x1b[5;5r");
+        assert_eq!(t.margins(), margins(1, 7));
+        t.feed(b"\x1b[r");
+        assert_eq!(t.margins(), margins(0, 7));
+        t.feed(b"\x1b[2;4r");
+        t.resize(Size { cols: 10, rows: 6 });
+        assert_eq!(t.margins(), margins(0, 5));
+        t.feed(b"\x1b[2;4r\x1bc");
+        assert_eq!(t.margins(), margins(0, 5));
+    }
+
+    /// Looking for the margins changes nothing the program or a window could see: the cursor (with a pending wrap), the pen, origin
+    /// mode, and what the next bytes do, also between the halves of a sequence and inside a synchronized update.
+    #[test]
+    fn looking_for_the_margins_changes_nothing() {
+        let size = Size { cols: 10, rows: 8 };
+        let cases: [(&[u8], &[u8]); 5] = [
+            // A pending wrap at the last column: the next character wraps.
+            (b"\x1b[3;6r\x1b[31m0123456789", b"next"),
+            // Origin mode on, the cursor inside the region.
+            (
+                b"\x1b[3;6r\x1b[?6h\x1b[2;4Hab",
+                b"\x1b[1;1Hc\x1b[9;1Hd\n\n\n\ne",
+            ),
+            // Origin mode on, the cursor below the region (DECRC).
+            (b"\x1b[8;2H\x1b7\x1b[3;6r\x1b[?6h\x1b8", b"x\x1b[1;1Hy"),
+            // Between the halves of a DECSTBM.
+            (b"\x1b[4;", b"7r\x1b[?6h\x1b[2;2Hz"),
+            // Inside a synchronized update (the parser holds the bytes; the backend has not applied them yet).
+            (b"\x1b[?2026h\x1b[2;5r\x1b[?6h", b"\x1b[?2026l\x1b[1;1Hw"),
+        ];
+        for (before, after) in cases {
+            let mut probed = AlacrittyTerminal::new(size);
+            let mut twin = AlacrittyTerminal::new(size);
+            probed.feed(before);
+            twin.feed(before);
+            let _ = probed.margins();
+            let _ = probed.margins();
+            let what = String::from_utf8_lossy(before);
+            assert_eq!(probed.cursor(), twin.cursor(), "{what}");
+            assert_eq!(probed.modes(), twin.modes(), "{what}");
+            assert_eq!(probed.pen(), twin.pen(), "{what}");
+            probed.feed(after);
+            twin.feed(after);
+            assert_eq!(probed.cursor(), twin.cursor(), "{what}");
+            assert_eq!(probed.modes(), twin.modes(), "{what}");
+            assert_eq!(probed.margins(), twin.margins(), "{what}");
+            for row in 0..size.rows {
+                assert_eq!(probed.line(row), twin.line(row), "{what}, row {row}");
+            }
+        }
     }
 }

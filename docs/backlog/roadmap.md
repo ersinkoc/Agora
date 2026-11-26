@@ -195,7 +195,7 @@ Items already in M2 and M3 are not repeated here.
 - [ ] **M7.8 Live update** (ADR-0019, ADR-0075; G4): the hub hands out signed node binaries after approval; stable and preview channels
   (M2.7 is the handoff)
 - [ ] **M7.9 Install channels** (G7, **decision**): a signature-checking install script, a Homebrew tap, a preview channel
-- [ ] **M7.10 Terminal repaint leftovers** (ADR-0100): origin mode and scroll region restored
+- [x] **M7.10 Terminal repaint leftovers** (ADR-0100): origin mode and scroll region restored
 - [ ] **M7.11 QUIC and the direct path** (ADR-0011, ADR-0023): measured first (M3.8)
 - [ ] **M7.12 A documentation site** (G14, Q15, **decision**)
 

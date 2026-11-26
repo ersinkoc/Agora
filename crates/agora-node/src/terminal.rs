@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use agora_platform::{ExitStatus, Pty, PtyControl};
 use agora_vt::{
-    AlacrittyTerminal, Cursor, CursorShape, Modes, MouseEncoding, MouseTracking, Size, Style,
-    Terminal,
+    AlacrittyTerminal, Cursor, CursorShape, Margins, Modes, MouseEncoding, MouseTracking, Size,
+    Style, Terminal,
 };
 
 use crate::history::HistoryCapture;
@@ -200,7 +200,7 @@ fn snapshot_from(term: &dyn Terminal, seq: u64, exit: Option<ExitStatus>) -> Sna
 
 /// The repaint a subscriber of `term` gets (the kind 1 frame, ADR-0100): the same bytes [`TerminalHandle::subscribe`] sends, for
 /// clients' tests and tools that hold an emulator rather than a running terminal.
-pub fn repaint_of(term: &dyn Terminal) -> Vec<u8> {
+pub fn repaint_of(term: &mut dyn Terminal) -> Vec<u8> {
     Repaint::capture(term, 0, None)
         .into_snapshot()
         .repaint
@@ -218,6 +218,8 @@ struct Repaint {
     snapshot: Snapshot,
     rows: Vec<PaintRow>,
     pen: Style,
+    /// The scroll region, when the emulator can say (M7.10).
+    margins: Option<Margins>,
 }
 
 /// `CSI ? n h` or `CSI ? n l`.
@@ -227,10 +229,9 @@ fn private_mode(out: &mut String, n: u16, on: bool) {
 
 /// Every mode the node's emulator tracks, as an explicit set or reset (ADR-0100 decision 1, step 4), so a window that kept modes
 /// from before (a reconnect) ends with the program's. Modes the emulator does not track (mouse 9, the urxvt encoding 1015,
-/// modifyOtherKeys, 47/1047, the scroll region) are left alone: resetting what the node cannot see could switch off what the
-/// program switched on while the window watched. Origin mode (DECOM) is not restored either: cursor positions under it are relative to
-/// the scroll region, which is not tracked, so restoring it would put the cursor, and every later position the program sends, on
-/// the wrong row (Codex review of ADR-0100); it waits until the margins can be restored. Two known gaps: xterm.js (the web window)
+/// modifyOtherKeys, 47/1047) are left alone: resetting what the node cannot see could switch off what the program switched on while
+/// the window watched. Origin mode (DECOM) and the scroll region are not written here but with the cursor ([`append_margins`]), since
+/// both move it and cursor positions under DECOM are relative to the region. Two known gaps: xterm.js (the web window)
 /// switches mouse mode 9 off on any of the 1000/1002/1003 resets, so there the repaint does end a 9 the window had; and only the
 /// kitty keyboard protocol's current flags are carried, not the program's stack, so a pop after a late attach gives the window none.
 fn append_modes(out: &mut String, m: &Modes) {
@@ -268,6 +269,39 @@ fn append_modes(out: &mut String, m: &Modes) {
     let _ = write!(out, "\x1b[<32u\x1b[={};1u", m.keyboard_flags);
 }
 
+/// The scroll region and origin mode (ADR-0100, M7.10), just before the cursor: DECSTBM always, the whole screen as `CSI r` (so a
+/// returning window's stale margins go, and a window of another height gets its own whole screen), then DECOM when the program has it
+/// on; both home the cursor, so the cursor is written after them, and
+/// under DECOM its row is relative to the top margin. Answers the cursor to write. A cursor outside the region (DECRC can leave it
+/// there) cannot be addressed under DECOM, so then origin mode stays off and the row is absolute: the cursor is right, and a later
+/// origin-relative move of the program lands as it would without DECOM (a pinned gap). Without margins (an emulator that cannot say)
+/// both are left alone and origin mode stays off, as before.
+fn append_margins(
+    out: &mut String,
+    margins: Option<Margins>,
+    rows: u16,
+    origin: bool,
+    cursor: Cursor,
+) -> Cursor {
+    let Some(g) = margins else {
+        return cursor;
+    };
+    // A region a window would refuse (top not above bottom: the backend can clamp one so) is written as the whole screen too.
+    if (g.top == 0 && g.bottom + 1 >= rows) || g.top >= g.bottom {
+        out.push_str("\x1b[r");
+    } else {
+        let _ = write!(out, "\x1b[{};{}r", g.top + 1, g.bottom + 1);
+    }
+    if origin && (g.top..=g.bottom).contains(&cursor.row) {
+        out.push_str("\x1b[?6h");
+        return Cursor {
+            row: cursor.row - g.top,
+            ..cursor
+        };
+    }
+    cursor
+}
+
 /// The cursor (ADR-0100 decision 1, step 5): position, visibility and shape. The default shape is `CSI 0 SP q`, which gives the
 /// window its user's own cursor back. Mode 12 (blink alone) is never written: xterm.js applies it to the window's own cursor-blink
 /// setting, which would outlive the program, so a blink without a shape the program chose is not carried (a known gap); a chosen
@@ -295,7 +329,9 @@ fn append_cursor(out: &mut String, c: &Cursor) {
 }
 
 impl Repaint {
-    fn capture(term: &dyn Terminal, seq: u64, exit: Option<ExitStatus>) -> Self {
+    fn capture(term: &mut dyn Terminal, seq: u64, exit: Option<ExitStatus>) -> Self {
+        let margins = term.margins();
+        let term: &dyn Terminal = term;
         let snapshot = snapshot_from(term, seq, exit);
         let size = snapshot.size;
         let rows = (0..size.rows)
@@ -325,12 +361,13 @@ impl Repaint {
             snapshot,
             rows,
             pen: term.pen(),
+            margins,
         }
     }
 
     /// The kind 1 repaint (ADR-0100 decision 1), in this order: the program's screen (normal or alternate), the state the drawing
-    /// depends on, the drawing, the modes, the cursor, the pen. Every byte is made here from the captured state; nothing is copied
-    /// from the program's output.
+    /// depends on, the drawing, the modes, the scroll region and origin mode, the cursor, the pen. Every byte is made here from the
+    /// captured state; nothing is copied from the program's output.
     fn into_snapshot(mut self) -> Snapshot {
         let m = self.snapshot.modes;
         // 1. The program's screen first, so the drawing lands on it.
@@ -356,9 +393,16 @@ impl Repaint {
             out.push_str(&paint.text[start..]);
             out.push_str("\x1b[0m\x1b[K");
         }
-        // 4-6. Live output continues from the captured modes, cursor and pen.
+        // 4-6. Live output continues from the captured modes, scroll region, cursor and pen.
         append_modes(&mut out, &m);
-        append_cursor(&mut out, &self.snapshot.cursor);
+        let cursor = append_margins(
+            &mut out,
+            self.margins,
+            self.snapshot.size.rows,
+            m.origin,
+            self.snapshot.cursor,
+        );
+        append_cursor(&mut out, &cursor);
         self.pen.append_sgr(&mut out);
         self.snapshot.repaint = Some(out.into_bytes());
         self.snapshot
@@ -618,7 +662,8 @@ impl TerminalWatch {
         let (history, repaint) = {
             let mut g = self.inner.lock();
             let history = (lines > 0).then(|| HistoryCapture::capture(g.term.as_ref(), lines));
-            let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
+            let (seq, exit) = (g.seq, g.exit);
+            let repaint = Repaint::capture(g.term.as_mut(), seq, exit);
             // F1481: the process already ended, so its `Exited` went out before this subscriber was there. It gets it first (an
             // empty queue has room), and the window hears the code rather than an unknown end once the terminal is let go.
             if let Some(st) = g.exit {
@@ -658,10 +703,11 @@ impl Drop for TerminalHandle {
 
 fn resync_in(inner: &Inner, sub: &OutputSubscription) -> Snapshot {
     let repaint = {
-        let g = inner.lock();
+        let mut g = inner.lock();
         while sub.rx.try_recv().is_ok() {}
         sub.lagged.store(false, Ordering::Release);
-        Repaint::capture(g.term.as_ref(), g.seq, g.exit)
+        let (seq, exit) = (g.seq, g.exit);
+        Repaint::capture(g.term.as_mut(), seq, exit)
     };
     repaint.into_snapshot()
 }
@@ -743,8 +789,9 @@ mod tests {
         let pen = live.pen();
         let original = inner(live);
         let captured = {
-            let g = original.lock();
-            Repaint::capture(g.term.as_ref(), g.seq, g.exit)
+            let mut g = original.lock();
+            let (seq, exit) = (g.seq, g.exit);
+            Repaint::capture(g.term.as_mut(), seq, exit)
         };
 
         bump(&original, |s| {
@@ -765,7 +812,7 @@ mod tests {
     fn source(size: Size, bytes: &[u8]) -> (AlacrittyTerminal, String) {
         let mut t = AlacrittyTerminal::new(size);
         t.feed(bytes);
-        let r = String::from_utf8_lossy(&repaint_of(&t)).into_owned();
+        let r = String::from_utf8_lossy(&repaint_of(&mut t)).into_owned();
         (t, r)
     }
 
@@ -869,9 +916,15 @@ mod tests {
     #[test]
     fn a_repaint_reproduces_the_modes_on_a_fresh_and_on_a_stale_window() {
         let size = Size { cols: 16, rows: 4 };
-        for bytes in [ALL_ON, ALL_OFF, b"" as &[u8], b"x\x1b[?1000h\x1b[?1015h"] {
-            let (src, r) = source(size, bytes);
-            for stale in [b"" as &[u8], ALL_ON, ALL_OFF] {
+        for bytes in [
+            ALL_ON,
+            ALL_OFF,
+            b"" as &[u8],
+            b"x\x1b[?1000h\x1b[?1015h",
+            b"\x1b[2;3r\x1b[?6h\x1b[2;3H",
+        ] {
+            let (mut src, r) = source(size, bytes);
+            for stale in [b"" as &[u8], ALL_ON, ALL_OFF, b"\x1b[1;2r\x1b[?6h"] {
                 let mut window = AlacrittyTerminal::new(size);
                 window.feed(stale);
                 window.feed(r.as_bytes());
@@ -883,6 +936,7 @@ mod tests {
                 assert_eq!(window.modes(), src.modes(), "{what}");
                 assert_eq!(window.cursor(), src.cursor(), "{what}");
                 assert_eq!(window.pen(), src.pen(), "{what}");
+                assert_eq!(window.margins(), src.margins(), "{what}");
                 for row in 0..size.rows {
                     assert_eq!(window.line(row), src.line(row), "{what}");
                 }
@@ -890,52 +944,156 @@ mod tests {
         }
     }
 
-    /// Origin mode (DECOM) is not restored while the scroll margins are untracked (ADR-0100, Codex review): the repaint leaves it
-    /// off, and the cursor of a fresh and of a reconnecting window (stale margins and origin mode) is the node's right after it.
+    /// A window that kept a scroll region and origin mode from before (a reconnect), and every other mode.
+    const STALE_MARGINS: &[u8] = b"\x1b[3;9r\x1b[?6h";
+
+    /// A fresh window and a returning one (stale margins and origin mode, or every mode on), each fed the repaint of `src`.
+    fn windows(size: Size, r: &str) -> Vec<(&'static str, AlacrittyTerminal)> {
+        [
+            ("fresh", b"" as &[u8]),
+            ("stale margins", STALE_MARGINS),
+            ("all on", ALL_ON),
+        ]
+        .into_iter()
+        .map(|(what, stale)| {
+            let mut w = AlacrittyTerminal::new(size);
+            w.feed(stale);
+            w.feed(r.as_bytes());
+            (what, w)
+        })
+        .collect()
+    }
+
+    /// M7.10 (ADR-0100): the scroll region and origin mode are restored, after the modes and before the cursor, whose row is then
+    /// relative to the top margin; a fresh and a returning window end with the node's margins, origin mode and cursor.
     #[test]
-    fn origin_mode_is_left_off_and_the_cursor_lands_where_the_nodes_is() {
+    fn origin_mode_and_the_scroll_region_are_restored_before_the_cursor() {
         let size = Size { cols: 16, rows: 10 };
-        for prog in [&b"\x1b[4;8r\x1b[?6h\x1b[2;3H"[..], b"\x1b[4;8r\x1b[5;3H"] {
-            let (src, r) = source(size, prog);
-            assert!(!r.contains("\x1b[?6h"), "{r:?}");
-            let mut fresh = AlacrittyTerminal::new(size);
-            fresh.feed(r.as_bytes());
-            let mut returning = AlacrittyTerminal::new(size);
-            returning.feed(b"\x1b[3;8r\x1b[?6h");
-            returning.feed(r.as_bytes());
-            for window in [&fresh, &returning] {
-                assert_eq!(window.cursor(), src.cursor());
-                assert!(!window.modes().origin);
+        let (_, r) = source(size, b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
+        let order = [
+            at(&r, "\x1b[?6l\x1b[4l"),
+            at(&r, "\x1b[2J"),
+            at(&r, "\x1b[?1000l"),
+            at(&r, "\x1b[=0;1u"),
+            at(&r, "\x1b[4;8r\x1b[?6h\x1b[2;3H\x1b[?25h"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?} in {r:?}");
+        // The whole screen is written too, so a returning window's stale margins go; origin mode stays off.
+        let (_, plain) = source(size, b"x");
+        at(&plain, "\x1b[r\x1b[1;2H");
+        assert!(!plain.contains("\x1b[?6h"));
+        for prog in [
+            &b"\x1b[4;8r\x1b[?6h\x1b[2;3H"[..],
+            b"\x1b[4;8r\x1b[5;3H",
+            b"\x1b[?6h\x1b[3;2H",
+            b"",
+        ] {
+            let (mut src, r) = source(size, prog);
+            for (what, mut window) in windows(size, &r) {
+                assert_eq!(window.cursor(), src.cursor(), "{what}");
+                assert_eq!(window.modes(), src.modes(), "{what}");
+                assert_eq!(window.margins(), src.margins(), "{what}");
             }
         }
     }
 
-    /// The known divergence this pins (ADR-0100: until the margins are tracked and restored): a program in origin mode with margins
-    /// moves the cursor relative to them; the window, with origin mode off, puts it at the absolute row. When the follow-up restores
-    /// the margins, this test changes to equality.
+    /// The golden test of M7.10: after the repaint, the program's next output (a line feed at the bottom margin, a reverse index at
+    /// the top one, origin-relative and absolute cursor moves, printing) lands in every window where it lands on the node.
     #[test]
-    fn a_live_origin_relative_move_still_diverges_while_the_margins_are_untracked() {
+    fn output_after_the_repaint_lands_where_it_does_on_the_node() {
         let size = Size { cols: 16, rows: 10 };
-        let (mut src, r) = source(size, b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
-        let mut fresh = AlacrittyTerminal::new(size);
-        fresh.feed(r.as_bytes());
-        let mut returning = AlacrittyTerminal::new(size);
-        returning.feed(b"\x1b[3;8r\x1b[?6h");
-        returning.feed(r.as_bytes());
-        src.feed(b"\x1b[2;3H");
-        fresh.feed(b"\x1b[2;3H");
-        returning.feed(b"\x1b[2;3H");
-        assert_eq!(src.cursor().row, 4, "relative to the top margin (row 3)");
-        assert_eq!(
-            fresh.cursor().row,
-            1,
-            "absolute: the margins are not restored"
-        );
-        assert_eq!(
-            returning.cursor().row,
-            1,
-            "absolute: the margins are not restored"
-        );
+        let mut prog = Vec::new();
+        for row in 1..=10 {
+            prog.extend_from_slice(format!("\x1b[{row};1Hrow {row}").as_bytes());
+        }
+        prog.extend_from_slice(b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
+        let live: &[&[u8]] = &[
+            b"\x1b[3;5Hmid",
+            b"\x1b[5;1Hbottom\n\nX",
+            b"\x1b[1;1H\x1bMtop",
+            b"\x1b[9;9Hclamped",
+            b"\x1b[?6l\x1b[10;1Habs",
+            b"\x1b[r\x1b[10;1H\nlast",
+        ];
+        let (mut src, r) = source(size, &prog);
+        let mut wins = windows(size, &r);
+        for bytes in live {
+            src.feed(bytes);
+            for (what, window) in &mut wins {
+                window.feed(bytes);
+                let step = format!("{what} after {:?}", String::from_utf8_lossy(bytes));
+                for row in 0..size.rows {
+                    assert_eq!(window.line(row), src.line(row), "row {row}, {step}");
+                }
+                assert_eq!(window.cursor(), src.cursor(), "{step}");
+                assert_eq!(window.margins(), src.margins(), "{step}");
+                assert_eq!(window.modes(), src.modes(), "{step}");
+            }
+        }
+    }
+
+    /// The pinned gap: a cursor outside the region under origin mode (DECRC put it there) cannot be addressed under DECOM, so the
+    /// repaint leaves origin mode off with the cursor at its absolute row: the cursor and the margins are right, and the program's
+    /// next origin-relative move lands absolute in the window.
+    #[test]
+    fn a_cursor_outside_the_region_under_origin_mode_keeps_origin_off() {
+        let size = Size { cols: 16, rows: 10 };
+        let (mut src, r) = source(size, b"\x1b[10;2H\x1b7\x1b[4;8r\x1b[?6h\x1b8");
+        assert!(src.modes().origin);
+        assert_eq!(src.cursor().row, 9);
+        assert!(!r.contains("\x1b[?6h"), "{r:?}");
+        for (what, mut window) in windows(size, &r) {
+            assert_eq!(window.cursor(), src.cursor(), "{what}");
+            assert_eq!(window.margins(), src.margins(), "{what}");
+            assert!(!window.modes().origin, "{what}");
+        }
+        src.feed(b"\x1b[1;1H");
+        let (_, mut window) = windows(size, &r).remove(0);
+        window.feed(b"\x1b[1;1H");
+        assert_eq!(src.cursor().row, 3, "relative to the top margin");
+        assert_eq!(window.cursor().row, 0, "absolute: origin mode was left off");
+    }
+
+    /// An emulator that cannot say where its margins are.
+    struct NoMargins(AlacrittyTerminal);
+
+    impl Terminal for NoMargins {
+        fn feed(&mut self, bytes: &[u8]) {
+            self.0.feed(bytes);
+        }
+        fn resize(&mut self, size: Size) {
+            self.0.resize(size);
+        }
+        fn size(&self) -> Size {
+            self.0.size()
+        }
+        fn cell(&self, row: u16, col: u16) -> Option<agora_vt::Cell> {
+            self.0.cell(row, col)
+        }
+        fn cursor(&self) -> Cursor {
+            self.0.cursor()
+        }
+        fn pen(&self) -> Style {
+            self.0.pen()
+        }
+        fn modes(&self) -> Modes {
+            self.0.modes()
+        }
+        fn title(&self) -> Option<String> {
+            self.0.title()
+        }
+    }
+
+    /// Without margins both are left alone, as before M7.10: no DECSTBM, origin mode off, the cursor at its absolute row.
+    #[test]
+    fn an_emulator_without_margins_leaves_them_and_origin_mode_alone() {
+        let size = Size { cols: 16, rows: 10 };
+        let mut t = NoMargins(AlacrittyTerminal::new(size));
+        t.feed(b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
+        let r = String::from_utf8_lossy(&repaint_of(&mut t)).into_owned();
+        assert!(!r.contains(";8r") && !r.contains(";10r"), "{r:?}");
+        assert!(!r.contains("\x1b[?6h"), "{r:?}");
+        at(&r, "\x1b[5;3H\x1b[?25h");
     }
 
     /// A window left in the line-drawing character set (`ESC ( 0`, or G1 shifted out) still draws the repaint's text as text.

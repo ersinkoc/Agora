@@ -335,11 +335,11 @@ mod tests {
 
     /// An empty window of `size` fed the replay of `lines` lines of `src`, then (when `repaint`) the node's repaint.
     fn window(
-        src: &dyn Terminal,
+        src: &mut dyn Terminal,
         lines: usize,
         repaint: bool,
     ) -> (AlacrittyTerminal, Vec<Vec<u8>>) {
-        let frames = history_of(src, lines);
+        let frames = history_of(&*src, lines);
         let mut w = AlacrittyTerminal::new(src.size());
         for f in &frames {
             w.feed(f);
@@ -356,7 +356,7 @@ mod tests {
     fn a_replay_puts_exactly_the_kept_lines_into_an_empty_window() {
         for rows in [1u16, 3, 5, 24] {
             for printed_lines in [1usize, 2, 4, 7, 40] {
-                let src = printed(
+                let mut src = printed(
                     size(20, rows),
                     (1..=printed_lines).map(|i| format!("\x1b[3{}mline {i}\x1b[0m", i % 8)),
                 );
@@ -368,7 +368,7 @@ mod tests {
                     assert!(history_of(&src, 10_000).is_empty(), "{what}");
                     continue;
                 }
-                let (w, frames) = window(&src, 10_000, true);
+                let (w, frames) = window(&mut src, 10_000, true);
                 assert_eq!(history(&w), kept, "{what}");
                 assert!(!frames.is_empty(), "{what}");
                 for row in 0..rows {
@@ -386,11 +386,11 @@ mod tests {
     /// Capped by the window's count: the newest lines.
     #[test]
     fn the_count_keeps_the_newest_lines() {
-        let src = printed(size(20, 5), (1..=100).map(|i| format!("line {i}")));
+        let mut src = printed(size(20, 5), (1..=100).map(|i| format!("line {i}")));
         let all = history(&src);
         assert_eq!(all.len(), 96);
         for n in [1usize, 10, 95, 96, 500] {
-            let (w, _) = window(&src, n, false);
+            let (w, _) = window(&mut src, n, false);
             let want = &all[all.len() - n.min(all.len())..];
             assert_eq!(history(&w), want, "{n}");
         }
@@ -413,13 +413,13 @@ mod tests {
             }
             s
         };
-        let src = printed(size(200, 10), (1..=2100).map(line));
+        let mut src = printed(size(200, 10), (1..=2100).map(line));
         let all = history(&src);
         assert_eq!(all.len(), 2000);
         // The capture (under the terminal's lock) already stops near the cap rather than copying all 2000 lines.
         let captured = HistoryCapture::capture(&src, 2000).rows.len();
         assert!(captured < 2000, "{captured}");
-        let (w, frames) = window(&src, 2000, false);
+        let (w, frames) = window(&mut src, 2000, false);
         let got = history(&w);
         let bytes: usize = frames.iter().map(Vec::len).sum();
         assert!(bytes <= HISTORY_MAX_BYTES, "{bytes}");
@@ -428,8 +428,8 @@ mod tests {
         assert!(got.len() > 100 && got.len() < 2000, "{}", got.len());
         assert_eq!(got, all[all.len() - got.len()..], "the newest, in order");
         // Plain lines of the same width: all 2000 fit.
-        let src = printed(size(200, 10), (1..=2100).map(|i| format!("{i:0>200}")));
-        let (w, frames) = window(&src, 2000, false);
+        let mut src = printed(size(200, 10), (1..=2100).map(|i| format!("{i:0>200}")));
+        let (w, frames) = window(&mut src, 2000, false);
         assert_eq!(history(&w), history(&src));
         assert!(frames.len() <= HISTORY_MAX_FRAMES);
     }
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn wrapped_lines_rewrap_in_the_window() {
         let long: String = (0..35).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let src = printed(
+        let mut src = printed(
             size(10, 3),
             [
                 "first".to_string(),
@@ -483,7 +483,7 @@ mod tests {
                 "z".into(),
             ],
         );
-        let (mut w, _) = window(&src, 100, true);
+        let (mut w, _) = window(&mut src, 100, true);
         assert_eq!(history(&w), history(&src));
         for back in 1..=src.history_len() {
             assert_eq!(w.history_wrapped(back), src.history_wrapped(back), "{back}");
@@ -504,7 +504,7 @@ mod tests {
     /// continuation, and wide characters elsewhere: the window gets the same rows.
     #[test]
     fn wide_characters_and_blank_continuations_keep_the_rows() {
-        let src = printed(
+        let mut src = printed(
             size(10, 3),
             [
                 "123456789界x".to_string(),
@@ -515,7 +515,7 @@ mod tests {
                 "c".into(),
             ],
         );
-        let (mut w, _) = window(&src, 100, true);
+        let (mut w, _) = window(&mut src, 100, true);
         assert_eq!(history(&w), history(&src));
         for back in 1..=src.history_len() {
             assert_eq!(w.history_wrapped(back), src.history_wrapped(back), "{back}");
@@ -528,7 +528,6 @@ mod tests {
             }
         }
         // Wider, both rewrap the same way: the blank the terminal left before 界 is not a character of the line.
-        let mut src = src;
         src.resize(size(20, 3));
         w.resize(size(20, 3));
         assert_eq!(history(&w), history(&src));
@@ -568,7 +567,7 @@ mod tests {
             }
             s
         };
-        let src = printed(size(200, 10), (1..=600).map(line));
+        let mut src = printed(size(200, 10), (1..=600).map(line));
         let frames = history_of(&src, 2000);
         assert!(frames.len() > 2);
         for (n, f) in frames.iter().enumerate() {
@@ -587,7 +586,7 @@ mod tests {
             }
         }
         // Past the byte cap: the newest lines, in order.
-        let (w, _) = window(&src, 2000, false);
+        let (w, _) = window(&mut src, 2000, false);
         let (got, all) = (history(&w), history(&src));
         assert!(!got.is_empty() && got.len() < all.len(), "{}", got.len());
         assert_eq!(got, all[all.len() - got.len()..]);

@@ -68,6 +68,14 @@ pub struct Cursor {
     pub blink: bool,
 }
 
+/// The scroll region the program set (DECSTBM, `CSI top ; bottom r`): rows `top..=bottom` of the live screen, 0-based. The whole
+/// screen when the program set none. Under origin mode (DECOM) cursor positions are relative to `top` (ADR-0100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Margins {
+    pub top: u16,
+    pub bottom: u16,
+}
+
 /// The cursor's shape as the program set it (DECSCUSR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CursorShape {
@@ -217,6 +225,12 @@ pub trait Terminal: Send {
     /// The style the program's next printed character gets (its current SGR state), so a repaint can hand it on.
     fn pen(&self) -> Style;
     fn modes(&self) -> Modes;
+    /// The scroll region (ADR-0100, M7.10), so a repaint can restore it and origin mode with it; `None` for a backend that cannot say
+    /// (then a repaint leaves both alone). `&mut` because a backend may have to look for it: [`AlacrittyTerminal`] keeps it private
+    /// and finds it by moving the cursor under origin mode, then puts the cursor and the mode back exactly as they were.
+    fn margins(&mut self) -> Option<Margins> {
+        None
+    }
     /// Window title set by the program (OSC 0/2), if any.
     fn title(&self) -> Option<String>;
 
