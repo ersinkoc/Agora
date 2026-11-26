@@ -1,1 +1,1 @@
-- A retried task handoff no longer replaces a handoff the node kept on disk but could not read at start: the retry is refused for now and answered with the original receipt after the next start.
+- A retried task handoff no longer replaces a handoff the node kept on disk but could not read at start: the retry is refused for now and answered with the original receipt after the next start. (#1221)

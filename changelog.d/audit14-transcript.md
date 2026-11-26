@@ -1,1 +1,1 @@
-- A chat transcript that reaches its size limit, or is read back from its last 4 MiB, no longer loses a whole line when the cut falls exactly on a line start, and a new transcript file stays within its limit.
+- A chat transcript that reaches its size limit, or is read back from its last 4 MiB, no longer loses a whole line when the cut falls exactly on a line start, and a new transcript file stays within its limit. (#1221)

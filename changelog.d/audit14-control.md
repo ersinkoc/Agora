@@ -1,1 +1,1 @@
-- A command whose answer would be larger than 1 MiB (for example listing a very large folder) is now refused with `node.resource_limit` instead of never being answered.
+- A command whose answer would be larger than 1 MiB (for example listing a very large folder) is now refused with `node.resource_limit` instead of never being answered. (#1221)
