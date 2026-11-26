@@ -11,7 +11,9 @@ cli-usage =
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--setting ID=VALUE]... [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
-      agora agent prompt AGENT_ID TEXT... [--socket PATH]
+      agora agent prompt AGENT_ID TEXT... [--wait [--timeout SECS]] [--force] [--socket PATH]
+      agora agent wait AGENT_ID [--until working|blocked|idle|done|exited[,...]] [--timeout SECS] [--socket PATH]
+      agora events [--agent AGENT_ID] [--json] [--socket PATH]
       agora agent resume AGENT_ID [--again] [--socket PATH]
       agora agent list [--socket PATH]
       agora agent kinds [--socket PATH]
@@ -56,6 +58,19 @@ cli-node-events-set-aside = Events recorded before this machine was linked as { 
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
 cli-agent-prompted = Sent the prompt to agent { $agent_id }
+cli-agent-prompt-blocked-hint = Answer the agent first, or add --force to type the text into it anyway.
+cli-agent-wait-bad-state = --until takes states separated by commas: working, blocked, idle, done, exited.
+cli-agent-wait-blocked = Agent { $agent_id } needs you: it is waiting for an answer.
+cli-agent-wait-exited = Agent { $agent_id } is no longer running (last state: { $state }).
+cli-agent-wait-timeout = Stopped waiting for agent { $agent_id } after { $seconds } s; it is { $state }.
+cli-event-present = { $agent_id } ({ $kind }): { $state }
+cli-event-added = { $agent_id } ({ $kind }) appeared: { $state }
+cli-event-state = { $agent_id }: { $previous } → { $state }
+cli-event-exited = { $agent_id } stopped (last state: { $state })
+cli-event-running = { $agent_id } is running again: { $state }
+cli-event-restarted = { $agent_id } was restarted ({ $restarts } so far)
+cli-event-interrupted = { $agent_id } was interrupted (last state: { $state })
+cli-event-removed = { $agent_id } is no longer listed
 cli-agent-resumed = Resumed agent { $agent_id } in { $worktree }
 cli-agent-started-again = Started agent { $agent_id } again in { $worktree } (a new conversation)
 cli-agent-list-empty = This node has no agents.

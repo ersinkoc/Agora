@@ -1,8 +1,8 @@
 //! The single Agora binary: `agora hub`, `agora node`, `agora tui`, and CLI subcommands.
 //!
 //! This build implements the node-local commands: `agora node run`, `agora agent start|stop|list`, and
-//! `agora terminal attach`. Each CLI command is one protocol command sent over the node's control socket
-//! (`agora_node::control`). All sentences come from `locales/` through `agora_i18n::Catalog`; the process
+//! `agora terminal attach`. Each CLI command sends protocol commands over the node's control socket
+//! (`agora_node::control`): most send one, and the waits of `orchestrate` ask for the agent list again and again. All sentences come from `locales/` through `agora_i18n::Catalog`; the process
 //! prints only ids, paths and codes of its own.
 
 use std::io::{Read, Write};
@@ -174,6 +174,7 @@ mod hold;
 mod hubcli;
 mod joincmd;
 mod meshbridge;
+mod orchestrate;
 mod paircmd;
 mod panelcmd;
 mod remotecmd;
@@ -337,6 +338,14 @@ pub(crate) struct Opts {
     file: Option<PathBuf>,
     size: Option<String>,
     save: bool,
+    /// G8: `agora agent prompt AGENT_ID TEXT --wait [--timeout SECS] [--force]`, `agora agent wait AGENT_ID [--until STATE,...]` and
+    /// `agora events [--agent ID] [--json]` ([`orchestrate`]).
+    wait: bool,
+    force: bool,
+    timeout: Option<u64>,
+    until: Option<String>,
+    agent: Option<String>,
+    json: bool,
     positional: Vec<String>,
 }
 
@@ -409,6 +418,12 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--resume" => o.resume = Some(it.next()?.clone()),
             "--setting" => o.settings.push(it.next()?.clone()),
             "--save" => o.save = true,
+            "--wait" => o.wait = true,
+            "--force" => o.force = true,
+            "--timeout" => o.timeout = Some(it.next()?.parse().ok()?),
+            "--until" => o.until = Some(it.next()?.clone()),
+            "--agent" => o.agent = Some(it.next()?.clone()),
+            "--json" => o.json = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -509,7 +524,9 @@ fn main() -> ExitCode {
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
-        ["agent", "prompt"] => agent_prompt(&say, &opts),
+        ["agent", "prompt"] => orchestrate::agent_prompt(&say, &opts),
+        ["agent", "wait"] => orchestrate::agent_wait(&say, &opts),
+        ["events"] => orchestrate::events(&say, &opts),
         ["agent", "resume"] => agent_resume(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
@@ -1145,21 +1162,23 @@ fn agent_list(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// An agent state as the fixed token the command line prints (`agora agent list`, `agora agent wait`, `agora events --json`), for scripts.
+fn state_word(s: i32) -> &'static str {
+    v1::AgentState::try_from(s).map_or("unknown", |s| match s {
+        v1::AgentState::Working => "working",
+        v1::AgentState::Blocked => "blocked",
+        v1::AgentState::Idle => "idle",
+        v1::AgentState::Done => "done",
+        v1::AgentState::Unspecified => "unknown",
+    })
+}
+
 /// The lines of `agora agent list`, one list in id order (`agent-2` before `agent-10`) across the node's agents and the ones it found
 /// interrupted. An agent's line is `id, kind, state, running|stopped`, as it always was. ADR-0107: an interrupted agent's line has its
 /// last state, `interrupted` in the fourth column and what can be done in a fifth: `still-running` (its process outlived the node;
 /// `agora agent stop` ends it, and Resume waits until then), `resume`, or `start-again` (no session to continue). Fixed tokens like
 /// `running` and `stopped`, not prose, so scripts can read them.
 fn agent_list_lines(list: &v1::AgentListResult) -> Vec<String> {
-    fn state_word(s: i32) -> &'static str {
-        v1::AgentState::try_from(s).map_or("unknown", |s| match s {
-            v1::AgentState::Working => "working",
-            v1::AgentState::Blocked => "blocked",
-            v1::AgentState::Idle => "idle",
-            v1::AgentState::Done => "done",
-            v1::AgentState::Unspecified => "unknown",
-        })
-    }
     let mut rows: Vec<(&str, String)> = list
         .agents
         .iter()
@@ -1292,46 +1311,6 @@ fn agent_resume(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(_) => ExitCode::from(1),
-        Err(code) => code,
-    }
-}
-
-fn agent_prompt(say: &Say, o: &Opts) -> ExitCode {
-    let (Some(id), text) = (
-        o.positional.first(),
-        o.positional
-            .iter()
-            .skip(1)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" "),
-    ) else {
-        say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
-    };
-    if text.is_empty() {
-        say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
-    }
-    let mut c = match connect(say, o) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    match call(
-        say,
-        &mut c,
-        Cmd::AgentPrompt(v1::AgentPrompt {
-            agent_id: id.clone(),
-            text,
-        }),
-    ) {
-        Ok(_) => {
-            say.out(
-                key!("cli-agent-prompted"),
-                &[("agent_id", id.as_str().into())],
-            );
-            ExitCode::SUCCESS
-        }
         Err(code) => code,
     }
 }
