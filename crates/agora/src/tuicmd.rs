@@ -1894,11 +1894,15 @@ fn start_in_folder(
         }
     }
     // ADR-0066: the kind's settings (model, effort, ...), one question each; nothing chosen sends none, as before. A machine that
-    // offers none (or an older one) asks nothing.
+    // offers none (or an older one) asks nothing. What was chosen last time for this kind on this machine is preselected (decision 3);
+    // how the agent acts above is never remembered, so an option that skips permissions is asked and confirmed every time.
     let specs = session.kind_settings(&node, kind).unwrap_or_default();
-    let Some(settings) = ask_settings(say, ask, specs) else {
+    let memory = home().join(agora_tui::launch::MEMORY_FILE);
+    let remembered = agora_tui::launch::recall(&memory, &node, kind);
+    let Some(settings) = ask_settings(say, ask, specs, &remembered) else {
         return String::new();
     };
+    let sent = settings.clone();
     let Some(launch) = signed_launch(
         &device,
         &node,
@@ -1914,20 +1918,26 @@ fn start_in_folder(
         );
     };
     match session.launch_in(&node, launch) {
-        Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
+        Ok(agent) => {
+            // A convenience: a choice that cannot be kept is simply not preselected next time.
+            let _ = agora_tui::launch::remember(&memory, &node, kind, &sent);
+            say.text(key!("tui-started"), &[("agent", Arg::Str(agent))])
+        }
         Err(code) if code == "approval.signature_invalid" => not_trusted(&device, &node),
         Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     }
 }
 
-/// ADR-0066: asks the start's settings ([`agora_tui::launch::Settings`]), one key at a time; a typed setting reads its keys as text
-/// (an arrow types nothing). The chosen pairs in the manifest's order, or `None`: cancelled, or no answer in time.
+/// ADR-0066: asks the start's settings ([`agora_tui::launch::Settings`]), one key at a time, with `remembered` (the last choice for
+/// this kind on this machine) preselected; a typed setting reads its keys as text (an arrow types nothing). The chosen pairs in the
+/// manifest's order, or `None`: cancelled, or no answer in time.
 fn ask_settings(
     say: &Say,
     ask: &mut dyn Asker,
     specs: Vec<agora_protocol::v1::LaunchSettingSpec>,
+    remembered: &[(String, String)],
 ) -> Option<Vec<(String, String)>> {
-    let Some(mut q) = agora_tui::launch::Settings::new(specs) else {
+    let Some(mut q) = agora_tui::launch::Settings::with_remembered(specs, remembered) else {
         return Some(Vec::new());
     };
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
@@ -9303,15 +9313,24 @@ mod viewer_console_tests {
         };
         // `3` picks "high"; then "o4", an Up arrow (ESC [ A, which is `k` in a list) and Enter.
         let mut ask = keys(b"3o4\x1b[A\r");
-        let chosen = ask_settings(&say, &mut ask, specs()).unwrap();
+        let chosen = ask_settings(&say, &mut ask, specs(), &[]).unwrap();
         let want = vec![
             ("effort".to_string(), "high".to_string()),
             ("model".to_string(), "o4".to_string()),
         ];
         assert_eq!(chosen, want);
-        assert_eq!(ask_settings(&say, &mut keys(b"\x1b"), specs()), None);
+        assert_eq!(ask_settings(&say, &mut keys(b"\x1b"), specs(), &[]), None);
+        // ADR-0066 decision 3: last time's choice is preselected, so Enter twice starts with it again; `1` still gives the default.
         assert_eq!(
-            ask_settings(&say, &mut keys(b""), Vec::new()),
+            ask_settings(&say, &mut keys(b"\r\r"), specs(), &want).as_ref(),
+            Some(&want)
+        );
+        assert_eq!(
+            ask_settings(&say, &mut keys(b"1\r"), specs(), &want),
+            Some(vec![("model".to_string(), "o4".to_string())])
+        );
+        assert_eq!(
+            ask_settings(&say, &mut keys(b""), Vec::new(), &[]),
             Some(Vec::new())
         );
         let (device, _) = Device::generate().unwrap();

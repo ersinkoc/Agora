@@ -33,9 +33,11 @@ const ATTACH_START: &[u8] = b"\x1b[>0u\x1b[?1007s";
 /// the pop of our entry and the agent's): the modes the node's repaint (ADR-0100) or the agent may have changed put back to a
 /// terminal's defaults: mouse tracking and encodings, focus, bracketed paste, application cursor keys and keypad, insert and
 /// newline off, autowrap on, alternate scroll off and then the terminal's own setting restored where it supports XTRESTORE
-/// (`CSI ? 1007 r`; elsewhere off, xterm's default), a plain pen in ASCII, the cursor shown in the terminal's own shape.
+/// (`CSI ? 1007 r`; elsewhere off, xterm's default), a plain pen in ASCII, the cursor shown in the terminal's own shape. First the
+/// scroll region the repaint (M7.10) or the agent set goes back to the whole screen, the cursor saved and restored around it
+/// (DECSTBM homes the cursor); with whole-screen margins an origin mode left on addresses the screen as with it off.
 const DETACH_RESET: &[u8] =
-    b"\x1b[?1007l\x1b[?1007r\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
+    b"\x1b7\x1b[r\x1b8\x1b[?1007l\x1b[?1007r\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
 \x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[4l\x1b[20l\x1b[?7h\x1b[0m\x1b(B\x0f\x1b[?25h\x1b[0 q";
 
 /// The node's repaint as the user's own terminal gets it: without the kitty keyboard pop (`CSI < 32 u`) the node writes for a
@@ -1565,6 +1567,33 @@ mod host_keyboard_tests {
             ] {
                 assert_eq!(pops(stream, split), want, "{what}, split {split}");
             }
+        }
+    }
+
+    /// M7.10: the repaint can now set the agent's scroll region and origin mode on the user's own terminal; detaching gives the
+    /// whole screen back and leaves the cursor where it was.
+    #[test]
+    fn detach_gives_the_whole_screen_back_and_keeps_the_cursor() {
+        use agora_vt::{AlacrittyTerminal, Margins, Size, Terminal};
+        let size = Size { cols: 20, rows: 10 };
+        for agent in [
+            &b"\x1b[3;7r\x1b[?6h\x1b[2;4H"[..],
+            b"\x1b[3;7r\x1b[6;5H",
+            b"\x1b[9;2H",
+        ] {
+            let mut user = AlacrittyTerminal::new(size);
+            user.feed(agent);
+            let cursor = user.cursor();
+            user.feed(super::DETACH_RESET);
+            assert_eq!(user.cursor().row, cursor.row);
+            assert_eq!(user.cursor().col, cursor.col);
+            assert_eq!(user.margins(), Some(Margins { top: 0, bottom: 9 }));
+            user.feed(b"\x1b[10;1Hend\n");
+            assert_eq!(
+                user.line(8),
+                "end",
+                "a line feed at the bottom scrolls the whole screen"
+            );
         }
     }
 }

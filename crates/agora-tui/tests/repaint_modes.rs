@@ -32,7 +32,7 @@ impl View {
 fn node(bytes: &[u8]) -> (AlacrittyTerminal, Vec<u8>) {
     let mut t = AlacrittyTerminal::new(SIZE);
     t.feed(bytes);
-    let r = repaint_of(&t);
+    let r = repaint_of(&mut t);
     (t, r)
 }
 

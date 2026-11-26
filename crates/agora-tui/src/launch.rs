@@ -7,6 +7,13 @@
 //! default; a setting without values (a model name the tool checks itself) is typed. Enter keeps the default, Backspace goes back to the
 //! setting before, Esc cancels the start. Nothing chosen sends no setting at all, so a start against a node that offers none (or an
 //! older one, which sends none) is the start of before.
+//!
+//! ADR-0066 decision 3: the last choice per kind per machine is remembered in [`MEMORY_FILE`] in the client's Agora folder (as the
+//! web window keeps its own on its device) and preselected the next time: Enter then keeps it, `1` still picks the tool's default. Only
+//! settings are kept, never how the agent acts (an option that skips permissions is asked and confirmed every time), and a remembered
+//! value the machine no longer offers is dropped.
+
+use std::path::Path;
 
 use agora_i18n::{key, Arg};
 use agora_protocol::v1::LaunchSettingSpec;
@@ -86,14 +93,41 @@ const CTRL_C: u8 = 3;
 impl Settings {
     /// `None` when there is nothing to ask.
     pub fn new(specs: Vec<LaunchSettingSpec>) -> Option<Self> {
+        Self::with_remembered(specs, &[])
+    }
+
+    /// Like [`new`](Self::new), with what was chosen last time for this kind on this machine ([`recall`]) preselected: a listed setting
+    /// takes a remembered value only when it is still in its list, a typed one only when it is still a value a start may send.
+    /// Anything else is left at the tool's default.
+    pub fn with_remembered(
+        specs: Vec<LaunchSettingSpec>,
+        remembered: &[(String, String)],
+    ) -> Option<Self> {
         let specs = usable_specs(specs);
-        (!specs.is_empty()).then(|| Self {
-            chosen: vec![None; specs.len()],
+        if specs.is_empty() {
+            return None;
+        }
+        let chosen = specs
+            .iter()
+            .map(|s| {
+                let (_, v) = remembered.iter().find(|(id, _)| *id == s.id)?;
+                let offered = if s.values.is_empty() {
+                    valid_value(v)
+                } else {
+                    s.values.contains(v)
+                };
+                offered.then(|| v.clone())
+            })
+            .collect();
+        let mut q = Self {
+            chosen,
             specs,
             at: 0,
             page: 0,
             typed: String::new(),
-        })
+        };
+        q.prefill();
+        Some(q)
     }
 
     fn spec(&self) -> &LaunchSettingSpec {
@@ -132,7 +166,12 @@ impl Settings {
                 match value {
                     Some(v) if !v.is_empty() && !valid_value(&v) => Step::Ask,
                     Some(v) if !v.is_empty() => self.answer(Some(v)),
-                    _ => self.answer(None),
+                    Some(_) => self.answer(None),
+                    // A list: Enter keeps what is preselected (remembered, or chosen before going back), else the default.
+                    None => {
+                        let kept = self.chosen[self.at].clone();
+                        self.answer(kept)
+                    }
                 }
             }
             0x7f | 0x08 if free && !self.typed.is_empty() => {
@@ -188,10 +227,16 @@ impl Settings {
         }
     }
 
-    /// A typed setting shows what was typed for it before (going back keeps it).
+    /// A typed setting shows what was typed for it before (going back keeps it, as does a remembered value); a list opens on the
+    /// page of its preselected value.
     fn prefill(&mut self) {
+        let current = self.chosen[self.at].clone();
         if self.spec().values.is_empty() {
-            self.typed = self.chosen[self.at].clone().unwrap_or_default();
+            self.typed = current.unwrap_or_default();
+        } else if let Some(i) =
+            current.and_then(|v| self.spec().values.iter().position(|x| *x == v))
+        {
+            self.page = i / PAGE;
         }
     }
 
@@ -238,10 +283,24 @@ impl Settings {
             )
         };
         if s.values.is_empty() {
-            out.push(t(
-                key!("tui-start-settings-type"),
-                &[("setting", Arg::Str(name)), ("default", Arg::Str(default))],
-            ));
+            // The field opens with last time's value (or the one typed before going back): Enter sends it, which is said.
+            let kept = self.chosen[self.at]
+                .as_deref()
+                .filter(|v| *v == self.typed && !v.is_empty());
+            out.push(match kept {
+                Some(v) => t(
+                    key!("tui-start-settings-type-last"),
+                    &[
+                        ("setting", Arg::Str(name)),
+                        ("value", Arg::Str(plain(v))),
+                        ("default", Arg::Str(default)),
+                    ],
+                ),
+                None => t(
+                    key!("tui-start-settings-type"),
+                    &[("setting", Arg::Str(name)), ("default", Arg::Str(default))],
+                ),
+            });
             out.push(format!(
                 "{} {}",
                 t(key!("tui-chat-input"), &[]),
@@ -251,10 +310,18 @@ impl Settings {
                 out.push(t(key!("tui-start-settings-invalid"), &[]));
             }
         } else {
-            out.push(t(
-                key!("tui-start-settings-pick"),
-                &[("setting", Arg::Str(name))],
-            ));
+            // What Enter keeps is said, and its line is marked, so what is signed is what is shown.
+            let kept = self.chosen[self.at].as_deref();
+            out.push(match kept {
+                Some(v) => t(
+                    key!("tui-start-settings-pick-last"),
+                    &[("setting", Arg::Str(name)), ("value", Arg::Str(plain(v)))],
+                ),
+                None => t(
+                    key!("tui-start-settings-pick"),
+                    &[("setting", Arg::Str(name))],
+                ),
+            });
             out.push(String::new());
             out.push(t(
                 key!("tui-start-item"),
@@ -267,8 +334,13 @@ impl Settings {
                 .take(PAGE)
                 .enumerate()
             {
+                let item = if kept == Some(v.as_str()) {
+                    key!("tui-start-item-last")
+                } else {
+                    key!("tui-start-item")
+                };
                 out.push(t(
-                    key!("tui-start-item"),
+                    item,
                     &[("n", Arg::Num(i as i64 + 2)), ("name", Arg::Str(plain(v)))],
                 ));
             }
@@ -287,6 +359,111 @@ impl Settings {
         }
         out
     }
+}
+
+/// The file in the client's Agora folder (`$AGORA_HOME`, else `~/.agora`, beside `tui-theme`) that keeps the last start choice per
+/// kind per machine (ADR-0066 decision 3). One line per machine and kind: `machine TAB kind TAB id=value TAB ...`, newest last.
+pub const MEMORY_FILE: &str = "tui-start-settings";
+/// The most bytes read from [`MEMORY_FILE`] (asked of the file system first): a larger file is ignored and rewritten.
+pub const MAX_MEMORY_BYTES: u64 = 64 * 1024;
+/// The most machine and kind pairs kept; the oldest go first.
+pub const MAX_REMEMBERED: usize = 256;
+
+/// A machine or kind name the file can hold: one field, no tab, newline or other control character.
+fn memory_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+}
+
+/// A setting id the file keeps: the ids a start signs (`[a-z0-9-]`, at most 32).
+fn memory_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+type Remembered = (String, String, Vec<(String, String)>);
+
+/// The file's lines that hold a choice; anything else is skipped.
+fn parse_memory(text: &str) -> Vec<Remembered> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let node = fields.next().filter(|n| memory_name(n))?;
+            let kind = fields.next().filter(|k| memory_name(k))?;
+            let pairs: Vec<(String, String)> = fields
+                .filter_map(|f| f.split_once('='))
+                .filter(|(id, v)| memory_id(id) && valid_value(v))
+                .map(|(id, v)| (id.to_string(), v.to_string()))
+                .take(MAX_SETTINGS)
+                .collect();
+            (!pairs.is_empty()).then(|| (node.to_string(), kind.to_string(), pairs))
+        })
+        .collect()
+}
+
+fn read_memory(file: &Path) -> Vec<Remembered> {
+    match std::fs::metadata(file) {
+        Ok(m) if m.len() <= MAX_MEMORY_BYTES => std::fs::read_to_string(file)
+            .map(|t| parse_memory(&t))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// What was chosen last time for `kind` on `node`, as kept in `file`; empty when nothing was (or the file is missing, too large or
+/// unreadable). Still to be checked against what the machine offers now ([`Settings::with_remembered`]).
+pub fn recall(file: &Path, node: &str, kind: &str) -> Vec<(String, String)> {
+    read_memory(file)
+        .into_iter()
+        .rev()
+        .find(|(n, k, _)| n == node && k == kind)
+        .map(|(_, _, pairs)| pairs)
+        .unwrap_or_default()
+}
+
+/// Keeps `chosen` (the settings a start just sent) as the last choice for `kind` on `node`; nothing chosen forgets it. Only settings
+/// are kept: how the agent acts is never passed here.
+pub fn remember(
+    file: &Path,
+    node: &str,
+    kind: &str,
+    chosen: &[(String, String)],
+) -> std::io::Result<()> {
+    if !memory_name(node) || !memory_name(kind) {
+        return Ok(());
+    }
+    let mut all: Vec<Remembered> = read_memory(file)
+        .into_iter()
+        .filter(|(n, k, _)| !(n == node && k == kind))
+        .collect();
+    let pairs: Vec<(String, String)> = chosen
+        .iter()
+        .filter(|(id, v)| memory_id(id) && valid_value(v))
+        .take(MAX_SETTINGS)
+        .cloned()
+        .collect();
+    if !pairs.is_empty() {
+        all.push((node.to_string(), kind.to_string(), pairs));
+    }
+    let skip = all.len().saturating_sub(MAX_REMEMBERED);
+    let mut text = String::new();
+    for (n, k, pairs) in all.into_iter().skip(skip) {
+        text.push_str(&n);
+        text.push('\t');
+        text.push_str(&k);
+        for (id, v) in pairs {
+            text.push('\t');
+            text.push_str(&id);
+            text.push('=');
+            text.push_str(&v);
+        }
+        text.push('\n');
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, text)
 }
 
 #[cfg(test)]
@@ -497,5 +674,143 @@ mod tests {
             keys(&mut s, b"o4\r"),
             Step::Done(vec![("model".into(), "o4".into())])
         );
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-tui-launch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d.join(MEMORY_FILE)
+    }
+
+    fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    /// ADR-0066 decision 3: the last choice is preselected; Enter keeps it, `1` picks the tool's default, and the line Enter keeps is
+    /// said and marked.
+    #[test]
+    fn a_remembered_choice_is_preselected_and_enter_keeps_it() {
+        let specs = || {
+            vec![
+                spec("effort", &["low", "medium", "high"], "medium"),
+                spec("model", &[], ""),
+            ]
+        };
+        let last = pairs(&[("effort", "high"), ("model", "o4")]);
+        let mut s = Settings::with_remembered(specs(), &last).unwrap();
+        let lines = s.lines(&t);
+        assert!(
+            lines.contains(&"tui-start-settings-pick-last[setting=effort,value=high]".to_string())
+        );
+        assert!(lines.contains(&"tui-start-item-last[n=4,name=high]".to_string()));
+        assert!(lines.contains(&"tui-start-item[n=3,name=medium]".to_string()));
+        assert_eq!(s.key(b'\r'), Step::Ask);
+        // The typed setting opens with last time's value in its field, and says Enter sends it.
+        let typed = s.lines(&t);
+        assert!(typed.iter().any(|l| l.ends_with(" o4")));
+        assert!(typed.contains(
+            &"tui-start-settings-type-last[setting=model,value=o4,default=tui-start-settings-default-tool]"
+                .to_string()
+        ));
+        assert_eq!(s.key(b'\r'), Step::Done(last.clone()));
+        // `1` is the tool's default; clearing the field too.
+        let mut s = Settings::with_remembered(specs(), &last).unwrap();
+        assert_eq!(
+            keys(&mut s, &[b'1', 0x7f, 0x7f, b'\r']),
+            Step::Done(Vec::new())
+        );
+    }
+
+    /// A remembered value the kind no longer offers (or a setting it no longer has, or a value a start may not send) is not preselected.
+    #[test]
+    fn a_value_no_longer_offered_is_ignored() {
+        let last = pairs(&[("effort", "max"), ("model", "-rf"), ("gone", "x")]);
+        let mut s = Settings::with_remembered(
+            vec![spec("effort", &["low", "high"], ""), spec("model", &[], "")],
+            &last,
+        )
+        .unwrap();
+        assert!(s
+            .lines(&t)
+            .contains(&"tui-start-settings-pick[setting=effort]".to_string()));
+        assert_eq!(keys(&mut s, b"\r\r"), Step::Done(Vec::new()));
+    }
+
+    /// A preselected value on a later page opens that page.
+    #[test]
+    fn a_remembered_value_opens_its_page() {
+        let values: Vec<String> = (0..10).map(|i| format!("v{i}")).collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let s =
+            Settings::with_remembered(vec![spec("model", &refs, "")], &pairs(&[("model", "v9")]))
+                .unwrap();
+        let lines = s.lines(&t);
+        assert!(
+            lines.iter().any(|l| l.contains("page=2,pages=2")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"tui-start-item-last[n=3,name=v9]".to_string()));
+    }
+
+    #[test]
+    fn the_memory_file_keeps_the_last_choice_per_machine_and_kind() {
+        let f = scratch("memory");
+        assert!(recall(&f, "laptop", "codex").is_empty());
+        remember(
+            &f,
+            "laptop",
+            "codex",
+            &pairs(&[("model", "o4"), ("effort", "high")]),
+        )
+        .unwrap();
+        remember(&f, "vps", "codex", &pairs(&[("effort", "low")])).unwrap();
+        remember(&f, "laptop", "claude", &pairs(&[("effort", "max")])).unwrap();
+        assert_eq!(
+            recall(&f, "laptop", "codex"),
+            pairs(&[("model", "o4"), ("effort", "high")])
+        );
+        assert_eq!(recall(&f, "vps", "codex"), pairs(&[("effort", "low")]));
+        assert!(recall(&f, "vps", "claude").is_empty());
+        // A new choice replaces the old; starting with the defaults forgets it.
+        remember(&f, "laptop", "codex", &pairs(&[("effort", "low")])).unwrap();
+        assert_eq!(recall(&f, "laptop", "codex"), pairs(&[("effort", "low")]));
+        remember(&f, "laptop", "codex", &[]).unwrap();
+        assert!(recall(&f, "laptop", "codex").is_empty());
+        assert_eq!(recall(&f, "laptop", "claude"), pairs(&[("effort", "max")]));
+        // Nothing that is not a plain value or a setting id is kept, and a name with a tab or newline is not kept at all.
+        remember(
+            &f,
+            "vps",
+            "codex",
+            &pairs(&[("effort", "a\tb"), ("Model", "x"), ("model", "x=y")]),
+        )
+        .unwrap();
+        assert!(recall(&f, "vps", "codex").is_empty());
+        remember(&f, "bad\nnode", "codex", &pairs(&[("effort", "low")])).unwrap();
+        assert!(recall(&f, "bad\nnode", "codex").is_empty());
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn the_memory_file_is_bounded() {
+        let f = scratch("bounded");
+        for i in 0..MAX_REMEMBERED + 5 {
+            remember(&f, &format!("n{i}"), "codex", &pairs(&[("effort", "low")])).unwrap();
+        }
+        assert!(recall(&f, "n0", "codex").is_empty(), "the oldest go first");
+        assert_eq!(
+            recall(&f, &format!("n{}", MAX_REMEMBERED + 4), "codex"),
+            pairs(&[("effort", "low")])
+        );
+        // A file over the cap is not read (and the next choice rewrites it); a corrupt one gives nothing.
+        std::fs::write(&f, "x".repeat(MAX_MEMORY_BYTES as usize + 1)).unwrap();
+        assert!(recall(&f, "n9", "codex").is_empty());
+        remember(&f, "n1", "codex", &pairs(&[("effort", "high")])).unwrap();
+        assert_eq!(recall(&f, "n1", "codex"), pairs(&[("effort", "high")]));
+        std::fs::write(&f, "laptop\ncodex\t\t=\n\u{0}\n").unwrap();
+        assert!(recall(&f, "laptop", "codex").is_empty());
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 }

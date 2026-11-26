@@ -103,6 +103,7 @@ tui-agent-exited = Ajan durdu, bu yüzden bunu almadı. Ajanı yeniden başlatı
 tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-pick-page = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; sonraki sayfa için n'ye basın ({ $page } / { $pages }); başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
+tui-start-item-last = { $n }  { $name }  (geçen sefer)
 tui-start-group-untested = Denenmedi (ACP kayıt defterinden, henüz Agora'da denenmedi)
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
 tui-start-signed-only = { $name } başlarken programını indirir; bu yüzden makine onu yalnızca bu cihaz başlatmayı imzaladığında başlatır: f tuşuna basın ve klasörünü seçin.
@@ -603,7 +604,9 @@ tui-config-approval-needed = Makine geçmeden önce imzalı onayınızı bekliyo
 ## ADR-0066: başlatmanın ayarları (model, çaba, ...).
 tui-start-settings-step = Başlatma ayarları ({ $n } / { $total })
 tui-start-settings-pick = { $setting }: numarasına basın. Enter varsayılanı korur, Esc başlatmayı iptal eder.
+tui-start-settings-pick-last = { $setting }: numarasına basın. Enter { $value } değerini korur (burada son seçiminiz), 1 varsayılanı seçer, Esc başlatmayı iptal eder.
 tui-start-settings-type = { $setting }: bir değer yazıp Enter'a basın. Yalnızca Enter { $default } korur; Esc başlatmayı iptal eder.
+tui-start-settings-type-last = { $setting }: Enter { $value } değerini korur (burada son seçiminiz). Başka bir değer yazın ya da { $default } için alanı temizleyin; Esc başlatmayı iptal eder.
 tui-start-settings-default = varsayılan ({ $value })
 tui-start-settings-default-tool = aracın varsayılanı
 tui-start-settings-default-word = varsayılan

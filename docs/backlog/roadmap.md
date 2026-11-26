@@ -83,8 +83,8 @@ fixes it.
   - [ ] **decision**: an archive reader for `.tar.gz` / `.zip` (a dependency) or binary-only for now
   - [ ] the window's "Add an agent": the signed list, what is installed where, install with the machine's typed approval
   - [ ] update and roll back from the window (the CLI already keeps the previous version)
-- [ ] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode (#1242); remembering the
-  last choice per kind and machine
+- [x] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode (#1242); remembering the
+  last choice per kind and machine (web window and terminal client; never how the agent acts)
 - [ ] **M2.3 Confinement** (ADR-0047, ADR-0050, ADR-0083)
   - [ ] per-project and per-kind choice of the level (decision 1)
   - [ ] **win**: measure the Windows sandbox on real agents, then on by default if it holds
@@ -205,7 +205,7 @@ Items already in M2 and M3 are not repeated here.
 - [ ] **M7.8 Live update** (ADR-0019, ADR-0075; G4): the hub hands out signed node binaries after approval; stable and preview channels
   (M2.7 is the handoff)
 - [ ] **M7.9 Install channels** (G7, **decision**): a signature-checking install script, a Homebrew tap, a preview channel
-- [ ] **M7.10 Terminal repaint leftovers** (ADR-0100): origin mode and scroll region restored
+- [x] **M7.10 Terminal repaint leftovers** (ADR-0100): origin mode and scroll region restored
 - [ ] **M7.11 QUIC and the direct path** (ADR-0011, ADR-0023): measured first (M3.8)
 - [ ] **M7.12 A documentation site** (G14, Q15, **decision**)
 

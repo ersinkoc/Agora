@@ -470,7 +470,7 @@ mod tests {
         fn late_attach(program: &[u8]) -> (Vec<String>, PaneFeed) {
             let mut machine = node(WIDE, program);
             let mut v = PaneFeed::new();
-            v.screen(repaint_of(&machine), Vec::new());
+            v.screen(repaint_of(&mut machine), Vec::new());
             assert!(!v.resized(WIDE.cols, WIDE.rows));
             assert_eq!(
                 lines(v.screen_term()),
@@ -518,9 +518,9 @@ mod tests {
 
         #[test]
         fn output_after_the_repaint_asks_the_machine_again_on_a_resize() {
-            let machine = node(WIDE, b"$ ");
+            let mut machine = node(WIDE, b"$ ");
             let mut v = PaneFeed::new();
-            v.screen(repaint_of(&machine), Vec::new());
+            v.screen(repaint_of(&mut machine), Vec::new());
             assert!(!v.resized(WIDE.cols, WIDE.rows));
             v.data(b"more");
             assert!(v.resized(PANE.cols, PANE.rows));

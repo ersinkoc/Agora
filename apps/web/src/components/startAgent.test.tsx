@@ -191,6 +191,41 @@ describe('the start window, how it acts (ADR-0059, ADR-0102)', () => {
   });
 });
 
+describe('the start window, the last choice per kind per machine (ADR-0066 decision 3)', () => {
+  const effort = { id: 'effort', label: 'setting-effort', values: ['low', 'high'], defaultValue: '' };
+  const withEffort = (values = effort.values): KindChoice[] => [{ kind: 'codex', name: 'Codex', installed: true, level: 2, options: [skip], settings: [{ ...effort, values }] }];
+  const reopen = async (kinds: KindChoice[]) => { act(() => root.unmount()); root = createRoot(host); return open({ loadKinds: async () => kinds }); };
+
+  it('preselects the last choice for the kind on the machine, but never how it acts: that starts on Ask every time', async () => {
+    const first = await open({ loadKinds: async () => withEffort() });
+    expect(checked('Effort')?.textContent).toBe(t('setting-default'));
+    click(radios('Effort').find((r) => r.textContent === 'high'));
+    click(radios('How it acts')[1]);
+    click(button(t('start-confirm-skip-yes')));
+    click(button('Start'));
+    await flush();
+    expect(first.mock.calls[0]![5]).toEqual({ ids: ['skip-permissions'], confirmed: ['skip-permissions'], settings: [['effort', 'high']] });
+    const again = await reopen(withEffort());
+    expect(checked('Effort')?.textContent).toBe('high');
+    expect(checked('How it acts')?.textContent).toBe('Ask before acting');
+    click(button('Start'));
+    await flush();
+    expect(again.mock.calls[0]![5]).toEqual({ ids: [], confirmed: [], settings: [['effort', 'high']] });
+  });
+
+  it('ignores a remembered value the kind no longer offers', async () => {
+    await open({ loadKinds: async () => withEffort() });
+    click(radios('Effort').find((r) => r.textContent === 'high'));
+    click(button('Start'));
+    await flush();
+    const later = await reopen(withEffort(['low', 'medium']));
+    expect(checked('Effort')?.textContent).toBe(t('setting-default'));
+    click(button('Start'));
+    await flush();
+    expect(later.mock.calls[0]![5]).toEqual({ ids: [], confirmed: [], settings: [] });
+  });
+});
+
 describe('the start window, machine, preview and errors', () => {
   it('shows the machines as a segmented control with their system, named by the machine alone', async () => {
     await open();
