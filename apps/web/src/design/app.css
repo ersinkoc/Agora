@@ -866,6 +866,7 @@
   @container (max-width: 32rem) { .keys-fixed { @apply gap-y-1; grid-template-columns: minmax(0, 1fr); } .keys-fixed dd + dt { @apply mt-1.5; } }
   .keys-fixed dt { @apply text-muted; }
   .keys-fixed dd { @apply m-0; }
+  .keys-import > .kit-dialog__actions { grid-column: 1 / -1; } /* one column: the kit's span of two would add a second */
   .keys-import { grid-template-columns: minmax(0, 1fr); width: min(32rem, calc(100vw - 2rem)); }
   /* Agents: a grid of kind cards; one that is not installed is dashed and quieter (its words stay readable). */
   .set-kinds-wrap { @apply grid gap-3 px-4 pb-4 pt-3; }
